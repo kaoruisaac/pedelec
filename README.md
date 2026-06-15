@@ -1,5 +1,5 @@
 # Pedelec
-
+English | [繁體中文](./README.zh-TW.md)
 Pedelec is a bridge architecture that lets web frontends call local AI coding agents.
 
 Its core goal is: **to let a Web App create agent sessions through the SDK, send user messages, receive streamed agent responses, and safely hand tool calls back to the Web App whenever the agent needs to operate on frontend state.**
