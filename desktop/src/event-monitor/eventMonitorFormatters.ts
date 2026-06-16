@@ -1,29 +1,29 @@
-export function prettyJson(value) {
+export function prettyJson(value: unknown): string {
   if (typeof value === "string") {
     return value;
   }
 
   try {
     return JSON.stringify(value, null, 2);
-  } catch (err) {
+  } catch {
     return String(value);
   }
 }
 
-export function formatTimestamp(value) {
+export function formatTimestamp(value: unknown): string {
   if (!value) {
     return "-";
   }
 
-  const date = new Date(value);
+  const date = new Date(String(value));
   if (Number.isNaN(date.getTime())) {
-    return value;
+    return String(value);
   }
 
   return date.toLocaleString();
 }
 
-export function formatValue(value) {
+export function formatValue(value: unknown): string {
   if (value === undefined || value === null || value === "") {
     return "-";
   }
@@ -31,11 +31,11 @@ export function formatValue(value) {
   return String(value);
 }
 
-export function statusLabel(status) {
+export function statusLabel(status: unknown): string {
   return formatValue(status);
 }
 
-export function commandDetails(event) {
+export function commandDetails(event: Record<string, unknown>): string {
   return prettyJson({
     seq: event.seq,
     processId: event.processId,
@@ -46,7 +46,7 @@ export function commandDetails(event) {
   });
 }
 
-export function toolCallDetails(event) {
+export function toolCallDetails(event: Record<string, unknown>): string {
   return prettyJson({
     seq: event.seq,
     requestId: event.requestId,
@@ -56,7 +56,7 @@ export function toolCallDetails(event) {
   });
 }
 
-export function toolResultDetails(event) {
+export function toolResultDetails(event: Record<string, unknown>): string {
   return prettyJson({
     seq: event.seq,
     requestId: event.requestId,
@@ -66,6 +66,7 @@ export function toolResultDetails(event) {
   });
 }
 
-export function errorTitle(event) {
-  return event?.error?.message || event?.message || "Error";
+export function errorTitle(event: unknown): string {
+  const e = event as { error?: { message?: string }; message?: string } | null | undefined;
+  return e?.error?.message || e?.message || "Error";
 }

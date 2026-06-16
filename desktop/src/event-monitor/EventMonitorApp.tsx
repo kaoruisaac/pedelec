@@ -1,4 +1,5 @@
 import { createMemo, For, onCleanup, onMount, Show } from "solid-js";
+import type { JSX } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import {
   commandDetails,
@@ -9,8 +10,9 @@ import {
   statusLabel,
   toolCallDetails,
   toolResultDetails,
-} from "./eventMonitorFormatters.js";
-import { createEventMonitorStore } from "./eventMonitorStore.js";
+} from "./eventMonitorFormatters";
+import { createEventMonitorStore } from "./eventMonitorStore";
+import type { MonitorEvent, ThreadViewModel } from "./eventMonitorStore";
 
 export function EventMonitorApp() {
   const monitor = createEventMonitorStore();
@@ -25,7 +27,7 @@ export function EventMonitorApp() {
   const hasEvents = createMemo(() => store.totalEventCount > 0);
 
   onMount(() => {
-    let unlisten;
+    let unlisten: (() => void) | undefined;
 
     listen("thread_event", (event) => upsertThreadEvent(event.payload))
       .then((cleanup) => {
@@ -143,16 +145,16 @@ export function EventMonitorApp() {
   );
 }
 
-function Metric(props) {
+function Metric(props: { label: string; value: unknown; status?: string }) {
   return (
     <div class="event-monitor-metric">
       <span>{props.label}</span>
-      <strong data-status={props.status}>{props.value}</strong>
+      <strong data-status={props.status}>{String(props.value)}</strong>
     </div>
   );
 }
 
-function ThreadDetail(props) {
+function ThreadDetail(props: { thread: ThreadViewModel }) {
   const thread = () => props.thread;
 
   return (
@@ -186,7 +188,7 @@ function ThreadDetail(props) {
 
         <MonitorBlock title="Commands" empty={thread().commandEvents.length === 0}>
           <For each={thread().commandEvents}>
-            {(event) => <pre class="event-monitor-json">{commandDetails(event)}</pre>}
+            {(event) => <pre class="event-monitor-json">{commandDetails(event as Record<string, unknown>)}</pre>}
           </For>
         </MonitorBlock>
 
@@ -200,13 +202,13 @@ function ThreadDetail(props) {
 
         <MonitorBlock title="Tool Calls" empty={thread().toolCalls.length === 0}>
           <For each={thread().toolCalls}>
-            {(event) => <pre class="event-monitor-json">{toolCallDetails(event)}</pre>}
+            {(event) => <pre class="event-monitor-json">{toolCallDetails(event as Record<string, unknown>)}</pre>}
           </For>
         </MonitorBlock>
 
         <MonitorBlock title="Tool Results" empty={thread().toolResults.length === 0}>
           <For each={thread().toolResults}>
-            {(event) => <pre class="event-monitor-json">{toolResultDetails(event)}</pre>}
+            {(event) => <pre class="event-monitor-json">{toolResultDetails(event as Record<string, unknown>)}</pre>}
           </For>
         </MonitorBlock>
 
@@ -225,7 +227,7 @@ function ThreadDetail(props) {
   );
 }
 
-function SummaryItem(props) {
+function SummaryItem(props: { label: string; value: unknown; status?: string }) {
   return (
     <div class="event-monitor-summary-item">
       <span>{props.label}</span>
@@ -234,7 +236,7 @@ function SummaryItem(props) {
   );
 }
 
-function MonitorBlock(props) {
+function MonitorBlock(props: { title: string; empty: boolean; children: JSX.Element }) {
   return (
     <section class="event-monitor-block">
       <div class="event-monitor-block-header">
@@ -249,7 +251,7 @@ function MonitorBlock(props) {
   );
 }
 
-function EmptyState(props) {
+function EmptyState(props: { title: string; lines?: string[] }) {
   return (
     <div class="event-monitor-empty-state">
       <h2>{props.title}</h2>
@@ -257,3 +259,6 @@ function EmptyState(props) {
     </div>
   );
 }
+
+// Re-export MonitorEvent for external consumers
+export type { MonitorEvent };

@@ -2,7 +2,52 @@ import { createStore, produce } from "solid-js/store";
 
 export const MAX_EVENTS_PER_THREAD = 300;
 
-const EMPTY_STORE = {
+export interface MonitorEvent {
+  type?: string;
+  seq?: number;
+  receivedAt: string;
+  threadId?: string;
+  status?: string;
+  text?: string;
+  providerSessionId?: string;
+  [key: string]: unknown;
+}
+
+export interface ThreadViewModel {
+  threadId: string;
+  status: string;
+  providerSessionId?: string;
+  createdAt: string;
+  updatedAt: string;
+  eventCount: number;
+  lastEventType: string;
+  lastSeq?: number;
+  events: MonitorEvent[];
+  assistantMessages: string[];
+  commandEvents: MonitorEvent[];
+  rawStdout: string;
+  rawStderr: string;
+  toolCalls: MonitorEvent[];
+  toolResults: MonitorEvent[];
+  errors: MonitorEvent[];
+}
+
+interface EventMonitorState {
+  selectedThreadId: string | null;
+  threadsById: Record<string, ThreadViewModel>;
+  threadOrder: string[];
+  totalEventCount: number;
+  globalError: string | null;
+}
+
+export interface EventMonitorStore {
+  store: EventMonitorState;
+  selectThread: (threadId: string) => void;
+  setGlobalError: (error: unknown) => void;
+  upsertThreadEvent: (event: unknown) => void;
+}
+
+const EMPTY_STORE: EventMonitorState = {
   selectedThreadId: null,
   threadsById: {},
   threadOrder: [],
@@ -10,21 +55,21 @@ const EMPTY_STORE = {
   globalError: null,
 };
 
-export function createEventMonitorStore() {
-  const [store, setStore] = createStore(EMPTY_STORE);
+export function createEventMonitorStore(): EventMonitorStore {
+  const [store, setStore] = createStore<EventMonitorState>(EMPTY_STORE);
 
-  function selectThread(threadId) {
+  function selectThread(threadId: string): void {
     setStore("selectedThreadId", threadId);
   }
 
-  function setGlobalError(error) {
+  function setGlobalError(error: unknown): void {
     setStore("globalError", normalizeError(error));
   }
 
-  function upsertThreadEvent(event) {
+  function upsertThreadEvent(event: unknown): void {
     const receivedAt = new Date().toISOString();
-    const eventWithReceivedAt = {
-      ...(event || {}),
+    const eventWithReceivedAt: MonitorEvent = {
+      ...((event as Record<string, unknown>) || {}),
       receivedAt,
     };
 
@@ -38,7 +83,7 @@ export function createEventMonitorStore() {
 
     setStore(
       produce((draft) => {
-        const threadId = eventWithReceivedAt.threadId;
+        const threadId = eventWithReceivedAt.threadId!;
         const existing = draft.threadsById[threadId];
         const thread =
           existing ||
@@ -77,7 +122,13 @@ export function createEventMonitorStore() {
   };
 }
 
-function createMonitorThreadViewModel({ threadId, receivedAt }) {
+function createMonitorThreadViewModel({
+  threadId,
+  receivedAt,
+}: {
+  threadId: string;
+  receivedAt: string;
+}): ThreadViewModel {
   return {
     threadId,
     status: "unknown",
@@ -98,7 +149,7 @@ function createMonitorThreadViewModel({ threadId, receivedAt }) {
   };
 }
 
-function applyEventToThread(thread, event) {
+function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void {
   thread.events = [event, ...thread.events].slice(0, MAX_EVENTS_PER_THREAD);
 
   switch (event.type) {
@@ -127,7 +178,7 @@ function applyEventToThread(thread, event) {
       thread.commandEvents.push(event);
       break;
     case "provider_session_id_updated":
-      thread.providerSessionId = event.providerSessionId;
+      thread.providerSessionId = event.providerSessionId as string | undefined;
       break;
     case "error":
       thread.status = "error";
@@ -141,14 +192,14 @@ function applyEventToThread(thread, event) {
   }
 }
 
-function normalizeError(error) {
+function normalizeError(error: unknown): string {
   if (typeof error === "string") {
     return error;
   }
 
   try {
     return JSON.stringify(error, null, 2);
-  } catch (err) {
+  } catch {
     return String(error);
   }
 }
