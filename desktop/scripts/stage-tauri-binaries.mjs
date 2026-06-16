@@ -15,6 +15,8 @@ const cargoArgs = [
   "--bin",
   "pedelec-cli",
   "--bin",
+  "pedelec-agent",
+  "--bin",
   "pedelec-native-host",
 ];
 
@@ -44,7 +46,7 @@ const profileDir = helperTarget
   ? join(tauriDir, "target", helperTarget, "release")
   : join(tauriDir, "target", "release");
 
-for (const name of ["pedelec-cli", "pedelec-native-host"]) {
+for (const name of ["pedelec-cli", "pedelec-agent", "pedelec-native-host"]) {
   await copyFile(join(profileDir, `${name}${exe}`), join(resourceDir, `${name}${exe}`));
 }
 

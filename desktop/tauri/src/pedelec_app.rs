@@ -1,14 +1,15 @@
 use crate::pedelec_core::{
-    CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, ProviderInfo,
-    SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput, UpdateSettingsInput,
-    PedelecError, PedelecSettings,
+    CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, PedelecError,
+    PedelecSettings, ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime,
+    SubmitToolResultInput, UpdateSettingsInput,
 };
 use crate::pedelec_ipc::{start_core_ipc_server, start_provider_process};
 use crate::pedelec_native_registration::register_chrome_native_messaging_host;
 use crate::pedelec_paths::{
-    ensure_user_path_contains_pedelec_dir, install_pedelec_native_host_from_path,
-    install_pedelec_tool_from_path, prepend_pedelec_dir_to_process_path,
-    pedelec_native_host_binary_name, pedelec_tool_binary_name,
+    ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
+    install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
+    pedelec_agent_binary_name, pedelec_native_host_binary_name, pedelec_tool_binary_name,
+    prepend_pedelec_dir_to_process_path,
 };
 use std::path::PathBuf;
 use std::thread;
@@ -38,11 +39,19 @@ pub fn run() {
         ])
         .setup(move |app| {
             let pedelec_tool_source = bundled_binary_path(app, pedelec_tool_binary_name())?;
+            let pedelec_agent_source = bundled_binary_path(app, pedelec_agent_binary_name())?;
             let native_host_source = bundled_binary_path(app, pedelec_native_host_binary_name())?;
             let _pedelec_tool_path =
                 install_pedelec_tool_from_path(&pedelec_tool_source).map_err(|err| {
                     tauri::Error::from(std::io::Error::other(format!(
                         "cannot install pedelec-cli: {}",
+                        err.message
+                    )))
+                })?;
+            let _pedelec_agent_path = install_pedelec_agent_from_path(&pedelec_agent_source)
+                .map_err(|err| {
+                    tauri::Error::from(std::io::Error::other(format!(
+                        "cannot install pedelec-agent: {}",
                         err.message
                     )))
                 })?;
@@ -82,6 +91,11 @@ pub fn run() {
             eprintln!(
                 "pedelec-cli installed at {}",
                 _pedelec_tool_path.to_string_lossy()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "pedelec-agent installed at {}",
+                _pedelec_agent_path.to_string_lossy()
             );
             #[cfg(debug_assertions)]
             eprintln!(

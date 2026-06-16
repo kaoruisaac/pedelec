@@ -27,6 +27,18 @@ pub fn pedelec_tool_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_tool_binary_name()))
 }
 
+pub fn pedelec_agent_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "pedelec-agent.exe"
+    } else {
+        "pedelec-agent"
+    }
+}
+
+pub fn pedelec_agent_install_path() -> Result<PathBuf, PedelecError> {
+    Ok(pedelec_home_dir()?.join(pedelec_agent_binary_name()))
+}
+
 pub fn pedelec_native_host_binary_name() -> &'static str {
     if cfg!(windows) {
         "pedelec-native-host.exe"
@@ -57,6 +69,15 @@ pub fn install_pedelec_tool_from_paths(
         target,
         "pedelec-cli",
         "cannot install pedelec-cli binary",
+    )
+}
+
+pub fn install_pedelec_agent_from_path(source: impl AsRef<Path>) -> Result<PathBuf, PedelecError> {
+    install_binary_from_paths(
+        source,
+        pedelec_agent_install_path()?,
+        "pedelec-agent",
+        "cannot install pedelec-agent binary",
     )
 }
 
@@ -267,7 +288,8 @@ mod tests {
         let other_dir = temp.path().join("other");
         let existing = env::join_paths([other_dir.clone()]).unwrap();
 
-        let updated = path_value_with_pedelec_dir(Some(existing.as_os_str()), &pedelec_dir).unwrap();
+        let updated =
+            path_value_with_pedelec_dir(Some(existing.as_os_str()), &pedelec_dir).unwrap();
         let paths = env::split_paths(&updated).collect::<Vec<_>>();
 
         assert_eq!(paths[0], pedelec_dir);
@@ -280,7 +302,8 @@ mod tests {
         let pedelec_dir = temp.path().join(".pedelec");
         let existing = env::join_paths([pedelec_dir.clone()]).unwrap();
 
-        let updated = path_value_with_pedelec_dir(Some(existing.as_os_str()), &pedelec_dir).unwrap();
+        let updated =
+            path_value_with_pedelec_dir(Some(existing.as_os_str()), &pedelec_dir).unwrap();
         let paths = env::split_paths(&updated).collect::<Vec<_>>();
 
         assert_eq!(paths, vec![pedelec_dir]);

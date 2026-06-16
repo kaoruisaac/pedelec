@@ -23,6 +23,10 @@ path = "src/bin/pedelec-native-host.rs"
 name = "pedelec-cli"
 path = "src/bin/pedelec-cli.rs"
 
+[[bin]]
+name = "pedelec-agent"
+path = "src/bin/pedelec-agent.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
