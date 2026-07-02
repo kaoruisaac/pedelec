@@ -4,10 +4,15 @@ import "./HomePage.css";
 
 const CHROME_WEB_STORE_URL =
   "https://chromewebstore.google.com/detail/pedelec/ogccgaminlphbkeghldidiiimajfdpag";
+const LIVE_DEMO_URL = "https://github.com/kaoruisaac/pedelec";
 
 function HomePage() {
   const handleOpenChromeWebStore = () => {
     void openExternalUrl(CHROME_WEB_STORE_URL);
+  };
+
+  const handleOpenLiveDemo = () => {
+    void openExternalUrl(LIVE_DEMO_URL);
   };
 
   return (
@@ -28,6 +33,9 @@ function HomePage() {
         >
           <AiOutlineChrome size={24} />
           <span>Get Pedelec Extension on Chrome Web Store</span>
+        </button>
+        <button type="button" class="home-demo-link" onClick={handleOpenLiveDemo}>
+          Visit live demo →
         </button>
       </section>
     </main>

@@ -69,6 +69,30 @@
   outline: none;
 }
 
+.home-demo-link {
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  color: #2f6fed;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.home-demo-link:hover,
+.home-demo-link:focus-visible {
+  color: #235cc8;
+  text-decoration: underline;
+  outline: none;
+}
+
+.home-demo-link:focus-visible {
+  border-radius: 4px;
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.2);
+}
+
 @media (max-width: 760px) {
   .home-page {
     padding: 16px;
