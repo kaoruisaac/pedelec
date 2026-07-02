@@ -17,6 +17,7 @@ const DEFAULT_TOOL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_MAX_SKILL_SIZE_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_OLLAMA_TIMEOUT_MS: u64 = 120_000;
+const OLLAMA_CONNECTION_CHECK_TIMEOUT_MS: u64 = 3_000;
 const SANDBOX_SUBDIRS: [&str; 5] = ["skills", "input", "output", "logs", "tmp"];
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 const THREAD_ID_BASE36_MIN_WIDTH: usize = 6;
@@ -313,6 +314,18 @@ pub struct ListOllamaModelsInput {
     pub base_url: Option<String>,
     pub timeout_ms: Option<u64>,
     pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckOllamaConnectionInput {
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckOllamaConnectionOutput {
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1338,6 +1351,13 @@ impl CoreRuntime {
         input: ListOllamaModelsInput,
     ) -> Result<Vec<OllamaModelOption>, PedelecError> {
         list_ollama_models(input)
+    }
+
+    pub fn check_ollama_connection(
+        &self,
+        input: CheckOllamaConnectionInput,
+    ) -> CheckOllamaConnectionOutput {
+        check_ollama_connection(input)
     }
 
     fn provider_path_value(&self) -> Option<OsString> {
@@ -3047,7 +3067,7 @@ fn normalize_update_settings(
     path_value: Option<&OsString>,
 ) -> Result<PedelecSettings, PedelecError> {
     let provider_info = provider_info_for(input.default_provider.clone(), path_value);
-    if !provider_info.available {
+    if input.default_provider != ProviderCode::Ollama && !provider_info.available {
         return Err(PedelecError::with_details(
             error_codes::DEFAULT_PROVIDER_UNAVAILABLE,
             "default provider is not currently available",
@@ -3204,6 +3224,44 @@ fn list_ollama_models(
         return Err(ollama_http_status_error(status.as_u16(), &text, Some(url)));
     }
     parse_ollama_models_response(&text)
+}
+
+fn check_ollama_connection(input: CheckOllamaConnectionInput) -> CheckOllamaConnectionOutput {
+    check_ollama_connection_with_timeout(input, OLLAMA_CONNECTION_CHECK_TIMEOUT_MS)
+}
+
+fn check_ollama_connection_with_timeout(
+    input: CheckOllamaConnectionInput,
+    timeout_ms: u64,
+) -> CheckOllamaConnectionOutput {
+    let Ok(base_url) = normalize_ollama_base_url(input.base_url) else {
+        return CheckOllamaConnectionOutput { connected: false };
+    };
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .build()
+    else {
+        return CheckOllamaConnectionOutput { connected: false };
+    };
+    let Ok(response) = client.get(format!("{base_url}/api/tags")).send() else {
+        return CheckOllamaConnectionOutput { connected: false };
+    };
+    if !response.status().is_success() {
+        return CheckOllamaConnectionOutput { connected: false };
+    }
+    let Ok(text) = response.text() else {
+        return CheckOllamaConnectionOutput { connected: false };
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return CheckOllamaConnectionOutput { connected: false };
+    };
+    CheckOllamaConnectionOutput {
+        connected: is_valid_ollama_tags_response(&value),
+    }
+}
+
+fn is_valid_ollama_tags_response(value: &Value) -> bool {
+    value.get("models").and_then(Value::as_array).is_some()
 }
 
 fn ollama_http_status_error(status: u16, body: &str, url: Option<String>) -> PedelecError {
@@ -5731,6 +5789,27 @@ mod tests {
     }
 
     #[test]
+    fn update_settings_allows_unavailable_ollama_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(temp.path().join("settings.json")),
+            provider_path_value_override: Some(OsString::from("")),
+            ..CoreRuntime::default()
+        };
+
+        let saved = runtime
+            .update_settings(UpdateSettingsInput {
+                default_provider: ProviderCode::Ollama,
+                default_models: HashMap::new(),
+                provider_settings: ProviderSettingsInput::default(),
+            })
+            .unwrap();
+
+        assert_eq!(saved.default_provider, Some(ProviderCode::Ollama));
+        assert!(temp.path().join("settings.json").exists());
+    }
+
+    #[test]
     fn update_settings_allows_unavailable_non_default_provider_models() {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "codex");
@@ -5756,6 +5835,80 @@ mod tests {
             saved.default_models.get(&ProviderCode::Gemini),
             Some(&"gemini-2.5-pro".to_string())
         );
+    }
+
+    #[test]
+    fn check_ollama_connection_accepts_valid_tags_response_without_authorization() {
+        let (base_url, handle) = start_single_response_server(200, r#"{"models":[]}"#);
+
+        let output = CoreRuntime::default().check_ollama_connection(CheckOllamaConnectionInput {
+            base_url: Some(format!("{base_url}/")),
+        });
+        let request = handle.join().unwrap();
+
+        assert!(output.connected);
+        assert!(request.starts_with("GET /api/tags "));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    }
+
+    #[test]
+    fn check_ollama_connection_rejects_http_status_invalid_json_and_invalid_shape() {
+        let (base_url, http_handle) = start_single_response_server(500, "nope");
+        let http_output =
+            CoreRuntime::default().check_ollama_connection(CheckOllamaConnectionInput {
+                base_url: Some(base_url),
+            });
+        http_handle.join().unwrap();
+        assert!(!http_output.connected);
+
+        let (base_url, json_handle) = start_single_response_server(200, "{not-json");
+        let json_output =
+            CoreRuntime::default().check_ollama_connection(CheckOllamaConnectionInput {
+                base_url: Some(base_url),
+            });
+        json_handle.join().unwrap();
+        assert!(!json_output.connected);
+
+        let (base_url, shape_handle) = start_single_response_server(200, r#"{"models":{}}"#);
+        let shape_output =
+            CoreRuntime::default().check_ollama_connection(CheckOllamaConnectionInput {
+                base_url: Some(base_url),
+            });
+        shape_handle.join().unwrap();
+        assert!(!shape_output.connected);
+    }
+
+    #[test]
+    fn check_ollama_connection_rejects_invalid_base_url_connection_refused_and_timeout() {
+        let invalid_output =
+            CoreRuntime::default().check_ollama_connection(CheckOllamaConnectionInput {
+                base_url: Some("not-a-url".into()),
+            });
+        assert!(!invalid_output.connected);
+
+        let refused_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let refused_url = format!("http://{}", refused_listener.local_addr().unwrap());
+        drop(refused_listener);
+        let refused_output =
+            CoreRuntime::default().check_ollama_connection(CheckOllamaConnectionInput {
+                base_url: Some(refused_url),
+            });
+        assert!(!refused_output.connected);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let timeout_url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+        let timeout_output = check_ollama_connection_with_timeout(
+            CheckOllamaConnectionInput {
+                base_url: Some(timeout_url),
+            },
+            1,
+        );
+        handle.join().unwrap();
+        assert!(!timeout_output.connected);
     }
 
     #[test]

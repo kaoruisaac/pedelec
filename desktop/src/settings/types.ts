@@ -6,6 +6,7 @@ export interface Provider {
   available: boolean;
   error?: string | null;
   description?: string;
+  connectionStatus?: "connected" | "disconnected";
 }
 
 export interface OllamaProviderSettings {

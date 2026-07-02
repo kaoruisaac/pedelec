@@ -270,13 +270,15 @@ pre {
   border: 1px solid #cdd6e0;
 }
 
-.provider-status[data-status="available"] {
+.provider-status[data-status="available"],
+.provider-status[data-status="connected"] {
   color: #17633a;
   background: #e9f7ef;
   border-color: #b9e2c9;
 }
 
-.provider-status[data-status="unavailable"] {
+.provider-status[data-status="unavailable"],
+.provider-status[data-status="disconnected"] {
   color: #8a4b11;
   background: #fff4e5;
   border-color: #efd1a7;

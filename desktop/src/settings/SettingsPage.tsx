@@ -34,10 +34,18 @@ function SettingsPage() {
   const savedProviderInfo = createMemo(() =>
     providers().find((provider) => provider.code === settings().defaultProvider),
   );
-  const savedProviderUnavailable = createMemo(
-    () => Boolean(settings().defaultProvider) && savedProviderInfo()?.available === false,
-  );
-  const canSave = createMemo(() => Boolean(selectedProviderInfo()?.available) && !saving());
+  const savedProviderUnavailable = createMemo(() => {
+    const provider = savedProviderInfo();
+    if (!settings().defaultProvider || !provider) return false;
+    if (provider.code === "ollama") return false;
+    return provider.available === false;
+  });
+  const canSave = createMemo(() => {
+    const provider = selectedProviderInfo();
+    if (!provider || saving()) return false;
+    if (provider.code === "ollama") return true;
+    return Boolean(provider.available);
+  });
 
   onMount(() => {
     loadSettings();
@@ -53,9 +61,12 @@ function SettingsPage() {
         invoke<Provider[]>("list_providers"),
       ]);
       const normalizedSettings = normalizeSettings(nextSettings);
+      const ollamaConnection = await checkOllamaConnection(
+        normalizedSettings.providerSettings.ollama.baseUrl,
+      );
       setSettings(normalizedSettings);
       setDraftSettings(cloneSettings(normalizedSettings));
-      setProviders(Array.isArray(nextProviders) ? nextProviders : []);
+      setProviders(withOllamaConnectionStatus(nextProviders, ollamaConnection));
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -69,7 +80,11 @@ function SettingsPage() {
     setSavedMessage("");
 
     const provider = selectedProviderInfo();
-    if (!provider?.available) {
+    if (!provider) {
+      setError("Choose a provider before saving.");
+      return;
+    }
+    if (provider.code !== "ollama" && !provider.available) {
       setError("Choose an available provider before saving.");
       return;
     }
@@ -110,21 +125,28 @@ function SettingsPage() {
         onApply: ({ model, baseUrl, timeoutMs, apiKey }: { model: string; baseUrl?: string; timeoutMs?: number; apiKey?: string }) => {
           setDraftSettings((current) => ({ ...current, defaultModels: { ...current.defaultModels, [provider.code]: model } }));
           if (provider.code === "ollama") {
+            const nextBaseUrl = baseUrl ?? DEFAULT_OLLAMA_BASE_URL;
             setDraftSettings((current) => ({
               ...current,
               providerSettings: {
                 ...current.providerSettings,
                 ollama: {
-                  baseUrl: baseUrl ?? DEFAULT_OLLAMA_BASE_URL,
+                  baseUrl: nextBaseUrl,
                   timeoutMs: timeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS,
                   apiKey: apiKey ?? "",
                 },
               },
             }));
+            void refreshOllamaConnectionStatus(nextBaseUrl);
           }
         }
       }
     );
+  }
+
+  async function refreshOllamaConnectionStatus(baseUrl: string): Promise<void> {
+    const connectionStatus = await checkOllamaConnection(baseUrl);
+    setProviders((current) => withOllamaConnectionStatus(current, connectionStatus));
   }
 
   function canEditProvider(provider: Provider): boolean {
@@ -173,7 +195,7 @@ function SettingsPage() {
                 <div
                   class="provider-option"
                   classList={{
-                    "is-unavailable": !provider.available,
+                    "is-unavailable": provider.code !== "ollama" && !provider.available,
                     "is-selected": draftSettings().defaultProvider === provider.code,
                   }}
                 >
@@ -183,7 +205,7 @@ function SettingsPage() {
                       name="defaultProvider"
                       value={provider.code}
                       checked={draftSettings().defaultProvider === provider.code}
-                      disabled={!provider.available}
+                      disabled={!isProviderSelectable(provider)}
                       onChange={() => setDraftProvider(provider.code)}
                     />
                   </label>
@@ -192,8 +214,8 @@ function SettingsPage() {
                     <span>{provider.code}</span>
                     <span>default model: {providerDefaultModel(provider)}</span>
                   </span>
-                  <span class="provider-status" data-status={provider.available ? "available" : "unavailable"}>
-                    {provider.available ? "Available" : "Unavailable"}
+                  <span class="provider-status" data-status={providerStatusValue(provider)}>
+                    {providerStatusLabel(provider)}
                   </span>
                   <button
                     type="button"
@@ -204,7 +226,7 @@ function SettingsPage() {
                   >
                     Edit
                   </button>
-                  <Show when={provider.error}>
+                  <Show when={provider.code !== "ollama" ? provider.error : null}>
                     <span class="provider-error">{provider.error}</span>
                   </Show>
                 </div>
@@ -224,6 +246,45 @@ function SettingsPage() {
 }
 
 export default SettingsPage;
+
+async function checkOllamaConnection(baseUrl: string): Promise<"connected" | "disconnected"> {
+  try {
+    const result = await invoke<{ connected: boolean }>("check_ollama_connection", {
+      input: { baseUrl },
+    });
+    return result.connected ? "connected" : "disconnected";
+  } catch {
+    return "disconnected";
+  }
+}
+
+function withOllamaConnectionStatus(
+  providers: Provider[],
+  connectionStatus: "connected" | "disconnected",
+): Provider[] {
+  if (!Array.isArray(providers)) return [];
+  return providers.map((provider) =>
+    provider.code === "ollama" ? { ...provider, connectionStatus } : provider,
+  );
+}
+
+function providerStatusValue(provider: Provider): string {
+  if (provider.code === "ollama") {
+    return provider.connectionStatus === "connected" ? "connected" : "disconnected";
+  }
+  return provider.available ? "available" : "unavailable";
+}
+
+function providerStatusLabel(provider: Provider): string {
+  if (provider.code === "ollama") {
+    return provider.connectionStatus === "connected" ? "Connected" : "Disconnected";
+  }
+  return provider.available ? "Available" : "Unavailable";
+}
+
+function isProviderSelectable(provider: Provider): boolean {
+  return provider.code === "ollama" || provider.available;
+}
 
 function formatError(err: unknown): string {
   if (!err) return "Unknown error";

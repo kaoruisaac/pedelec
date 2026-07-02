@@ -1,7 +1,8 @@
 use crate::pedelec_core::{
-    CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, ListOllamaModelsInput,
-    OllamaModelOption, PedelecError, PedelecSettings, ProviderInfo, SendTextInput, SendTextOutput,
-    SharedCoreRuntime, SubmitToolResultInput, UpdateSettingsInput,
+    CheckOllamaConnectionInput, CheckOllamaConnectionOutput, CoreRuntimeOwner, CreateThreadInput,
+    CreateThreadOutput, EndThreadInput, ListOllamaModelsInput, OllamaModelOption, PedelecError,
+    PedelecSettings, ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime,
+    SubmitToolResultInput, UpdateSettingsInput,
 };
 use crate::pedelec_ipc::{start_core_ipc_server, start_provider_process};
 use crate::pedelec_native_registration::register_chrome_native_messaging_host;
@@ -32,6 +33,7 @@ pub fn run() {
             create_thread,
             get_settings,
             update_settings,
+            check_ollama_connection,
             list_ollama_models,
             list_providers,
             send_text,
@@ -220,6 +222,18 @@ fn list_ollama_models(
     input: ListOllamaModelsInput,
 ) -> Result<Vec<OllamaModelOption>, PedelecError> {
     state.runtime().lock().unwrap().list_ollama_models(input)
+}
+
+#[tauri::command]
+fn check_ollama_connection(
+    state: State<'_, CoreRuntimeOwner>,
+    input: CheckOllamaConnectionInput,
+) -> CheckOllamaConnectionOutput {
+    state
+        .runtime()
+        .lock()
+        .unwrap()
+        .check_ollama_connection(input)
 }
 
 #[tauri::command]
