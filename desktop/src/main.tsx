@@ -1,6 +1,7 @@
 import { render } from "solid-js/web";
 import { createSignal, For, Show } from "solid-js";
 import { EventMonitorApp } from "./event-monitor/EventMonitorApp";
+import HomePage from "./home/HomePage";
 import SettingsPage from "./settings/SettingsPage";
 import "./style.css";
 import "./event-monitor/event-monitor.css";
@@ -9,12 +10,13 @@ import PopUpProvider from "./services/PopUpProvider";
 const IS_DEV = import.meta.env.DEV;
 
 const PAGES: Record<string, string> = {
+  home: "Home",
   settings: "Settings",
   ...(IS_DEV ? { monitor: "Event Monitor" } : {}),
 };
 
 function AppShell() {
-  const [page, setPage] = createSignal("settings");
+  const [page, setPage] = createSignal("home");
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
 
   return (
@@ -50,7 +52,7 @@ function AppShell() {
                   onClick={() => setPage(key)}
                 >
                   <span class="app-nav-icon" aria-hidden="true">
-                    {key === "settings" ? "S" : "E"}
+                    {key === "home" ? "H" : key === "settings" ? "S" : "E"}
                   </span>
                   <Show when={!sidebarCollapsed()}>
                     <span>{label}</span>
@@ -62,6 +64,9 @@ function AppShell() {
         </aside>
 
         <section class="app-page">
+          <div hidden={page() !== "home"}>
+            <HomePage />
+          </div>
           <div hidden={page() !== "settings"}>
             <SettingsPage />
           </div>

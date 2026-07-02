@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "solid-icons": "^1.2.0",
     "solid-js": "latest"
   },
   "devDependencies": {
