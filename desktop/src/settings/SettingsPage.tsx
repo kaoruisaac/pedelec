@@ -25,6 +25,7 @@ function SettingsPage() {
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal("");
   const [savedMessage, setSavedMessage] = createSignal("");
+  const [hasUnsavedChanges, setHasUnsavedChanges] = createSignal(false);
 
   const { pop } = usePopUp();
 
@@ -67,6 +68,7 @@ function SettingsPage() {
       setSettings(normalizedSettings);
       setDraftSettings(cloneSettings(normalizedSettings));
       setProviders(withOllamaConnectionStatus(nextProviders, ollamaConnection));
+      setHasUnsavedChanges(false);
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -100,6 +102,7 @@ function SettingsPage() {
       const normalizedSettings = normalizeSettings(nextSettings);
       setSettings(normalizedSettings);
       setDraftSettings(cloneSettings(normalizedSettings));
+      setHasUnsavedChanges(false);
       setSavedMessage("Settings saved.");
     } catch (err) {
       setError(formatError(err));
@@ -108,7 +111,13 @@ function SettingsPage() {
     }
   }
 
+  function markDraftChanged(): void {
+    setHasUnsavedChanges(true);
+    setSavedMessage("");
+  }
+
   function setDraftProvider(provider: ProviderCode): void {
+    markDraftChanged();
     setDraftSettings((current) => ({ ...current, defaultProvider: provider }));
   }
 
@@ -123,6 +132,7 @@ function SettingsPage() {
         editingModel: draftSettings().defaultModels[provider.code],
         editingTimeoutMs: String(draftSettings().providerSettings.ollama.timeoutMs),
         onApply: ({ model, baseUrl, timeoutMs, apiKey }: { model: string; baseUrl?: string; timeoutMs?: number; apiKey?: string }) => {
+          markDraftChanged();
           setDraftSettings((current) => ({ ...current, defaultModels: { ...current.defaultModels, [provider.code]: model } }));
           if (provider.code === "ollama") {
             const nextBaseUrl = baseUrl ?? DEFAULT_OLLAMA_BASE_URL;
@@ -234,6 +244,12 @@ function SettingsPage() {
             </For>
           </div>
         </section>
+
+        <Show when={hasUnsavedChanges()}>
+          <div class="settings-alert is-warning">
+            You have unsaved changes. Click Save to apply your settings.
+          </div>
+        </Show>
 
         <footer class="settings-actions">
           <button type="submit" class="settings-primary-button" disabled={!canSave()}>
