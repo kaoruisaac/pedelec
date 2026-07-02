@@ -1,10 +1,15 @@
 import { AiOutlineChrome } from "solid-icons/ai";
+import { openExternalUrl } from "../utils/openExternalUrl";
 import "./HomePage.css";
 
 const CHROME_WEB_STORE_URL =
   "https://chromewebstore.google.com/detail/pedelec/ogccgaminlphbkeghldidiiimajfdpag";
 
 function HomePage() {
+  const handleOpenChromeWebStore = () => {
+    void openExternalUrl(CHROME_WEB_STORE_URL);
+  };
+
   return (
     <main class="home-page">
       <section class="home-card" aria-labelledby="home-title">
@@ -16,15 +21,14 @@ function HomePage() {
           Extension.
         </p>
         <div class="home-divider" aria-hidden="true" />
-        <a
+        <button
+          type="button"
           class="home-primary-link"
-          href={CHROME_WEB_STORE_URL}
-          target="_blank"
-          rel="noreferrer"
+          onClick={handleOpenChromeWebStore}
         >
           <AiOutlineChrome size={24} />
           <span>Get Pedelec Extension on Chrome Web Store</span>
-        </a>
+        </button>
       </section>
     </main>
   );

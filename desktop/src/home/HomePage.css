@@ -54,6 +54,8 @@
   border-radius: 6px;
   background: #2f6fed;
   color: #ffffff;
+  cursor: pointer;
+  font: inherit;
   font-weight: 700;
   font-size: 14px;
   line-height: 1.2;

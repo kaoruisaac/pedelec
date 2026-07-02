@@ -28,6 +28,7 @@ pub fn run() {
     let runtime_for_exit = runtime.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .manage(runtime_owner)
         .invoke_handler(tauri::generate_handler![
             create_thread,
