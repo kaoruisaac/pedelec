@@ -172,6 +172,19 @@ const session = await pedelec.createSession({
 When only `provider` is passed, the SDK uses that provider's own Desktop App default model if one is configured. Otherwise, it sends the provider without a model and lets the provider CLI use its own default behavior.
 Ollama is the exception: it requires a model, so provider-only Ollama sessions need `defaultModels.ollama` or they fail with `MODEL_REQUIRED`.
 
+### Session Lifecycle
+
+SDK-created sessions are page-scoped by default. `autoEndOnDisconnect` defaults to `true`, so Pedelec automatically ends the Desktop thread when the last SDK connection for that session disconnects, such as on page refresh or tab close.
+
+Use the default for demos and page-scoped apps. Set `autoEndOnDisconnect: false` only when you need to resume the same session after navigation or share it across pages:
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+```
+
 ---
 
 ## Listing Providers
@@ -338,6 +351,8 @@ await session.end();
 ```
 
 After a session ends, `sendText()` can no longer be called on it. Create a new session with `createSession()` if you need a new conversation.
+
+If `autoEndOnDisconnect` is enabled, disconnect cleanup has the same goal as calling `session.end()`: the thread is ended and no longer treated as active.
 
 ---
 

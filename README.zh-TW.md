@@ -172,6 +172,19 @@ const session = await pedelec.createSession({
 只傳 `provider` 時，SDK 會使用該 provider 在 Desktop App 中設定的 default model；若該 provider 未設定 model，則只傳 provider，讓 provider CLI 使用自己的預設行為。
 Ollama 是例外：它必須有 model，因此只傳 Ollama provider 時需要 `defaultModels.ollama`，否則會回傳 `MODEL_REQUIRED`。
 
+### Session 生命週期
+
+SDK 建立的 session 預設是 page-scoped。`autoEndOnDisconnect` 預設為 `true`，因此頁面重新整理、關閉 tab，或該 session 的最後一個 SDK connection 中斷時，Pedelec 會自動結束對應的 Desktop thread。
+
+Demo 與 page-scoped app 建議使用預設值。若需要在頁面切換後 `resumeSession`，或跨頁共用同一個 session，請明確設定 `autoEndOnDisconnect: false`：
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+```
+
 ---
 
 ## 查詢 Providers
@@ -338,6 +351,8 @@ await session.end();
 ```
 
 結束後，該 session 不能再呼叫 `sendText()`。如果需要新的對話，請重新 `createSession()`。
+
+若啟用 `autoEndOnDisconnect`，disconnect cleanup 的目標與呼叫 `session.end()` 相同：thread 會被結束，且不再被視為 active。
 
 ---
 

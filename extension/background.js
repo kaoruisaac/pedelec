@@ -27,6 +27,7 @@ function createBackground(runtimeChrome, options = {}) {
   const sdkChannelsByPort = new Map();
   const sdkContextsByPort = new Map();
   const sdkRoutesBySession = new Map();
+  const sdkLifecycleBySession = new Map();
   const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
   let pendingApproval = null;
 
@@ -441,7 +442,7 @@ function createBackground(runtimeChrome, options = {}) {
       dispatchSdkThreadEvent(message.event);
       if (message.event?.type === "ended") {
         removeActiveThread(message.event.threadId);
-        removeSdkSessionRoutes(message.event.threadId);
+        forgetSdkSession(message.event.threadId);
         maybeDisconnectNativeIfIdle();
       }
       return;
@@ -793,18 +794,54 @@ function createBackground(runtimeChrome, options = {}) {
     }
   }
 
+  function forgetSdkSession(sessionId) {
+    removeSdkSessionRoutes(sessionId);
+    sdkLifecycleBySession.delete(sessionId);
+  }
+
+  function shouldAutoEndSdkSession(sessionId) {
+    const lifecycle = sdkLifecycleBySession.get(sessionId);
+    return lifecycle?.autoEndOnDisconnect === true && !sdkRoutesBySession.has(sessionId);
+  }
+
+  async function autoEndSdkSession(sessionId) {
+    try {
+      await withNativeOperation(async () => {
+        await sendNativeRequest("end_thread", { threadId: sessionId });
+        removeActiveThread(sessionId);
+        forgetSdkSession(sessionId);
+      });
+    } catch (err) {
+      const normalized = normalizeError(err, "AUTO_END_SESSION_FAILED", "Could not end disconnected session.");
+      const error = {
+        code: "AUTO_END_SESSION_FAILED",
+        message: normalized.message || "Could not end disconnected session.",
+        details: normalized.details,
+      };
+      setState({ error: formatError(error) });
+    }
+  }
+
   function disconnectSdkPort(port) {
     sdkPorts.delete(port);
     sdkContextsByPort.delete(port);
     const channels = sdkChannelsByPort.get(port);
+    const maybeAutoEndSessionIds = new Set();
     if (channels) {
       for (const [channelId, sessions] of Array.from(channels.entries())) {
         for (const sessionId of Array.from(sessions)) {
           removeSdkSession(port, channelId, sessionId);
+          if (shouldAutoEndSdkSession(sessionId)) {
+            maybeAutoEndSessionIds.add(sessionId);
+          }
         }
       }
     }
     sdkChannelsByPort.delete(port);
+
+    for (const sessionId of maybeAutoEndSessionIds) {
+      autoEndSdkSession(sessionId);
+    }
 
     if (pendingApproval) {
       pendingApproval.requests = pendingApproval.requests.filter((request) => request.port !== port);
@@ -913,6 +950,9 @@ function createBackground(runtimeChrome, options = {}) {
 
           addActiveThread(sessionId);
           addSdkSession(port, channelId, sessionId);
+          sdkLifecycleBySession.set(sessionId, {
+            autoEndOnDisconnect: input.autoEndOnDisconnect !== false,
+          });
           postSdkResponse(port, channelId, requestId, true, { sessionId });
         });
         return;
@@ -970,7 +1010,7 @@ function createBackground(runtimeChrome, options = {}) {
       if (message.type === "end_session") {
         await withNativeOperation(async () => {
           await sendNativeRequest("end_thread", { threadId: message.sessionId });
-          removeSdkSession(port, channelId, message.sessionId);
+          forgetSdkSession(message.sessionId);
           removeActiveThread(message.sessionId);
         });
         postSdkResponse(port, channelId, requestId, true, {});

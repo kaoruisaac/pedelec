@@ -11,6 +11,8 @@ npm run dev
 
 The dev server defaults to `http://127.0.0.1:5174`.
 
+Shape Rain uses the SDK default page-scoped session lifecycle. Refreshing or closing the page disconnects the SDK connection, and Pedelec automatically ends the old desktop thread.
+
 ## Pedelec prerequisites
 
 1. Install and enable the Pedelec Chrome Extension.

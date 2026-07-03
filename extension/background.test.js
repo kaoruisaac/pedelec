@@ -730,10 +730,38 @@ test("maps Core statuses to SDK statuses", () => {
   );
 });
 
-test("SDK port disconnect removes routing without ending the Core thread", async () => {
+test("SDK port disconnect auto-ends default lifecycle session", async () => {
   const { chrome, nativePort } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
   const sdkPort = await createSdkSession(background, nativePort);
+
+  sdkPort.disconnect();
+  assert.equal(nativePort.lastSent().type, "end_thread");
+  assert.equal(nativePort.lastSent().threadId, "thread_sdk");
+  respondNative(nativePort, nativePort.lastSent(), {});
+  await tick();
+
+  assert.equal(background.getSdkRouteCount(), 0);
+  assert.equal(background.getActiveThreadCount(), 0);
+  assert.equal(nativePort.disconnectCallCount, 1);
+});
+
+test("SDK port disconnect does not auto-end when lifecycle opts out", async () => {
+  const { chrome, nativePort } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = new MockPort("pedelec-sdk-internal");
+  background.handleSdkConnect(sdkPort);
+
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skillsUrls: [], autoEndOnDisconnect: false },
+  });
+  respondNative(nativePort, nativePort.lastSent(), { threadId: "thread_keep_alive" });
+  await tick();
+  respondNative(nativePort, nativePort.lastSent(), { subscribed: true });
+  await tick();
   const sentBeforeDisconnect = nativePort.sent.length;
 
   sdkPort.disconnect();
@@ -741,6 +769,39 @@ test("SDK port disconnect removes routing without ending the Core thread", async
   assert.equal(background.getSdkRouteCount(), 0);
   assert.equal(nativePort.sent.length, sentBeforeDisconnect);
   assert.equal(nativePort.sent.some((message) => message.type === "end_thread"), false);
+  assert.equal(background.getActiveThreadCount(), 1);
+});
+
+test("SDK auto-end waits until the final route disconnects", async () => {
+  const { chrome, nativePort } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const firstPort = await createSdkSession(background, nativePort);
+  const secondPort = new MockPort("pedelec-sdk-internal");
+  background.handleSdkConnect(secondPort);
+
+  secondPort.emit({
+    type: "resume_session",
+    channelId: "channel_2",
+    requestId: "sdk_resume",
+    sessionId: "thread_sdk",
+  });
+  assert.equal(nativePort.lastSent().type, "subscribe_thread");
+  respondNative(nativePort, nativePort.lastSent(), { subscribed: true });
+  await tick();
+
+  const sentBeforeFirstDisconnect = nativePort.sent.length;
+  firstPort.disconnect();
+  assert.equal(nativePort.sent.length, sentBeforeFirstDisconnect);
+  assert.equal(background.getSdkRouteCount(), 1);
+
+  secondPort.disconnect();
+  assert.equal(nativePort.lastSent().type, "end_thread");
+  assert.equal(nativePort.lastSent().threadId, "thread_sdk");
+  respondNative(nativePort, nativePort.lastSent(), {});
+  await tick();
+
+  assert.equal(background.getSdkRouteCount(), 0);
+  assert.equal(background.getActiveThreadCount(), 0);
 });
 
 test("end_session calls end_thread", async () => {
@@ -770,6 +831,64 @@ test("end_session calls end_thread", async () => {
   assert.equal(background.getActiveThreadCount(), 0);
   assert.equal(nativePort.disconnectCallCount, 1);
   assert.equal(background.getState().connected, false);
+});
+
+test("SDK disconnect after manual end does not duplicate cleanup", async () => {
+  const { chrome, nativePort } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = await createSdkSession(background, nativePort);
+
+  sdkPort.emit({
+    type: "end_session",
+    channelId: "channel_1",
+    requestId: "sdk_end",
+    sessionId: "thread_sdk",
+  });
+  await tick();
+  respondNative(nativePort, nativePort.lastSent(), {});
+  await tick();
+  const endThreadCount = nativePort.sent.filter((message) => message.type === "end_thread").length;
+
+  sdkPort.disconnect();
+
+  assert.equal(nativePort.sent.filter((message) => message.type === "end_thread").length, endThreadCount);
+  assert.equal(background.getSdkRouteCount(), 0);
+});
+
+test("auto-end failure does not prevent other SDK sessions from operating", async () => {
+  const { chrome, nativePort } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const firstPort = await createSdkSession(background, nativePort, "thread_failing_auto_end");
+  const secondPort = await createSdkSession(background, nativePort, "thread_other");
+  const originalPostMessage = nativePort.postMessage.bind(nativePort);
+  nativePort.postMessage = (message) => {
+    if (message?.type === "end_thread" && message.threadId === "thread_failing_auto_end") {
+      throw new Error("end failed");
+    }
+    originalPostMessage(message);
+  };
+
+  firstPort.disconnect();
+  await tick();
+  assert.equal(background.getState().error, "AUTO_END_SESSION_FAILED: end failed");
+
+  secondPort.emit({
+    type: "list_providers",
+    channelId: "channel_1",
+    requestId: "sdk_providers_after_failure",
+  });
+  assert.equal(nativePort.lastSent().type, "list_providers");
+  respondNative(nativePort, nativePort.lastSent(), []);
+  await tick();
+
+  assert.deepEqual(secondPort.lastSent(), {
+    channelId: "channel_1",
+    type: "response",
+    requestId: "sdk_providers_after_failure",
+    ok: true,
+    result: [],
+  });
+  assert.equal(background.getActiveThreadCount(), 2);
 });
 
 test("create_session after idle disconnect opens a fresh native port before old disconnect event", async () => {

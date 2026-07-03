@@ -166,6 +166,7 @@ describe("Pedelec SDK", () => {
         provider: "codex",
         model: "gpt-5",
         skillsUrls: ["https://example.test/tools.json"],
+        autoEndOnDisconnect: true,
       },
     });
     expect(request.channelId).toMatch(/^pedelec_/);
@@ -532,6 +533,47 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, request, { sessionId: "thread_user_model" });
 
     expect((await promise).model).toBe("user-model");
+  });
+
+  it("sends explicit autoEndOnDisconnect lifecycle options", async () => {
+    const pedelec = new Pedelec();
+    const keepAlivePromise = pedelec.createSession({
+      provider: "codex",
+      model: "gpt-5",
+      autoEndOnDisconnect: false,
+    });
+    const keepAliveRequest = pageWindow.lastSent();
+
+    expect(keepAliveRequest).toMatchObject({
+      type: "create_session",
+      input: {
+        provider: "codex",
+        model: "gpt-5",
+        skillsUrls: [],
+        autoEndOnDisconnect: false,
+      },
+    });
+    respondOk(pageWindow, keepAliveRequest, { sessionId: "thread_keep_alive" });
+    await keepAlivePromise;
+
+    const pageScopedPromise = pedelec.createSession({
+      provider: "codex",
+      model: "gpt-5",
+      autoEndOnDisconnect: true,
+    });
+    const pageScopedRequest = pageWindow.lastSent();
+
+    expect(pageScopedRequest).toMatchObject({
+      type: "create_session",
+      input: {
+        provider: "codex",
+        model: "gpt-5",
+        skillsUrls: [],
+        autoEndOnDisconnect: true,
+      },
+    });
+    respondOk(pageWindow, pageScopedRequest, { sessionId: "thread_page_scoped" });
+    await pageScopedPromise;
   });
 
   it("returns clear errors when default provider is missing or unavailable", async () => {

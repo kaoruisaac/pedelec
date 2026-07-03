@@ -13,12 +13,14 @@ type CreateSessionInputWithProvider = {
   provider: ProviderCode;
   model?: string;
   skillsUrls?: string[];
+  autoEndOnDisconnect?: boolean;
 };
 
 type CreateSessionInputWithDefaults = {
   provider?: undefined;
   model?: never;
   skillsUrls?: string[];
+  autoEndOnDisconnect?: boolean;
 };
 
 export type CreateSessionInput = CreateSessionInputWithProvider | CreateSessionInputWithDefaults;
@@ -182,6 +184,7 @@ export class Pedelec {
         provider: resolvedInput.provider,
         model: resolvedInput.model,
         skillsUrls: resolvedInput.skillsUrls,
+        autoEndOnDisconnect: resolvedInput.autoEndOnDisconnect,
       },
     });
 
@@ -301,20 +304,24 @@ export class Pedelec {
         provider: ProviderCode;
         model?: string;
         skillsUrls: string[];
+        autoEndOnDisconnect: boolean;
       }
     | Promise<{
     provider: ProviderCode;
     model?: string;
     skillsUrls: string[];
+    autoEndOnDisconnect: boolean;
   }> {
     const raw = (input ?? {}) as {
       provider?: unknown;
       model?: unknown;
       skillsUrls?: unknown;
+      autoEndOnDisconnect?: unknown;
     };
     const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
     const hasProvider = provider.length > 0;
     const hasModel = raw.model !== undefined;
+    const autoEndOnDisconnect = raw.autoEndOnDisconnect !== false;
 
     if (!hasProvider && hasModel) {
       throw makeError("INVALID_INPUT", "model cannot be provided without provider");
@@ -324,7 +331,7 @@ export class Pedelec {
     const userModel = typeof raw.model === "string" ? raw.model : undefined;
 
     if (!hasProvider) {
-      return this.resolveDefaultCreateSessionInput(skillsUrls);
+      return this.resolveDefaultCreateSessionInput(skillsUrls, autoEndOnDisconnect);
     }
 
     if (!isProviderCode(provider)) {
@@ -333,20 +340,22 @@ export class Pedelec {
 
     let model = userModel;
     if (model === undefined) {
-      return this.resolveProviderOnlyCreateSessionInput(provider, skillsUrls);
+      return this.resolveProviderOnlyCreateSessionInput(provider, skillsUrls, autoEndOnDisconnect);
     }
 
     return {
       provider: provider as ProviderCode,
       model,
       skillsUrls,
+      autoEndOnDisconnect,
     };
   }
 
-  private async resolveDefaultCreateSessionInput(skillsUrls: string[]): Promise<{
+  private async resolveDefaultCreateSessionInput(skillsUrls: string[], autoEndOnDisconnect: boolean): Promise<{
     provider: ProviderCode;
     model?: string;
     skillsUrls: string[];
+    autoEndOnDisconnect: boolean;
   }> {
     const settings = await this.getSettings();
     if (!settings.defaultProvider) {
@@ -360,22 +369,26 @@ export class Pedelec {
       provider: settings.defaultProvider,
       model: settings.defaultModels[settings.defaultProvider] ?? undefined,
       skillsUrls,
+      autoEndOnDisconnect,
     };
   }
 
   private async resolveProviderOnlyCreateSessionInput(
     provider: ProviderCode,
-    skillsUrls: string[]
+    skillsUrls: string[],
+    autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
     model?: string;
     skillsUrls: string[];
+    autoEndOnDisconnect: boolean;
   }> {
     const settings = await this.getSettings();
     return {
       provider,
       model: settings.defaultModels[provider] ?? undefined,
       skillsUrls,
+      autoEndOnDisconnect,
     };
   }
 

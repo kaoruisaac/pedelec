@@ -209,6 +209,15 @@ const session = await pedelec.createSession({
 
 Ollama sessions are executed by the `pedelec-agent` binary bundled with the Desktop App, not by the `ollama` CLI. You still need to start the local Ollama server yourself. Ollama requires a model from the session input or `defaultModels.ollama`; otherwise the CoreRuntime returns `MODEL_REQUIRED`.
 
+By default, SDK-created sessions are page-scoped. `autoEndOnDisconnect` defaults to `true`, so the Desktop thread is ended when the last SDK connection for that session disconnects, such as on page refresh or tab close. Keep the default for demo and page-scoped apps. Set `autoEndOnDisconnect: false` when you need to resume the same session after navigation or share it across pages:
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+```
+
 `model` cannot be provided without `provider`.
 
 ```ts
@@ -217,10 +226,12 @@ type CreateSessionInput =
       provider: ProviderCode;
       model?: string;
       skillsUrls?: string[];
+      autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       skillsUrls?: string[];
+      autoEndOnDisconnect?: boolean;
     };
 ```
 
@@ -375,6 +386,7 @@ const result = await pedelec.request<{ sessionId: string }>("create_session", {
   input: {
     provider: "codex",
     skillsUrls: [],
+    autoEndOnDisconnect: true,
   },
 });
 ```
