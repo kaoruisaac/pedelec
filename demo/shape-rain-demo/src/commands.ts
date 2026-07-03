@@ -44,6 +44,17 @@ const MAX_PER_COMMAND = 36;
 const MIN_SIZE = 12;
 const MAX_SIZE = 86;
 
+const candyPalette = [
+  "#4f7df3", // blue
+  "#57b7ff", // sky
+  "#f05a87", // pink
+  "#ffd24d", // yellow
+  "#65c875", // green
+  "#62d6a3", // mint
+  "#8f6be8", // purple
+  "#ff9f43", // orange
+];
+
 const namedColors: Record<string, string> = {
   blue: "#4f7df3",
   sky: "#57b7ff",
@@ -95,10 +106,20 @@ export function normalizeSpawnCommand(args: unknown): SpawnBasicShapesResult {
 
     const count = clamp(toNumber(item.count, 1), 1, Math.min(MAX_PER_ITEM, remaining));
     const size = normalizeSize(item.size);
-    const color = normalizeColor(item.color ?? item.style);
     const xHint = normalizeXHint(item.x ?? item.xHint ?? item.spawnX);
+    const xHintProps = xHint === undefined ? {} : { xHint };
 
-    normalizedItems.push({ shape, count, color, size, ...(xHint === undefined ? {} : { xHint }) });
+    const rawColor = item.color ?? item.style;
+    if (typeof rawColor === "string" && rawColor.trim().length > 0) {
+      normalizedItems.push({ shape, count, color: normalizeColor(rawColor), size, ...xHintProps });
+    } else {
+      // 未指定顏色時，每個物件各自抽一個糖果色
+      let previous: string | undefined;
+      for (let unit = 0; unit < count; unit += 1) {
+        previous = randomCandyColor(previous);
+        normalizedItems.push({ shape, count: 1, color: previous, size, ...xHintProps });
+      }
+    }
     remaining -= count;
   });
 
@@ -152,6 +173,11 @@ function normalizeColor(value: unknown): string {
   }
   if (/^#[0-9a-f]{6}$/i.test(trimmed)) return trimmed;
   return "#4f7df3";
+}
+
+function randomCandyColor(previous?: string): string {
+  const pool = previous === undefined ? candyPalette : candyPalette.filter((color) => color !== previous);
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function normalizeXHint(value: unknown): number | undefined {

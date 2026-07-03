@@ -84,8 +84,8 @@ export class ShapeWorld implements ShapeWorldLike {
     for (const item of items) {
       for (let index = 0; index < item.count; index += 1) {
         const jitter = (Math.random() - 0.5) * Math.min(220, rect.width * 0.22);
-        const baseX = item.xHint === undefined ? rect.width * 0.5 : item.xHint * rect.width;
-        const x = clamp(baseX + jitter, item.size + 18, rect.width - item.size - 18);
+        const baseX = item.xHint === undefined ? Math.random() * rect.width : item.xHint * rect.width + jitter;
+        const x = clamp(baseX, item.size + 18, rect.width - item.size - 18);
         const y = -item.size * (1.2 + index * 0.9 + Math.random() * 1.2);
         const object = this.createObject(item.shape, item.color, item.size, x, y);
         Matter.Composite.add(this.engine.world, object.body);

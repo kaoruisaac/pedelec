@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import RAPIER, { type Collider, type RigidBody, type World } from "@dimforge/rapier3d-compat";
 import type { ShapeKind, SpawnBasicShapeItem } from "./commands";
 import type { ShapeWorldLike } from "./shapeWorldTypes";
@@ -11,8 +12,8 @@ type ShapeObject3D = {
 };
 
 const MAX_WORLD_OBJECTS = 110;
-const WALL_THICKNESS = 0.5;
-const SHAPE_THICKNESS = 0.34;
+const WALL_THICKNESS = 0.4;
+const SHAPE_THICKNESS = 0.2;
 const SLOT_HALF_DEPTH = SHAPE_THICKNESS * 0.5 + 0.06;
 const FALL_LIMIT_PADDING = 5;
 
@@ -79,9 +80,13 @@ export class ShapeWorld3D implements ShapeWorldLike {
     for (const item of items) {
       for (let index = 0; index < item.count; index += 1) {
         const radius = sizeToWorld(item.size);
-        const baseX = item.xHint === undefined ? 0 : (item.xHint - 0.5) * (this.viewWidth - radius * 2);
-        const x = clamp(baseX + randomRange(-0.6, 0.6), -this.viewWidth * 0.5 + radius, this.viewWidth * 0.5 - radius);
-        const y = this.viewHeight * 0.5 + radius * 2 + index * radius * 1.6;
+        const halfSpan = Math.max(0, this.viewWidth * 0.5 - radius);
+        const baseX =
+          item.xHint === undefined
+            ? randomRange(-halfSpan, halfSpan)
+            : (item.xHint - 0.5) * (this.viewWidth - radius * 2) + randomRange(-0.6, 0.6);
+        const x = clamp(baseX, -halfSpan, halfSpan);
+        const y = this.viewHeight * 0.5 + radius * 2 + index * radius * 1.6 + randomRange(0, radius * 1.4);
         const body = this.physics.createRigidBody(
           RAPIER.RigidBodyDesc.dynamic()
             .setTranslation(x, y, 0)
@@ -123,6 +128,8 @@ export class ShapeWorld3D implements ShapeWorldLike {
     this.clearObjects();
     this.staticColliders = [];
     if (this.scene) {
+      this.scene.environment?.dispose();
+      this.scene.environment = null;
       for (const child of [...this.scene.children]) {
         this.scene.remove(child);
         disposeObject(child);
@@ -138,10 +145,15 @@ export class ShapeWorld3D implements ShapeWorldLike {
   }
 
   private setupScene(): void {
-    if (!this.scene) return;
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xd7e3ff, 2.4));
+    if (!this.scene || !this.renderer) return;
 
-    const key = new THREE.DirectionalLight(0xffffff, 2.8);
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.6).texture;
+    pmrem.dispose();
+
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xd7e3ff, 1.8));
+
+    const key = new THREE.DirectionalLight(0xffffff, 1.5);
     key.position.set(-4, 8, 8);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
@@ -153,7 +165,7 @@ export class ShapeWorld3D implements ShapeWorldLike {
     key.shadow.camera.bottom = -8;
     this.scene.add(key);
 
-    const fill = new THREE.DirectionalLight(0xdceeff, 1.05);
+    const fill = new THREE.DirectionalLight(0xdceeff, 0.7);
     fill.position.set(5, 3, 6);
     this.scene.add(fill);
 
@@ -263,61 +275,37 @@ function createShapeMesh(shape: ShapeKind, color: string, radius: number): THREE
   geometry.computeVertexNormals();
 
   const material = new THREE.MeshPhysicalMaterial({
-    color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.18),
-    roughness: 0.08,
-    metalness: 0,
-    transmission: 0.58,
-    thickness: SHAPE_THICKNESS * 1.2,
-    attenuationDistance: 2.6,
-    attenuationColor: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.46),
-    clearcoat: 1,
-    clearcoatRoughness: 0.12,
-    transparent: true,
-    opacity: 0.7,
-    side: THREE.DoubleSide,
-    ior: 1.34,
-    envMapIntensity: 1.05,
+    color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.08), // 基礎色，混入 8% 白使色彩更亮
+    roughness: 0.32, // 表面粗糙度，略帶霧面感
+    metalness: 0, // 金屬度，0 為非金屬材質
+    transmission: 0.96, // 透光率，接近全透明玻璃
+    thickness: SHAPE_THICKNESS * 2.2, // 玻璃厚度，影響折射與內部散射
+    attenuationDistance: 1.6, // 光線在材質內的衰減距離
+    attenuationColor: new THREE.Color(color), // 光線被吸收時呈現的色調
+    clearcoat: 0.55, // 清漆層強度，模擬表面光澤
+    clearcoatRoughness: 0.4, // 清漆層粗糙度
+    ior: 1.45, // 折射率（Index of Refraction），類似玻璃
+    envMapIntensity: 0.7, // 環境貼圖反射強度
+    specularIntensity: 0.6, // 高光反射強度
   });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   group.add(mesh);
 
-  const faceTint = new THREE.Mesh(
-    geometry.clone(),
-    new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.28),
-      transparent: true,
-      opacity: 0.26,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    }),
-  );
-  faceTint.scale.setScalar(0.985);
-  faceTint.renderOrder = 1;
-  group.add(faceTint);
-
   const rim = new THREE.Mesh(
     geometry.clone(),
     new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.7),
-      transparent: true,
-      opacity: 0.26,
-      blending: THREE.AdditiveBlending,
-      side: THREE.BackSide,
-      depthWrite: false,
+      color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.72), // 邊緣光色，混入 72% 白使輪廓更亮
+      transparent: true, // 啟用透明度
+      opacity: 0.2, // 整體不透明度，低值呈現柔和光暈
+      blending: THREE.AdditiveBlending, // 加法混合，疊加出發光效果
+      side: THREE.FrontSide, // 只渲染背面，形成外圈 rim light
+      depthWrite: false, // 不寫入深度緩衝，避免半透明邊緣遮擋主體
     }),
   );
-  rim.scale.setScalar(1.045);
+  rim.scale.setScalar(1.035);
   group.add(rim);
-
-  const glint = new THREE.Mesh(
-    new THREE.SphereGeometry(clamp(radius * 0.1, 0.032, 0.052), 12, 8),
-    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.46, depthWrite: false }),
-  );
-  glint.position.set(-radius * 0.24, radius * 0.26, SHAPE_THICKNESS * 0.34);
-  glint.renderOrder = 2;
-  group.add(glint);
   return group;
 }
 
@@ -327,7 +315,7 @@ function makeGeometry(shape: ShapeKind, radius: number): THREE.BufferGeometry {
     disc.absarc(0, 0, radius, 0, Math.PI * 2, false);
     return extrudeShape(disc);
   }
-  if (shape === "square") return extrudeRoundedRect(radius * 1.7, radius * 1.7, radius * 0.3);
+  if (shape === "square") return extrudeRoundedRect(radius * 1.7, radius * 1.7, radius * 0.16);
   if (shape === "rectangle") return extrudeRoundedRect(radius * 2.3, radius * 1.4, radius * 0.28);
   if (shape === "capsule") return makeCapsuleGeometry(radius);
   if (shape === "star") return extrudePoints(starPoints(radius * 1.05, radius * 0.5, 5));
@@ -375,7 +363,7 @@ function extrudePoints(points: Array<[number, number]>): THREE.BufferGeometry {
 }
 
 function extrudeShape(shape: THREE.Shape): THREE.BufferGeometry {
-  const bevel = SHAPE_THICKNESS * 0.22;
+  const bevel = SHAPE_THICKNESS * 0.1;
   const geometry = new THREE.ExtrudeGeometry(shape, {
     depth: SHAPE_THICKNESS - bevel * 2,
     bevelEnabled: true,
@@ -383,7 +371,7 @@ function extrudeShape(shape: THREE.Shape): THREE.BufferGeometry {
     bevelSize: bevel * 0.9,
     bevelThickness: bevel,
     curveSegments: 24,
-    steps: 1,
+    steps: 5,
   });
   geometry.center();
   return geometry;
@@ -452,7 +440,7 @@ function starPoints(outer: number, inner: number, points: number): Array<[number
 
 function zOnlyQuaternion(): { x: number; y: number; z: number; w: number } {
   const quaternion = new THREE.Quaternion().setFromAxisAngle(
-    new THREE.Vector3(0, 0, 1),
+    new THREE.Vector3(0.15, 0.15, 1),
     randomRange(0, Math.PI * 2),
   );
   return { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w };
@@ -468,7 +456,7 @@ function disposeObject(object: THREE.Object3D): void {
 }
 
 function sizeToWorld(size: number): number {
-  return clamp(size / 200, 0.1, 0.66);
+  return clamp((size / 200) * 3, 0.3, 1.98);
 }
 
 function randomRange(min: number, max: number): number {

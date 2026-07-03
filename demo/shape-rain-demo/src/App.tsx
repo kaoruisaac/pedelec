@@ -20,7 +20,7 @@ export default function App() {
   let lifecycleId = 0;
 
   const [prompt, setPrompt] = createSignal("");
-  const [renderMode, setRenderMode] = createSignal<RenderMode>("2d");
+  const [renderMode, setRenderMode] = createSignal<RenderMode>("3d");
   const [uiState, setUiState] = createSignal<UiState>("connecting");
   const [session, setSession] = createSignal<PedelecSession | null>(null);
   const [sessionStatus, setSessionStatus] = createSignal<PedelecSessionStatus | "none">("none");
