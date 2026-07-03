@@ -13,9 +13,10 @@ type ShapeObject3D = {
 
 const MAX_WORLD_OBJECTS = 110;
 const WALL_THICKNESS = 0.4;
-const SHAPE_THICKNESS = 0.2;
+const SHAPE_THICKNESS = 0.38;
 const SLOT_HALF_DEPTH = SHAPE_THICKNESS * 0.5 + 0.06;
 const FALL_LIMIT_PADDING = 5;
+const WHITE = new THREE.Color(0xffffff);
 
 export class ShapeWorld3D implements ShapeWorldLike {
   private container: HTMLElement | null = null;
@@ -53,7 +54,7 @@ export class ShapeWorld3D implements ShapeWorldLike {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.domElement.className = "shape-stage-canvas shape-stage-canvas-3d";
@@ -148,13 +149,15 @@ export class ShapeWorld3D implements ShapeWorldLike {
     if (!this.scene || !this.renderer) return;
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.6).texture;
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.3; 
     pmrem.dispose();
 
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xd7e3ff, 1.8));
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xf1f6ff, 0.5));
 
-    const key = new THREE.DirectionalLight(0xffffff, 1.5);
-    key.position.set(-4, 8, 8);
+    const key = new THREE.DirectionalLight(0xffffff, 0.24);
+    key.position.set(-4, 8, 9);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
     key.shadow.camera.near = 0.5;
@@ -165,13 +168,13 @@ export class ShapeWorld3D implements ShapeWorldLike {
     key.shadow.camera.bottom = -8;
     this.scene.add(key);
 
-    const fill = new THREE.DirectionalLight(0xdceeff, 0.7);
-    fill.position.set(5, 3, 6);
-    this.scene.add(fill);
+    const coolFill = new THREE.DirectionalLight(0xeaf4ff, 0.16);
+    coolFill.position.set(5, 3, 7);
+    this.scene.add(coolFill);
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(32, 7),
-      new THREE.ShadowMaterial({ color: 0x8aa0c2, opacity: 0.16, transparent: true }),
+      new THREE.ShadowMaterial({ color: 0x9eb2d1, opacity: 0.1, transparent: true }),
     );
     floor.name = "soft-contact-shadow";
     floor.receiveShadow = true;
@@ -274,39 +277,107 @@ function createShapeMesh(shape: ShapeKind, color: string, radius: number): THREE
   const geometry = makeGeometry(shape, radius);
   geometry.computeVertexNormals();
 
-  const material = new THREE.MeshPhysicalMaterial({
-    color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.08), // 基礎色，混入 8% 白使色彩更亮
-    roughness: 0.32, // 表面粗糙度，略帶霧面感
-    metalness: 0, // 金屬度，0 為非金屬材質
-    transmission: 0.96, // 透光率，接近全透明玻璃
-    thickness: SHAPE_THICKNESS * 2.2, // 玻璃厚度，影響折射與內部散射
-    attenuationDistance: 1.6, // 光線在材質內的衰減距離
-    attenuationColor: new THREE.Color(color), // 光線被吸收時呈現的色調
-    clearcoat: 0.55, // 清漆層強度，模擬表面光澤
-    clearcoatRoughness: 0.4, // 清漆層粗糙度
-    ior: 1.45, // 折射率（Index of Refraction），類似玻璃
-    envMapIntensity: 0.7, // 環境貼圖反射強度
-    specularIntensity: 0.6, // 高光反射強度
-  });
-  const mesh = new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, createCandyGlassMaterial(color, radius));
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   group.add(mesh);
 
+  group.add(createRimShell(geometry, color));
+  group.add(createGlassEdgeLines(geometry));
+  group.add(createHighlightSprite(radius));
+
+  return group;
+}
+
+function createCandyGlassMaterial(color: string, radius: number): THREE.MeshPhysicalMaterial {
+  const baseColor = new THREE.Color(color);
+  const candyColor = baseColor.clone().lerp(WHITE, 0.56);
+
+  return new THREE.MeshPhysicalMaterial({
+    color: candyColor,
+    metalness: 0,
+    roughness: 0.28,
+    transmission: 0.98,
+    thickness: Math.max(SHAPE_THICKNESS * 1.35, radius * 0.36),
+    attenuationDistance: Math.max(1.9, radius * 2.15),
+    attenuationColor: baseColor.clone().lerp(WHITE, 0.58),
+    ior: 1.58,
+    clearcoat: 0.42,
+    clearcoatRoughness: 0.34,
+    specularIntensity: 0.24,
+    envMapIntensity: 0.62,
+    side: THREE.DoubleSide,
+  });
+}
+
+function createRimShell(geometry: THREE.BufferGeometry, color: string): THREE.Mesh {
   const rim = new THREE.Mesh(
     geometry.clone(),
     new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.72), // 邊緣光色，混入 72% 白使輪廓更亮
-      transparent: true, // 啟用透明度
-      opacity: 0.2, // 整體不透明度，低值呈現柔和光暈
-      blending: THREE.AdditiveBlending, // 加法混合，疊加出發光效果
-      side: THREE.FrontSide, // 只渲染背面，形成外圈 rim light
-      depthWrite: false, // 不寫入深度緩衝，避免半透明邊緣遮擋主體
+      color: new THREE.Color(color).lerp(WHITE, 0.9),
+      transparent: true,
+      opacity: 0.16,
+      blending: THREE.AdditiveBlending,
+      side: THREE.BackSide,
+      depthWrite: false,
     }),
   );
-  rim.scale.setScalar(1.035);
-  group.add(rim);
-  return group;
+
+  rim.scale.setScalar(1.045);
+  return rim;
+}
+
+function createGlassEdgeLines(geometry: THREE.BufferGeometry): THREE.LineSegments {
+  const edge = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry, 22),
+    new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.15,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+
+  edge.scale.setScalar(1.012);
+  return edge;
+}
+
+function createHighlightSprite(radius: number): THREE.Sprite {
+  const highlight = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: makeHighlightTexture(),
+      transparent: true,
+      opacity: 0.18,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+
+  highlight.position.set(-radius * 0.24, radius * 0.24, SHAPE_THICKNESS * 0.7);
+  highlight.scale.set(radius * 0.78, radius * 0.52, 1);
+  return highlight;
+}
+
+function makeHighlightTexture(): THREE.Texture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 96;
+  canvas.height = 96;
+
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Could not create highlight texture.");
+
+  const gradient = context.createRadialGradient(34, 28, 4, 34, 28, 42);
+  gradient.addColorStop(0, "rgba(255,255,255,0.28)");
+  gradient.addColorStop(0.46, "rgba(255,255,255,0.08)");
+  gradient.addColorStop(1, "rgba(255,255,255,0)");
+
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 96, 96);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
 
 function makeGeometry(shape: ShapeKind, radius: number): THREE.BufferGeometry {
@@ -363,15 +434,15 @@ function extrudePoints(points: Array<[number, number]>): THREE.BufferGeometry {
 }
 
 function extrudeShape(shape: THREE.Shape): THREE.BufferGeometry {
-  const bevel = SHAPE_THICKNESS * 0.1;
+  const bevel = SHAPE_THICKNESS * 0.24;
   const geometry = new THREE.ExtrudeGeometry(shape, {
     depth: SHAPE_THICKNESS - bevel * 2,
     bevelEnabled: true,
-    bevelSegments: 3,
-    bevelSize: bevel * 0.9,
+    bevelSegments: 8,
+    bevelSize: bevel * 0.95,
     bevelThickness: bevel,
-    curveSegments: 24,
-    steps: 5,
+    curveSegments: 36,
+    steps: 2,
   });
   geometry.center();
   return geometry;
@@ -448,11 +519,25 @@ function zOnlyQuaternion(): { x: number; y: number; z: number; w: number } {
 
 function disposeObject(object: THREE.Object3D): void {
   object.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) return;
-    child.geometry.dispose();
-    const materials = Array.isArray(child.material) ? child.material : [child.material];
-    for (const material of materials) material.dispose();
+    const disposable = child as THREE.Object3D & {
+      geometry?: THREE.BufferGeometry;
+      material?: THREE.Material | THREE.Material[];
+    };
+
+    disposable.geometry?.dispose();
+
+    const materials = disposable.material ? (Array.isArray(disposable.material) ? disposable.material : [disposable.material]) : [];
+    for (const material of materials) disposeMaterial(material);
   });
+}
+
+function disposeMaterial(material: THREE.Material): void {
+  const texturedMaterial = material as THREE.Material & {
+    map?: THREE.Texture | null;
+  };
+
+  texturedMaterial.map?.dispose();
+  material.dispose();
 }
 
 function sizeToWorld(size: number): number {
