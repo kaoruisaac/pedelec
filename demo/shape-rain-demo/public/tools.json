@@ -1,58 +1,60 @@
-[
-  {
-    "name": "spawn_basic_shapes",
-    "description": "Spawn one or more batches of supported 2D basic shapes at the top of the Shape Rain stage. The frontend validates the request, clamps counts and sizes, then renders falling glass-like shapes with PixiJS and Matter.js.",
-    "timeoutMs": 5000,
-    "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["items"],
-      "properties": {
-        "items": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 8,
+{
+  "tools": [
+    {
+      "name": "spawn_basic_shapes",
+      "description": "Spawn one or more batches of supported 2D basic shapes at the top of the Shape Rain stage. The frontend validates the request, clamps counts and sizes, then renders falling glass-like shapes with PixiJS and Matter.js.",
+      "timeoutMs": 60000,
+      "argsSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items"],
+        "properties": {
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["shape"],
-            "properties": {
-              "shape": {
-                "type": "string",
-                "enum": ["circle", "square", "rectangle", "triangle", "pentagon", "hexagon", "star", "capsule"]
-              },
-              "count": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 12,
-                "default": 1
-              },
-              "color": {
-                "type": "string",
-                "description": "Simple color name or #RRGGBB hex color.",
-                "default": "blue"
-              },
-              "style": {
-                "type": "string",
-                "description": "Optional visual style hint. The first version uses it only as a fallback color string."
-              },
-              "size": {
-                "oneOf": [
-                  { "type": "string", "enum": ["small", "medium", "large"] },
-                  { "type": "number", "minimum": 28, "maximum": 86 }
-                ],
-                "default": "medium"
-              },
-              "xHint": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1,
-                "description": "Optional horizontal spawn hint from 0 left to 1 right."
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["shape"],
+              "properties": {
+                "shape": {
+                  "type": "string",
+                  "enum": ["circle", "square", "rectangle", "triangle", "pentagon", "hexagon", "star", "capsule"]
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12,
+                  "default": 1
+                },
+                "color": {
+                  "type": "string",
+                  "description": "Simple color name or #RRGGBB hex color.",
+                  "default": "blue"
+                },
+                "style": {
+                  "type": "string",
+                  "description": "Optional visual style hint. The first version uses it only as a fallback color string."
+                },
+                "size": {
+                  "oneOf": [
+                    { "type": "string", "enum": ["small", "medium", "large"] },
+                    { "type": "number", "minimum": 28, "maximum": 86 }
+                  ],
+                  "default": "medium"
+                },
+                "xHint": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "Optional horizontal spawn hint from 0 left to 1 right."
+                }
               }
             }
           }
         }
       }
     }
-  }
-]
+  ]
+}
