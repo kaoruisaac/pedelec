@@ -12,14 +12,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
     "matter-js": "^0.20.0",
     "pedelec": "file:../../sdk",
     "pixi.js": "^8.19.0",
-    "solid-js": "^1.9.14"
+    "solid-js": "^1.9.14",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@types/matter-js": "^0.20.2",
     "@types/node": "^26.1.0",
+    "@types/three": "^0.185.0",
     "typescript": "^6.0.3",
     "vite": "^8.1.3",
     "vite-plugin-solid": "^2.11.12"

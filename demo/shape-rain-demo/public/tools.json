@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "spawn_basic_shapes",
-      "description": "Spawn one or more batches of supported 2D basic shapes at the top of the Shape Rain stage. The frontend validates the request, clamps counts and sizes, then renders falling glass-like shapes with PixiJS and Matter.js.",
+      "description": "Spawn one or more batches of supported basic shapes at the top of the active Shape Rain stage. The frontend validates the request, clamps counts and sizes, then renders falling shapes in the current 2D or 3D mode.",
       "timeoutMs": 60000,
       "argsSchema": {
         "type": "object",

@@ -1,6 +1,7 @@
 import { Application, Container, Graphics } from "pixi.js";
 import Matter from "matter-js";
 import type { ShapeKind, SpawnBasicShapeItem } from "./commands";
+import type { ShapeWorldLike } from "./shapeWorldTypes";
 
 type ShapeObject = {
   id: number;
@@ -12,7 +13,7 @@ type ShapeObject = {
 const WALL_THICKNESS = 120;
 const MAX_WORLD_OBJECTS = 160;
 
-export class ShapeWorld {
+export class ShapeWorld implements ShapeWorldLike {
   private app: Application | null = null;
   private engine: Matter.Engine | null = null;
   private runner: Matter.Runner | null = null;
@@ -199,56 +200,23 @@ function makeBody(shape: ShapeKind, x: number, y: number, size: number): Matter.
 }
 
 function drawShape(shape: ShapeKind, color: string, size: number): Container {
-  return drawGlassShape(shape, color, size);
-}
-
-function drawGlassShape(shape: ShapeKind, color: string, size: number): Container {
   const root = new Container();
   const baseColor = hexToPixiColor(color);
-  const lightEdge = hexToPixiColor(lightenColor(color, 0.5));
-  const paleGlow = hexToPixiColor(lightenColor(color, 0.78));
+  const strokeColor = hexToPixiColor(darkenColor(color, 0.16));
+  const shadowColor = hexToPixiColor(darkenColor(color, 0.34));
 
-  const softShadow = new Graphics();
-  softShadow.position.set(0, size * 0.11);
-  drawScaledPath(softShadow, shape, size, 1.04);
-  softShadow.fill({ color: baseColor, alpha: 0.13 });
-
-  const floorShadow = new Graphics();
-  floorShadow.position.set(size * 0.02, size * 0.18);
-  drawScaledPath(floorShadow, shape, size, 0.96);
-  floorShadow.fill({ color: 0x64748b, alpha: 0.11 });
-
-  const outerGlow = new Graphics();
-  drawScaledPath(outerGlow, shape, size, 1.06);
-  outerGlow.stroke({ color: paleGlow, alpha: 0.62, width: Math.max(5, size * 0.1) });
+  const shadow = new Graphics();
+  shadow.position.set(size * 0.035, size * 0.055);
+  drawPath(shadow, shape, size);
+  shadow.fill({ color: shadowColor, alpha: 0.18 });
 
   const body = new Graphics();
   drawPath(body, shape, size);
-  body.fill({ color: baseColor, alpha: 0.5 });
-  body.stroke({ color: lightEdge, alpha: 0.9, width: Math.max(3, size * 0.06) });
+  body.fill({ color: baseColor, alpha: 0.92 });
+  body.stroke({ color: strokeColor, alpha: 0.7, width: Math.max(2, size * 0.035) });
 
-  const innerTint = new Graphics();
-  drawScaledPath(innerTint, shape, size, 0.82);
-  innerTint.fill({ color: 0xffffff, alpha: 0.1 });
-
-  const innerEdge = new Graphics();
-  drawScaledPath(innerEdge, shape, size, 0.82);
-  innerEdge.stroke({ color: 0xffffff, alpha: 0.68, width: Math.max(1.5, size * 0.027) });
-
-  const lowerEdge = new Graphics();
-  lowerEdge.position.set(size * 0.025, size * 0.035);
-  drawScaledPath(lowerEdge, shape, size, 0.91);
-  lowerEdge.stroke({ color: baseColor, alpha: 0.38, width: Math.max(2, size * 0.035) });
-
-  const shine = new Graphics();
-  drawHighlight(shine, shape, size, lightEdge);
-
-  root.addChild(softShadow, floorShadow, outerGlow, body, innerTint, lowerEdge, innerEdge, shine);
+  root.addChild(shadow, body);
   return root;
-}
-
-function drawScaledPath(graphics: Graphics, shape: ShapeKind, size: number, scale: number): void {
-  drawPath(graphics, shape, size * scale);
 }
 
 function drawPath(graphics: Graphics, shape: ShapeKind, size: number): void {
@@ -278,37 +246,6 @@ function drawPath(graphics: Graphics, shape: ShapeKind, size: number): void {
   polygon(graphics, regularPolygonPoints(sides, size * 0.58, shape === "triangle" ? -Math.PI / 2 : -Math.PI / 2));
 }
 
-function drawHighlight(graphics: Graphics, shape: ShapeKind, size: number, edgeColor: number): void {
-  graphics.alpha = 0.82;
-  if (shape === "circle") {
-    graphics.arc(-size * 0.08, -size * 0.05, size * 0.34, Math.PI * 1.08, Math.PI * 1.62);
-    graphics.stroke({ color: 0xffffff, alpha: 0.82, width: Math.max(2, size * 0.045) });
-    graphics.circle(size * 0.18, -size * 0.2, size * 0.06);
-    graphics.fill({ color: 0xffffff, alpha: 0.35 });
-    return;
-  }
-
-  if (shape === "capsule" || shape === "rectangle") {
-    graphics.moveTo(-size * 0.43, -size * 0.2);
-    graphics.lineTo(size * 0.18, -size * 0.3);
-    graphics.stroke({ color: 0xffffff, alpha: 0.78, width: Math.max(2, size * 0.04) });
-    graphics.moveTo(-size * 0.5, size * 0.19);
-    graphics.lineTo(size * 0.44, size * 0.11);
-    graphics.stroke({ color: edgeColor, alpha: 0.44, width: Math.max(1.5, size * 0.028) });
-    return;
-  }
-
-  if (shape === "star") {
-    graphics.moveTo(-size * 0.24, -size * 0.12);
-    graphics.lineTo(-size * 0.04, -size * 0.34);
-    graphics.lineTo(size * 0.11, -size * 0.11);
-  } else {
-    graphics.moveTo(-size * 0.27, -size * 0.26);
-    graphics.lineTo(size * 0.14, -size * 0.37);
-  }
-  graphics.stroke({ color: 0xffffff, alpha: 0.78, width: Math.max(2, size * 0.045) });
-}
-
 function regularPolygonPoints(sides: number, radius: number, offset = 0): number[] {
   return Array.from({ length: sides }, (_, index) => {
     const angle = offset + (Math.PI * 2 * index) / sides;
@@ -336,12 +273,12 @@ function hexToPixiColor(hex: string): number {
   return Number.parseInt(hex.replace("#", ""), 16);
 }
 
-function lightenColor(hex: string, amount: number): string {
+function darkenColor(hex: string, amount: number): string {
   const { r, g, b } = hexToRgb(hex);
   return rgbToHex(
-    Math.round(r + (255 - r) * amount),
-    Math.round(g + (255 - g) * amount),
-    Math.round(b + (255 - b) * amount),
+    Math.round(r * (1 - amount)),
+    Math.round(g * (1 - amount)),
+    Math.round(b * (1 - amount)),
   );
 }
 

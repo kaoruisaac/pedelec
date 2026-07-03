@@ -1,9 +1,10 @@
 import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Pedelec, type PedelecError, type PedelecSession, type PedelecSessionStatus } from "pedelec";
 import { normalizeSpawnCommand, type SpawnBasicShapesResult } from "./commands";
-import { ShapeWorld } from "./shapeWorld";
+import { createShapeWorld } from "./shapeWorldFactory";
+import type { RenderMode, ShapeWorldLike } from "./shapeWorldTypes";
 
-type UiState = "ready" | "connecting" | "submitting" | "generating" | "error" | "disconnected";
+type UiState = "ready" | "connecting" | "switching" | "submitting" | "generating" | "error" | "disconnected";
 
 type RuntimeStatus = {
   label: string;
@@ -15,9 +16,11 @@ const EXAMPLE_PROMPTS = "Try: pink triangle, five blue circles, yellow stars";
 export default function App() {
   let stageElement: HTMLDivElement | undefined;
   let sessionDisposer: (() => void) | undefined;
-  const world = new ShapeWorld();
+  let world: ShapeWorldLike | null = null;
+  let lifecycleId = 0;
 
   const [prompt, setPrompt] = createSignal("");
+  const [renderMode, setRenderMode] = createSignal<RenderMode>("2d");
   const [uiState, setUiState] = createSignal<UiState>("connecting");
   const [session, setSession] = createSignal<PedelecSession | null>(null);
   const [sessionStatus, setSessionStatus] = createSignal<PedelecSessionStatus | "none">("none");
@@ -27,7 +30,13 @@ export default function App() {
 
   const busy = createMemo(() => {
     const status = sessionStatus();
-    return uiState() === "connecting" || uiState() === "submitting" || status === "running" || status === "waiting_tool_result";
+    return (
+      uiState() === "connecting" ||
+      uiState() === "switching" ||
+      uiState() === "submitting" ||
+      status === "running" ||
+      status === "waiting_tool_result"
+    );
   });
 
   const canSubmit = createMemo(() => Boolean(prompt().trim()) && !busy() && sessionStatus() !== "ended" && sessionStatus() !== "error");
@@ -36,6 +45,7 @@ export default function App() {
     const current = uiState();
     if (current === "ready") return { label: "Ready", detail: "Pedelec connected" };
     if (current === "connecting") return { label: "Connecting", detail: "Checking Extension and Desktop App" };
+    if (current === "switching") return { label: "Switching", detail: `Starting ${renderMode().toUpperCase()} mode` };
     if (current === "submitting") return { label: "Submitting", detail: "Agent is reading your request" };
     if (current === "generating") return { label: "Generating", detail: "Tool command received" };
     if (current === "disconnected") return { label: "Disconnected", detail: "Pedelec is unavailable" };
@@ -43,20 +53,55 @@ export default function App() {
   });
 
   onMount(() => {
-    if (stageElement) {
-      void world.mount(stageElement);
-    }
-    void connectPedelec();
+    void initializeRuntime(renderMode(), ++lifecycleId);
   });
 
   onCleanup(() => {
+    lifecycleId += 1;
     sessionDisposer?.();
-    world.destroy();
+    const activeSession = session();
+    if (activeSession && activeSession.getStatus() !== "ended") void activeSession.end().catch(() => undefined);
+    world?.destroy();
+    world = null;
   });
 
-  async function connectPedelec(): Promise<void> {
+  async function initializeRuntime(mode: RenderMode, generation: number): Promise<void> {
+    if (!stageElement) return;
+    clearWorldUiState();
+    setUiState(generation === 1 ? "connecting" : "switching");
+    setMessage(generation === 1 ? "Connecting to Pedelec..." : `Switching to ${mode.toUpperCase()} mode...`);
+    const nextWorld = createShapeWorld(mode);
+    world = nextWorld;
+    try {
+      await nextWorld.mount(stageElement);
+      if (generation !== lifecycleId) {
+        nextWorld.destroy();
+        return;
+      }
+      await connectPedelec(generation);
+    } catch (err) {
+      if (generation !== lifecycleId) return;
+      nextWorld.destroy();
+      world = null;
+      setUiState("error");
+      setMessage(err instanceof Error ? err.message : `Could not start ${mode.toUpperCase()} mode.`);
+    }
+  }
+
+  async function resetCurrentSession(): Promise<void> {
     sessionDisposer?.();
     sessionDisposer = undefined;
+    const activeSession = session();
+    setSession(null);
+    setSessionStatus("none");
+    if (activeSession && activeSession.getStatus() !== "ended") {
+      await activeSession.end().catch(() => undefined);
+    }
+  }
+
+  async function connectPedelec(generation = lifecycleId): Promise<void> {
+    await resetCurrentSession();
+    if (generation !== lifecycleId) return;
     setUiState("connecting");
     setMessage("Connecting to Pedelec...");
     setChatPreview("");
@@ -76,20 +121,26 @@ export default function App() {
       const nextSession = await client.createSession({
         skillsUrls: [`${location.origin}/tools.md`, `${location.origin}/tools.json`],
       });
+      if (generation !== lifecycleId) {
+        await nextSession.end().catch(() => undefined);
+        return;
+      }
 
-      registerSession(nextSession);
+      registerSession(nextSession, generation);
       setUiState("ready");
       setMessage("Ready. Describe the basic shapes you want to drop.");
     } catch (err) {
+      if (generation !== lifecycleId) return;
       const friendly = friendlyPedelecError(err);
       setUiState(friendly.disconnected ? "disconnected" : "error");
       setMessage(friendly.message);
     }
   }
 
-  function registerSession(nextSession: PedelecSession): void {
+  function registerSession(nextSession: PedelecSession, generation: number): void {
     sessionDisposer?.();
     const disposeStatus = nextSession.onStatus((status) => {
+      if (generation !== lifecycleId) return;
       setSessionStatus(status);
       if (status === "idle") {
         setUiState("ready");
@@ -109,19 +160,22 @@ export default function App() {
       }
     });
     const disposeError = nextSession.onError((error) => {
+      if (generation !== lifecycleId) return;
       const friendly = friendlyPedelecError(error);
       setUiState(friendly.disconnected ? "disconnected" : "error");
       setMessage(friendly.message);
     });
     const disposeEnded = nextSession.onEnded(() => {
+      if (generation !== lifecycleId) return;
       setSessionStatus("ended");
       setUiState("disconnected");
       setMessage("This Pedelec session ended. Connect again to start a new one.");
     });
     const disposeChat = nextSession.onChat((text) => {
+      if (generation !== lifecycleId) return;
       setChatPreview((current) => (current + text).slice(-180));
     });
-    const disposeTool = nextSession.onTool((tool, args) => handleTool(tool, args));
+    const disposeTool = nextSession.onTool((tool, args) => handleTool(tool, args, generation));
     sessionDisposer = () => {
       disposeStatus();
       disposeError();
@@ -131,6 +185,31 @@ export default function App() {
     };
     setSession(nextSession);
     setSessionStatus(nextSession.getStatus());
+  }
+
+  async function reconnectPedelec(): Promise<void> {
+    const generation = ++lifecycleId;
+    clearWorldUiState();
+    await connectPedelec(generation);
+  }
+
+  async function switchRenderMode(): Promise<void> {
+    if (busy()) return;
+    const nextMode: RenderMode = renderMode() === "2d" ? "3d" : "2d";
+    const generation = ++lifecycleId;
+    setRenderMode(nextMode);
+    setUiState("switching");
+    setMessage(`Switching to ${nextMode.toUpperCase()} mode...`);
+    await resetCurrentSession();
+    world?.destroy();
+    world = null;
+    stageElement?.replaceChildren();
+    await initializeRuntime(nextMode, generation);
+  }
+
+  function clearWorldUiState(): void {
+    setLastToolResult(null);
+    setChatPreview("");
   }
 
   async function submitPrompt(event: SubmitEvent): Promise<void> {
@@ -163,7 +242,19 @@ export default function App() {
     }
   }
 
-  function handleTool(tool: string, args: unknown): SpawnBasicShapesResult | { error: { code: string; message: string; details?: unknown } } {
+  function handleTool(
+    tool: string,
+    args: unknown,
+    generation = lifecycleId,
+  ): SpawnBasicShapesResult | { error: { code: string; message: string; details?: unknown } } {
+    if (generation !== lifecycleId || !world) {
+      return {
+        error: {
+          code: "STALE_TOOL_CALL",
+          message: "This tool call belongs to an older render session.",
+        },
+      };
+    }
     setUiState("generating");
     if (tool !== "spawn_basic_shapes") {
       return {
@@ -191,6 +282,7 @@ export default function App() {
   }
 
   function spawnDemoBatch(): void {
+    if (!world || busy()) return;
     const result = normalizeSpawnCommand({
       items: [
         { shape: "circle", count: 3, color: "yellow", size: "medium" },
@@ -199,8 +291,15 @@ export default function App() {
         { shape: "star", count: 1, color: "pink", size: 62 },
       ],
     });
-    world.spawn(result.normalizedItems);
-    setLastToolResult(result);
+    const spawned = world.spawn(result.normalizedItems);
+    setLastToolResult({ ...result, spawned, success: spawned > 0 });
+    setMessage(spawned > 0 ? `Dropped ${spawned} demo shapes.` : "Demo shapes could not be spawned yet.");
+  }
+
+  function clearShapes(): void {
+    world?.clearObjects();
+    setLastToolResult(null);
+    setMessage(`${renderMode().toUpperCase()} canvas cleared.`);
   }
 
   return (
@@ -216,13 +315,16 @@ export default function App() {
           <h1>Shape Rain</h1>
         </div>
         <nav class="toolbar" aria-label="Shape Rain tools">
-          <button type="button" title="Reconnect Pedelec" onClick={() => void connectPedelec()}>
+          <button type="button" title="Switch render mode" disabled={busy()} onClick={() => void switchRenderMode()}>
+            {renderMode().toUpperCase()}
+          </button>
+          <button type="button" title="Reconnect Pedelec" disabled={uiState() === "switching"} onClick={() => void reconnectPedelec()}>
             ↻
           </button>
-          <button type="button" title="Drop demo shapes" onClick={spawnDemoBatch}>
+          <button type="button" title="Drop demo shapes" disabled={busy()} onClick={spawnDemoBatch}>
             ◇
           </button>
-          <button type="button" title="Clear shapes" onClick={() => world.clearObjects()}>
+          <button type="button" title="Clear shapes" disabled={uiState() === "switching"} onClick={clearShapes}>
             ⌫
           </button>
         </nav>
@@ -238,7 +340,7 @@ export default function App() {
         <form class="prompt-card" onSubmit={submitPrompt}>
           <input
             value={prompt()}
-            disabled={uiState() === "connecting" || sessionStatus() === "ended"}
+            disabled={uiState() === "connecting" || uiState() === "switching" || sessionStatus() === "ended"}
             onInput={(event) => setPrompt(event.currentTarget.value)}
             placeholder="Drop a pink triangle"
             aria-label="Describe shapes to drop"
