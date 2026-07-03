@@ -12,7 +12,8 @@ type ShapeObject3D = {
 
 const MAX_WORLD_OBJECTS = 110;
 const WALL_THICKNESS = 0.5;
-const DEPTH_LIMIT = 2.4;
+const SHAPE_THICKNESS = 0.34;
+const SLOT_HALF_DEPTH = SHAPE_THICKNESS * 0.5 + 0.06;
 const FALL_LIMIT_PADDING = 5;
 
 export class ShapeWorld3D implements ShapeWorldLike {
@@ -39,8 +40,8 @@ export class ShapeWorld3D implements ShapeWorldLike {
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.OrthographicCamera(-5, 5, 4, -4, 0.1, 80);
-    this.camera.position.set(0, 1.1, 13);
-    this.camera.lookAt(0, -0.35, 0);
+    this.camera.position.set(0, 0, 13);
+    this.camera.lookAt(0, 0, 0);
 
     this.renderer = new THREE.WebGLRenderer({
       alpha: true,
@@ -79,21 +80,24 @@ export class ShapeWorld3D implements ShapeWorldLike {
       for (let index = 0; index < item.count; index += 1) {
         const radius = sizeToWorld(item.size);
         const baseX = item.xHint === undefined ? 0 : (item.xHint - 0.5) * (this.viewWidth - radius * 2);
-        const x = clamp(baseX + randomRange(-0.8, 0.8), -this.viewWidth * 0.5 + radius, this.viewWidth * 0.5 - radius);
-        const y = this.viewHeight * 0.5 + radius * (1.5 + index * 0.55);
-        const z = randomRange(-0.45, 0.45);
+        const x = clamp(baseX + randomRange(-0.6, 0.6), -this.viewWidth * 0.5 + radius, this.viewWidth * 0.5 - radius);
+        const y = this.viewHeight * 0.5 + radius * 2 + index * radius * 1.6;
         const body = this.physics.createRigidBody(
           RAPIER.RigidBodyDesc.dynamic()
-            .setTranslation(x, y, z)
-            .setRotation(randomQuaternion())
-            .setLinvel(randomRange(-0.5, 0.5), randomRange(-0.2, 0.3), randomRange(-0.28, 0.28))
-            .setAngvel({ x: randomRange(-1.7, 1.7), y: randomRange(-1.4, 1.4), z: randomRange(-2.4, 2.4) })
+            .setTranslation(x, y, 0)
+            .setRotation(zOnlyQuaternion())
+            .setLinvel(randomRange(-0.5, 0.5), randomRange(-0.2, 0.3), 0)
+            .setAngvel({ x: 0, y: 0, z: randomRange(-2.4, 2.4) })
+            .setLinearDamping(0.14)
+            .setAngularDamping(0.22)
+            .enabledTranslations(true, true, false)
+            .enabledRotations(false, false, true)
             .setCanSleep(true),
         );
         this.physics.createCollider(makeCollider(item.shape, radius), body);
 
         const mesh = createShapeMesh(item.shape, item.color, radius);
-        mesh.position.set(x, y, z);
+        mesh.position.set(x, y, 0);
         this.scene.add(mesh);
         this.objects.push({ id: this.nextId++, body, mesh, bornAt: performance.now() });
         spawned += 1;
@@ -183,27 +187,35 @@ export class ShapeWorld3D implements ShapeWorldLike {
   private rebuildBounds(): void {
     if (!this.physics) return;
     for (const collider of this.staticColliders) this.physics.removeCollider(collider, false);
-    const floorY = -this.viewHeight * 0.5 - WALL_THICKNESS * 0.5 + 0.24;
+    const floorHalfHeight = 0.9;
+    const floorY = -this.viewHeight * 0.5 + 1.1 - floorHalfHeight;
     const leftX = -this.viewWidth * 0.5 - WALL_THICKNESS * 0.5;
     const rightX = this.viewWidth * 0.5 + WALL_THICKNESS * 0.5;
     this.staticColliders = [
       this.physics.createCollider(
-        RAPIER.ColliderDesc.cuboid(this.viewWidth * 0.5 + WALL_THICKNESS, WALL_THICKNESS * 0.5, DEPTH_LIMIT),
+        RAPIER.ColliderDesc.cuboid(this.viewWidth * 0.5 + WALL_THICKNESS, floorHalfHeight, SLOT_HALF_DEPTH).setTranslation(0, floorY, 0),
       ),
       this.physics.createCollider(
-        RAPIER.ColliderDesc.cuboid(WALL_THICKNESS * 0.5, this.viewHeight, DEPTH_LIMIT).setTranslation(leftX, 0, 0),
+        RAPIER.ColliderDesc.cuboid(WALL_THICKNESS * 0.5, this.viewHeight, SLOT_HALF_DEPTH).setTranslation(leftX, 0, 0),
       ),
       this.physics.createCollider(
-        RAPIER.ColliderDesc.cuboid(WALL_THICKNESS * 0.5, this.viewHeight, DEPTH_LIMIT).setTranslation(rightX, 0, 0),
+        RAPIER.ColliderDesc.cuboid(WALL_THICKNESS * 0.5, this.viewHeight, SLOT_HALF_DEPTH).setTranslation(rightX, 0, 0),
       ),
       this.physics.createCollider(
-        RAPIER.ColliderDesc.cuboid(this.viewWidth, this.viewHeight, WALL_THICKNESS * 0.5).setTranslation(0, 0, -DEPTH_LIMIT),
+        RAPIER.ColliderDesc.cuboid(this.viewWidth, this.viewHeight, WALL_THICKNESS * 0.5).setTranslation(
+          0,
+          0,
+          -(SLOT_HALF_DEPTH + WALL_THICKNESS * 0.5),
+        ),
       ),
       this.physics.createCollider(
-        RAPIER.ColliderDesc.cuboid(this.viewWidth, this.viewHeight, WALL_THICKNESS * 0.5).setTranslation(0, 0, DEPTH_LIMIT),
+        RAPIER.ColliderDesc.cuboid(this.viewWidth, this.viewHeight, WALL_THICKNESS * 0.5).setTranslation(
+          0,
+          0,
+          SLOT_HALF_DEPTH + WALL_THICKNESS * 0.5,
+        ),
       ),
     ];
-    this.staticColliders[0].setTranslation({ x: 0, y: floorY, z: 0 });
   }
 
   private animate(time: number): void {
@@ -254,14 +266,15 @@ function createShapeMesh(shape: ShapeKind, color: string, radius: number): THREE
     color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.18),
     roughness: 0.08,
     metalness: 0,
-    transmission: 0.62,
-    thickness: radius * 1.7,
-    attenuationDistance: 2.2,
+    transmission: 0.58,
+    thickness: SHAPE_THICKNESS * 1.2,
+    attenuationDistance: 2.6,
     attenuationColor: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.46),
     clearcoat: 1,
     clearcoatRoughness: 0.12,
     transparent: true,
-    opacity: 0.68,
+    opacity: 0.7,
+    side: THREE.DoubleSide,
     ior: 1.34,
     envMapIntensity: 1.05,
   });
@@ -270,12 +283,26 @@ function createShapeMesh(shape: ShapeKind, color: string, radius: number): THREE
   mesh.receiveShadow = true;
   group.add(mesh);
 
+  const faceTint = new THREE.Mesh(
+    geometry.clone(),
+    new THREE.MeshBasicMaterial({
+      color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.28),
+      transparent: true,
+      opacity: 0.26,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  faceTint.scale.setScalar(0.985);
+  faceTint.renderOrder = 1;
+  group.add(faceTint);
+
   const rim = new THREE.Mesh(
     geometry.clone(),
     new THREE.MeshBasicMaterial({
       color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.7),
       transparent: true,
-      opacity: 0.22,
+      opacity: 0.26,
       blending: THREE.AdditiveBlending,
       side: THREE.BackSide,
       depthWrite: false,
@@ -285,22 +312,27 @@ function createShapeMesh(shape: ShapeKind, color: string, radius: number): THREE
   group.add(rim);
 
   const glint = new THREE.Mesh(
-    new THREE.SphereGeometry(Math.max(0.045, radius * 0.12), 12, 8),
-    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.52 }),
+    new THREE.SphereGeometry(clamp(radius * 0.1, 0.032, 0.052), 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.46, depthWrite: false }),
   );
-  glint.position.set(-radius * 0.24, radius * 0.26, radius * 0.55);
+  glint.position.set(-radius * 0.24, radius * 0.26, SHAPE_THICKNESS * 0.34);
+  glint.renderOrder = 2;
   group.add(glint);
   return group;
 }
 
 function makeGeometry(shape: ShapeKind, radius: number): THREE.BufferGeometry {
-  if (shape === "circle") return new THREE.SphereGeometry(radius * 0.72, 32, 20);
-  if (shape === "square") return new THREE.BoxGeometry(radius * 1.3, radius * 1.3, radius * 0.56, 3, 3, 2);
-  if (shape === "rectangle") return new THREE.BoxGeometry(radius * 1.72, radius, radius * 0.54, 3, 2, 2);
+  if (shape === "circle") {
+    const disc = new THREE.Shape();
+    disc.absarc(0, 0, radius, 0, Math.PI * 2, false);
+    return extrudeShape(disc);
+  }
+  if (shape === "square") return extrudeRoundedRect(radius * 1.7, radius * 1.7, radius * 0.3);
+  if (shape === "rectangle") return extrudeRoundedRect(radius * 2.3, radius * 1.4, radius * 0.28);
   if (shape === "capsule") return makeCapsuleGeometry(radius);
-  if (shape === "star") return extrudePoints(starPoints(radius * 0.82, radius * 0.38, 5), radius * 0.46);
+  if (shape === "star") return extrudePoints(starPoints(radius * 1.05, radius * 0.5, 5));
   const sides = shape === "triangle" ? 3 : shape === "pentagon" ? 5 : 6;
-  return extrudePoints(regularPolygonPoints(sides, radius * 0.78, -Math.PI / 2), radius * 0.46);
+  return extrudePoints(regularPolygonPoints(sides, radius, -Math.PI / 2));
 }
 
 function makeCapsuleGeometry(radius: number): THREE.BufferGeometry {
@@ -311,27 +343,46 @@ function makeCapsuleGeometry(radius: number): THREE.BufferGeometry {
   shape.absarc(-width * 0.5 + end, 0, end, Math.PI / 2, Math.PI * 1.5, false);
   shape.absarc(width * 0.5 - end, 0, end, Math.PI * 1.5, Math.PI / 2, false);
   shape.closePath();
-  return extrudeShape(shape, radius * 0.46);
+  return extrudeShape(shape);
 }
 
-function extrudePoints(points: Array<[number, number]>, depth: number): THREE.BufferGeometry {
+function extrudeRoundedRect(width: number, height: number, cornerRadius: number): THREE.BufferGeometry {
+  const halfWidth = width * 0.5;
+  const halfHeight = height * 0.5;
+  const r = Math.min(cornerRadius, halfWidth, halfHeight);
+  const shape = new THREE.Shape();
+  shape.moveTo(-halfWidth + r, -halfHeight);
+  shape.lineTo(halfWidth - r, -halfHeight);
+  shape.quadraticCurveTo(halfWidth, -halfHeight, halfWidth, -halfHeight + r);
+  shape.lineTo(halfWidth, halfHeight - r);
+  shape.quadraticCurveTo(halfWidth, halfHeight, halfWidth - r, halfHeight);
+  shape.lineTo(-halfWidth + r, halfHeight);
+  shape.quadraticCurveTo(-halfWidth, halfHeight, -halfWidth, halfHeight - r);
+  shape.lineTo(-halfWidth, -halfHeight + r);
+  shape.quadraticCurveTo(-halfWidth, -halfHeight, -halfWidth + r, -halfHeight);
+  shape.closePath();
+  return extrudeShape(shape);
+}
+
+function extrudePoints(points: Array<[number, number]>): THREE.BufferGeometry {
   const shape = new THREE.Shape();
   points.forEach(([x, y], index) => {
     if (index === 0) shape.moveTo(x, y);
     else shape.lineTo(x, y);
   });
   shape.closePath();
-  return extrudeShape(shape, depth);
+  return extrudeShape(shape);
 }
 
-function extrudeShape(shape: THREE.Shape, depth: number): THREE.BufferGeometry {
+function extrudeShape(shape: THREE.Shape): THREE.BufferGeometry {
+  const bevel = SHAPE_THICKNESS * 0.22;
   const geometry = new THREE.ExtrudeGeometry(shape, {
-    depth,
+    depth: SHAPE_THICKNESS - bevel * 2,
     bevelEnabled: true,
-    bevelSegments: 4,
-    bevelSize: depth * 0.18,
-    bevelThickness: depth * 0.22,
-    curveSegments: 18,
+    bevelSegments: 3,
+    bevelSize: bevel * 0.9,
+    bevelThickness: bevel,
+    curveSegments: 24,
     steps: 1,
   });
   geometry.center();
@@ -339,10 +390,49 @@ function extrudeShape(shape: THREE.Shape, depth: number): THREE.BufferGeometry {
 }
 
 function makeCollider(shape: ShapeKind, radius: number): RAPIER.ColliderDesc {
-  if (shape === "circle") return RAPIER.ColliderDesc.ball(radius * 0.7).setDensity(0.72).setRestitution(0.28).setFriction(0.58);
-  const halfX = shape === "rectangle" || shape === "capsule" ? radius * 0.86 : radius * 0.62;
-  const halfY = shape === "triangle" ? radius * 0.58 : shape === "star" ? radius * 0.68 : radius * 0.62;
-  return RAPIER.ColliderDesc.cuboid(halfX, halfY, radius * 0.28).setDensity(0.72).setRestitution(0.22).setFriction(0.7);
+  if (shape === "circle") {
+    return withCandyPhysics(
+      RAPIER.ColliderDesc.cylinder(SHAPE_THICKNESS * 0.5, radius).setRotation({
+        x: Math.SQRT1_2,
+        y: 0,
+        z: 0,
+        w: Math.SQRT1_2,
+      }),
+    );
+  }
+
+  const borderRadius = Math.min(0.06, SHAPE_THICKNESS * 0.25);
+  const halfZ = Math.max(0.01, SHAPE_THICKNESS * 0.5 - borderRadius);
+  if (shape === "square") return withCandyPhysics(RAPIER.ColliderDesc.roundCuboid(radius * 0.85, radius * 0.85, halfZ, borderRadius));
+  if (shape === "rectangle") return withCandyPhysics(RAPIER.ColliderDesc.roundCuboid(radius * 1.15, radius * 0.7, halfZ, borderRadius));
+  if (shape === "capsule") return withCandyPhysics(RAPIER.ColliderDesc.roundCuboid(radius * 0.91, radius * 0.47, halfZ, borderRadius));
+  if (shape === "star") return convexHullCollider(starPoints(radius * 1.05, radius * 0.5, 5), radius * 0.95, radius * 0.95);
+
+  const sides = shape === "triangle" ? 3 : shape === "pentagon" ? 5 : 6;
+  return convexHullCollider(regularPolygonPoints(sides, radius, -Math.PI / 2), radius, radius);
+}
+
+function withCandyPhysics(collider: RAPIER.ColliderDesc): RAPIER.ColliderDesc {
+  return collider.setDensity(0.72).setFriction(0.75).setRestitution(0.15);
+}
+
+function convexHullCollider(points: Array<[number, number]>, fallbackHalfX: number, fallbackHalfY: number): RAPIER.ColliderDesc {
+  const halfZ = SHAPE_THICKNESS * 0.5;
+  const vertices = new Float32Array(points.length * 2 * 3);
+
+  points.forEach(([x, y], index) => {
+    const front = index * 3;
+    vertices[front] = x;
+    vertices[front + 1] = y;
+    vertices[front + 2] = halfZ;
+
+    const back = (points.length + index) * 3;
+    vertices[back] = x;
+    vertices[back + 1] = y;
+    vertices[back + 2] = -halfZ;
+  });
+
+  return withCandyPhysics(RAPIER.ColliderDesc.convexHull(vertices) ?? RAPIER.ColliderDesc.cuboid(fallbackHalfX, fallbackHalfY, halfZ));
 }
 
 function regularPolygonPoints(sides: number, radius: number, offset = 0): Array<[number, number]> {
@@ -360,9 +450,10 @@ function starPoints(outer: number, inner: number, points: number): Array<[number
   });
 }
 
-function randomQuaternion(): { x: number; y: number; z: number; w: number } {
-  const quaternion = new THREE.Quaternion().setFromEuler(
-    new THREE.Euler(randomRange(-0.35, 0.35), randomRange(-0.7, 0.7), randomRange(-0.55, 0.55)),
+function zOnlyQuaternion(): { x: number; y: number; z: number; w: number } {
+  const quaternion = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1),
+    randomRange(0, Math.PI * 2),
   );
   return { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w };
 }
@@ -377,7 +468,7 @@ function disposeObject(object: THREE.Object3D): void {
 }
 
 function sizeToWorld(size: number): number {
-  return clamp(size / 58, 0.48, 1.55);
+  return clamp(size / 200, 0.1, 0.66);
 }
 
 function randomRange(min: number, max: number): number {

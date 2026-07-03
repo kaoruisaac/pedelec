@@ -41,7 +41,7 @@ export type SpawnBasicShapesResult = {
 
 const MAX_PER_ITEM = 12;
 const MAX_PER_COMMAND = 36;
-const MIN_SIZE = 28;
+const MIN_SIZE = 12;
 const MAX_SIZE = 86;
 
 const namedColors: Record<string, string> = {
@@ -134,13 +134,13 @@ function normalizeShape(value: unknown): ShapeKind | null {
 function normalizeSize(value: unknown): number {
   if (typeof value === "string") {
     const named = value.trim().toLowerCase();
-    if (named === "small") return 34;
+    if (named === "small") return 12;
     if (named === "large") return 72;
     const parsed = Number(named);
     if (Number.isFinite(parsed)) return clamp(parsed, MIN_SIZE, MAX_SIZE);
   }
 
-  return clamp(toNumber(value, 52), MIN_SIZE, MAX_SIZE);
+  return clamp(toNumber(value, 18), MIN_SIZE, MAX_SIZE);
 }
 
 function normalizeColor(value: unknown): string {

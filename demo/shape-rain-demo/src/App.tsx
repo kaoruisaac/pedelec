@@ -285,10 +285,10 @@ export default function App() {
     if (!world || busy()) return;
     const result = normalizeSpawnCommand({
       items: [
-        { shape: "circle", count: 3, color: "yellow", size: "medium" },
-        { shape: "triangle", count: 2, color: "green", size: 58 },
-        { shape: "square", count: 2, color: "blue", size: 54 },
-        { shape: "star", count: 1, color: "pink", size: 62 },
+        { shape: "circle", count: 3, size: "small" },
+        { shape: "triangle", count: 2, size: 18 },
+        { shape: "square", count: 2, color: "blue", size: 18 },
+        { shape: "star", count: 1, color: "pink", size: 18 },
       ],
     });
     const spawned = world.spawn(result.normalizedItems);
