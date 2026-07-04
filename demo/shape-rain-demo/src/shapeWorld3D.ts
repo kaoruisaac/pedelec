@@ -12,8 +12,8 @@ type ShapeObject3D = {
 };
 
 const MAX_WORLD_OBJECTS = 110;
-const WALL_THICKNESS = 0.4;
-const SHAPE_THICKNESS = 0.38;
+const WALL_THICKNESS = 1;
+const SHAPE_THICKNESS = 0.2;
 const SLOT_HALF_DEPTH = SHAPE_THICKNESS * 0.5 + 0.06;
 const FALL_LIMIT_PADDING = 5;
 const WHITE = new THREE.Color(0xffffff);
@@ -150,13 +150,13 @@ export class ShapeWorld3D implements ShapeWorldLike {
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.3; 
+    this.scene.environmentIntensity = 1; 
     pmrem.dispose();
 
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xf1f6ff, 0.5));
+    this.scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0xf1f6ff, 0.2));
 
-    const key = new THREE.DirectionalLight(0xffffff, 0.24);
+    const key = new THREE.DirectionalLight(0xffffff, 1.24);
     key.position.set(-4, 8, 9);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
@@ -291,23 +291,94 @@ function createShapeMesh(shape: ShapeKind, color: string, radius: number): THREE
 
 function createCandyGlassMaterial(color: string, radius: number): THREE.MeshPhysicalMaterial {
   const baseColor = new THREE.Color(color);
-  const candyColor = baseColor.clone().lerp(WHITE, 0.56);
+  const internalLightTexture = makeInternalLightTexture();
 
   return new THREE.MeshPhysicalMaterial({
-    color: candyColor,
+    color: baseColor,
     metalness: 0,
-    roughness: 0.28,
-    transmission: 0.98,
-    thickness: Math.max(SHAPE_THICKNESS * 1.35, radius * 0.36),
-    attenuationDistance: Math.max(1.9, radius * 2.15),
-    attenuationColor: baseColor.clone().lerp(WHITE, 0.58),
-    ior: 1.58,
-    clearcoat: 0.42,
-    clearcoatRoughness: 0.34,
-    specularIntensity: 0.24,
-    envMapIntensity: 0.62,
+    roughness: 0.01,
+    roughnessMap: internalLightTexture,
+    transparent: true,
+    transmission: 0.95,
+    transmissionMap: internalLightTexture,
+    // thickness: Math.max(SHAPE_THICKNESS * 4, radius * 0.24),
+    thickness: 0.6,
+    thicknessMap: internalLightTexture,
+    // attenuationDistance: Math.max(1.0, radius * 3.1),
+    attenuationDistance: 1.5,
+    attenuationColor: baseColor.clone().lerp(WHITE, 0.68),
+    ior: 1.4,
+    clearcoat: 0.1,
+    clearcoatRoughness: 0.5,
+    specularIntensity: 1,
+    envMapIntensity: 0.1,
     side: THREE.DoubleSide,
   });
+}
+
+function makeInternalLightTexture(): THREE.Texture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 128;
+
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Could not create internal light texture.");
+
+  context.fillStyle = "rgb(224 224 224)";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let index = 0; index < 26; index += 1) {
+    const x = randomRange(0, canvas.width);
+    const y = randomRange(0, canvas.height);
+    const inner = randomRange(1.5, 3.5);
+    const outer = randomRange(2, 10);
+    const brightness = randomRange(248, 255);
+    const shadow = randomRange(174, 214);
+    const gradient = context.createRadialGradient(x, y, inner, x, y, outer);
+    gradient.addColorStop(0, `rgb(${brightness} ${brightness} ${brightness})`);
+    gradient.addColorStop(0.28, `rgb(${brightness} ${brightness} ${brightness})`);
+    gradient.addColorStop(0.48, `rgb(${shadow} ${shadow} ${shadow})`);
+    gradient.addColorStop(1, "rgb(224 224 224 / 0)");
+    context.globalAlpha = randomRange(0.24, 0.48);
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  context.globalAlpha = 0.22;
+  context.lineCap = "round";
+  for (let index = 0; index < 9; index += 1) {
+    const x = randomRange(0, canvas.width);
+    const y = randomRange(0, canvas.height);
+    const length = randomRange(18, 46);
+    const angle = randomRange(-0.85, 0.85);
+    const gradient = context.createLinearGradient(
+      x - Math.cos(angle) * length * 0.5,
+      y - Math.sin(angle) * length * 0.5,
+      x + Math.cos(angle) * length * 0.5,
+      y + Math.sin(angle) * length * 0.5,
+    );
+    gradient.addColorStop(0, "rgb(255 255 255 / 0)");
+    gradient.addColorStop(0.5, "rgb(255 255 255)");
+    gradient.addColorStop(1, "rgb(255 255 255 / 0)");
+    context.strokeStyle = gradient;
+    context.lineWidth = randomRange(1.2, 2.8);
+    context.beginPath();
+    context.moveTo(x - Math.cos(angle) * length * 0.5, y - Math.sin(angle) * length * 0.5);
+    context.lineTo(x + Math.cos(angle) * length * 0.5, y + Math.sin(angle) * length * 0.5);
+    context.stroke();
+  }
+
+  context.globalAlpha = 1;
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(1.75, 1.75);
+  texture.rotation = randomRange(-0.2, 0.2);
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return texture;
 }
 
 function createRimShell(geometry: THREE.BufferGeometry, color: string): THREE.Mesh {
@@ -434,12 +505,12 @@ function extrudePoints(points: Array<[number, number]>): THREE.BufferGeometry {
 }
 
 function extrudeShape(shape: THREE.Shape): THREE.BufferGeometry {
-  const bevel = SHAPE_THICKNESS * 0.24;
+  const bevel = SHAPE_THICKNESS * 0.4;
   const geometry = new THREE.ExtrudeGeometry(shape, {
-    depth: SHAPE_THICKNESS - bevel * 2,
+    depth: SHAPE_THICKNESS - bevel * 4,
     bevelEnabled: true,
-    bevelSegments: 8,
-    bevelSize: bevel * 0.95,
+    bevelSegments: 5,
+    bevelSize: bevel * 1.6,
     bevelThickness: bevel,
     curveSegments: 36,
     steps: 2,
@@ -511,7 +582,7 @@ function starPoints(outer: number, inner: number, points: number): Array<[number
 
 function zOnlyQuaternion(): { x: number; y: number; z: number; w: number } {
   const quaternion = new THREE.Quaternion().setFromAxisAngle(
-    new THREE.Vector3(0.15, 0.15, 1),
+    new THREE.Vector3(0.2, 0.2, 1),
     randomRange(0, Math.PI * 2),
   );
   return { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w };
@@ -532,11 +603,30 @@ function disposeObject(object: THREE.Object3D): void {
 }
 
 function disposeMaterial(material: THREE.Material): void {
-  const texturedMaterial = material as THREE.Material & {
-    map?: THREE.Texture | null;
-  };
+  const texturedMaterial = material as THREE.Material & Record<string, unknown>;
+  const textureFields = [
+    "map",
+    "alphaMap",
+    "aoMap",
+    "bumpMap",
+    "displacementMap",
+    "emissiveMap",
+    "envMap",
+    "lightMap",
+    "metalnessMap",
+    "normalMap",
+    "roughnessMap",
+    "transmissionMap",
+    "thicknessMap",
+  ];
+  const textures = new Set<THREE.Texture>();
 
-  texturedMaterial.map?.dispose();
+  for (const field of textureFields) {
+    const texture = texturedMaterial[field];
+    if (texture instanceof THREE.Texture) textures.add(texture);
+  }
+
+  for (const texture of textures) texture.dispose();
   material.dispose();
 }
 

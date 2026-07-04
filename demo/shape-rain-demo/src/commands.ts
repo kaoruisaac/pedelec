@@ -45,29 +45,29 @@ const MIN_SIZE = 12;
 const MAX_SIZE = 86;
 
 const candyPalette = [
-  "#4f7df3", // blue
-  "#57b7ff", // sky
-  "#f05a87", // pink
-  "#ffd24d", // yellow
-  "#65c875", // green
-  "#62d6a3", // mint
-  "#8f6be8", // purple
-  "#ff9f43", // orange
+  "#90c4ff", // blue
+  "#66e0ff", // sky
+  "#ff94d4", // pink
+  "#ffea70", // yellow
+  "#80f0a0", // green
+  "#70ecd8", // mint
+  "#b888ff", // purple
+  "#ffb870", // orange
 ];
 
 const namedColors: Record<string, string> = {
-  blue: "#4f7df3",
-  sky: "#57b7ff",
-  pink: "#f05a87",
-  rose: "#ff6d8d",
-  red: "#f15d68",
-  yellow: "#ffd24d",
-  gold: "#f7c94b",
-  green: "#65c875",
-  mint: "#62d6a3",
-  purple: "#8f6be8",
-  violet: "#9b6ef3",
-  orange: "#ff9f43",
+  blue: "#90c4ff",
+  sky: "#66e0ff",
+  pink: "#ff94d4",
+  rose: "#ffa8dc",
+  red: "#ff98b0",
+  yellow: "#ffea70",
+  gold: "#ffe858",
+  green: "#80f0a0",
+  mint: "#70ecd8",
+  purple: "#b888ff",
+  violet: "#c898ff",
+  orange: "#ffb870",
   white: "#ffffff",
 };
 
@@ -165,14 +165,14 @@ function normalizeSize(value: unknown): number {
 }
 
 function normalizeColor(value: unknown): string {
-  if (typeof value !== "string") return "#4f7df3";
+  if (typeof value !== "string") return "#90c4ff";
   const trimmed = value.trim().toLowerCase();
   if (namedColors[trimmed]) return namedColors[trimmed];
   if (/^#[0-9a-f]{3}$/i.test(trimmed)) {
     return `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}`;
   }
   if (/^#[0-9a-f]{6}$/i.test(trimmed)) return trimmed;
-  return "#4f7df3";
+  return "#90c4ff";
 }
 
 function randomCandyColor(previous?: string): string {

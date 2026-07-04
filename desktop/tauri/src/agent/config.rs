@@ -99,7 +99,7 @@ pub(crate) fn resolve_config_with_settings_path(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
         max_transcript_bytes: get_u64(&file_env, "PEDELEC_AGENT_MAX_TRANSCRIPT_BYTES", 1_048_576)?,
-        max_tool_rounds: get_usize(&file_env, "PEDELEC_AGENT_MAX_TOOL_ROUNDS", 8)?,
+        max_tool_rounds: get_usize(&file_env, "PEDELEC_AGENT_MAX_TOOL_ROUNDS", 100)?,
         max_list_files: get_usize(&file_env, "PEDELEC_AGENT_MAX_LIST_FILES", 200)?,
         max_file_bytes: get_u64(&file_env, "PEDELEC_AGENT_MAX_FILE_BYTES", 262_144)?,
         pedelec_cli_timeout_ms: get_u64(&file_env, "PEDELEC_AGENT_PEDELEC_CLI_TIMEOUT_MS", 60_000)?,
