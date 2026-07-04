@@ -1,3 +1,5 @@
+import type { RenderMode } from "./shapeWorldTypes";
+
 export const SUPPORTED_SHAPES = [
   "circle",
   "square",
@@ -71,7 +73,7 @@ const namedColors: Record<string, string> = {
   white: "#ffffff",
 };
 
-export function normalizeSpawnCommand(args: unknown): SpawnBasicShapesResult {
+export function normalizeSpawnCommand(args: unknown, mode: RenderMode = "3d"): SpawnBasicShapesResult {
   const ignored: SpawnBasicShapesResult["ignored"] = [];
 
   if (!args || typeof args !== "object" || Array.isArray(args)) {
@@ -105,7 +107,7 @@ export function normalizeSpawnCommand(args: unknown): SpawnBasicShapesResult {
     }
 
     const count = clamp(toNumber(item.count, 1), 1, Math.min(MAX_PER_ITEM, remaining));
-    const size = normalizeSize(item.size);
+    const size = normalizeSize(item.size, mode);
     const xHint = normalizeXHint(item.x ?? item.xHint ?? item.spawnX);
     const xHintProps = xHint === undefined ? {} : { xHint };
 
@@ -152,16 +154,21 @@ function normalizeShape(value: unknown): ShapeKind | null {
   return SUPPORTED_SHAPES.find((shape) => shape === normalized) ?? null;
 }
 
-function normalizeSize(value: unknown): number {
+function normalizeSize(value: unknown, mode: RenderMode = "3d"): number {
+  let size: number;
   if (typeof value === "string") {
     const named = value.trim().toLowerCase();
-    if (named === "small") return 12;
-    if (named === "large") return 72;
-    const parsed = Number(named);
-    if (Number.isFinite(parsed)) return clamp(parsed, MIN_SIZE, MAX_SIZE);
+    if (named === "small") size = 12;
+    else if (named === "large") size = 72;
+    else {
+      const parsed = Number(named);
+      size = Number.isFinite(parsed) ? clamp(parsed, MIN_SIZE, MAX_SIZE) : clamp(toNumber(value, 18), MIN_SIZE, MAX_SIZE);
+    }
+  } else {
+    size = clamp(toNumber(value, 18), MIN_SIZE, MAX_SIZE);
   }
 
-  return clamp(toNumber(value, 18), MIN_SIZE, MAX_SIZE);
+  return mode === "2d" ? size * 4 : size;
 }
 
 function normalizeColor(value: unknown): string {

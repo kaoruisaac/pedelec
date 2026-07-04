@@ -266,7 +266,7 @@ export default function App() {
       };
     }
 
-    const result = normalizeSpawnCommand(args);
+    const result = normalizeSpawnCommand(args, renderMode());
     if (result.normalizedItems.length > 0) {
       const spawned = world.spawn(result.normalizedItems);
       const finalResult = { ...result, spawned, success: spawned > 0 };
@@ -283,14 +283,17 @@ export default function App() {
 
   function spawnDemoBatch(): void {
     if (!world || busy()) return;
-    const result = normalizeSpawnCommand({
-      items: [
-        { shape: "circle", count: 3, size: "small" },
-        { shape: "triangle", count: 2, size: 18 },
-        { shape: "square", count: 2, color: "blue", size: 18 },
-        { shape: "star", count: 1, color: "pink", size: 18 },
-      ],
-    });
+    const result = normalizeSpawnCommand(
+      {
+        items: [
+          { shape: "circle", count: 3, size: "small" },
+          { shape: "triangle", count: 2, size: 18 },
+          { shape: "square", count: 2, color: "blue", size: 18 },
+          { shape: "star", count: 1, color: "pink", size: 18 },
+        ],
+      },
+      renderMode(),
+    );
     const spawned = world.spawn(result.normalizedItems);
     setLastToolResult({ ...result, spawned, success: spawned > 0 });
     setMessage(spawned > 0 ? `Dropped ${spawned} demo shapes.` : "Demo shapes could not be spawned yet.");
@@ -308,10 +311,6 @@ export default function App() {
 
       <header class="topbar">
         <div class="brand">
-          <div class="brand-mark" aria-hidden="true">
-            <span />
-            <i />
-          </div>
           <h1>Shape Rain</h1>
         </div>
         <nav class="toolbar" aria-label="Shape Rain tools">
@@ -331,12 +330,6 @@ export default function App() {
       </header>
 
       <section class="interaction-layer" aria-label="Shape Rain prompt">
-        <div class="fall-guide" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </div>
-
         <form class="prompt-card" onSubmit={submitPrompt}>
           <input
             value={prompt()}

@@ -83,58 +83,6 @@ input {
   letter-spacing: 0;
 }
 
-.brand-mark {
-  position: relative;
-  width: 36px;
-  height: 29px;
-}
-
-.brand-mark span {
-  position: absolute;
-  left: 2px;
-  top: 7px;
-  width: 31px;
-  height: 16px;
-  border: 2px solid #1f2937;
-  border-radius: 14px;
-  background: rgb(255 255 255 / 0.74);
-}
-
-.brand-mark span::before,
-.brand-mark span::after {
-  content: "";
-  position: absolute;
-  bottom: 7px;
-  border: 2px solid #1f2937;
-  border-bottom: 0;
-  background: #fff;
-}
-
-.brand-mark span::before {
-  left: 4px;
-  width: 9px;
-  height: 8px;
-  border-radius: 8px 8px 0 0;
-}
-
-.brand-mark span::after {
-  left: 12px;
-  width: 12px;
-  height: 12px;
-  border-radius: 12px 12px 0 0;
-}
-
-.brand-mark i {
-  position: absolute;
-  left: 8px;
-  bottom: 0;
-  width: 3px;
-  height: 6px;
-  border-radius: 2px;
-  background: #4f7df3;
-  box-shadow: 9px 0 #4f7df3, 18px 0 #4f7df3;
-}
-
 .toolbar {
   display: flex;
   gap: 14px;
@@ -176,34 +124,6 @@ input {
   pointer-events: none;
 }
 
-.fall-guide {
-  position: absolute;
-  bottom: calc(100% + 26px);
-  left: 50%;
-  display: flex;
-  height: 160px;
-  transform: translateX(-50%);
-  gap: 11px;
-  opacity: 0.36;
-}
-
-.fall-guide span {
-  width: 2px;
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(180deg, transparent, rgb(99 116 139 / 0.42), transparent);
-}
-
-.fall-guide span:nth-child(2) {
-  height: 74%;
-  margin-top: 34px;
-}
-
-.fall-guide span:nth-child(3) {
-  height: 58%;
-  margin-top: 52px;
-}
-
 .prompt-card {
   position: relative;
   display: flex;
@@ -235,7 +155,7 @@ input {
   padding: 0 20px;
   color: #172033;
   background: transparent;
-  font-size: 28px;
+  font-size: 18px;
   letter-spacing: 0;
 }
 
@@ -249,8 +169,8 @@ input {
 
 .prompt-card button {
   display: grid;
-  width: 64px;
-  height: 64px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   place-items: center;
   border: 0;
@@ -258,7 +178,8 @@ input {
   color: white;
   background: linear-gradient(135deg, #5b8cff, #4664ec);
   box-shadow: 0 12px 24px rgb(70 100 236 / 0.28);
-  font-size: 34px;
+  font-size: 23px;
+  line-height: 0;
   cursor: pointer;
 }
 
@@ -380,9 +301,5 @@ input {
     height: 52px;
     border-radius: 11px;
     font-size: 28px;
-  }
-
-  .fall-guide {
-    height: 110px;
   }
 }
