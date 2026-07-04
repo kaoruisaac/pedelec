@@ -1,6 +1,6 @@
 import { Application, Container, Graphics } from "pixi.js";
 import Matter from "matter-js";
-import type { ShapeKind, SpawnBasicShapeItem } from "./commands";
+import type { Point, ShapeKind, ShapeSpawnItem, SpawnClosedPolygonItem } from "./commands";
 import type { ShapeWorldLike } from "./shapeWorldTypes";
 
 type ShapeObject = {
@@ -75,7 +75,7 @@ export class ShapeWorld implements ShapeWorldLike {
     this.container = null;
   }
 
-  spawn(items: SpawnBasicShapeItem[]): number {
+  spawn(items: ShapeSpawnItem[]): number {
     if (!this.app || !this.engine || !this.container) return 0;
 
     const rect = this.container.getBoundingClientRect();
@@ -87,7 +87,9 @@ export class ShapeWorld implements ShapeWorldLike {
         const baseX = item.xHint === undefined ? Math.random() * rect.width : item.xHint * rect.width + jitter;
         const x = clamp(baseX, item.size + 18, rect.width - item.size - 18);
         const y = -item.size * (1.2 + index * 0.9 + Math.random() * 1.2);
-        const object = this.createObject(item.shape, item.color, item.size, x, y);
+        const object = isClosedPolygonItem(item)
+          ? this.createClosedPolygonObject(item, x, y)
+          : this.createObject(item.shape, item.color, item.size, x, y);
         Matter.Composite.add(this.engine.world, object.body);
         this.app.stage.addChild(object.view);
         this.objects.push(object);
@@ -118,6 +120,20 @@ export class ShapeWorld implements ShapeWorldLike {
       id: this.nextId++,
       body,
       view: drawShape(shape, color, size),
+      bornAt: Date.now(),
+    };
+  }
+
+  private createClosedPolygonObject(item: SpawnClosedPolygonItem, x: number, y: number): ShapeObject {
+    const body = makeClosedPolygonBody(item, x, y);
+    Matter.Body.setAngle(body, (Math.random() - 0.5) * 0.9);
+    Matter.Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.08);
+    Matter.Body.setVelocity(body, { x: (Math.random() - 0.5) * 2.5, y: Math.random() * 1.2 });
+
+    return {
+      id: this.nextId++,
+      body,
+      view: drawClosedPolygon(item),
       bornAt: Date.now(),
     };
   }
@@ -199,6 +215,17 @@ function makeBody(shape: ShapeKind, x: number, y: number, size: number): Matter.
   return Matter.Bodies.polygon(x, y, sides, size * 0.55, options);
 }
 
+function makeClosedPolygonBody(item: SpawnClosedPolygonItem, x: number, y: number): Matter.Body {
+  const options = {
+    friction: 0.62,
+    frictionAir: 0.012,
+    restitution: 0.28,
+    density: 0.0016,
+  } satisfies Matter.IChamferableBodyDefinition;
+  const vertices = contourToMatterVertices(item.outer, item.size);
+  return Matter.Bodies.fromVertices(x, y, [vertices], options, true, 0.01, 10, 0.01);
+}
+
 function drawShape(shape: ShapeKind, color: string, size: number): Container {
   const root = new Container();
   const baseColor = hexToPixiColor(color);
@@ -217,6 +244,34 @@ function drawShape(shape: ShapeKind, color: string, size: number): Container {
 
   root.addChild(shadow, body);
   return root;
+}
+
+function drawClosedPolygon(item: SpawnClosedPolygonItem): Container {
+  const root = new Container();
+  const baseColor = hexToPixiColor(item.color);
+  const strokeColor = hexToPixiColor(darkenColor(item.color, 0.16));
+  const shadowColor = hexToPixiColor(darkenColor(item.color, 0.34));
+
+  const shadow = new Graphics();
+  shadow.position.set(item.size * 0.035, item.size * 0.055);
+  drawClosedPolygonPath(shadow, item, item.size);
+  shadow.fill({ color: shadowColor, alpha: 0.18 });
+
+  const body = new Graphics();
+  drawClosedPolygonPath(body, item, item.size);
+  body.fill({ color: baseColor, alpha: 0.92 });
+  for (const hole of item.holes) {
+    body.poly(pointsToPixi(hole, item.size));
+    body.cut();
+  }
+  body.stroke({ color: strokeColor, alpha: 0.7, width: Math.max(2, item.size * 0.035) });
+
+  root.addChild(shadow, body);
+  return root;
+}
+
+function drawClosedPolygonPath(graphics: Graphics, item: SpawnClosedPolygonItem, size: number): void {
+  graphics.poly(pointsToPixi(item.outer, size));
 }
 
 function drawPath(graphics: Graphics, shape: ShapeKind, size: number): void {
@@ -263,6 +318,20 @@ function starPoints(outer: number, inner: number, points: number): number[] {
 
 function polygon(graphics: Graphics, points: number[]): void {
   graphics.poly(points);
+}
+
+function pointsToPixi(points: Point[], size: number): number[] {
+  const scale = size / 200;
+  return points.flatMap((point) => [point.x * scale, point.y * scale]);
+}
+
+function contourToMatterVertices(points: Point[], size: number): Matter.Vector[] {
+  const scale = size / 200;
+  return points.map((point) => Matter.Vector.create(point.x * scale, point.y * scale));
+}
+
+function isClosedPolygonItem(item: ShapeSpawnItem): item is SpawnClosedPolygonItem {
+  return "kind" in item && item.kind === "closedPolygon";
 }
 
 function clamp(value: number, min: number, max: number): number {

@@ -55,6 +55,93 @@
           }
         }
       }
+    },
+    {
+      "name": "spawn_closed_polygons",
+      "description": "Spawn custom closed polygon shapes in the active Shape Rain stage. Use this for complex straight-edged closed shapes, holes, or the supported presets heart, shield, and droplet. The frontend validates contours, clamps counts and sizes, ignores invalid items, and renders in the current 2D or 3D mode.",
+      "timeoutMs": 60000,
+      "argsSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "preset": {
+                  "type": "string",
+                  "enum": ["heart", "shield", "droplet"],
+                  "description": "Built-in polygon preset. Do not provide outer when using preset."
+                },
+                "outer": {
+                  "type": "array",
+                  "minItems": 3,
+                  "maxItems": 64,
+                  "description": "Outer contour points in continuous order. The contour is implicitly closed; do not repeat the first point.",
+                  "items": { "$ref": "#/$defs/point" }
+                },
+                "holes": {
+                  "type": "array",
+                  "description": "Optional hole contours. Each hole must stay inside outer and not overlap other holes.",
+                  "items": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 64,
+                    "items": { "$ref": "#/$defs/point" }
+                  }
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Short semantic name such as crystal_shard, lightning, leaf, or ring."
+                },
+                "color": {
+                  "type": "string",
+                  "description": "Simple color name or #RRGGBB hex color."
+                },
+                "size": {
+                  "oneOf": [
+                    { "type": "string", "enum": ["small", "medium", "large"] },
+                    { "type": "number", "minimum": 28, "maximum": 96 }
+                  ],
+                  "default": "medium"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8,
+                  "default": 1
+                },
+                "xHint": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "Optional horizontal spawn hint from 0 left to 1 right."
+                }
+              },
+              "oneOf": [
+                { "required": ["preset"], "not": { "required": ["outer"] } },
+                { "required": ["outer"], "not": { "required": ["preset"] } }
+              ]
+            }
+          }
+        },
+        "$defs": {
+          "point": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["x", "y"],
+            "properties": {
+              "x": { "type": "integer", "minimum": -100, "maximum": 100 },
+              "y": { "type": "integer", "minimum": -100, "maximum": 100 }
+            }
+          }
+        }
+      }
     }
   ]
 }

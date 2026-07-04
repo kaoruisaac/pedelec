@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import RAPIER, { type Collider, type RigidBody, type World } from "@dimforge/rapier3d-compat";
-import type { ShapeKind, SpawnBasicShapeItem } from "./commands";
+import type { Point, ShapeKind, ShapeSpawnItem, SpawnClosedPolygonItem } from "./commands";
 import type { ShapeWorldLike } from "./shapeWorldTypes";
 
 type ShapeObject3D = {
@@ -74,7 +74,7 @@ export class ShapeWorld3D implements ShapeWorldLike {
     this.frameId = requestAnimationFrame((time) => this.animate(time));
   }
 
-  spawn(items: SpawnBasicShapeItem[]): number {
+  spawn(items: ShapeSpawnItem[]): number {
     if (!this.scene || !this.physics) return 0;
     let spawned = 0;
 
@@ -100,9 +100,9 @@ export class ShapeWorld3D implements ShapeWorldLike {
             .enabledRotations(false, false, true)
             .setCanSleep(true),
         );
-        this.physics.createCollider(makeCollider(item.shape, radius), body);
+        this.physics.createCollider(isClosedPolygonItem(item) ? makeClosedPolygonCollider(item, radius) : makeCollider(item.shape, radius), body);
 
-        const mesh = createShapeMesh(item.shape, item.color, radius);
+        const mesh = isClosedPolygonItem(item) ? createClosedPolygonMesh(item, radius) : createShapeMesh(item.shape, item.color, radius);
         mesh.position.set(x, y, 0);
         this.scene.add(mesh);
         this.objects.push({ id: this.nextId++, body, mesh, bornAt: performance.now() });
@@ -283,6 +283,23 @@ function createShapeMesh(shape: ShapeKind, color: string, radius: number): THREE
   group.add(mesh);
 
   group.add(createRimShell(geometry, color));
+  group.add(createGlassEdgeLines(geometry));
+  group.add(createHighlightSprite(radius));
+
+  return group;
+}
+
+function createClosedPolygonMesh(item: SpawnClosedPolygonItem, radius: number): THREE.Object3D {
+  const group = new THREE.Group();
+  const geometry = extrudeClosedPolygon(item, radius);
+  geometry.computeVertexNormals();
+
+  const mesh = new THREE.Mesh(geometry, createCandyGlassMaterial(item.color, radius));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  group.add(mesh);
+
+  group.add(createRimShell(geometry, item.color));
   group.add(createGlassEdgeLines(geometry));
   group.add(createHighlightSprite(radius));
 
@@ -504,6 +521,27 @@ function extrudePoints(points: Array<[number, number]>): THREE.BufferGeometry {
   return extrudeShape(shape);
 }
 
+function extrudeClosedPolygon(item: SpawnClosedPolygonItem, radius: number): THREE.BufferGeometry {
+  const shape = new THREE.Shape();
+  addContourToPath(shape, item.outer, radius);
+  for (const hole of item.holes) {
+    const path = new THREE.Path();
+    addContourToPath(path, hole, radius);
+    shape.holes.push(path);
+  }
+  return extrudeShape(shape);
+}
+
+function addContourToPath(path: THREE.Path, points: Point[], radius: number): void {
+  points.forEach((point, index) => {
+    const x = (point.x / 100) * radius;
+    const y = -(point.y / 100) * radius;
+    if (index === 0) path.moveTo(x, y);
+    else path.lineTo(x, y);
+  });
+  path.closePath();
+}
+
 function extrudeShape(shape: THREE.Shape): THREE.BufferGeometry {
   const bevel = SHAPE_THICKNESS * 0.4;
   const geometry = new THREE.ExtrudeGeometry(shape, {
@@ -540,6 +578,14 @@ function makeCollider(shape: ShapeKind, radius: number): RAPIER.ColliderDesc {
 
   const sides = shape === "triangle" ? 3 : shape === "pentagon" ? 5 : 6;
   return convexHullCollider(regularPolygonPoints(sides, radius, -Math.PI / 2), radius, radius);
+}
+
+function makeClosedPolygonCollider(item: SpawnClosedPolygonItem, radius: number): RAPIER.ColliderDesc {
+  return convexHullCollider(
+    item.outer.map((point) => [(point.x / 100) * radius, -(point.y / 100) * radius]),
+    radius,
+    radius,
+  );
 }
 
 function withCandyPhysics(collider: RAPIER.ColliderDesc): RAPIER.ColliderDesc {
@@ -640,4 +686,8 @@ function randomRange(min: number, max: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function isClosedPolygonItem(item: ShapeSpawnItem): item is SpawnClosedPolygonItem {
+  return "kind" in item && item.kind === "closedPolygon";
 }

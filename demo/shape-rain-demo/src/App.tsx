@@ -1,6 +1,11 @@
 import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Pedelec, type PedelecError, type PedelecSession, type PedelecSessionStatus } from "pedelec";
-import { normalizeSpawnCommand, type SpawnBasicShapesResult } from "./commands";
+import {
+  normalizeSpawnClosedPolygonsCommand,
+  normalizeSpawnCommand,
+  type SpawnBasicShapesResult,
+  type SpawnClosedPolygonsResult,
+} from "./commands";
 import { createShapeWorld } from "./shapeWorldFactory";
 import type { RenderMode, ShapeWorldLike } from "./shapeWorldTypes";
 
@@ -12,6 +17,7 @@ type RuntimeStatus = {
 };
 
 const EXAMPLE_PROMPTS = "Try: pink triangle, five blue circles, yellow stars";
+type ShapeToolResult = SpawnBasicShapesResult | SpawnClosedPolygonsResult;
 
 export default function App() {
   let stageElement: HTMLDivElement | undefined;
@@ -25,7 +31,7 @@ export default function App() {
   const [session, setSession] = createSignal<PedelecSession | null>(null);
   const [sessionStatus, setSessionStatus] = createSignal<PedelecSessionStatus | "none">("none");
   const [message, setMessage] = createSignal("Connecting to Pedelec...");
-  const [lastToolResult, setLastToolResult] = createSignal<SpawnBasicShapesResult | null>(null);
+  const [lastToolResult, setLastToolResult] = createSignal<ShapeToolResult | null>(null);
   const [chatPreview, setChatPreview] = createSignal("");
 
   const busy = createMemo(() => {
@@ -128,7 +134,7 @@ export default function App() {
 
       registerSession(nextSession, generation);
       setUiState("ready");
-      setMessage("Ready. Describe the basic shapes you want to drop.");
+      setMessage("Ready. Describe the shapes you want to drop.");
     } catch (err) {
       if (generation !== lifecycleId) return;
       const friendly = friendlyPedelecError(err);
@@ -144,7 +150,7 @@ export default function App() {
       setSessionStatus(status);
       if (status === "idle") {
         setUiState("ready");
-        setMessage("Ready. Describe the basic shapes you want to drop.");
+        setMessage("Ready. Describe the shapes you want to drop.");
       } else if (status === "running") {
         setUiState("submitting");
         setMessage("Pedelec is interpreting your request.");
@@ -246,7 +252,7 @@ export default function App() {
     tool: string,
     args: unknown,
     generation = lifecycleId,
-  ): SpawnBasicShapesResult | { error: { code: string; message: string; details?: unknown } } {
+  ): ShapeToolResult | { error: { code: string; message: string; details?: unknown } } {
     if (generation !== lifecycleId || !world) {
       return {
         error: {
@@ -256,7 +262,7 @@ export default function App() {
       };
     }
     setUiState("generating");
-    if (tool !== "spawn_basic_shapes") {
+    if (tool !== "spawn_basic_shapes" && tool !== "spawn_closed_polygons") {
       return {
         error: {
           code: "TOOL_HANDLER_NOT_FOUND",
@@ -266,7 +272,10 @@ export default function App() {
       };
     }
 
-    const result = normalizeSpawnCommand(args, renderMode());
+    const result =
+      tool === "spawn_basic_shapes"
+        ? normalizeSpawnCommand(args, renderMode())
+        : normalizeSpawnClosedPolygonsCommand(args, renderMode());
     if (result.normalizedItems.length > 0) {
       const spawned = world.spawn(result.normalizedItems);
       const finalResult = { ...result, spawned, success: spawned > 0 };
