@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { marked } from "marked";
 import {
   Pedelec,
   type CreateSessionInput,
@@ -15,7 +16,7 @@ import {
 } from "./commands";
 import { createShapeWorld } from "./shapeWorldFactory";
 import type { RenderMode, ShapeWorldLike } from "./shapeWorldTypes";
-import { IoClose, IoSettingsOutline } from "solid-icons/io";
+import { IoChevronDown, IoChevronUp, IoClose, IoSettingsOutline, IoTerminalOutline } from "solid-icons/io";
 import { usePopUp } from "./services/PopUpProvider";
 import SettingPop, { type PedelecProviderSettings, type ShapeRainSessionSettings } from "./SettingPop/SettingPop";
 
@@ -30,13 +31,27 @@ const EXAMPLE_PROMPTS = "Try: pink triangle, five blue circles, yellow stars";
 const SHAPE_RAIN_SESSION_SETTINGS_KEY = "shape-rain:pedelec-session-settings";
 const DEFAULT_SESSION_SETTINGS: ShapeRainSessionSettings = { provider: "default", model: "" };
 type ShapeToolResult = SpawnBasicShapesResult | SpawnClosedPolygonsResult;
+type ToolCallErrorResult = { error: { code: string; message: string; details?: unknown } };
+type ToolCallResult = ShapeToolResult | ToolCallErrorResult;
 
-type ChatRole = "assistant" | "user" | "error";
+type ChatRole = "assistant" | "user" | "error" | "system";
 
-type ChatMessage = {
-  role: ChatRole;
+type TextChatMessage = {
+  role: Exclude<ChatRole, "system">;
   text: string;
 };
+
+type SystemChatMessage = {
+  role: "system";
+  id: number;
+  tool: string;
+  spawned: number;
+  detailLines: string[];
+  error?: { code: string; message: string };
+  expanded: boolean;
+};
+
+type ChatMessage = TextChatMessage | SystemChatMessage;
 
 export default function App() {
   const { pop } = usePopUp();
@@ -45,6 +60,7 @@ export default function App() {
   let sessionDisposer: (() => void) | undefined;
   let world: ShapeWorldLike | null = null;
   let lifecycleId = 0;
+  let nextToolMessageId = 1;
 
   const [prompt, setPrompt] = createSignal("");
   const [renderMode, setRenderMode] = createSignal<RenderMode>("3d");
@@ -255,8 +271,30 @@ export default function App() {
     setConversation([]);
   }
 
-  function appendConversationMessage(role: ChatRole, text: string): void {
+  function appendConversationMessage(role: TextChatMessage["role"], text: string): void {
     setConversation((current) => [...current, { role, text }]);
+  }
+
+  function appendToolConversationMessage(tool: string, result: ToolCallResult): void {
+    const error = getToolResultError(result);
+    setConversation((current) => [
+      ...current,
+      {
+        role: "system",
+        id: nextToolMessageId++,
+        tool,
+        spawned: getToolResultSpawned(result),
+        detailLines: buildToolDetailLines(tool, result),
+        ...(error ? { error } : {}),
+        expanded: false,
+      },
+    ]);
+  }
+
+  function toggleToolMessage(id: number): void {
+    setConversation((current) =>
+      current.map((message) => (message.role === "system" && message.id === id ? { ...message, expanded: !message.expanded } : message)),
+    );
   }
 
   async function submitPrompt(event: SubmitEvent): Promise<void> {
@@ -296,24 +334,28 @@ export default function App() {
     tool: string,
     args: unknown,
     generation = lifecycleId,
-  ): ShapeToolResult | { error: { code: string; message: string; details?: unknown } } {
+  ): ToolCallResult {
     if (generation !== lifecycleId || !world) {
-      return {
+      const staleResult = {
         error: {
           code: "STALE_TOOL_CALL",
           message: "This tool call belongs to an older render session.",
         },
       };
+      appendToolConversationMessage(tool, staleResult);
+      return staleResult;
     }
     setUiState("generating");
     if (tool !== "spawn_basic_shapes" && tool !== "spawn_closed_polygons") {
-      return {
+      const unsupportedResult = {
         error: {
           code: "TOOL_HANDLER_NOT_FOUND",
           message: `Shape Rain does not support the frontend tool "${tool}".`,
           details: { tool },
         },
       };
+      appendToolConversationMessage(tool, unsupportedResult);
+      return unsupportedResult;
     }
 
     const result =
@@ -324,11 +366,13 @@ export default function App() {
       const spawned = world.spawn(result.normalizedItems);
       const finalResult = { ...result, spawned, success: spawned > 0 };
       setLastToolResult(finalResult);
+      appendToolConversationMessage(tool, finalResult);
       setMessage(spawned > 0 ? `Dropped ${spawned} shape${spawned === 1 ? "" : "s"}.` : "The command was valid, but no shapes could be spawned.");
       return finalResult;
     }
 
     setLastToolResult(result);
+    appendToolConversationMessage(tool, result);
     setUiState("error");
     setMessage(result.error?.message ?? "The shape command did not include a supported item.");
     return result;
@@ -486,52 +530,107 @@ export default function App() {
             <For each={conversation()}>
               {(chatMessage) => (
                 <div class="chat-row" data-role={chatMessage.role}>
-                  <div class="chat-bubble">{chatMessage.text}</div>
+                  {chatMessage.role === "system" ? (
+                    <div class="chat-tool-bubble" data-collapsed={chatMessage.expanded ? "false" : "true"} onClick={() => toggleToolMessage(chatMessage.id)}>
+                      {chatMessage.expanded ? (
+                        <>
+                          <div class="chat-tool-header">
+                            <div class="chat-tool-header-left">
+                              <span class="chat-tool-icon">
+                                <IoTerminalOutline size={14} />
+                              </span>
+                              <span class="chat-tool-text">{toolSummaryText(chatMessage)}</span>
+                            </div>
+                            <span class="chat-tool-chevron">
+                              <IoChevronUp size={14} />
+                            </span>
+                          </div>
+                          <div class="chat-tool-divider" />
+                          <div class="chat-tool-detail">
+                            <p class="chat-tool-detail-line chat-tool-detail-title">{chatMessage.tool}</p>
+                            <For each={chatMessage.detailLines}>
+                              {(line) => <p class="chat-tool-detail-line">{line}</p>}
+                            </For>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <span class="chat-tool-icon">
+                            <IoTerminalOutline size={14} />
+                          </span>
+                          <span class="chat-tool-text">{toolSummaryText(chatMessage)}</span>
+                          <span class="chat-tool-chevron">
+                            <IoChevronDown size={14} />
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div class="chat-bubble" innerHTML={renderChatMessageHtml(chatMessage.text)} />
+                  )}
                 </div>
               )}
             </For>
           </Show>
-          {/*
-            TODO: 在 chat-panel-messages 裡加入 可開闔的 system dialog
-            照底下範例class實作，不用替這些class寫css
-
-            # system dialog 收合:
-            <div class="chat-row" data-role="system">
-              <div class="chat-tool-bubble" data-collapsed="true">
-                <span class="chat-tool-icon"><IoTerminalOutline size={14} /></span>
-                <span class="chat-tool-text">Tool call: spawn_basic_shapes (5 items)</span>
-                <span class="chat-tool-chevron"><IoChevronDown size={14} /></span>
-              </div>
-            </div>
-
-            # system dialog 展開:
-            <div class="chat-row" data-role="system">
-              <div class="chat-tool-bubble" data-collapsed="false">
-                <div class="chat-tool-header">
-                  <div class="chat-tool-header-left">
-                    <span class="chat-tool-icon"><IoTerminalOutline size={14} /></span>
-                    <span class="chat-tool-text">Tool call: spawn_basic_shapes (5 items)</span>
-                  </div>
-                  <span class="chat-tool-chevron"><IoChevronUp size={14} /></span>
-                </div>
-                <div class="chat-tool-divider" />
-                <div class="chat-tool-detail">
-                  <p class="chat-tool-detail-line chat-tool-detail-title">spawn_basic_shapes</p>
-                  <p class="chat-tool-detail-line">1. circle &middot; blue</p>
-                  <p class="chat-tool-detail-line">2. circle &middot; blue</p>
-                  <p class="chat-tool-detail-line">3. circle &middot; blue</p>
-                  <p class="chat-tool-detail-line">4. circle &middot; blue</p>
-                  <p class="chat-tool-detail-line">5. triangle &middot; pink</p>
-                </div>
-              </div>
-            </div>
-          */}
         </div>
       </aside>
 
       <footer class="hint-line">Enter sends the prompt to Pedelec. The frontend only executes validated shape tool commands.</footer>
     </main>
   );
+}
+
+function toolSummaryText(message: SystemChatMessage): string {
+  return `Tool call: ${message.tool} (${message.spawned} spawned)`;
+}
+
+function renderChatMessageHtml(text: string): string {
+  return marked.parse(text, { async: false });
+}
+
+function buildToolDetailLines(tool: string, result: ToolCallResult): string[] {
+  const lines: string[] = [];
+  const error = getToolResultError(result);
+  if (error) {
+    lines.push(`Error: ${error.code}`);
+    lines.push(error.message);
+  }
+
+  if ("normalizedItems" in result) {
+    result.normalizedItems.forEach((item, index) => {
+      if (tool === "spawn_closed_polygons" && "kind" in item) {
+        const label = item.preset ?? item.name ?? "custom polygon";
+        lines.push(`${index + 1}. ${label} · ${item.color} · x${item.count}`);
+        return;
+      }
+
+      if ("shape" in item) {
+        lines.push(`${index + 1}. ${item.shape} · ${item.color} · x${item.count}`);
+      }
+    });
+  }
+
+  const ignored = getToolResultIgnored(result);
+  if (ignored.length > 0) {
+    lines.push(`Ignored: ${ignored.length}`);
+    ignored.forEach((item) => {
+      lines.push(`- item ${item.index}: ${item.reason}`);
+    });
+  }
+
+  return lines.length > 0 ? lines : ["No normalized items."];
+}
+
+function getToolResultSpawned(result: ToolCallResult): number {
+  return "spawned" in result ? result.spawned : 0;
+}
+
+function getToolResultIgnored(result: ToolCallResult): Array<{ index: number; reason: string; value?: unknown }> {
+  return "ignored" in result ? result.ignored : [];
+}
+
+function getToolResultError(result: ToolCallResult): { code: string; message: string } | undefined {
+  return "error" in result && result.error ? { code: result.error.code, message: result.error.message } : undefined;
 }
 
 function friendlyPedelecError(err: unknown): { message: string; disconnected: boolean } {
