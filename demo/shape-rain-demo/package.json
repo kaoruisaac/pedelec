@@ -16,6 +16,7 @@
     "matter-js": "^0.20.0",
     "pedelec": "file:../../sdk",
     "pixi.js": "^8.19.0",
+    "solid-icons": "^1.2.0",
     "solid-js": "^1.9.14",
     "three": "^0.185.1"
   },

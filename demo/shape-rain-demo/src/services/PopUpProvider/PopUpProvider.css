@@ -1,0 +1,51 @@
+.PopUpProvider {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 100;
+    pointer-events: none;
+}
+.PopUpProvider .PopUpFrame .PopUpBackground {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(255, 255, 255, 0.2);
+    z-index: -1;
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+    backdrop-filter: blur(2px);
+}
+.PopUpProvider .PopUpFrame.active .PopUpBackground {
+    opacity: 1;
+    pointer-events: all;
+}
+.PopUpProvider .PopUpFrame {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.PopUpProvider .PopUpFrame .PopUpContent {
+    pointer-events: all;
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+}
+.PopUpProvider .PopUpFrame.active .PopUpContent {
+    opacity: 1;
+}
+
+.PopUpProvider .PopUpFrame .PopUpContent.is-dragging {
+    user-select: none;
+}
+
+.PopUpProvider .PopUpFrame .PopUpContent.is-dragging .PopUpWindow .header {
+    cursor: grabbing;
+}

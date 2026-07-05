@@ -8,6 +8,9 @@ import {
 } from "./commands";
 import { createShapeWorld } from "./shapeWorldFactory";
 import type { RenderMode, ShapeWorldLike } from "./shapeWorldTypes";
+import { IoSettingsOutline } from "solid-icons/io";
+import { usePopUp } from "./services/PopUpProvider";
+import SettingPop from "./SettingPop/SettingPop";
 
 type UiState = "ready" | "connecting" | "switching" | "submitting" | "generating" | "error" | "disconnected";
 
@@ -20,6 +23,7 @@ const EXAMPLE_PROMPTS = "Try: pink triangle, five blue circles, yellow stars";
 type ShapeToolResult = SpawnBasicShapesResult | SpawnClosedPolygonsResult;
 
 export default function App() {
+  const { pop } = usePopUp();
   let stageElement: HTMLDivElement | undefined;
   let sessionDisposer: (() => void) | undefined;
   let world: ShapeWorldLike | null = null;
@@ -314,6 +318,10 @@ export default function App() {
     setMessage(`${renderMode().toUpperCase()} canvas cleared.`);
   }
 
+  function openSettings(): void {
+    pop(SettingPop, {});
+  }
+
   return (
     <main class="app-shell">
       <div ref={stageElement} class="stage-layer" aria-hidden="true" />
@@ -354,9 +362,18 @@ export default function App() {
 
         <p class="examples">{EXAMPLE_PROMPTS}</p>
 
-        <div class="status-line" data-state={uiState()}>
-          <strong>{runtimeStatus().label}</strong>
-          <span>{runtimeStatus().detail}</span>
+        <div class="status-row">
+          <div class="status-line" data-state={uiState()}>
+            <strong>{runtimeStatus().label}</strong>
+            <span>{runtimeStatus().detail}</span>
+          </div>
+          {/* TODO: will popup provider settings */}
+          <button type="button" class="settings-btn" title="Provider settings" onClick={openSettings}>
+            <span class="settings-btn-label">
+              Ollama
+            </span>
+            <IoSettingsOutline />
+          </button>
         </div>
 
         <p class="message-line">{message()}</p>
