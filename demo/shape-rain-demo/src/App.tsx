@@ -1,4 +1,4 @@
-import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   Pedelec,
   type CreateSessionInput,
@@ -15,7 +15,7 @@ import {
 } from "./commands";
 import { createShapeWorld } from "./shapeWorldFactory";
 import type { RenderMode, ShapeWorldLike } from "./shapeWorldTypes";
-import { IoSettingsOutline } from "solid-icons/io";
+import { IoClose, IoSettingsOutline } from "solid-icons/io";
 import { usePopUp } from "./services/PopUpProvider";
 import SettingPop, { type PedelecProviderSettings, type ShapeRainSessionSettings } from "./SettingPop/SettingPop";
 
@@ -30,6 +30,23 @@ const EXAMPLE_PROMPTS = "Try: pink triangle, five blue circles, yellow stars";
 const SHAPE_RAIN_SESSION_SETTINGS_KEY = "shape-rain:pedelec-session-settings";
 const DEFAULT_SESSION_SETTINGS: ShapeRainSessionSettings = { provider: "default", model: "" };
 type ShapeToolResult = SpawnBasicShapesResult | SpawnClosedPolygonsResult;
+
+type ChatRole = "assistant" | "user";
+
+type ChatMessage = {
+  role: ChatRole;
+  text: string;
+};
+
+const DEMO_CHAT_MESSAGES: ChatMessage[] = [
+  { role: "assistant", text: "Hi! Describe the shapes you want to rain down and I'll drop them for you." },
+  { role: "user", text: "Drop five pink triangles" },
+  { role: "assistant", text: "Done — 5 pink triangles are falling. Anything else?" },
+  { role: "user", text: "Add some yellow stars, make them bigger" },
+  { role: "assistant", text: "Added 8 large yellow stars to the rain." },
+  { role: "user", text: "Clear everything" },
+  { role: "assistant", text: "Canvas cleared. Ready for a new prompt." },
+];
 
 export default function App() {
   const { pop } = usePopUp();
@@ -47,6 +64,7 @@ export default function App() {
   const [lastToolResult, setLastToolResult] = createSignal<ShapeToolResult | null>(null);
   const [chatPreview, setChatPreview] = createSignal("");
   const [sessionSettings, setSessionSettings] = createSignal<ShapeRainSessionSettings>(readStoredSessionSettings());
+  const [conversationOpen, setConversationOpen] = createSignal(false);
 
   const busy = createMemo(() => {
     const status = sessionStatus();
@@ -366,7 +384,7 @@ export default function App() {
   }
 
   return (
-    <main class="app-shell">
+    <main class="app-shell" classList={{ "panel-open": conversationOpen() }}>
       <div ref={stageElement} class="stage-layer" aria-hidden="true" />
 
       <header class="topbar">
@@ -421,6 +439,16 @@ export default function App() {
 
         <p class="message-line">{message()}</p>
 
+        <button
+          type="button"
+          class="view-more-pill"
+          title="View conversation"
+          aria-expanded={conversationOpen()}
+          onClick={() => setConversationOpen(true)}
+        >
+          ...
+        </button>
+
         <Show when={lastToolResult()}>
           {(result) => (
             <p class="tool-summary">
@@ -434,6 +462,24 @@ export default function App() {
           <p class="agent-preview">{chatPreview()}</p>
         </Show>
       </section>
+
+      <aside class="chat-panel" classList={{ open: conversationOpen() }} aria-label="Conversation" aria-hidden={!conversationOpen()}>
+        <header class="chat-panel-header">
+          <h2>Conversation</h2>
+          <button type="button" class="chat-panel-close" title="Close conversation" onClick={() => setConversationOpen(false)}>
+            <IoClose size={18} />
+          </button>
+        </header>
+        <div class="chat-panel-messages">
+          <For each={DEMO_CHAT_MESSAGES}>
+            {(chatMessage) => (
+              <div class="chat-row" data-role={chatMessage.role}>
+                <div class="chat-bubble">{chatMessage.text}</div>
+              </div>
+            )}
+          </For>
+        </div>
+      </aside>
 
       <footer class="hint-line">Enter sends the prompt to Pedelec. The frontend only executes validated shape tool commands.</footer>
     </main>
