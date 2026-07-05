@@ -1,5 +1,6 @@
 import { AiOutlineChrome } from "solid-icons/ai";
 import { openExternalUrl } from "../utils/openExternalUrl";
+import appIcon from "../../app-icon.png?url";
 import "./HomePage.css";
 
 const CHROME_WEB_STORE_URL =
@@ -18,7 +19,7 @@ function HomePage() {
   return (
     <main class="home-page">
       <section class="home-card" aria-labelledby="home-title">
-        <img class="home-icon" src="../../app-icon.png" alt="Pedelec" />
+        <img class="home-icon" src={appIcon} alt="Pedelec" />
         <h1 id="home-title">Welcome to Pedelec</h1>
         <p>Pedelec is the bridge that connects AI Agents on your computer to Chrome.</p>
         <p>
