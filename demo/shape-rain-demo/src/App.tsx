@@ -1,5 +1,12 @@
 import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
-import { Pedelec, type PedelecError, type PedelecSession, type PedelecSessionStatus } from "pedelec";
+import {
+  Pedelec,
+  type CreateSessionInput,
+  type PedelecError,
+  type PedelecSession,
+  type PedelecSessionStatus,
+  type ProviderCode,
+} from "pedelec";
 import {
   normalizeSpawnClosedPolygonsCommand,
   normalizeSpawnCommand,
@@ -10,7 +17,7 @@ import { createShapeWorld } from "./shapeWorldFactory";
 import type { RenderMode, ShapeWorldLike } from "./shapeWorldTypes";
 import { IoSettingsOutline } from "solid-icons/io";
 import { usePopUp } from "./services/PopUpProvider";
-import SettingPop from "./SettingPop/SettingPop";
+import SettingPop, { type PedelecProviderSettings, type ShapeRainSessionSettings } from "./SettingPop/SettingPop";
 
 type UiState = "ready" | "connecting" | "switching" | "submitting" | "generating" | "error" | "disconnected";
 
@@ -20,6 +27,8 @@ type RuntimeStatus = {
 };
 
 const EXAMPLE_PROMPTS = "Try: pink triangle, five blue circles, yellow stars";
+const SHAPE_RAIN_SESSION_SETTINGS_KEY = "shape-rain:pedelec-session-settings";
+const DEFAULT_SESSION_SETTINGS: ShapeRainSessionSettings = { provider: "default", model: "" };
 type ShapeToolResult = SpawnBasicShapesResult | SpawnClosedPolygonsResult;
 
 export default function App() {
@@ -37,6 +46,7 @@ export default function App() {
   const [message, setMessage] = createSignal("Connecting to Pedelec...");
   const [lastToolResult, setLastToolResult] = createSignal<ShapeToolResult | null>(null);
   const [chatPreview, setChatPreview] = createSignal("");
+  const [sessionSettings, setSessionSettings] = createSignal<ShapeRainSessionSettings>(readStoredSessionSettings());
 
   const busy = createMemo(() => {
     const status = sessionStatus();
@@ -129,7 +139,7 @@ export default function App() {
       }
 
       const nextSession = await client.createSession({
-        skillsUrls: [`${location.origin}/tools.md`, `${location.origin}/tools.json`],
+        ...createSessionSettingsInput(sessionSettings()),
       });
       if (generation !== lifecycleId) {
         await nextSession.end().catch(() => undefined);
@@ -318,8 +328,41 @@ export default function App() {
     setMessage(`${renderMode().toUpperCase()} canvas cleared.`);
   }
 
+  async function loadProviderSettings(): Promise<PedelecProviderSettings> {
+    const client = new Pedelec();
+    const approval = await client.getApprovalStatus();
+    if (!approval.installed) {
+      throw {
+        code: "EXTENSION_UNAVAILABLE",
+        message: "Pedelec Extension is unavailable. Open this page in Chrome with the extension installed.",
+      } satisfies PedelecError;
+    }
+
+    const [providers, settings] = await Promise.all([client.listProviders(), client.getSettings()]);
+    return { providers, settings };
+  }
+
+  function applySessionSettings(nextSettings: ShapeRainSessionSettings): void {
+    if (busy()) {
+      setMessage("Pedelec is busy. Try changing provider settings again in a moment.");
+      return;
+    }
+    const normalized = normalizeSessionSettings(nextSettings);
+    setSessionSettings(normalized);
+    writeStoredSessionSettings(normalized);
+    void reconnectPedelec();
+  }
+
   function openSettings(): void {
-    pop(SettingPop, {});
+    if (busy()) {
+      setMessage("Pedelec is busy. Try changing provider settings again in a moment.");
+      return;
+    }
+    pop(SettingPop, {
+      value: sessionSettings(),
+      loadProviderSettings,
+      onApply: applySessionSettings,
+    });
   }
 
   return (
@@ -370,7 +413,7 @@ export default function App() {
           {/* TODO: will popup provider settings */}
           <button type="button" class="settings-btn" title="Provider settings" onClick={openSettings}>
             <span class="settings-btn-label">
-              Ollama
+              {sessionSettingsLabel(sessionSettings())}
             </span>
             <IoSettingsOutline />
           </button>
@@ -447,6 +490,64 @@ function friendlyPedelecError(err: unknown): { message: string; disconnected: bo
     disconnected: false,
     message: error.message || "Pedelec returned an unexpected error.",
   };
+}
+
+function createSessionSettingsInput(settings: ShapeRainSessionSettings): CreateSessionInput {
+  const skillsUrls = [`${location.origin}/tools.md`, `${location.origin}/tools.json`];
+  if (settings.provider === "default") {
+    return { skillsUrls };
+  }
+
+  const model = settings.model.trim();
+  return model ? { provider: settings.provider, model, skillsUrls } : { provider: settings.provider, skillsUrls };
+}
+
+function readStoredSessionSettings(): ShapeRainSessionSettings {
+  if (typeof localStorage === "undefined") return DEFAULT_SESSION_SETTINGS;
+
+  try {
+    const raw = localStorage.getItem(SHAPE_RAIN_SESSION_SETTINGS_KEY);
+    if (!raw) return DEFAULT_SESSION_SETTINGS;
+    return normalizeSessionSettings(JSON.parse(raw));
+  } catch {
+    return DEFAULT_SESSION_SETTINGS;
+  }
+}
+
+function writeStoredSessionSettings(settings: ShapeRainSessionSettings): void {
+  if (typeof localStorage === "undefined") return;
+
+  try {
+    localStorage.setItem(SHAPE_RAIN_SESSION_SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // Storage failures should not block reconnecting with the selected settings.
+  }
+}
+
+function normalizeSessionSettings(value: unknown): ShapeRainSessionSettings {
+  if (!value || typeof value !== "object") return DEFAULT_SESSION_SETTINGS;
+
+  const raw = value as Partial<ShapeRainSessionSettings>;
+  if (raw.provider === "default") {
+    return { provider: "default", model: "" };
+  }
+
+  if (!isProviderCode(raw.provider)) {
+    return DEFAULT_SESSION_SETTINGS;
+  }
+
+  return {
+    provider: raw.provider,
+    model: typeof raw.model === "string" ? raw.model.trim() : "",
+  };
+}
+
+function isProviderCode(value: unknown): value is ProviderCode {
+  return value === "codex" || value === "gemini" || value === "opencode" || value === "cursor" || value === "claude" || value === "ollama";
+}
+
+function sessionSettingsLabel(settings: ShapeRainSessionSettings): string {
+  return settings.provider === "default" ? "Default" : settings.provider;
 }
 
 function toPedelecError(err: unknown): PedelecError {
