@@ -68,8 +68,6 @@ export default function App() {
   const [session, setSession] = createSignal<PedelecSession | null>(null);
   const [sessionStatus, setSessionStatus] = createSignal<PedelecSessionStatus | "none">("none");
   const [message, setMessage] = createSignal("Connecting to Pedelec...");
-  const [lastToolResult, setLastToolResult] = createSignal<ShapeToolResult | null>(null);
-  const [chatPreview, setChatPreview] = createSignal("");
   const [sessionSettings, setSessionSettings] = createSignal<ShapeRainSessionSettings>(readStoredSessionSettings());
   const [conversationOpen, setConversationOpen] = createSignal(false);
   const [conversation, setConversation] = createSignal<ChatMessage[]>([]);
@@ -113,6 +111,7 @@ export default function App() {
 
   createEffect(() => {
     conversation()
+    uiState()
     panelMessageEl?.scrollTo(0, panelMessageEl.scrollHeight)
   })
 
@@ -156,7 +155,6 @@ export default function App() {
     if (generation !== lifecycleId) return;
     setUiState("connecting");
     setMessage("Connecting to Pedelec...");
-    setChatPreview("");
 
     try {
       const client = new Pedelec();
@@ -230,7 +228,6 @@ export default function App() {
     });
     const disposeChat = nextSession.onChat((text) => {
       if (generation !== lifecycleId) return;
-      setChatPreview((current) => (current + text).slice(-180));
       appendConversationMessage("assistant", text);
     });
     const disposeTool = nextSession.onTool((tool, args) => handleTool(tool, args, generation));
@@ -266,8 +263,6 @@ export default function App() {
   }
 
   function clearWorldUiState(): void {
-    setLastToolResult(null);
-    setChatPreview("");
     setConversation([]);
   }
 
@@ -365,13 +360,11 @@ export default function App() {
     if (result.normalizedItems.length > 0) {
       const spawned = world.spawn(result.normalizedItems);
       const finalResult = { ...result, spawned, success: spawned > 0 };
-      setLastToolResult(finalResult);
       appendToolConversationMessage(tool, finalResult);
       setMessage(spawned > 0 ? `Dropped ${spawned} shape${spawned === 1 ? "" : "s"}.` : "The command was valid, but no shapes could be spawned.");
       return finalResult;
     }
 
-    setLastToolResult(result);
     appendToolConversationMessage(tool, result);
     setUiState("error");
     setMessage(result.error?.message ?? "The shape command did not include a supported item.");
@@ -392,13 +385,11 @@ export default function App() {
       renderMode(),
     );
     const spawned = world.spawn(result.normalizedItems);
-    setLastToolResult({ ...result, spawned, success: spawned > 0 });
     setMessage(spawned > 0 ? `Dropped ${spawned} demo shapes.` : "Demo shapes could not be spawned yet.");
   }
 
   function clearShapes(): void {
     world?.clearObjects();
-    setLastToolResult(null);
     setMessage(`${renderMode().toUpperCase()} canvas cleared.`);
   }
 
@@ -494,27 +485,16 @@ export default function App() {
 
         <p class="message-line">{message()}</p>
 
-        <button
-          type="button"
-          class="view-more-pill"
-          title="View conversation"
-          aria-expanded={conversationOpen()}
-          onClick={() => setConversationOpen(true)}
-        >
-          ...
-        </button>
-
-        <Show when={lastToolResult()}>
-          {(result) => (
-            <p class="tool-summary">
-              Last command: {result().spawned} spawned
-              <Show when={result().ignored.length > 0}> · {result().ignored.length} ignored</Show>
-            </p>
-          )}
-        </Show>
-
-        <Show when={chatPreview()}>
-          <p class="agent-preview">{chatPreview()}</p>
+        <Show when={!conversationOpen()}>
+          <button
+            type="button"
+            class="view-more-pill"
+            title="View conversation"
+            aria-expanded={conversationOpen()}
+            onClick={() => setConversationOpen(true)}
+          >
+            ...
+          </button>
         </Show>
       </section>
 
@@ -571,6 +551,15 @@ export default function App() {
                 </div>
               )}
             </For>
+          </Show>
+          <Show when={uiState() === "submitting" || uiState() === "generating"}>
+            <div class="chat-row" data-role="assistant">
+              <div class="chat-bubble chat-typing-bubble" role="status" aria-label="Assistant is responding">
+                <span class="chat-typing-dot" />
+                <span class="chat-typing-dot" />
+                <span class="chat-typing-dot" />
+              </div>
+            </div>
           </Show>
         </div>
       </aside>

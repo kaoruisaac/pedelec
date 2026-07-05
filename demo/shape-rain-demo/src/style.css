@@ -191,7 +191,6 @@ input {
 
 .examples,
 .message-line,
-.tool-summary,
 .agent-preview,
 .hint-line {
   margin: 14px 0 0;
@@ -272,7 +271,6 @@ input {
 }
 
 .message-line,
-.tool-summary,
 .agent-preview {
   width: min(680px, 100%);
   min-height: 18px;
@@ -324,7 +322,6 @@ input {
 
   .panel-open .interaction-layer .examples,
   .panel-open .interaction-layer .message-line,
-  .panel-open .interaction-layer .tool-summary,
   .panel-open .interaction-layer .agent-preview {
     text-align: left;
   }
@@ -455,6 +452,41 @@ input {
 .chat-row[data-role="assistant"] .chat-bubble::before {
   left: -8px;
   background: #ffffff;
+}
+
+.chat-typing-bubble {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 13px 16px;
+}
+
+.chat-typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6d7686;
+  animation: chat-typing-wave 1.2s ease-in-out infinite;
+}
+
+.chat-typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.chat-typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes chat-typing-wave {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+  }
+
+  30% {
+    transform: translateY(-3px);
+  }
 }
 
 .chat-row[data-role="user"] {
