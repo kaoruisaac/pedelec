@@ -440,7 +440,6 @@ export default function App() {
             <strong>{runtimeStatus().label}</strong>
             <span>{runtimeStatus().detail}</span>
           </div>
-          {/* TODO: will popup provider settings */}
           <button type="button" class="settings-btn" title="Provider settings" onClick={openSettings}>
             <span class="settings-btn-label">
               {sessionSettingsLabel(sessionSettings())}
@@ -492,6 +491,41 @@ export default function App() {
               )}
             </For>
           </Show>
+          {/*
+            TODO: 在 chat-panel-messages 裡加入 可開闔的 system dialog
+            照底下範例class實作，不用替這些class寫css
+
+            # system dialog 收合:
+            <div class="chat-row" data-role="system">
+              <div class="chat-tool-bubble" data-collapsed="true">
+                <span class="chat-tool-icon"><IoTerminalOutline size={14} /></span>
+                <span class="chat-tool-text">Tool call: spawn_basic_shapes (5 items)</span>
+                <span class="chat-tool-chevron"><IoChevronDown size={14} /></span>
+              </div>
+            </div>
+
+            # system dialog 展開:
+            <div class="chat-row" data-role="system">
+              <div class="chat-tool-bubble" data-collapsed="false">
+                <div class="chat-tool-header">
+                  <div class="chat-tool-header-left">
+                    <span class="chat-tool-icon"><IoTerminalOutline size={14} /></span>
+                    <span class="chat-tool-text">Tool call: spawn_basic_shapes (5 items)</span>
+                  </div>
+                  <span class="chat-tool-chevron"><IoChevronUp size={14} /></span>
+                </div>
+                <div class="chat-tool-divider" />
+                <div class="chat-tool-detail">
+                  <p class="chat-tool-detail-line chat-tool-detail-title">spawn_basic_shapes</p>
+                  <p class="chat-tool-detail-line">1. circle &middot; blue</p>
+                  <p class="chat-tool-detail-line">2. circle &middot; blue</p>
+                  <p class="chat-tool-detail-line">3. circle &middot; blue</p>
+                  <p class="chat-tool-detail-line">4. circle &middot; blue</p>
+                  <p class="chat-tool-detail-line">5. triangle &middot; pink</p>
+                </div>
+              </div>
+            </div>
+          */}
         </div>
       </aside>
 
