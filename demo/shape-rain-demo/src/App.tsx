@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   Pedelec,
   type CreateSessionInput,
@@ -31,26 +31,17 @@ const SHAPE_RAIN_SESSION_SETTINGS_KEY = "shape-rain:pedelec-session-settings";
 const DEFAULT_SESSION_SETTINGS: ShapeRainSessionSettings = { provider: "default", model: "" };
 type ShapeToolResult = SpawnBasicShapesResult | SpawnClosedPolygonsResult;
 
-type ChatRole = "assistant" | "user";
+type ChatRole = "assistant" | "user" | "error";
 
 type ChatMessage = {
   role: ChatRole;
   text: string;
 };
 
-const DEMO_CHAT_MESSAGES: ChatMessage[] = [
-  { role: "assistant", text: "Hi! Describe the shapes you want to rain down and I'll drop them for you." },
-  { role: "user", text: "Drop five pink triangles" },
-  { role: "assistant", text: "Done — 5 pink triangles are falling. Anything else?" },
-  { role: "user", text: "Add some yellow stars, make them bigger" },
-  { role: "assistant", text: "Added 8 large yellow stars to the rain." },
-  { role: "user", text: "Clear everything" },
-  { role: "assistant", text: "Canvas cleared. Ready for a new prompt." },
-];
-
 export default function App() {
   const { pop } = usePopUp();
   let stageElement: HTMLDivElement | undefined;
+  let panelMessageEl: HTMLDivElement | undefined;
   let sessionDisposer: (() => void) | undefined;
   let world: ShapeWorldLike | null = null;
   let lifecycleId = 0;
@@ -65,6 +56,7 @@ export default function App() {
   const [chatPreview, setChatPreview] = createSignal("");
   const [sessionSettings, setSessionSettings] = createSignal<ShapeRainSessionSettings>(readStoredSessionSettings());
   const [conversationOpen, setConversationOpen] = createSignal(false);
+  const [conversation, setConversation] = createSignal<ChatMessage[]>([]);
 
   const busy = createMemo(() => {
     const status = sessionStatus();
@@ -103,6 +95,11 @@ export default function App() {
     world = null;
   });
 
+  createEffect(() => {
+    conversation()
+    panelMessageEl?.scrollTo(0, panelMessageEl.scrollHeight)
+  })
+
   async function initializeRuntime(mode: RenderMode, generation: number): Promise<void> {
     if (!stageElement) return;
     clearWorldUiState();
@@ -121,6 +118,7 @@ export default function App() {
       if (generation !== lifecycleId) return;
       nextWorld.destroy();
       world = null;
+      appendConversationMessage("error", err instanceof Error ? err.message : `Could not start ${mode.toUpperCase()} mode.`);
       setUiState("error");
       setMessage(err instanceof Error ? err.message : `Could not start ${mode.toUpperCase()} mode.`);
     }
@@ -148,6 +146,7 @@ export default function App() {
       const client = new Pedelec();
       const approval = await client.getApprovalStatus();
       if (!approval.installed) {
+        appendConversationMessage("error", "Pedelec Extension is unavailable. Open this page in Chrome with the extension installed.");
         setUiState("disconnected");
         setMessage("Pedelec Extension is unavailable. Open this page in Chrome with the extension installed.");
         return;
@@ -170,6 +169,7 @@ export default function App() {
     } catch (err) {
       if (generation !== lifecycleId) return;
       const friendly = friendlyPedelecError(err);
+      appendConversationMessage("error", friendly.message);
       setUiState(friendly.disconnected ? "disconnected" : "error");
       setMessage(friendly.message);
     }
@@ -193,13 +193,16 @@ export default function App() {
         setUiState("disconnected");
         setMessage("This Pedelec session ended. Connect again to start a new one.");
       } else if (status === "error") {
+        const statusMessage = "The Pedelec session reported an error. Connect again if it does not recover.";
+        appendConversationMessage("error", statusMessage);
         setUiState("error");
-        setMessage("The Pedelec session reported an error. Connect again if it does not recover.");
+        setMessage(statusMessage);
       }
     });
     const disposeError = nextSession.onError((error) => {
       if (generation !== lifecycleId) return;
       const friendly = friendlyPedelecError(error);
+      appendConversationMessage("error", friendly.message);
       setUiState(friendly.disconnected ? "disconnected" : "error");
       setMessage(friendly.message);
     });
@@ -212,6 +215,7 @@ export default function App() {
     const disposeChat = nextSession.onChat((text) => {
       if (generation !== lifecycleId) return;
       setChatPreview((current) => (current + text).slice(-180));
+      appendConversationMessage("assistant", text);
     });
     const disposeTool = nextSession.onTool((tool, args) => handleTool(tool, args, generation));
     sessionDisposer = () => {
@@ -248,6 +252,11 @@ export default function App() {
   function clearWorldUiState(): void {
     setLastToolResult(null);
     setChatPreview("");
+    setConversation([]);
+  }
+
+  function appendConversationMessage(role: ChatRole, text: string): void {
+    setConversation((current) => [...current, { role, text }]);
   }
 
   async function submitPrompt(event: SubmitEvent): Promise<void> {
@@ -270,11 +279,14 @@ export default function App() {
     setPrompt("");
     setUiState("submitting");
     setMessage("Pedelec is interpreting your request.");
+    appendConversationMessage("user", text);
+    setConversationOpen(true);
 
     try {
       await activeSession.sendText(text);
     } catch (err) {
       const friendly = friendlyPedelecError(err);
+      appendConversationMessage("error", friendly.message);
       setUiState(friendly.disconnected ? "disconnected" : "error");
       setMessage(friendly.message);
     }
@@ -470,14 +482,16 @@ export default function App() {
             <IoClose size={18} />
           </button>
         </header>
-        <div class="chat-panel-messages">
-          <For each={DEMO_CHAT_MESSAGES}>
-            {(chatMessage) => (
-              <div class="chat-row" data-role={chatMessage.role}>
-                <div class="chat-bubble">{chatMessage.text}</div>
-              </div>
-            )}
-          </For>
+        <div class="chat-panel-messages" ref={panelMessageEl}>
+          <Show when={conversation().length > 0} fallback={<p class="chat-empty-state">No conversation yet.</p>}>
+            <For each={conversation()}>
+              {(chatMessage) => (
+                <div class="chat-row" data-role={chatMessage.role}>
+                  <div class="chat-bubble">{chatMessage.text}</div>
+                </div>
+              )}
+            </For>
+          </Show>
         </div>
       </aside>
 
