@@ -80,8 +80,8 @@ export type SpawnClosedPolygonsResult = {
 
 const MAX_PER_ITEM = 12;
 const MAX_PER_COMMAND = 36;
-const MIN_SIZE = 12;
-const MAX_SIZE = 86;
+const MIN_SIZE = 8;
+const MAX_SIZE = 40;
 const CLOSED_MAX_ITEMS = 6;
 const CLOSED_MAX_PER_ITEM = 8;
 const CLOSED_MAX_PER_COMMAND = 24;
@@ -314,10 +314,11 @@ function normalizeSize(value: unknown, mode: RenderMode = "3d"): number {
   if (typeof value === "string") {
     const named = value.trim().toLowerCase();
     if (named === "small") size = 12;
-    else if (named === "large") size = 72;
+    else if (named === "medium") size = 28;
+    else if (named === "large") size = 40;
     else {
       const parsed = Number(named);
-      size = Number.isFinite(parsed) ? clamp(parsed, MIN_SIZE, MAX_SIZE) : clamp(toNumber(value, 18), MIN_SIZE, MAX_SIZE);
+      size = Number.isFinite(parsed) ? clamp(parsed, MIN_SIZE, MAX_SIZE) : clamp(toNumber(value, 12), MIN_SIZE, MAX_SIZE);
     }
   } else {
     size = clamp(toNumber(value, 18), MIN_SIZE, MAX_SIZE);

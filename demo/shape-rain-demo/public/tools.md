@@ -23,7 +23,7 @@ Example:
 {
   "items": [
     { "shape": "triangle", "count": 3, "color": "pink", "size": "medium" },
-    { "shape": "circle", "count": 2, "color": "blue", "size": 48 }
+    { "shape": "circle", "count": 2, "color": "blue", "size": 20 }
   ]
 }
 ```
@@ -54,7 +54,7 @@ Rules:
 - Avoid self-intersections, skipped points, tiny edges, and holes near the outer edge.
 - Keep paths conservative. Use 3-8 points for simple geometry, 5-12 for crystals/shields/lightning, and 8-20 for hearts/droplets/leaves. Do not use 64 points unless a smoother outline truly needs it.
 - Use `count` 1-8 per item and at most 24 spawned polygon objects per call.
-- Use `size` as `small`, `medium`, `large`, or a number from 28 to 96.
+- Use `size` as `small`, `medium`, `large`, or a number from 8 to 40.
 - Use `xHint` from 0 left to 1 right when the user asks for an approximate horizontal position.
 
 Preset examples:
@@ -62,9 +62,9 @@ Preset examples:
 ```json
 {
   "items": [
-    { "preset": "heart", "color": "pink", "size": 64, "count": 3 },
-    { "preset": "shield", "color": "blue", "size": 68, "count": 2, "xHint": 0.5 },
-    { "preset": "droplet", "color": "sky", "size": 60, "count": 5 }
+    { "preset": "heart", "color": "pink", "size": 18, "count": 3 },
+    { "preset": "shield", "color": "blue", "size": "small", "count": 2, "xHint": 0.5 },
+    { "preset": "droplet", "color": "sky", "size": "medium", "count": 5 }
   ]
 }
 ```
@@ -85,7 +85,7 @@ Crystal shard:
         { "x": -90, "y": -24 }
       ],
       "color": "amber",
-      "size": 64,
+      "size": 18,
       "count": 4,
       "xHint": 0.5
     }
@@ -109,7 +109,7 @@ Lightning:
         { "x": 12, "y": -28 }
       ],
       "color": "yellow",
-      "size": 72,
+      "size": 18,
       "count": 3
     }
   ]
@@ -146,7 +146,7 @@ Ring with a hole:
         ]
       ],
       "color": "amber",
-      "size": 72,
+      "size": 18,
       "count": 2
     }
   ]

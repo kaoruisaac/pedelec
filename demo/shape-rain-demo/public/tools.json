@@ -40,7 +40,7 @@
                 "size": {
                   "oneOf": [
                     { "type": "string", "enum": ["small", "medium", "large"] },
-                    { "type": "number", "minimum": 28, "maximum": 86 }
+                    { "type": "number", "minimum": 8, "maximum": 40 }
                   ],
                   "default": "medium"
                 },
@@ -106,7 +106,7 @@
                 "size": {
                   "oneOf": [
                     { "type": "string", "enum": ["small", "medium", "large"] },
-                    { "type": "number", "minimum": 28, "maximum": 96 }
+                    { "type": "number", "minimum": 8, "maximum": 40 }
                   ],
                   "default": "medium"
                 },
