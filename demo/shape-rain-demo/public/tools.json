@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "spawn_basic_shapes",
-      "description": "Spawn one or more batches of supported basic shapes at the top of the active Shape Rain stage. The frontend validates the request, clamps counts and sizes, then renders falling shapes in the current 2D or 3D mode.",
+      "description": "Spawn one or more batches of supported basic shapes at the top of the active Shape Rain stage. Use this when the user explicitly asks for simple geometry. Prefer numeric sizes from 12 to 24 by default unless the user asks for larger objects. The frontend validates the request, clamps counts and sizes, then renders falling shapes in the current 2D or 3D mode.",
       "timeoutMs": 60000,
       "argsSchema": {
         "type": "object",
@@ -42,7 +42,8 @@
                     { "type": "string", "enum": ["small", "medium", "large"] },
                     { "type": "number", "minimum": 8, "maximum": 40 }
                   ],
-                  "default": "medium"
+                  "description": "Shape size. Numeric values are preferred; use 12-24 by default, with 16 for small decorative shapes, 18 for normal shapes, 20 for emphasis, and 22-24 for main visual shapes. Use medium, large, or numeric sizes above 24 only when explicitly requested.",
+                  "default": 18
                 },
                 "xHint": {
                   "type": "number",
@@ -58,7 +59,7 @@
     },
     {
       "name": "spawn_closed_polygons",
-      "description": "Spawn custom closed polygon shapes in the active Shape Rain stage. Use this for complex straight-edged closed shapes, holes, or the supported presets heart, shield, and droplet. The frontend validates contours, clamps counts and sizes, ignores invalid items, and renders in the current 2D or 3D mode.",
+      "description": "Spawn custom closed polygon shapes in the active Shape Rain stage. Prefer this tool when the user asks for expressive, decorative, organic, symbolic, fantasy, natural, or custom silhouettes. Use multi-point contours to create richer shapes instead of reducing everything to basic geometry. The frontend validates contours, clamps counts and sizes, ignores invalid items, and renders in the current 2D or 3D mode.",
       "timeoutMs": 60000,
       "argsSchema": {
         "type": "object",
@@ -108,7 +109,8 @@
                     { "type": "string", "enum": ["small", "medium", "large"] },
                     { "type": "number", "minimum": 8, "maximum": 40 }
                   ],
-                  "default": "medium"
+                  "description": "Polygon size. Numeric values are preferred; use 12-24 by default, with 16 for small decorative shapes, 18 for normal shapes, 20 for emphasis, and 22-24 for main visual shapes. Use medium, large, or numeric sizes above 24 only when explicitly requested.",
+                  "default": 18
                 },
                 "count": {
                   "type": "integer",

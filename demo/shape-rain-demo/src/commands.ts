@@ -85,7 +85,7 @@ const MAX_SIZE = 40;
 const CLOSED_MAX_ITEMS = 6;
 const CLOSED_MAX_PER_ITEM = 8;
 const CLOSED_MAX_PER_COMMAND = 24;
-const CLOSED_MIN_SIZE = 28;
+const CLOSED_MIN_SIZE = 8;
 const CLOSED_MAX_SIZE = 96;
 const MIN_POINTS_PER_CONTOUR = 3;
 const MAX_POINTS_PER_CONTOUR = 64;
@@ -331,12 +331,12 @@ function normalizeClosedPolygonSize(value: unknown, mode: RenderMode = "3d"): nu
   let size: number;
   if (typeof value === "string") {
     const named = value.trim().toLowerCase();
-    if (named === "small") size = 36;
+    if (named === "small") size = 16;
     else if (named === "large") size = 84;
-    else if (named === "medium") size = 64;
-    else size = clamp(toNumber(value, 64), CLOSED_MIN_SIZE, CLOSED_MAX_SIZE);
+    else if (named === "medium") size = 28;
+    else size = clamp(toNumber(value, 18), CLOSED_MIN_SIZE, CLOSED_MAX_SIZE);
   } else {
-    size = clamp(toNumber(value, 64), CLOSED_MIN_SIZE, CLOSED_MAX_SIZE);
+    size = clamp(toNumber(value, 18), CLOSED_MIN_SIZE, CLOSED_MAX_SIZE);
   }
 
   return mode === "2d" ? size * 4 : size;
