@@ -60,7 +60,7 @@ npm run build
 在 Web App 端引用：
 
 ```ts
-import { Pedelec } from "@kaoruisaac/pedelec";
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
 ```
 
 如果尚未發布到 npm，可以先用本地 path 安裝：
@@ -81,10 +81,20 @@ const pedelec = new Pedelec();
 const session = await pedelec.createSession({
   provider: "codex",
   model: "gpt-5",
-  skillsUrls: [
-    "https://example.com/tools.json",
-    "https://example.com/tools.md",
-  ],
+  skills: {
+    guidance: "需要瀏覽器頁面資訊時使用 get_current_page。",
+    tools: [
+      defineTool({
+        name: "get_current_page",
+        description: "讀取目前瀏覽器頁面的 title 與 URL。",
+        input: {},
+        handler: () => ({
+          url: location.href,
+          title: document.title,
+        }),
+      }),
+    ],
+  },
 });
 
 session.onChat((text) => {
@@ -155,7 +165,16 @@ const session = await pedelec.createSession({
 
 ```ts
 const session = await pedelec.createSession({
-  skillsUrls: ["https://example.com/tools.md"],
+  skills: {
+    guidance: "使用者要求更新 counter 時使用 update_counter。",
+    tools: [
+      defineTool({
+        name: "update_counter",
+        description: "依照 delta 更新畫面上的 counter。",
+        input: { delta: "number" },
+      }),
+    ],
+  },
 });
 ```
 
@@ -286,9 +305,9 @@ session.onStatus((status) => {
 
 Pedelec 的 tool calling 流程是：
 
-1. Web App 在 `skillsUrls` 提供 tool 說明，例如 `tools.md` 與 `tools.json`。
-2. Desktop Runtime 把 skills 放進 agent sandbox。
-3. Agent 需要前端資料或操作時，在本機執行 `pedelec-cli tool-call ...`。
+1. Web App 在 `createSession` 提供 `skills: { guidance, tools }`。
+2. Desktop Runtime 驗證 manifest，並在 sandbox 產生 `skills/tools.md` 與 per-tool spec 檔案。
+3. Agent 需要前端資料或操作時，先讀 `tools.md`，用 `pedelec-cli tool-spec <tool>` 查規格，再執行 `pedelec-cli tool-call ...`。
 4. Desktop Runtime 收到 tool call 後，透過 native host 與 extension 送回 SDK。
 5. SDK 觸發 `session.onTool()`。
 6. Web App 執行對應工具並 return result。
@@ -402,7 +421,7 @@ sequenceDiagram
   participant Desktop as pedelec-app CoreRuntime
   participant Agent as Provider Agent CLI
 
-  App->>SDK: createSession({ provider, model, skillsUrls })
+  App->>SDK: createSession({ provider, model, skills })
   SDK->>BG: chrome.runtime.connect external message
   BG->>BG: verify sender origin approval
   BG->>NH: native messaging create_thread

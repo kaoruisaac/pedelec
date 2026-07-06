@@ -1,9 +1,35 @@
 const HOST_NAME = "cc.isaaclin.pedelec";
 const DEMO_PROVIDER = "codex";
-const DEMO_SKILLS_URLS = [
-  "http://127.0.0.1:8765/tools.json",
-  "http://127.0.0.1:8765/tools.md",
-];
+const DEMO_SKILLS = {
+  guidance:
+    "Use get_app_state when you need the current extension demo state. Use update_counter to change the visible counter.",
+  tools: [
+    {
+      name: "get_app_state",
+      description: "Get the current extension demo state.",
+      argsSchema: {
+        type: "object",
+        properties: {},
+        required: [],
+        additionalProperties: false,
+      },
+      timeoutMs: 60000,
+    },
+    {
+      name: "update_counter",
+      description: "Update the visible counter by delta.",
+      argsSchema: {
+        type: "object",
+        properties: {
+          delta: { type: "number" },
+        },
+        required: ["delta"],
+        additionalProperties: false,
+      },
+      timeoutMs: 3000,
+    },
+  ],
+};
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30000;
 const MAX_EVENTS = 80;
@@ -496,7 +522,7 @@ function createBackground(runtimeChrome, options = {}) {
 
       const result = await sendNativeRequest("create_thread", {
         provider: DEMO_PROVIDER,
-        skillsUrls: DEMO_SKILLS_URLS,
+        skills: DEMO_SKILLS,
       });
       const threadId = result?.threadId;
       if (!threadId) {
@@ -934,7 +960,7 @@ function createBackground(runtimeChrome, options = {}) {
           const result = await sendNativeRequest("create_thread", {
             provider: input.provider,
             model: input.model,
-            skillsUrls: input.skillsUrls || [],
+            skills: input.skills,
           });
           const sessionId = result?.threadId;
           if (!sessionId) {

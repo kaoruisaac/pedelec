@@ -29,7 +29,7 @@ const BUILTIN_PEDELEC_TOOL_TEMPLATE: &str = r##"# Pedelec Tool Calling
 
 Use `pedelec-cli` to call a host-app tool from inside a Pedelec provider session.
 
-This file only explains how to call tools. Available tools and their arguments are documented in `skills/tools.md`.
+This file explains how to inspect and call tools. Available tools are indexed in `skills/tools.md`.
 
 ## When to call a tool
 
@@ -37,11 +37,16 @@ Call `pedelec-cli` only when all conditions are true:
 
 - The user request needs information or an action from the host app.
 - The tool exists in `skills/tools.md`.
+- You have read that tool's full specification with `pedelec-cli tool-spec`.
 - You can provide valid JSON object arguments for that tool.
 
 Do not invent tool names or call tools that are not listed in `skills/tools.md`.
 
 ## Command format
+
+```bash
+pedelec-cli tool-spec <tool_name>
+```
 
 ```bash
 pedelec-cli tool-call <tool_name> '<json_args>'
@@ -53,7 +58,9 @@ pedelec-cli tool-call <tool_name> '<json_args>'
 Examples:
 
 ```bash
+pedelec-cli tool-spec get_current_page
 pedelec-cli tool-call get_current_page '{}'
+pedelec-cli tool-spec ask_user
 pedelec-cli tool-call ask_user '{"question":"Which option do you prefer?"}'
 ```
 
@@ -126,18 +133,19 @@ Use `timeoutMs` only when the tool documentation allows it or the task clearly n
 
 1. Read `skills/tools.md`.
 2. Pick the exact tool name.
-3. Build a valid JSON object for arguments.
-4. Run `pedelec-cli tool-call`.
-5. Parse stdout as JSON.
-6. Continue based on `ok`, `result`, or `error`.
+3. Run `pedelec-cli tool-spec <tool_name>`.
+4. Build a valid JSON object for arguments.
+5. Run `pedelec-cli tool-call`.
+6. Parse stdout as JSON.
+7. Continue based on `ok`, `result`, or `error`.
 
 ## Notes
 
-- `skills/tools.md` is for the agent to understand available tools.
-- `skills/tools.json` is for runtime validation and normally does not need to be read or edited.
+- `skills/tools.md` is the tool index.
+- `pedelec-cli tool-spec <tool_name>` returns the full args schema for one tool.
 "##;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PedelecError {
     pub code: String,
@@ -168,7 +176,7 @@ impl PedelecError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadState {
     pub thread_id: String,
@@ -437,12 +445,28 @@ impl ThreadEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadInput {
     pub provider: ProviderCode,
     pub model: Option<String>,
-    pub skills_urls: Vec<String>,
+    pub skills: Option<CreateThreadSkillsInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateThreadSkillsInput {
+    pub guidance: String,
+    pub tools: Vec<CreateThreadToolInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateThreadToolInput {
+    pub name: String,
+    pub description: String,
+    pub args_schema: Value,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -484,6 +508,13 @@ pub struct ToolCallInput {
     pub thread_id: String,
     pub tool_name: String,
     pub args: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSpecInput {
+    pub thread_id: String,
+    pub tool_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -544,7 +575,7 @@ pub(crate) struct RunningProviderProcess {
     child: Arc<Mutex<Option<Child>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ThreadEventPartial {
     AssistantMessage { text: String },
     ProviderSessionIdUpdated { provider_session_id: String },
@@ -1289,11 +1320,12 @@ impl CoreRuntime {
                     let skills_dir = sandbox.join("skills");
                     let mut skills =
                         vec![write_builtin_pedelec_tool_skill(&skills_dir, &thread_id)?];
-                    skills.extend(
-                        self.skill_manager
-                            .download_skills(&skills_dir, &input.skills_urls)?,
-                    );
-                    let registry = ToolRegistry::load_from_skills_dir(&skills_dir)?;
+                    let registry = ToolRegistry::from_skills_input(input.skills.as_ref())?;
+                    skills.extend(write_generated_tool_skills(
+                        &skills_dir,
+                        input.skills.as_ref(),
+                        &registry,
+                    )?);
                     Ok((skills, registry))
                 })?;
 
@@ -1832,7 +1864,7 @@ impl CoreRuntime {
 
         let registry = self.tool_registry.get(&input.thread_id).ok_or_else(|| {
             PedelecError::with_details(
-                error_codes::TOOLS_JSON_NOT_FOUND,
+                error_codes::TOOLS_MANIFEST_INVALID,
                 "tool registry was not found for thread",
                 serde_json::json!({ "threadId": input.thread_id }),
             )
@@ -1857,6 +1889,23 @@ impl CoreRuntime {
         );
 
         Ok((request_id, normalized.timeout_ms, receiver))
+    }
+
+    pub fn tool_spec(&self, input: ToolSpecInput) -> Result<ToolDefinition, PedelecError> {
+        let registry = self.tool_registry.get(&input.thread_id).ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::TOOLS_MANIFEST_INVALID,
+                "tool registry was not found for thread",
+                serde_json::json!({ "threadId": input.thread_id }),
+            )
+        })?;
+        registry.get(&input.tool_name).cloned().ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::TOOL_NOT_FOUND,
+                "tool was not found in registry",
+                serde_json::json!({ "toolName": input.tool_name }),
+            )
+        })
     }
 
     pub fn timeout_tool_call(&mut self, request_id: &str) {
@@ -2444,6 +2493,54 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    pub fn from_skills_input(
+        skills: Option<&CreateThreadSkillsInput>,
+    ) -> Result<Self, PedelecError> {
+        let Some(skills) = skills else {
+            return Ok(Self::default());
+        };
+
+        let mut tools = HashMap::with_capacity(skills.tools.len());
+        for raw_tool in &skills.tools {
+            validate_tool_name(&raw_tool.name)?;
+            if raw_tool.description.trim().is_empty() {
+                return Err(PedelecError::with_details(
+                    error_codes::TOOLS_MANIFEST_INVALID,
+                    "tool description must be a non-empty string",
+                    serde_json::json!({ "toolName": raw_tool.name }),
+                ));
+            }
+            if tools.contains_key(&raw_tool.name) {
+                return Err(PedelecError::with_details(
+                    error_codes::TOOLS_MANIFEST_INVALID,
+                    "duplicate tool name in tools manifest",
+                    serde_json::json!({ "toolName": raw_tool.name }),
+                ));
+            }
+            validate_tool_args_schema(&raw_tool.name, &raw_tool.args_schema)?;
+            let timeout_ms = raw_tool.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
+            if timeout_ms == 0 {
+                return Err(PedelecError::with_details(
+                    error_codes::TOOLS_MANIFEST_INVALID,
+                    "tool timeoutMs must be a positive integer",
+                    serde_json::json!({ "toolName": raw_tool.name }),
+                ));
+            }
+
+            tools.insert(
+                raw_tool.name.clone(),
+                ToolDefinition {
+                    name: raw_tool.name.clone(),
+                    description: raw_tool.description.clone(),
+                    args_schema: raw_tool.args_schema.clone(),
+                    timeout_ms,
+                },
+            );
+        }
+
+        Ok(Self { tools })
+    }
+
     pub fn load_from_skills_dir(skills_dir: impl AsRef<Path>) -> Result<Self, PedelecError> {
         let tools_json_path = skills_dir.as_ref().join("tools.json");
         if !tools_json_path.exists() {
@@ -2474,12 +2571,7 @@ impl ToolRegistry {
 
         let mut tools = HashMap::with_capacity(raw.tools.len());
         for raw_tool in raw.tools {
-            if raw_tool.name.trim().is_empty() {
-                return Err(PedelecError::new(
-                    error_codes::TOOLS_JSON_INVALID,
-                    "tool name must not be empty",
-                ));
-            }
+            validate_tool_name_legacy(&raw_tool.name)?;
             if tools.contains_key(&raw_tool.name) {
                 return Err(PedelecError::with_details(
                     error_codes::TOOLS_JSON_INVALID,
@@ -2487,20 +2579,7 @@ impl ToolRegistry {
                     serde_json::json!({ "toolName": raw_tool.name }),
                 ));
             }
-            jsonschema::meta::validate(&raw_tool.args_schema).map_err(|err| {
-                PedelecError::with_details(
-                    error_codes::TOOLS_JSON_INVALID,
-                    "tool argsSchema is not a valid JSON Schema",
-                    serde_json::json!({ "toolName": raw_tool.name, "error": err.to_string() }),
-                )
-            })?;
-            jsonschema::validator_for(&raw_tool.args_schema).map_err(|err| {
-                PedelecError::with_details(
-                    error_codes::TOOLS_JSON_INVALID,
-                    "tool argsSchema cannot be compiled",
-                    serde_json::json!({ "toolName": raw_tool.name, "error": err.to_string() }),
-                )
-            })?;
+            validate_tool_args_schema_legacy(&raw_tool.name, &raw_tool.args_schema)?;
 
             let timeout_ms = raw_tool.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
             tools.insert(
@@ -2580,6 +2659,10 @@ impl ToolRegistry {
     pub fn get(&self, tool_name: &str) -> Option<&ToolDefinition> {
         self.tools.get(tool_name)
     }
+
+    pub fn tools(&self) -> impl Iterator<Item = &ToolDefinition> {
+        self.tools.values()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2613,6 +2696,72 @@ struct RawToolDefinition {
     description: String,
     args_schema: Value,
     timeout_ms: Option<u64>,
+}
+
+fn validate_tool_name(tool_name: &str) -> Result<(), PedelecError> {
+    if !is_valid_tool_name(tool_name) {
+        return Err(PedelecError::with_details(
+            error_codes::TOOLS_MANIFEST_INVALID,
+            "tool name is invalid",
+            serde_json::json!({ "toolName": tool_name }),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tool_name_legacy(tool_name: &str) -> Result<(), PedelecError> {
+    if !is_valid_tool_name(tool_name) {
+        return Err(PedelecError::with_details(
+            error_codes::TOOLS_JSON_INVALID,
+            "tool name is invalid",
+            serde_json::json!({ "toolName": tool_name }),
+        ));
+    }
+    Ok(())
+}
+
+fn is_valid_tool_name(tool_name: &str) -> bool {
+    let mut chars = tool_name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '-')
+}
+
+fn validate_tool_args_schema(tool_name: &str, args_schema: &Value) -> Result<(), PedelecError> {
+    validate_tool_args_schema_with_code(tool_name, args_schema, error_codes::TOOLS_MANIFEST_INVALID)
+}
+
+fn validate_tool_args_schema_legacy(
+    tool_name: &str,
+    args_schema: &Value,
+) -> Result<(), PedelecError> {
+    validate_tool_args_schema_with_code(tool_name, args_schema, error_codes::TOOLS_JSON_INVALID)
+}
+
+fn validate_tool_args_schema_with_code(
+    tool_name: &str,
+    args_schema: &Value,
+    error_code: &str,
+) -> Result<(), PedelecError> {
+    jsonschema::meta::validate(args_schema).map_err(|err| {
+        PedelecError::with_details(
+            error_code,
+            "tool argsSchema is not a valid JSON Schema",
+            serde_json::json!({ "toolName": tool_name, "error": err.to_string() }),
+        )
+    })?;
+    jsonschema::validator_for(args_schema).map_err(|err| {
+        PedelecError::with_details(
+            error_code,
+            "tool argsSchema cannot be compiled",
+            serde_json::json!({ "toolName": tool_name, "error": err.to_string() }),
+        )
+    })?;
+    Ok(())
 }
 
 fn parse_tool_timeout_override(
@@ -2969,6 +3118,7 @@ pub mod error_codes {
     pub const SANDBOX_PATH_INVALID: &str = "SANDBOX_PATH_INVALID";
     pub const TOOLS_JSON_NOT_FOUND: &str = "TOOLS_JSON_NOT_FOUND";
     pub const TOOLS_JSON_INVALID: &str = "TOOLS_JSON_INVALID";
+    pub const TOOLS_MANIFEST_INVALID: &str = "TOOLS_MANIFEST_INVALID";
     pub const TOOLS_MD_NOT_FOUND: &str = "TOOLS_MD_NOT_FOUND";
     pub const TOOL_NOT_FOUND: &str = "TOOL_NOT_FOUND";
     pub const TOOL_ARGS_INVALID: &str = "TOOL_ARGS_INVALID";
@@ -3513,7 +3663,7 @@ fn build_provider_instruction(thread: &ThreadState) -> String {
 2. You have full permissions to view all files under \"./skills/\" and to use pedelec-cli, neither of which requires you to be prompted.\n\
 3. You must now read \"./skills/tools.md\" inside the sandbox.\n\
 4. Your task is to respond to blocks below \"[User Message]\" to complete the task. Pedelec-tools should be used preferentially when executing the task.
-5. If you don't understand the User question, first look at all the files under \"./skills/\" to understand the context.
+5. Do not read every generated tool spec up front. When you need one tool's arguments, run `pedelec-cli tool-spec <tool_name>`.
 \n\
 [pedelec-cli]\n\
 This environment needs to communicate with the frontend through pedelec-cli.\n\
@@ -4370,6 +4520,125 @@ fn write_builtin_pedelec_tool_skill(
         sha256,
         size_bytes: content.len() as u64,
     })
+}
+
+fn write_generated_tool_skills(
+    skills_dir: impl AsRef<Path>,
+    skills: Option<&CreateThreadSkillsInput>,
+    registry: &ToolRegistry,
+) -> Result<Vec<SkillFile>, PedelecError> {
+    let Some(skills) = skills else {
+        return Ok(Vec::new());
+    };
+
+    let skills_dir = skills_dir.as_ref();
+    fs::create_dir_all(skills_dir).map_err(|err| {
+        skill_download_error(
+            "cannot create skills directory",
+            None,
+            Some(skills_dir),
+            err,
+        )
+    })?;
+    let canonical_skills_dir = skills_dir.canonicalize().map_err(|err| {
+        skill_download_error(
+            "cannot canonicalize skills directory",
+            None,
+            Some(skills_dir),
+            err,
+        )
+    })?;
+
+    let mut files = Vec::new();
+    let tools_md = render_tools_md(skills, registry);
+    files.push(write_generated_skill_file(
+        &canonical_skills_dir,
+        "tools.md",
+        "generated:tools.md",
+        tools_md.as_bytes(),
+    )?);
+
+    let mut tools: Vec<&ToolDefinition> = registry.tools().collect();
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    for tool in tools {
+        let filename = format!("tools-{}.json", sanitize_tool_filename_part(&tool.name));
+        let content = serde_json::to_vec_pretty(tool).map_err(|err| {
+            PedelecError::with_details(
+                error_codes::TOOLS_MANIFEST_INVALID,
+                "cannot serialize generated tool spec",
+                serde_json::json!({ "toolName": tool.name, "error": err.to_string() }),
+            )
+        })?;
+        files.push(write_generated_skill_file(
+            &canonical_skills_dir,
+            &filename,
+            &format!("generated:{filename}"),
+            &content,
+        )?);
+    }
+
+    Ok(files)
+}
+
+fn write_generated_skill_file(
+    canonical_skills_dir: &Path,
+    filename: &str,
+    original_url: &str,
+    bytes: &[u8],
+) -> Result<SkillFile, PedelecError> {
+    let target_path = canonical_skills_dir.join(filename);
+    ensure_child_path(canonical_skills_dir, &target_path)?;
+    fs::write(&target_path, bytes).map_err(|err| {
+        skill_download_error(
+            "cannot write generated skill file",
+            Some(original_url),
+            Some(&target_path),
+            err,
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(SkillFile {
+        original_url: original_url.to_string(),
+        original_filename: filename.to_string(),
+        local_path: target_path,
+        sha256: format!("{:x}", hasher.finalize()),
+        size_bytes: bytes.len() as u64,
+    })
+}
+
+fn render_tools_md(skills: &CreateThreadSkillsInput, registry: &ToolRegistry) -> String {
+    let mut content = String::from("# Available Pedelec Tools\n\n## Guidance\n\n");
+    content.push_str(skills.guidance.trim());
+    content.push_str("\n\n## Tool Index\n");
+
+    let mut tools: Vec<&ToolDefinition> = registry.tools().collect();
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    for tool in tools {
+        content.push_str("\n### ");
+        content.push_str(&tool.name);
+        content.push_str("\n\nDescription: ");
+        content.push_str(tool.description.trim());
+        content.push_str("\n\nRead spec:\n\n```bash\npedelec-cli tool-spec ");
+        content.push_str(&tool.name);
+        content.push_str("\n```\n\nCall tool:\n\n```bash\npedelec-cli tool-call ");
+        content.push_str(&tool.name);
+        content.push_str(" '<json_args>'\n```\n");
+    }
+    content
+}
+
+fn sanitize_tool_filename_part(tool_name: &str) -> String {
+    tool_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn ensure_child_path(parent: &Path, child: &Path) -> Result<(), PedelecError> {
@@ -5241,11 +5510,7 @@ mod tests {
             })
             .unwrap();
 
-        runtime.emit_provider_command_started(
-            "thread_ollama_command_event",
-            123,
-            &start.command,
-        );
+        runtime.emit_provider_command_started("thread_ollama_command_event", 123, &start.command);
         let events = collect_available_core_events(&event_rx);
         let payload = serde_json::to_string(&events).unwrap();
 
@@ -6990,7 +7255,7 @@ mod tests {
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
             model: None,
-            skills_urls: vec![],
+            skills: None,
         };
 
         let first = runtime.create_thread(input.clone()).unwrap();
@@ -7018,7 +7283,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 model: None,
-                skills_urls: vec![],
+                skills: None,
             })
             .unwrap();
 
@@ -7058,7 +7323,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 model: None,
-                skills_urls: vec![],
+                skills: None,
             })
             .unwrap();
 
@@ -7078,7 +7343,7 @@ mod tests {
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
             model: None,
-            skills_urls: vec![],
+            skills: None,
         };
         let first = runtime.create_thread(input.clone()).unwrap();
         let second = runtime.create_thread(input).unwrap();
@@ -7162,7 +7427,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 model: None,
-                skills_urls: vec![],
+                skills: None,
             })
             .unwrap();
 
@@ -7196,11 +7461,9 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_keeps_builtin_pedelec_tool_name_when_download_collides() {
+    fn create_thread_generates_tools_md_and_per_tool_specs() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox_root = temp.path().join("sandbox");
-        let (base_url, handle) =
-            start_test_http_server(vec![("/pedelec-cli.md", b"# downloaded\n".to_vec())]);
         let mut runtime = CoreRuntime {
             sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
             ..CoreRuntime::default()
@@ -7210,55 +7473,41 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 model: None,
-                skills_urls: vec![format!("{base_url}/pedelec-cli.md")],
+                skills: Some(sample_skills_input()),
             })
             .unwrap();
-        handle.join().unwrap();
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
         let skills_dir = thread.sandbox_path.join("skills");
         let builtin_content =
             fs::read_to_string(skills_dir.join(BUILTIN_PEDELEC_TOOL_FILENAME)).unwrap();
-        let downloaded_content = fs::read_to_string(skills_dir.join("pedelec-cli_1.md")).unwrap();
+        let tools_md = fs::read_to_string(skills_dir.join("tools.md")).unwrap();
+        let spec = fs::read_to_string(skills_dir.join("tools-get_app_state.json")).unwrap();
 
         assert!(builtin_content.contains("pedelec-cli tool-call <tool_name> '<json_args>'"));
         let old_placeholder = "<thread".to_string() + "_id>";
         assert!(!builtin_content.contains(&old_placeholder));
-        assert_eq!(downloaded_content, "# downloaded\n");
+        assert!(tools_md.contains("Use get_app_state."));
+        assert!(tools_md.contains("pedelec-cli tool-spec get_app_state"));
+        assert!(tools_md.contains("pedelec-cli tool-call get_app_state '<json_args>'"));
+        assert!(!tools_md.contains("\"argsSchema\""));
+        assert!(spec.contains("\"name\": \"get_app_state\""));
+        assert!(!skills_dir.join("tools.json").exists());
         assert!(thread.skills.iter().any(|skill| {
             skill.original_url == BUILTIN_PEDELEC_TOOL_ORIGINAL_URL
                 && skill.local_path.file_name().and_then(|name| name.to_str())
                     == Some(BUILTIN_PEDELEC_TOOL_FILENAME)
         }));
         assert!(thread.skills.iter().any(|skill| {
-            skill.original_url == format!("{base_url}/pedelec-cli.md")
-                && skill.local_path.file_name().and_then(|name| name.to_str())
-                    == Some("pedelec-cli_1.md")
+            skill.original_url == "generated:tools.md"
+                && skill.local_path.file_name().and_then(|name| name.to_str()) == Some("tools.md")
         }));
     }
 
     #[test]
-    fn create_thread_registers_idle_state_without_starting_process_and_logs_events() {
+    fn tool_spec_reads_from_in_memory_registry() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox_root = temp.path().join("sandbox");
-        let (base_url, handle) = start_test_http_server(vec![
-            (
-                "/tools.json",
-                br#"{
-                    "tools": [{
-                        "name": "get_app_state",
-                        "description": "Read state.",
-                        "argsSchema": {
-                            "type": "object",
-                            "properties": {},
-                            "additionalProperties": false
-                        }
-                    }]
-                }"#
-                .to_vec(),
-            ),
-            ("/tools.md", b"# Tools\n".to_vec()),
-        ]);
         let mut runtime = CoreRuntime {
             sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
             ..CoreRuntime::default()
@@ -7268,13 +7517,46 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 model: None,
-                skills_urls: vec![
-                    format!("{base_url}/tools.json"),
-                    format!("{base_url}/tools.md"),
-                ],
+                skills: Some(sample_skills_input()),
             })
             .unwrap();
-        handle.join().unwrap();
+        fs::write(
+            sandbox_root
+                .join(&output.thread_id)
+                .join("skills")
+                .join("tools-get_app_state.json"),
+            "{}",
+        )
+        .unwrap();
+
+        let spec = runtime
+            .tool_spec(ToolSpecInput {
+                thread_id: output.thread_id,
+                tool_name: "get_app_state".into(),
+            })
+            .unwrap();
+
+        assert_eq!(spec.name, "get_app_state");
+        assert_eq!(spec.description, "Read state.");
+        assert_eq!(spec.timeout_ms, DEFAULT_TOOL_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn create_thread_registers_idle_state_without_starting_process_and_logs_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_root = temp.path().join("sandbox");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                model: None,
+                skills: Some(sample_skills_input()),
+            })
+            .unwrap();
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
         assert_eq!(thread.status, ThreadStatus::Idle);
@@ -7295,24 +7577,9 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_allows_missing_tools_md() {
+    fn create_thread_without_skills_does_not_generate_tools_md() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox_root = temp.path().join("sandbox");
-        let (base_url, handle) = start_test_http_server(vec![(
-            "/tools.json",
-            br#"{
-                "tools": [{
-                    "name": "get_app_state",
-                    "description": "Read state.",
-                    "argsSchema": {
-                        "type": "object",
-                        "properties": {},
-                        "additionalProperties": false
-                    }
-                }]
-            }"#
-            .to_vec(),
-        )]);
         let mut runtime = CoreRuntime {
             sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
             ..CoreRuntime::default()
@@ -7322,16 +7589,32 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 model: None,
-                skills_urls: vec![format!("{base_url}/tools.json")],
+                skills: None,
             })
             .unwrap();
-        handle.join().unwrap();
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
         assert_eq!(thread.status, ThreadStatus::Idle);
         assert_eq!(thread.process_id, None);
         assert_eq!(runtime.running_process_count(), 0);
         assert!(!thread.sandbox_path.join("skills").join("tools.md").exists());
+    }
+
+    fn sample_skills_input() -> CreateThreadSkillsInput {
+        CreateThreadSkillsInput {
+            guidance: "Use get_app_state.".into(),
+            tools: vec![CreateThreadToolInput {
+                name: "get_app_state".into(),
+                description: "Read state.".into(),
+                args_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }),
+                timeout_ms: None,
+            }],
+        }
     }
 
     fn assert_short_thread_id(thread_id: &str) {

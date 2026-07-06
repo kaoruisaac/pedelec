@@ -28,6 +28,21 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "pedelec_cli.tool_spec",
+                "description": "Read one Pedelec host app tool specification through pedelec-cli.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "toolName": { "type": "string" }
+                    },
+                    "required": ["toolName"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "fs.read_text_file",
                 "description": "Read one UTF-8 text file inside the sandbox.",
                 "parameters": {
@@ -84,6 +99,7 @@ pub fn execute_tool(
             let (text, truncated) = sandbox.read_text_file(path)?;
             Ok(serde_json::json!({ "path": path, "text": text, "truncated": truncated }))
         }
+        "pedelec_cli.tool_spec" => pedelec_cli_tool_spec(args, config),
         "pedelec_cli.tool_call" => pedelec_cli_tool_call(args, config),
         _ => Err(AgentError::with_details(
             "INVALID_ARGUMENT",
@@ -91,6 +107,28 @@ pub fn execute_tool(
             serde_json::json!({ "tool": tool }),
         )),
     }
+}
+
+fn pedelec_cli_tool_spec(args: &Value, config: &AgentConfig) -> Result<Value, AgentError> {
+    let tool_name = args
+        .get("toolName")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            AgentError::new("INVALID_ARGUMENT", "toolName must be a non-empty string")
+        })?;
+    let cli_path = resolve_pedelec_cli(config)?;
+    let mut command = Command::new(cli_path);
+    command
+        .arg("tool-spec")
+        .arg(tool_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(runtime_file) = &config.core_runtime_file {
+        command.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
+    }
+    run_pedelec_cli_command(command, config)
 }
 
 fn pedelec_cli_tool_call(args: &Value, config: &AgentConfig) -> Result<Value, AgentError> {
@@ -124,6 +162,10 @@ fn pedelec_cli_tool_call(args: &Value, config: &AgentConfig) -> Result<Value, Ag
     if let Some(runtime_file) = &config.core_runtime_file {
         command.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
     }
+    run_pedelec_cli_command(command, config)
+}
+
+fn run_pedelec_cli_command(command: Command, config: &AgentConfig) -> Result<Value, AgentError> {
     let output =
         run_command_with_timeout(command, config.pedelec_cli_timeout_ms).map_err(|err| {
             AgentError::with_details(

@@ -26,7 +26,8 @@ struct NativeHostManifest {
     allowed_origins: Vec<String>,
 }
 
-pub fn register_chrome_native_messaging_host() -> Result<NativeMessagingRegistration, PedelecError> {
+pub fn register_chrome_native_messaging_host() -> Result<NativeMessagingRegistration, PedelecError>
+{
     let native_host_path = pedelec_native_host_install_path()?;
     let manifest_path = chrome_native_host_manifest_path()?;
 
@@ -137,7 +138,9 @@ fn write_native_host_manifest(
 
 #[cfg(target_os = "windows")]
 fn chrome_native_host_manifest_path() -> Result<PathBuf, PedelecError> {
-    Ok(windows_chrome_native_host_manifest_path(&pedelec_home_dir()?))
+    Ok(windows_chrome_native_host_manifest_path(
+        &pedelec_home_dir()?
+    ))
 }
 
 #[cfg(target_os = "macos")]

@@ -1,6 +1,7 @@
 use crate::pedelec_core::{
     error_codes, CreateThreadInput, EndThreadInput, PedelecError, SendTextInput, SharedCoreRuntime,
-    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, UpdateSettingsInput,
+    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolSpecInput,
+    UpdateSettingsInput,
 };
 use encoding_rs::Encoding;
 use serde::{Deserialize, Serialize};
@@ -398,6 +399,13 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
             Err(err) => error_response(&request.request_id, err),
         },
         "tool_call" => handle_tool_call_request(&request, runtime),
+        "tool_spec" => match decode_payload::<ToolSpecInput>(&request) {
+            Ok(input) => match runtime.lock().unwrap().tool_spec(input) {
+                Ok(spec) => ok_response(&request.request_id, serde_json::json!(spec)),
+                Err(err) => error_response(&request.request_id, err),
+            },
+            Err(err) => error_response(&request.request_id, err),
+        },
         _ => error_response(
             &request.request_id,
             PedelecError::with_details(
@@ -1082,14 +1090,13 @@ mod tests {
     use super::*;
     use crate::pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
     use crate::pedelec_core::{
-        CommandSpec, CoreRuntime, CreateThreadOutput, OllamaProviderSettings, PedelecSettings,
-        ProviderAdapterState, ProviderCode, ProviderSettings, SandboxManager, ThreadState,
-        ThreadStatus, ToolRegistry,
+        CommandSpec, CoreRuntime, CreateThreadOutput, CreateThreadSkillsInput,
+        CreateThreadToolInput, OllamaProviderSettings, PedelecSettings, ProviderAdapterState,
+        ProviderCode, ProviderSettings, SandboxManager, ThreadState, ThreadStatus, ToolRegistry,
     };
     use serde_json::json;
     use std::collections::HashMap;
     use std::env;
-    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1544,27 +1551,18 @@ mod tests {
             ..CoreRuntime::default()
         }));
         start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
-        let (base_url, handle) = start_test_http_server(vec![
-            ("/tools.json", phase09_tools_json().as_bytes().to_vec()),
-            ("/tools.md", phase09_tools_md().as_bytes().to_vec()),
-        ]);
-
         let create = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
                 request_id: "phase09_create".into(),
                 r#type: "create_thread".into(),
                 payload: Some(json!({
                     "provider": "codex",
-                    "skillsUrls": [
-                        format!("{base_url}/tools.json"),
-                        format!("{base_url}/tools.md")
-                    ]
+                    "skills": phase09_skills_manifest()
                 })),
             },
             &runtime_path,
         )
         .unwrap();
-        handle.join().unwrap();
         assert!(create.ok);
         let output: CreateThreadOutput = serde_json::from_value(create.result.unwrap()).unwrap();
         assert_eq!(create.request_id, "phase09_create");
@@ -1775,14 +1773,9 @@ mod tests {
 
     #[test]
     fn phase09_demo_tools_fixture_matches_registry_contract() {
-        let tools_json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("extension")
-            .join("demo-skills")
-            .join("tools.json");
-        let tools_json = std::fs::read_to_string(tools_json_path).unwrap();
-        let registry = ToolRegistry::from_tools_json_str(&tools_json).unwrap();
+        let skills: CreateThreadSkillsInput =
+            serde_json::from_value(phase09_skills_manifest()).unwrap();
+        let registry = ToolRegistry::from_skills_input(Some(&skills)).unwrap();
 
         assert!(registry
             .validate_tool_call("get_app_state", &json!({}))
@@ -2025,10 +2018,21 @@ mod tests {
         let result = runtime.create_thread(CreateThreadInput {
             provider: ProviderCode::Codex,
             model: None,
-            skills_urls: vec!["http://example.com/tools.md".into()],
+            skills: Some(CreateThreadSkillsInput {
+                guidance: "bad".into(),
+                tools: vec![CreateThreadToolInput {
+                    name: "bad/name".into(),
+                    description: "Bad.".into(),
+                    args_schema: json!({ "type": "object" }),
+                    timeout_ms: None,
+                }],
+            }),
         });
 
-        assert_eq!(result.unwrap_err().code, error_codes::SKILL_URL_INVALID);
+        assert_eq!(
+            result.unwrap_err().code,
+            error_codes::TOOLS_MANIFEST_INVALID
+        );
         let entries = std::fs::read_dir(&sandbox_root)
             .map(|entries| entries.count())
             .unwrap_or(0);
@@ -2523,62 +2527,11 @@ exit 0
         }"#
     }
 
-    fn phase09_tools_md() -> &'static str {
-        r#"# Available App Tools
-
-## get_app_state
-
-```bash
-pedelec-cli tool-call get_app_state '{}'
-```
-
-## update_counter
-
-```bash
-pedelec-cli tool-call update_counter '{"delta":1}'
-```
-"#
-    }
-
-    fn start_test_http_server(
-        routes: Vec<(&'static str, Vec<u8>)>,
-    ) -> (String, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let expected_requests = routes.len();
-        let routes: HashMap<String, Vec<u8>> = routes
-            .into_iter()
-            .map(|(path, body)| (path.to_string(), body))
-            .collect();
-
-        let handle = thread::spawn(move || {
-            for _ in 0..expected_requests {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut buffer = [0; 2048];
-                let bytes_read = stream.read(&mut buffer).unwrap();
-                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
-                let path = request
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap_or("/");
-
-                if let Some(body) = routes.get(path) {
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .unwrap();
-                    stream.write_all(body).unwrap();
-                } else {
-                    stream
-                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-                        .unwrap();
-                }
-            }
-        });
-
-        (format!("http://{address}"), handle)
+    fn phase09_skills_manifest() -> Value {
+        let registry: Value = serde_json::from_str(phase09_tools_json()).unwrap();
+        json!({
+            "guidance": "Use get_app_state to read app state. Use update_counter to update the counter.",
+            "tools": registry["tools"].clone()
+        })
     }
 }

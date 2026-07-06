@@ -60,7 +60,7 @@ npm run build
 Import it from the Web App:
 
 ```ts
-import { Pedelec } from "@kaoruisaac/pedelec";
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
 ```
 
 If it has not been published to npm yet, install it from a local path first:
@@ -81,10 +81,20 @@ const pedelec = new Pedelec();
 const session = await pedelec.createSession({
   provider: "codex",
   model: "gpt-5",
-  skillsUrls: [
-    "https://example.com/tools.json",
-    "https://example.com/tools.md",
-  ],
+  skills: {
+    guidance: "Use get_current_page when you need browser page context.",
+    tools: [
+      defineTool({
+        name: "get_current_page",
+        description: "Read the current browser page title and URL.",
+        input: {},
+        handler: () => ({
+          url: location.href,
+          title: document.title,
+        }),
+      }),
+    ],
+  },
 });
 
 session.onChat((text) => {
@@ -155,7 +165,16 @@ If the Desktop App has a default provider configured, you can omit `provider`:
 
 ```ts
 const session = await pedelec.createSession({
-  skillsUrls: ["https://example.com/tools.md"],
+  skills: {
+    guidance: "Use update_counter when the user asks to change the counter.",
+    tools: [
+      defineTool({
+        name: "update_counter",
+        description: "Update the visible counter by delta.",
+        input: { delta: "number" },
+      }),
+    ],
+  },
 });
 ```
 
@@ -286,9 +305,9 @@ Common statuses:
 
 Pedelec's tool calling flow is:
 
-1. The Web App provides tool instructions in `skillsUrls`, such as `tools.md` and `tools.json`.
-2. The Desktop Runtime places the skills into the agent sandbox.
-3. When the agent needs frontend data or an action, it executes `pedelec-cli tool-call ...` locally.
+1. The Web App provides `skills: { guidance, tools }` when creating a session.
+2. The Desktop Runtime validates the manifest and generates `skills/tools.md` plus per-tool spec files in the sandbox.
+3. When the agent needs frontend data or an action, it reads `tools.md`, uses `pedelec-cli tool-spec <tool>`, then executes `pedelec-cli tool-call ...` locally.
 4. After the Desktop Runtime receives the tool call, it sends it back to the SDK through the native host and extension.
 5. The SDK triggers `session.onTool()`.
 6. The Web App executes the corresponding tool and returns the result.
@@ -402,7 +421,7 @@ sequenceDiagram
   participant Desktop as pedelec-app CoreRuntime
   participant Agent as Provider Agent CLI
 
-  App->>SDK: createSession({ provider, model, skillsUrls })
+  App->>SDK: createSession({ provider, model, skills })
   SDK->>BG: chrome.runtime.connect external message
   BG->>BG: verify sender origin approval
   BG->>NH: native messaging create_thread

@@ -9,17 +9,49 @@ export type PedelecOptions = {
 
 export type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama";
 
+type JsonSchema = Record<string, unknown>;
+type ToolInputPrimitive = "string" | "number" | "boolean" | "integer" | "object" | "array";
+export type ToolInputSchema<TArgs = unknown> = Record<string, ToolInputPrimitive> | JsonSchema;
+export type ToolSpecificHandler<TArgs = unknown, TResult = unknown> = (
+  args: TArgs
+) => TResult | Promise<TResult>;
+
+export type ToolInput<TArgs = unknown, TResult = unknown> = {
+  name: string;
+  description: string;
+  input: ToolInputSchema<TArgs>;
+  timeoutMs?: number;
+  handler?: ToolSpecificHandler<TArgs, TResult>;
+};
+
+export type SkillsInput = {
+  guidance: string;
+  tools: ToolInput[];
+};
+
+export type SerializableToolManifest = {
+  name: string;
+  description: string;
+  argsSchema: JsonSchema;
+  timeoutMs?: number;
+};
+
+export type SerializableSkillsManifest = {
+  guidance: string;
+  tools: SerializableToolManifest[];
+};
+
 type CreateSessionInputWithProvider = {
   provider: ProviderCode;
   model?: string;
-  skillsUrls?: string[];
+  skills?: SkillsInput;
   autoEndOnDisconnect?: boolean;
 };
 
 type CreateSessionInputWithDefaults = {
   provider?: undefined;
   model?: never;
-  skillsUrls?: string[];
+  skills?: SkillsInput;
   autoEndOnDisconnect?: boolean;
 };
 
@@ -142,10 +174,151 @@ type PendingSend = {
 };
 
 type ChatHandler = (text: string) => void;
-type ToolHandler = (tool: string, args: unknown) => unknown | Promise<unknown>;
+type GenericToolHandler = (tool: string, args: unknown) => unknown | Promise<unknown>;
 type ErrorHandler = (error: PedelecError) => void;
 type StatusHandler = (status: PedelecSessionStatus) => void;
 type EndedHandler = () => void;
+
+const TOOL_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_.-]*$/;
+
+export function defineTool<TArgs = unknown, TResult = unknown>(
+  tool: ToolInput<TArgs, TResult>
+): ToolInput<TArgs, TResult> {
+  return tool;
+}
+
+type NormalizedSkillsInput = {
+  manifest?: SerializableSkillsManifest;
+  handlers: Map<string, ToolSpecificHandler>;
+};
+
+function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
+  const handlers = new Map<string, ToolSpecificHandler>();
+  if (value === undefined) return { handlers };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw makeError("INVALID_INPUT", "skills must be an object");
+  }
+
+  const skills = value as Partial<SkillsInput>;
+  if (typeof skills.guidance !== "string") {
+    throw makeError("INVALID_INPUT", "skills.guidance must be a string");
+  }
+  if (!Array.isArray(skills.tools)) {
+    throw makeError("INVALID_INPUT", "skills.tools must be an array");
+  }
+
+  const seen = new Set<string>();
+  const tools = skills.tools.map((tool, index) => {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+      throw makeError("INVALID_INPUT", "skills.tools entries must be objects", { index });
+    }
+    const rawTool = tool as Partial<ToolInput>;
+    if (typeof rawTool.name !== "string" || !TOOL_NAME_PATTERN.test(rawTool.name)) {
+      throw makeError("INVALID_INPUT", "tool name is invalid", { index, toolName: rawTool.name });
+    }
+    if (seen.has(rawTool.name)) {
+      throw makeError("INVALID_INPUT", "duplicate tool name", { toolName: rawTool.name });
+    }
+    seen.add(rawTool.name);
+    if (typeof rawTool.description !== "string" || rawTool.description.trim().length === 0) {
+      throw makeError("INVALID_INPUT", "tool description must be a non-empty string", {
+        toolName: rawTool.name,
+      });
+    }
+    if (
+      rawTool.timeoutMs !== undefined &&
+      (!Number.isInteger(rawTool.timeoutMs) || rawTool.timeoutMs <= 0)
+    ) {
+      throw makeError("INVALID_INPUT", "tool timeoutMs must be a positive integer", {
+        toolName: rawTool.name,
+      });
+    }
+    if (rawTool.handler !== undefined && typeof rawTool.handler !== "function") {
+      throw makeError("INVALID_INPUT", "tool handler must be a function", { toolName: rawTool.name });
+    }
+
+    const argsSchema = normalizeToolInputSchema(rawTool.input, rawTool.name);
+    if (rawTool.handler) handlers.set(rawTool.name, rawTool.handler);
+    return {
+      name: rawTool.name,
+      description: rawTool.description,
+      argsSchema,
+      ...(rawTool.timeoutMs === undefined ? {} : { timeoutMs: rawTool.timeoutMs }),
+    };
+  });
+
+  return {
+    manifest: {
+      guidance: skills.guidance,
+      tools,
+    },
+    handlers,
+  };
+}
+
+function normalizeToolInputSchema(input: unknown, toolName: string): JsonSchema {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw makeError("INVALID_INPUT", "tool input must be an object", { toolName });
+  }
+
+  const objectInput = input as Record<string, unknown>;
+  if (typeof objectInput.type === "string") {
+    assertJsonSchemaObject(objectInput, toolName);
+    return deepCloneObject(objectInput);
+  }
+
+  const properties: Record<string, JsonSchema> = {};
+  const required: string[] = [];
+  for (const [field, primitive] of Object.entries(objectInput)) {
+    if (!field.trim()) {
+      throw makeError("INVALID_INPUT", "tool input field name must be non-empty", { toolName });
+    }
+    if (!isToolInputPrimitive(primitive)) {
+      throw makeError("INVALID_INPUT", "tool input shorthand value is invalid", {
+        toolName,
+        field,
+      });
+    }
+    properties[field] = { type: primitive };
+    required.push(field);
+  }
+
+  return {
+    type: "object",
+    properties,
+    required,
+    additionalProperties: false,
+  };
+}
+
+function assertJsonSchemaObject(schema: Record<string, unknown>, toolName: string): void {
+  try {
+    JSON.stringify(schema);
+  } catch (err) {
+    throw makeError("INVALID_INPUT", "tool input JSON Schema must be serializable", {
+      toolName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (schema.type !== "object") {
+    throw makeError("INVALID_INPUT", "tool input JSON Schema must describe an object", { toolName });
+  }
+}
+
+function deepCloneObject<T extends Record<string, unknown>>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function isToolInputPrimitive(value: unknown): value is ToolInputPrimitive {
+  return (
+    value === "string" ||
+    value === "number" ||
+    value === "boolean" ||
+    value === "integer" ||
+    value === "object" ||
+    value === "array"
+  );
+}
 
 export class Pedelec {
   private readonly pageWindow: Window | null;
@@ -183,7 +356,7 @@ export class Pedelec {
       input: {
         provider: resolvedInput.provider,
         model: resolvedInput.model,
-        skillsUrls: resolvedInput.skillsUrls,
+        skills: resolvedInput.skills,
         autoEndOnDisconnect: resolvedInput.autoEndOnDisconnect,
       },
     });
@@ -192,7 +365,12 @@ export class Pedelec {
       throw makeError("SDK_PROTOCOL_ERROR", "create_session response did not include sessionId");
     }
 
-    return this.registerSession(result.sessionId, resolvedInput.provider, resolvedInput.model);
+    return this.registerSession(
+      result.sessionId,
+      resolvedInput.provider,
+      resolvedInput.model,
+      resolvedInput.inlineToolHandlers
+    );
   }
 
   async listProviders(): Promise<ProviderInfo[]> {
@@ -303,35 +481,37 @@ export class Pedelec {
     | {
         provider: ProviderCode;
         model?: string;
-        skillsUrls: string[];
+        skills?: SerializableSkillsManifest;
+        inlineToolHandlers: Map<string, ToolSpecificHandler>;
         autoEndOnDisconnect: boolean;
       }
     | Promise<{
     provider: ProviderCode;
     model?: string;
-    skillsUrls: string[];
+    skills?: SerializableSkillsManifest;
+    inlineToolHandlers: Map<string, ToolSpecificHandler>;
     autoEndOnDisconnect: boolean;
   }> {
     const raw = (input ?? {}) as {
       provider?: unknown;
       model?: unknown;
-      skillsUrls?: unknown;
+      skills?: unknown;
       autoEndOnDisconnect?: unknown;
     };
     const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
     const hasProvider = provider.length > 0;
     const hasModel = raw.model !== undefined;
     const autoEndOnDisconnect = raw.autoEndOnDisconnect !== false;
+    const normalizedSkills = normalizeSkillsInput(raw.skills);
 
     if (!hasProvider && hasModel) {
       throw makeError("INVALID_INPUT", "model cannot be provided without provider");
     }
 
-    const skillsUrls = Array.isArray(raw.skillsUrls) ? raw.skillsUrls : [];
     const userModel = typeof raw.model === "string" ? raw.model : undefined;
 
     if (!hasProvider) {
-      return this.resolveDefaultCreateSessionInput(skillsUrls, autoEndOnDisconnect);
+      return this.resolveDefaultCreateSessionInput(normalizedSkills, autoEndOnDisconnect);
     }
 
     if (!isProviderCode(provider)) {
@@ -340,21 +520,26 @@ export class Pedelec {
 
     let model = userModel;
     if (model === undefined) {
-      return this.resolveProviderOnlyCreateSessionInput(provider, skillsUrls, autoEndOnDisconnect);
+      return this.resolveProviderOnlyCreateSessionInput(provider, normalizedSkills, autoEndOnDisconnect);
     }
 
     return {
       provider: provider as ProviderCode,
       model,
-      skillsUrls,
+      skills: normalizedSkills.manifest,
+      inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
   }
 
-  private async resolveDefaultCreateSessionInput(skillsUrls: string[], autoEndOnDisconnect: boolean): Promise<{
+  private async resolveDefaultCreateSessionInput(
+    normalizedSkills: NormalizedSkillsInput,
+    autoEndOnDisconnect: boolean
+  ): Promise<{
     provider: ProviderCode;
     model?: string;
-    skillsUrls: string[];
+    skills?: SerializableSkillsManifest;
+    inlineToolHandlers: Map<string, ToolSpecificHandler>;
     autoEndOnDisconnect: boolean;
   }> {
     const settings = await this.getSettings();
@@ -368,26 +553,29 @@ export class Pedelec {
     return {
       provider: settings.defaultProvider,
       model: settings.defaultModels[settings.defaultProvider] ?? undefined,
-      skillsUrls,
+      skills: normalizedSkills.manifest,
+      inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
   }
 
   private async resolveProviderOnlyCreateSessionInput(
     provider: ProviderCode,
-    skillsUrls: string[],
+    normalizedSkills: NormalizedSkillsInput,
     autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
     model?: string;
-    skillsUrls: string[];
+    skills?: SerializableSkillsManifest;
+    inlineToolHandlers: Map<string, ToolSpecificHandler>;
     autoEndOnDisconnect: boolean;
   }> {
     const settings = await this.getSettings();
     return {
       provider,
       model: settings.defaultModels[provider] ?? undefined,
-      skillsUrls,
+      skills: normalizedSkills.manifest,
+      inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
   }
@@ -404,11 +592,19 @@ export class Pedelec {
     }
   }
 
-  private registerSession(sessionId: string, provider: string, model: string | undefined): PedelecSession {
+  private registerSession(
+    sessionId: string,
+    provider: string,
+    model: string | undefined,
+    inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map()
+  ): PedelecSession {
     const existing = this.sessions.get(sessionId);
-    if (existing) return existing;
+    if (existing) {
+      existing.replaceInlineToolHandlers(inlineToolHandlers);
+      return existing;
+    }
 
-    const session = new PedelecSession(this, sessionId, provider, model);
+    const session = new PedelecSession(this, sessionId, provider, model, inlineToolHandlers);
     this.sessions.set(sessionId, session);
     return session;
   }
@@ -506,7 +702,9 @@ export class PedelecSession {
 
   private status: PedelecSessionStatus = "idle";
   private pendingSend: PendingSend | null = null;
-  private toolHandler: ToolHandler | null = null;
+  private genericToolHandler: GenericToolHandler | null = null;
+  private inlineToolHandlers = new Map<string, ToolSpecificHandler>();
+  private readonly namedToolHandlers = new Map<string, ToolSpecificHandler>();
   private readonly chatHandlers = new Set<ChatHandler>();
   private readonly errorHandlers = new Set<ErrorHandler>();
   private readonly statusHandlers = new Set<StatusHandler>();
@@ -516,11 +714,13 @@ export class PedelecSession {
     private readonly client: Pedelec,
     sessionId: string,
     provider: string,
-    model?: string
+    model?: string,
+    inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map()
   ) {
     this.sessionId = sessionId;
     this.provider = provider;
     this.model = model;
+    this.inlineToolHandlers = new Map(inlineToolHandlers);
   }
 
   sendText(text: string): Promise<void> {
@@ -558,11 +758,36 @@ export class PedelecSession {
     return () => this.chatHandlers.delete(handler);
   }
 
-  onTool(handler: ToolHandler): () => void {
-    this.toolHandler = handler;
+  onTool(handler: GenericToolHandler): () => void;
+  onTool<TArgs = unknown, TResult = unknown>(
+    toolName: string,
+    handler: ToolSpecificHandler<TArgs, TResult>
+  ): () => void;
+  onTool<TArgs = unknown, TResult = unknown>(
+    toolNameOrHandler: string | GenericToolHandler,
+    maybeHandler?: ToolSpecificHandler<TArgs, TResult>
+  ): () => void {
+    if (typeof toolNameOrHandler === "string") {
+      const toolName = toolNameOrHandler;
+      if (!TOOL_NAME_PATTERN.test(toolName)) {
+        throw makeError("INVALID_INPUT", "tool name is invalid", { toolName });
+      }
+      if (typeof maybeHandler !== "function") {
+        throw makeError("INVALID_INPUT", "tool handler must be a function", { toolName });
+      }
+      this.namedToolHandlers.set(toolName, maybeHandler as ToolSpecificHandler);
+      return () => {
+        if (this.namedToolHandlers.get(toolName) === maybeHandler) {
+          this.namedToolHandlers.delete(toolName);
+        }
+      };
+    }
+
+    const handler = toolNameOrHandler;
+    this.genericToolHandler = handler;
     return () => {
-      if (this.toolHandler === handler) {
-        this.toolHandler = null;
+      if (this.genericToolHandler === handler) {
+        this.genericToolHandler = null;
       }
     };
   }
@@ -650,22 +875,44 @@ export class PedelecSession {
     }
   }
 
+  replaceInlineToolHandlers(handlers: Map<string, ToolSpecificHandler>): void {
+    this.inlineToolHandlers = new Map(handlers);
+  }
+
   private async handleToolCall(event: Extract<SessionEvent, { type: "tool_call" }>): Promise<void> {
     let result: unknown;
-    if (!this.toolHandler) {
-      result = {
-        error: makeError("TOOL_HANDLER_NOT_FOUND", `No tool handler registered for ${event.tool}`, {
-          tool: event.tool,
-        }),
-      };
-    } else {
+    const namedHandler = this.namedToolHandlers.get(event.tool);
+    const inlineHandler = this.inlineToolHandlers.get(event.tool);
+    if (namedHandler) {
       try {
-        result = await this.toolHandler(event.tool, event.args);
+        result = await namedHandler(event.args);
       } catch (err) {
         result = {
           error: normalizeError(err, "TOOL_HANDLER_ERROR", "Tool handler failed"),
         };
       }
+    } else if (inlineHandler) {
+      try {
+        result = await inlineHandler(event.args);
+      } catch (err) {
+        result = {
+          error: normalizeError(err, "TOOL_HANDLER_ERROR", "Tool handler failed"),
+        };
+      }
+    } else if (this.genericToolHandler) {
+      try {
+        result = await this.genericToolHandler(event.tool, event.args);
+      } catch (err) {
+        result = {
+          error: normalizeError(err, "TOOL_HANDLER_ERROR", "Tool handler failed"),
+        };
+      }
+    } else {
+      result = {
+        error: makeError("TOOL_HANDLER_NOT_FOUND", `No tool handler registered for ${event.tool}`, {
+          tool: event.tool,
+        }),
+      };
     }
 
     try {

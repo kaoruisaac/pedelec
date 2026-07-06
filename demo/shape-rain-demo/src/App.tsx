@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { marked } from "marked";
 import {
+  defineTool,
   Pedelec,
   type CreateSessionInput,
   type PedelecError,
@@ -96,6 +97,30 @@ export default function App() {
     return { label: "Error", detail: "Action needed" };
   });
 
+  function createShapeRainSkills(generation: number) {
+    return {
+      guidance:
+        "Use spawn_basic_shapes for simple geometry. Use spawn_closed_polygons for expressive custom silhouettes. Prefer tool calls over describing shapes without rendering them.",
+      tools: [
+        defineTool({
+          name: "spawn_basic_shapes",
+          description:
+            "Spawn one or more batches of supported basic shapes at the top of the active Shape Rain stage.",
+          input: { items: "array" },
+          timeoutMs: 60000,
+          handler: (args) => handleTool("spawn_basic_shapes", args, generation),
+        }),
+        defineTool({
+          name: "spawn_closed_polygons",
+          description:
+            "Spawn custom closed polygon shapes in the active Shape Rain stage. Use this for expressive, decorative, organic, symbolic, natural, or custom silhouettes.",
+          input: { items: "array" },
+          timeoutMs: 60000,
+        }),
+      ],
+    };
+  }
+
   onMount(() => {
     void initializeRuntime(renderMode(), ++lifecycleId);
   });
@@ -165,6 +190,7 @@ export default function App() {
 
       const nextSession = await client.createSession({
         ...createSessionSettingsInput(sessionSettings()),
+        skills: createShapeRainSkills(generation),
       });
       if (generation !== lifecycleId) {
         await nextSession.end().catch(() => undefined);
@@ -224,12 +250,14 @@ export default function App() {
       if (generation !== lifecycleId) return;
       appendConversationMessage("assistant", text);
     });
+    const disposeClosedPolygonTool = nextSession.onTool("spawn_closed_polygons", (args) => handleTool("spawn_closed_polygons", args, generation));
     const disposeTool = nextSession.onTool((tool, args) => handleTool(tool, args, generation));
     sessionDisposer = () => {
       disposeStatus();
       disposeError();
       disposeEnded();
       disposeChat();
+      disposeClosedPolygonTool();
       disposeTool();
     };
     setSession(nextSession);
@@ -670,13 +698,12 @@ function friendlyPedelecError(err: unknown): { message: string; disconnected: bo
 }
 
 function createSessionSettingsInput(settings: ShapeRainSessionSettings): CreateSessionInput {
-  const skillsUrls = [`${location.origin}/tools.md`, `${location.origin}/tools.json`];
   if (settings.provider === "default") {
-    return { skillsUrls };
+    return {};
   }
 
   const model = settings.model.trim();
-  return model ? { provider: settings.provider, model, skillsUrls } : { provider: settings.provider, skillsUrls };
+  return model ? { provider: settings.provider, model } : { provider: settings.provider };
 }
 
 function readStoredSessionSettings(): ShapeRainSessionSettings {

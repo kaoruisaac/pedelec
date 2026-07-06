@@ -124,7 +124,7 @@ async function createSdkSession(background, nativePort, sessionId = "thread_sdk"
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   assert.equal(nativePort.lastSent().type, "create_thread");
   respondNative(nativePort, nativePort.lastSent(), { threadId: sessionId });
@@ -203,7 +203,7 @@ test("unapproved external create_session opens approval without native host", as
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await tick();
   await tick();
@@ -254,7 +254,7 @@ test("approved external create_session continues to native host", async () => {
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await tick();
   assert.equal(nativePort.lastSent().type, "create_thread");
@@ -284,7 +284,7 @@ test("popup approve stores origin and resumes pending create_session", async () 
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await tick();
   assert.equal(nativePort.sent.length, 0);
@@ -319,7 +319,7 @@ test("popup reject fails pending create_session", async () => {
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await tick();
   popupPort.emit({ type: "reject_pending_approval" });
@@ -347,7 +347,7 @@ test("popup close fails pending create_session", async () => {
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await tick();
   popupPort.disconnect();
@@ -368,7 +368,7 @@ test("approval timeout fails pending create_session", async () => {
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await new Promise((resolve) => setTimeout(resolve, 5));
 
@@ -388,7 +388,7 @@ test("openPopup failure fails pending create_session", async () => {
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await tick();
 
@@ -409,14 +409,14 @@ test("pending approval for one origin does not approve another origin", async ()
     type: "create_session",
     channelId: "channel_a",
     requestId: "sdk_create_a",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await tick();
   secondPort.emit({
     type: "create_session",
     channelId: "channel_b",
     requestId: "sdk_create_b",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   await tick();
 
@@ -626,16 +626,29 @@ test("SDK create_session forwards opencode provider", async () => {
   const background = createBackground(chrome, { disableReconnect: true });
   const sdkPort = new MockPort("pedelec-sdk-internal");
   background.handleSdkConnect(sdkPort);
+  const skills = {
+    guidance: "Use tools.",
+    tools: [
+      {
+        name: "get_app_state",
+        description: "Get app state.",
+        argsSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+        timeoutMs: 60000,
+      },
+    ],
+  };
 
   sdkPort.emit({
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "opencode", model: "ollama/qwen2.5-coder:14b", skillsUrls: [] },
+    input: { provider: "opencode", model: "ollama/qwen2.5-coder:14b", skills },
   });
   assert.equal(nativePort.lastSent().type, "create_thread");
   assert.equal(nativePort.lastSent().provider, "opencode");
   assert.equal(nativePort.lastSent().model, "ollama/qwen2.5-coder:14b");
+  assert.deepEqual(nativePort.lastSent().skills, skills);
+  assert.equal("skillsUrls" in nativePort.lastSent(), false);
 });
 
 test("SDK create_session forwards cursor provider", async () => {
@@ -648,7 +661,7 @@ test("SDK create_session forwards cursor provider", async () => {
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "cursor", model: "gpt-5", skillsUrls: [] },
+    input: { provider: "cursor", model: "gpt-5", skills: undefined },
   });
   assert.equal(nativePort.lastSent().type, "create_thread");
   assert.equal(nativePort.lastSent().provider, "cursor");
@@ -665,7 +678,7 @@ test("SDK create_session forwards claude provider", async () => {
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "claude", model: "sonnet", skillsUrls: [] },
+    input: { provider: "claude", model: "sonnet", skills: undefined },
   });
   assert.equal(nativePort.lastSent().type, "create_thread");
   assert.equal(nativePort.lastSent().provider, "claude");
@@ -756,7 +769,7 @@ test("SDK port disconnect does not auto-end when lifecycle opts out", async () =
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create",
-    input: { provider: "codex", skillsUrls: [], autoEndOnDisconnect: false },
+    input: { provider: "codex", skills: undefined, autoEndOnDisconnect: false },
   });
   respondNative(nativePort, nativePort.lastSent(), { threadId: "thread_keep_alive" });
   await tick();
@@ -915,7 +928,7 @@ test("create_session after idle disconnect opens a fresh native port before old 
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create_1",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   assert.equal(nativePorts.length, 1);
   respondNative(nativePorts[0], nativePorts[0].lastSent(), { threadId: "thread_1" });
@@ -940,7 +953,7 @@ test("create_session after idle disconnect opens a fresh native port before old 
     type: "create_session",
     channelId: "channel_2",
     requestId: "sdk_create_2",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
 
   assert.equal(nativePorts.length, 2);
@@ -973,7 +986,7 @@ test("multiple SDK sessions keep native host until final session ends", async ()
     type: "create_session",
     channelId: "channel_1",
     requestId: "sdk_create_a",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   respondNative(nativePort, nativePort.lastSent(), { threadId: "thread_a" });
   await tick();
@@ -984,7 +997,7 @@ test("multiple SDK sessions keep native host until final session ends", async ()
     type: "create_session",
     channelId: "channel_2",
     requestId: "sdk_create_b",
-    input: { provider: "codex", skillsUrls: [] },
+    input: { provider: "codex", skills: undefined },
   });
   respondNative(nativePort, nativePort.lastSent(), { threadId: "thread_b" });
   await tick();
@@ -1101,3 +1114,4 @@ test("unexpected disconnect without active sessions does not reconnect", () => {
 
   assert.equal(background.hasReconnectTimer(), false);
 });
+

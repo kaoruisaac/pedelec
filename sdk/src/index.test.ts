@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PEDELEC_EXTENSION_ID } from "./extension-id";
-import { Pedelec } from "./index";
+import { Pedelec, defineTool } from "./index";
 
 type Listener<T> = (value: T) => void;
 
@@ -129,7 +129,7 @@ async function createProviderSession(
   const createRequest = pageWindow.lastSent();
   expect(createRequest).toMatchObject({
     type: "create_session",
-    input: { provider, skillsUrls: [] },
+    input: { provider, skills: undefined },
   });
   respondOk(pageWindow, createRequest, { sessionId });
   return { session: await create, createRequest };
@@ -156,7 +156,17 @@ describe("Pedelec SDK", () => {
     const promise = pedelec.createSession({
       provider: "codex",
       model: "gpt-5",
-      skillsUrls: ["https://example.test/tools.json"],
+      skills: {
+        guidance: "Use get_app_state for app state.",
+        tools: [
+          defineTool({
+            name: "get_app_state",
+            description: "Get app state.",
+            input: {},
+            handler: () => ({ ok: true }),
+          }),
+        ],
+      },
     });
     const request = pageWindow.lastSent();
 
@@ -165,10 +175,25 @@ describe("Pedelec SDK", () => {
       input: {
         provider: "codex",
         model: "gpt-5",
-        skillsUrls: ["https://example.test/tools.json"],
+        skills: {
+          guidance: "Use get_app_state for app state.",
+          tools: [
+            {
+              name: "get_app_state",
+              description: "Get app state.",
+              argsSchema: {
+                type: "object",
+                properties: {},
+                required: [],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
         autoEndOnDisconnect: true,
       },
     });
+    expect(JSON.stringify(request.input.skills)).not.toContain("handler");
     expect(request.channelId).toMatch(/^pedelec_/);
     expect(request.requestId).toMatch(/^sdk_/);
     expect(pageWindow.connectCalls).toEqual([
@@ -231,7 +256,7 @@ describe("Pedelec SDK", () => {
       input: {
         provider: "opencode",
         model: "ollama/qwen2.5-coder:14b",
-        skillsUrls: [],
+        skills: undefined,
       },
     });
 
@@ -267,7 +292,7 @@ describe("Pedelec SDK", () => {
       input: {
         provider: "cursor",
         model: "gpt-5",
-        skillsUrls: [],
+        skills: undefined,
       },
     });
 
@@ -300,7 +325,7 @@ describe("Pedelec SDK", () => {
       input: {
         provider: "claude",
         model: "sonnet",
-        skillsUrls: [],
+        skills: undefined,
       },
     });
 
@@ -399,7 +424,7 @@ describe("Pedelec SDK", () => {
     const createRequest = pageWindow.lastSent();
     expect(createRequest).toMatchObject({
       type: "create_session",
-      input: { provider: "codex", model: "gpt-5", skillsUrls: [] },
+      input: { provider: "codex", model: "gpt-5", skills: undefined },
     });
     respondOk(pageWindow, createRequest, { sessionId: "thread_default" });
 
@@ -421,7 +446,7 @@ describe("Pedelec SDK", () => {
       input: {
         provider: "ollama",
         model: "qwen3-14b-32k:latest",
-        skillsUrls: [],
+        skills: undefined,
       },
     });
     respondOk(pageWindow, request, { sessionId: "thread_ollama" });
@@ -448,7 +473,7 @@ describe("Pedelec SDK", () => {
     const createRequest = pageWindow.lastSent();
     expect(createRequest).toMatchObject({
       type: "create_session",
-      input: { provider: "ollama", model: "qwen3-14b-32k:latest", skillsUrls: [] },
+      input: { provider: "ollama", model: "qwen3-14b-32k:latest", skills: undefined },
     });
     respondOk(pageWindow, createRequest, { sessionId: "thread_ollama_default" });
 
@@ -468,7 +493,7 @@ describe("Pedelec SDK", () => {
     const codexCreate = pageWindow.lastSent();
     expect(codexCreate).toMatchObject({
       type: "create_session",
-      input: { provider: "codex", model: "gpt-5", skillsUrls: [] },
+      input: { provider: "codex", model: "gpt-5", skills: undefined },
     });
     respondOk(pageWindow, codexCreate, { sessionId: "thread_codex_default_model" });
     expect((await codexPromise).model).toBe("gpt-5");
@@ -482,7 +507,7 @@ describe("Pedelec SDK", () => {
     const geminiCreate = pageWindow.lastSent();
     expect(geminiCreate).toMatchObject({
       type: "create_session",
-      input: { provider: "gemini", model: "gemini-2.5-pro", skillsUrls: [] },
+      input: { provider: "gemini", model: "gemini-2.5-pro", skills: undefined },
     });
     respondOk(pageWindow, geminiCreate, { sessionId: "thread_gemini_no_default_model" });
     expect((await geminiPromise).model).toBe("gemini-2.5-pro");
@@ -496,7 +521,7 @@ describe("Pedelec SDK", () => {
     const ollamaCreate = pageWindow.lastSent();
     expect(ollamaCreate).toMatchObject({
       type: "create_session",
-      input: { provider: "ollama", model: "qwen3-14b-32k:latest", skillsUrls: [] },
+      input: { provider: "ollama", model: "qwen3-14b-32k:latest", skills: undefined },
     });
     respondOk(pageWindow, ollamaCreate, { sessionId: "thread_ollama_default_model" });
     expect((await ollamaPromise).model).toBe("qwen3-14b-32k:latest");
@@ -514,7 +539,7 @@ describe("Pedelec SDK", () => {
     const createRequest = pageWindow.lastSent();
     expect(createRequest).toMatchObject({
       type: "create_session",
-      input: { provider: "gemini", skillsUrls: [] },
+      input: { provider: "gemini", skills: undefined },
     });
     expect(createRequest.input.model).toBeUndefined();
     respondOk(pageWindow, createRequest, { sessionId: "thread_gemini_no_model" });
@@ -528,7 +553,7 @@ describe("Pedelec SDK", () => {
 
     expect(request).toMatchObject({
       type: "create_session",
-      input: { provider: "codex", model: "user-model", skillsUrls: [] },
+      input: { provider: "codex", model: "user-model", skills: undefined },
     });
     respondOk(pageWindow, request, { sessionId: "thread_user_model" });
 
@@ -549,7 +574,7 @@ describe("Pedelec SDK", () => {
       input: {
         provider: "codex",
         model: "gpt-5",
-        skillsUrls: [],
+        skills: undefined,
         autoEndOnDisconnect: false,
       },
     });
@@ -568,7 +593,7 @@ describe("Pedelec SDK", () => {
       input: {
         provider: "codex",
         model: "gpt-5",
-        skillsUrls: [],
+        skills: undefined,
         autoEndOnDisconnect: true,
       },
     });
@@ -699,6 +724,114 @@ describe("Pedelec SDK", () => {
     });
 
     expect(text).toEqual([]);
+  });
+
+  it("normalizes skills, registers inline handlers, and lets named onTool override them", async () => {
+    const pedelec = new Pedelec();
+    const create = pedelec.createSession({
+      provider: "codex",
+      skills: {
+        guidance: "Use update_counter.",
+        tools: [
+          defineTool({
+            name: "update_counter",
+            description: "Update counter.",
+            input: { delta: "number" },
+            timeoutMs: 3000,
+            handler: (args: any) => ({ source: "inline", delta: args.delta }),
+          }),
+        ],
+      },
+    });
+    respondSettings(pageWindow, pageWindow.lastSent());
+    await nextTick();
+    const createRequest = pageWindow.lastSent();
+    expect(createRequest.input.skills).toEqual({
+      guidance: "Use update_counter.",
+      tools: [
+        {
+          name: "update_counter",
+          description: "Update counter.",
+          argsSchema: {
+            type: "object",
+            properties: { delta: { type: "number" } },
+            required: ["delta"],
+            additionalProperties: false,
+          },
+          timeoutMs: 3000,
+        },
+      ],
+    });
+    expect(JSON.stringify(createRequest.input.skills)).not.toContain("handler");
+    respondOk(pageWindow, createRequest, { sessionId: "thread_skills" });
+    const session = await create;
+    const disposeOverride = session.onTool("update_counter", (args: any) => ({
+      source: "named",
+      delta: args.delta,
+    }));
+
+    emitEvent(pageWindow, createRequest, {
+      type: "tool_call",
+      sessionId: "thread_skills",
+      seq: 1,
+      toolRequestId: "tool_override",
+      tool: "update_counter",
+      args: { delta: 2 },
+    });
+    await nextTick();
+    expect(pageWindow.lastSent()).toMatchObject({
+      type: "submit_tool_result",
+      result: { source: "named", delta: 2 },
+    });
+    respondOk(pageWindow, pageWindow.lastSent());
+
+    disposeOverride();
+    emitEvent(pageWindow, createRequest, {
+      type: "tool_call",
+      sessionId: "thread_skills",
+      seq: 2,
+      toolRequestId: "tool_inline",
+      tool: "update_counter",
+      args: { delta: 3 },
+    });
+    await nextTick();
+    expect(pageWindow.lastSent()).toMatchObject({
+      type: "submit_tool_result",
+      result: { source: "inline", delta: 3 },
+    });
+  });
+
+  it("rejects invalid skills at runtime", async () => {
+    const pedelec = new Pedelec();
+    const validBase = {
+      guidance: "Use tools.",
+      tools: [
+        defineTool({
+          name: "good_tool",
+          description: "Good tool.",
+          input: {},
+        }),
+      ],
+    };
+
+    await expect(
+      pedelec.createSession({
+        provider: "codex",
+        skills: { ...validBase, tools: [{ ...validBase.tools[0], name: "bad/name" }] },
+      } as any)
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(
+      pedelec.createSession({
+        provider: "codex",
+        skills: { ...validBase, tools: [validBase.tools[0], validBase.tools[0]] },
+      } as any)
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(
+      pedelec.createSession({
+        provider: "codex",
+        skills: { ...validBase, tools: [{ ...validBase.tools[0], timeoutMs: 0 }] },
+      } as any)
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
   });
 
   it("submits async tool handler results", async () => {
@@ -850,3 +983,4 @@ describe("Pedelec SDK", () => {
     });
   });
 });
+

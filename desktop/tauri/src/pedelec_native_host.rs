@@ -398,7 +398,10 @@ mod tests {
             "requestId": "req_create",
             "provider": "codex",
             "model": "gpt-5",
-            "skillsUrls": ["http://127.0.0.1:8765/tools.json"]
+            "skills": {
+                "guidance": "Use tools.",
+                "tools": []
+            }
         }))
         .unwrap();
 
@@ -409,7 +412,10 @@ mod tests {
             json!({
                 "provider": "codex",
                 "model": "gpt-5",
-                "skillsUrls": ["http://127.0.0.1:8765/tools.json"]
+                "skills": {
+                    "guidance": "Use tools.",
+                    "tools": []
+                }
             })
         );
     }
@@ -517,10 +523,10 @@ mod tests {
             "type": "create_thread",
             "requestId": "phase09_create",
             "provider": "codex",
-            "skillsUrls": [
-                "http://127.0.0.1:8765/tools.json",
-                "http://127.0.0.1:8765/tools.md"
-            ]
+            "skills": {
+                "guidance": "Use tools.",
+                "tools": []
+            }
         }))
         .unwrap();
         assert_eq!(create.r#type, "create_thread");
@@ -528,10 +534,10 @@ mod tests {
             create.payload.unwrap(),
             json!({
                 "provider": "codex",
-                "skillsUrls": [
-                    "http://127.0.0.1:8765/tools.json",
-                    "http://127.0.0.1:8765/tools.md"
-                ]
+                "skills": {
+                    "guidance": "Use tools.",
+                    "tools": []
+                }
             })
         );
 

@@ -28,7 +28,7 @@ npm install @kaoruisaac/pedelec
 Import the SDK in browser-side TypeScript:
 
 ```ts
-import { Pedelec } from "@kaoruisaac/pedelec";
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
 ```
 
 For local development before publishing:
@@ -48,14 +48,27 @@ npm run build
 ## Quick Start
 
 ```ts
-import { Pedelec } from "@kaoruisaac/pedelec";
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
 
 const pedelec = new Pedelec();
 
 const session = await pedelec.createSession({
   provider: "codex",
   model: "gpt-5",
-  skillsUrls: ["https://example.com/tools.md"],
+  skills: {
+    guidance: "Use get_current_page when you need browser page context.",
+    tools: [
+      defineTool({
+        name: "get_current_page",
+        description: "Read the current browser page title and URL.",
+        input: {},
+        handler: () => ({
+          url: location.href,
+          title: document.title,
+        }),
+      }),
+    ],
+  },
 });
 
 session.onChat((text) => {
@@ -181,7 +194,16 @@ Use default provider with skills:
 
 ```ts
 const session = await pedelec.createSession({
-  skillsUrls: ["https://example.com/tools.md", "https://example.com/tools.json"],
+  skills: {
+    guidance: "Use update_counter when the user asks to change the counter.",
+    tools: [
+      defineTool({
+        name: "update_counter",
+        description: "Update the visible counter by delta.",
+        input: { delta: "number" },
+      }),
+    ],
+  },
 });
 ```
 
@@ -225,12 +247,12 @@ type CreateSessionInput =
   | {
       provider: ProviderCode;
       model?: string;
-      skillsUrls?: string[];
+      skills?: SkillsInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
-      skillsUrls?: string[];
+      skills?: SkillsInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -310,40 +332,61 @@ type PedelecSessionStatus =
 
 ## Tool Calling
 
-Use `skillsUrls` to tell the agent what tools your web app can handle. When the agent calls a tool, the SDK invokes the registered `onTool()` handler and automatically submits the returned result to the runtime.
+Use `skills` to tell the agent what tools your web app can handle. `guidance` is high-level instruction for the agent, and `tools` is the typed list of callable frontend capabilities. Core automatically generates `tools.md` and per-tool spec artifacts inside the sandbox; SDK users do not write or host those files.
+
+Inline handlers are registered locally and are not sent to Core:
 
 ```ts
-session.onTool(async (tool, args) => {
-  if (tool === "get_current_page") {
-    return {
-      url: location.href,
-      title: document.title,
-      selectedText: window.getSelection()?.toString() ?? "",
-    };
-  }
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use get_current_page for browser context.",
+    tools: [
+      defineTool({
+        name: "get_current_page",
+        description: "Read the current browser page title and URL.",
+        input: {},
+        handler: () => ({
+          url: location.href,
+          title: document.title,
+          selectedText: window.getSelection()?.toString() ?? "",
+        }),
+      }),
+    ],
+  },
+});
+```
 
-  if (tool === "update_counter") {
-    const { delta } = args as { delta: number };
-    counter.value += delta;
+You can also register handlers after session creation. A named `onTool(name, handler)` handler overrides an inline handler for the same tool:
 
-    return {
-      counter: counter.value,
-      delta,
-    };
-  }
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use update_counter when the user asks to change the counter.",
+    tools: [
+      defineTool({
+        name: "update_counter",
+        description: "Update the visible counter by delta.",
+        input: { delta: "number" },
+      }),
+    ],
+  },
+});
 
+session.onTool("update_counter", async (args) => {
+  const { delta } = args as { delta: number };
+  counter.value += delta;
   return {
-    error: {
-      code: "TOOL_NOT_FOUND",
-      message: `Unknown tool: ${tool}`,
-    },
+    counter: counter.value,
+    delta,
   };
 });
 ```
 
 Tool results must be JSON-serializable. If no handler is registered, the SDK returns a `TOOL_HANDLER_NOT_FOUND` error result. If the handler throws, the SDK returns a `TOOL_HANDLER_ERROR` error result.
 
-Only one tool handler is active per session. Calling `onTool()` again replaces the previous handler.
+The legacy generic form `session.onTool((tool, args) => ...)` remains available as a fallback handler.
 
 ## Resume Sessions
 
@@ -385,7 +428,7 @@ Most apps should use the typed methods above. `request<T>(type, payload)` is exp
 const result = await pedelec.request<{ sessionId: string }>("create_session", {
   input: {
     provider: "codex",
-    skillsUrls: [],
+    skills: undefined,
     autoEndOnDisconnect: true,
   },
 });

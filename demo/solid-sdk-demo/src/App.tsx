@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import { ProviderCode, Pedelec, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus } from "pedelec";
+import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus } from "pedelec";
 
 const MAX_EVENTS = 300;
 
@@ -76,6 +76,50 @@ type ConnectionState = {
   message: string;
 };
 
+function createDemoSkills() {
+  return {
+    guidance:
+      "Use these tools when you need browser page context, selected text, or explicit input from the user. Do not guess page state.",
+    tools: [
+      defineTool({
+        name: "get_current_page",
+        description: "Read the current browser page title and URL.",
+        input: {},
+        timeoutMs: 60000,
+        handler: () => ({
+          title: document.title,
+          url: location.href,
+        }),
+      }),
+      defineTool({
+        name: "get_selected_text",
+        description: "Read the text currently selected on the page.",
+        input: {},
+        timeoutMs: 60000,
+      }),
+      defineTool({
+        name: "ask_user",
+        description: "Ask the user a question and wait for their text response.",
+        input: {
+          type: "object",
+          properties: {
+            question: { type: "string" },
+          },
+          required: ["question"],
+          additionalProperties: false,
+        },
+        timeoutMs: 60000,
+      }),
+      defineTool({
+        name: "throw_error",
+        description: "Trigger the demo error path by throwing an error from the tool handler.",
+        input: {},
+        timeoutMs: 60000,
+      }),
+    ],
+  };
+}
+
 export default function App() {
   const [client, setClient] = createSignal<Pedelec | null>(null);
   const [connection, setConnection] = createSignal<ConnectionState>(initializeClient(setClient));
@@ -83,7 +127,6 @@ export default function App() {
   const [providers, setProviders] = createSignal<ProviderInfo[]>([]);
   const [providersLoading, setProvidersLoading] = createSignal(false);
   const [model, setModel] = createSignal("");
-  const [skillsUrlsText, setSkillsUrlsText] = createSignal("http://localhost:5173/tools.md\nhttp://localhost:5173/tools.json");
   const [resumeId, setResumeId] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [sessions, setSessions] = createSignal<DemoSessionState[]>([]);
@@ -98,12 +141,6 @@ export default function App() {
     return [...sessionErrors, ...globalErrors()].sort((a, b) => b.createdAt - a.createdAt);
   });
   const activeEvents = createMemo(() => activeSession()?.events ?? globalEvents());
-  const skillsUrls = createMemo(() =>
-    skillsUrlsText()
-      .split(/\r?\n/)
-      .map((url) => url.trim())
-      .filter(Boolean),
-  );
   const canSend = createMemo(() => {
     const session = activeSession();
     return Boolean(session && prompt().trim() && !session.sending && session.status !== "ended");
@@ -156,11 +193,11 @@ export default function App() {
     if (!sdk) return;
 
     try {
-      appendGlobalEvent("create_session_requested", { provider: provider(), model: model(), skillsUrls: skillsUrls() });
+      appendGlobalEvent("create_session_requested", { provider: provider(), model: model() });
       const session = await sdk.createSession({
         provider: provider() as ProviderCode,
         model: model().trim() || undefined,
-        skillsUrls: skillsUrls(),
+        skills: createDemoSkills(),
       });
       registerSession(session, provider(), model().trim() || undefined);
       setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
@@ -255,12 +292,14 @@ export default function App() {
       updateSession(session.sessionId, (current) => ({ ...current, status: "ended", sending: false, updatedAt: Date.now() }));
       appendSessionEvent(session.sessionId, "session_ended", {});
     });
+    const disposeSelectedTextTool = session.onTool("get_selected_text", (args) => handleTool(session.sessionId, "get_selected_text", args));
     const disposeTool = session.onTool((tool, args) => handleTool(session.sessionId, tool, args));
     const dispose = () => {
       disposeChat();
       disposeStatus();
       disposeError();
       disposeEnded();
+      disposeSelectedTextTool();
       disposeTool();
     };
     const now = Date.now();
@@ -494,15 +533,6 @@ export default function App() {
               <label>
                 Model
                 <input value={model()} onInput={(event) => setModel(event.currentTarget.value)} placeholder="optional" />
-              </label>
-              <label>
-                Skills URLs
-                <textarea
-                  rows="4"
-                  value={skillsUrlsText()}
-                  onInput={(event) => setSkillsUrlsText(event.currentTarget.value)}
-                  placeholder={"http://127.0.0.1:8765/tools.json\nhttp://127.0.0.1:8765/tools.md"}
-                />
               </label>
               <button type="submit" disabled={!canCreate()}>Create</button>
             </form>
