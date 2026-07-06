@@ -74,7 +74,7 @@ npm install ../path/to/pedelec/sdk
 ## Minimal Example
 
 ```ts
-import { Pedelec } from "@kaoruisaac/pedelec";
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
 
 const pedelec = new Pedelec();
 
@@ -87,7 +87,11 @@ const session = await pedelec.createSession({
       defineTool({
         name: "get_current_page",
         description: "Read the current browser page title and URL.",
-        input: {},
+        argsSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
         handler: () => ({
           url: location.href,
           title: document.title,
@@ -171,7 +175,16 @@ const session = await pedelec.createSession({
       defineTool({
         name: "update_counter",
         description: "Update the visible counter by delta.",
-        input: { delta: "number" },
+        argsSchema: {
+          type: "object",
+          required: ["delta"],
+          properties: {
+            delta: {
+              type: "number",
+              description: "Counter delta.",
+            },
+          },
+        },
       }),
     ],
   },
@@ -312,6 +325,8 @@ Pedelec's tool calling flow is:
 5. The SDK triggers `session.onTool()`.
 6. The Web App executes the corresponding tool and returns the result.
 7. The SDK automatically submits the result back to the Desktop Runtime, then hands it to the agent so reasoning can continue.
+
+Each `defineTool` uses `argsSchema` to describe arguments for the provider and agent. The root schema must be an object. `argsSchema` is the Pedelec Tool Args Schema subset, not full JSON Schema: it supports common `string`, `number`, `integer`, `boolean`, `array`, `object`, and `oneOf` nodes with metadata such as `description`, `default`, `examples`, `enum`, numeric ranges, array bounds, and `required`. `default` guides the agent only; the SDK does not fill missing values. Shorthand `input` schemas are not supported. `$defs`, `$ref`, `additionalProperties`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, and `format` are not supported; use TypeScript constants for reusable schema fragments.
 
 Example:
 

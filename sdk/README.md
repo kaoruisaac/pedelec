@@ -61,7 +61,11 @@ const session = await pedelec.createSession({
       defineTool({
         name: "get_current_page",
         description: "Read the current browser page title and URL.",
-        input: {},
+        argsSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
         handler: () => ({
           url: location.href,
           title: document.title,
@@ -200,7 +204,16 @@ const session = await pedelec.createSession({
       defineTool({
         name: "update_counter",
         description: "Update the visible counter by delta.",
-        input: { delta: "number" },
+        argsSchema: {
+          type: "object",
+          required: ["delta"],
+          properties: {
+            delta: {
+              type: "number",
+              description: "Counter delta.",
+            },
+          },
+        },
       }),
     ],
   },
@@ -345,7 +358,11 @@ const session = await pedelec.createSession({
       defineTool({
         name: "get_current_page",
         description: "Read the current browser page title and URL.",
-        input: {},
+        argsSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
         handler: () => ({
           url: location.href,
           title: document.title,
@@ -368,7 +385,16 @@ const session = await pedelec.createSession({
       defineTool({
         name: "update_counter",
         description: "Update the visible counter by delta.",
-        input: { delta: "number" },
+        argsSchema: {
+          type: "object",
+          required: ["delta"],
+          properties: {
+            delta: {
+              type: "number",
+              description: "Counter delta.",
+            },
+          },
+        },
       }),
     ],
   },
@@ -387,6 +413,33 @@ session.onTool("update_counter", async (args) => {
 Tool results must be JSON-serializable. If no handler is registered, the SDK returns a `TOOL_HANDLER_NOT_FOUND` error result. If the handler throws, the SDK returns a `TOOL_HANDLER_ERROR` error result.
 
 The legacy generic form `session.onTool((tool, args) => ...)` remains available as a fallback handler.
+
+### Tool Args Schema
+
+`defineTool` uses `argsSchema` to describe the tool arguments sent to the provider and agent. The root schema must be an object:
+
+```ts
+defineTool({
+  name: "update_counter",
+  description: "Update the visible counter by delta.",
+  argsSchema: {
+    type: "object",
+    required: ["delta"],
+    properties: {
+      delta: {
+        type: "number",
+        description: "Counter delta.",
+      },
+    },
+  },
+});
+```
+
+`argsSchema` is the Pedelec Tool Args Schema subset, not full JSON Schema. It supports common `string`, `number`, `integer`, `boolean`, `array`, `object`, and `oneOf` nodes with fields such as `description`, `default`, `examples`, `enum`, `minimum`, `maximum`, `minItems`, `maxItems`, and `required`.
+
+`default` is guidance for the agent; the SDK does not automatically fill missing argument values. Shorthand schemas such as `input: { delta: "number" }` are no longer supported.
+
+The first version does not support `$defs`, `$ref`, `additionalProperties`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, or `format`. Reuse schema fragments with TypeScript constants instead of JSON Schema references.
 
 ## Resume Sessions
 

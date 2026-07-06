@@ -8,6 +8,9 @@ import {
   type PedelecSession,
   type PedelecSessionStatus,
   type ProviderCode,
+  type ToolArgsObjectSchema,
+  type ToolArgsSchema,
+  type ToolArgsSchemaNode,
 } from "pedelec";
 import {
   normalizeSpawnClosedPolygonsCommand,
@@ -53,6 +56,158 @@ type SystemChatMessage = {
 };
 
 type ChatMessage = TextChatMessage | SystemChatMessage;
+
+const shapeSizeArgsSchema = {
+  oneOf: [
+    { type: "string", enum: ["small", "medium", "large"] },
+    { type: "number", minimum: 8, maximum: 40 },
+  ],
+  description:
+    "Shape size. Numeric values are preferred; use 12-24 by default, with 16 for small decorative shapes, 18 for normal shapes, 20 for emphasis, and 22-24 for main visual shapes. Use medium, large, or numeric sizes above 24 only when explicitly requested.",
+  default: 18,
+} satisfies ToolArgsSchemaNode;
+
+const polygonSizeArgsSchema = {
+  ...shapeSizeArgsSchema,
+  description:
+    "Polygon size. Numeric values are preferred; use 12-24 by default, with 16 for small decorative shapes, 18 for normal shapes, 20 for emphasis, and 22-24 for main visual shapes. Use medium, large, or numeric sizes above 24 only when explicitly requested.",
+} satisfies ToolArgsSchemaNode;
+
+const pointArgsSchema = {
+  type: "object",
+  required: ["x", "y"],
+  properties: {
+    x: {
+      type: "integer",
+      minimum: -100,
+      maximum: 100,
+      description: "Point x coordinate in normalized polygon space.",
+    },
+    y: {
+      type: "integer",
+      minimum: -100,
+      maximum: 100,
+      description: "Point y coordinate in normalized polygon space.",
+    },
+  },
+} satisfies ToolArgsObjectSchema;
+
+const spawnBasicShapesArgsSchema = {
+  type: "object",
+  required: ["items"],
+  properties: {
+    items: {
+      type: "array",
+      minItems: 1,
+      maxItems: 8,
+      items: {
+        type: "object",
+        required: ["shape"],
+        properties: {
+          shape: {
+            type: "string",
+            enum: [
+              "circle",
+              "square",
+              "rectangle",
+              "triangle",
+              "pentagon",
+              "hexagon",
+              "star",
+              "capsule",
+            ],
+            description: "Supported basic shape type.",
+          },
+          count: {
+            type: "integer",
+            minimum: 1,
+            maximum: 12,
+            default: 1,
+            description: "Number of shapes to spawn for this item.",
+          },
+          color: {
+            type: "string",
+            description: "Simple color name or #RRGGBB hex color.",
+            default: "blue",
+          },
+          style: {
+            type: "string",
+            description: "Optional visual style hint. The first version uses it only as a fallback color string.",
+          },
+          size: shapeSizeArgsSchema,
+          xHint: {
+            type: "number",
+            minimum: 0,
+            maximum: 1,
+            description: "Optional horizontal spawn hint from 0 left to 1 right.",
+          },
+        },
+      },
+    },
+  },
+} satisfies ToolArgsSchema;
+
+const spawnClosedPolygonsArgsSchema = {
+  type: "object",
+  required: ["items"],
+  properties: {
+    items: {
+      type: "array",
+      minItems: 1,
+      maxItems: 6,
+      items: {
+        type: "object",
+        properties: {
+          preset: {
+            type: "string",
+            enum: ["heart", "shield", "droplet"],
+            description: "Built-in polygon preset. Do not provide outer when using preset.",
+          },
+          outer: {
+            type: "array",
+            minItems: 3,
+            maxItems: 64,
+            description:
+              "Outer contour points in continuous order. The contour is implicitly closed; do not repeat the first point.",
+            items: pointArgsSchema,
+          },
+          holes: {
+            type: "array",
+            description: "Optional hole contours. Each hole must stay inside outer and not overlap other holes.",
+            items: {
+              type: "array",
+              minItems: 3,
+              maxItems: 64,
+              items: pointArgsSchema,
+            },
+          },
+          name: {
+            type: "string",
+            description: "Short semantic name such as crystal_shard, lightning, leaf, or ring.",
+          },
+          color: {
+            type: "string",
+            description: "Simple color name or #RRGGBB hex color.",
+          },
+          size: polygonSizeArgsSchema,
+          count: {
+            type: "integer",
+            minimum: 1,
+            maximum: 8,
+            default: 1,
+            description: "Number of polygons to spawn for this item.",
+          },
+          xHint: {
+            type: "number",
+            minimum: 0,
+            maximum: 1,
+            description: "Optional horizontal spawn hint from 0 left to 1 right.",
+          },
+        },
+      },
+    },
+  },
+} satisfies ToolArgsSchema;
 
 export default function App() {
   const { pop } = usePopUp();
@@ -105,17 +260,18 @@ export default function App() {
         defineTool({
           name: "spawn_basic_shapes",
           description:
-            "Spawn one or more batches of supported basic shapes at the top of the active Shape Rain stage.",
-          input: { items: "array" },
+            "Spawn one or more batches of supported basic shapes at the top of the active Shape Rain stage. Use this when the user explicitly asks for simple geometry. Prefer numeric sizes from 12 to 24 by default unless the user asks for larger objects. The frontend validates the request, clamps counts and sizes, then renders falling shapes in the current 2D or 3D mode.",
+          argsSchema: spawnBasicShapesArgsSchema,
           timeoutMs: 60000,
           handler: (args) => handleTool("spawn_basic_shapes", args, generation),
         }),
         defineTool({
           name: "spawn_closed_polygons",
           description:
-            "Spawn custom closed polygon shapes in the active Shape Rain stage. Use this for expressive, decorative, organic, symbolic, natural, or custom silhouettes.",
-          input: { items: "array" },
+            "Spawn custom closed polygon shapes in the active Shape Rain stage. Prefer this tool when the user asks for expressive, decorative, organic, symbolic, fantasy, natural, or custom silhouettes. Use multi-point contours to create richer shapes instead of reducing everything to basic geometry. The frontend validates contours, clamps counts and sizes, ignores invalid items, and renders in the current 2D or 3D mode.",
+          argsSchema: spawnClosedPolygonsArgsSchema,
           timeoutMs: 60000,
+          handler: (args) => handleTool("spawn_closed_polygons", args, generation),
         }),
       ],
     };
@@ -250,14 +406,12 @@ export default function App() {
       if (generation !== lifecycleId) return;
       appendConversationMessage("assistant", text);
     });
-    const disposeClosedPolygonTool = nextSession.onTool("spawn_closed_polygons", (args) => handleTool("spawn_closed_polygons", args, generation));
     const disposeTool = nextSession.onTool((tool, args) => handleTool(tool, args, generation));
     sessionDisposer = () => {
       disposeStatus();
       disposeError();
       disposeEnded();
       disposeChat();
-      disposeClosedPolygonTool();
       disposeTool();
     };
     setSession(nextSession);

@@ -9,30 +9,93 @@ export type PedelecOptions = {
 
 export type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama";
 
-type JsonSchema = Record<string, unknown>;
-type ToolInputPrimitive = "string" | "number" | "boolean" | "integer" | "object" | "array";
-export type ToolInputSchema<TArgs = unknown> = Record<string, ToolInputPrimitive> | JsonSchema;
+export type JsonPrimitive = string | number | boolean | null;
+
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+export type ToolArgsSchemaMeta<TDefault extends JsonValue = JsonValue> = {
+  description?: string;
+  default?: TDefault;
+  examples?: TDefault[];
+};
+
+export type ToolArgsStringSchema = ToolArgsSchemaMeta<string> & {
+  type: "string";
+  enum?: string[];
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+};
+
+export type ToolArgsNumberSchema = ToolArgsSchemaMeta<number> & {
+  type: "number";
+  enum?: number[];
+  minimum?: number;
+  maximum?: number;
+};
+
+export type ToolArgsIntegerSchema = ToolArgsSchemaMeta<number> & {
+  type: "integer";
+  enum?: number[];
+  minimum?: number;
+  maximum?: number;
+};
+
+export type ToolArgsBooleanSchema = ToolArgsSchemaMeta<boolean> & {
+  type: "boolean";
+  enum?: boolean[];
+};
+
+export type ToolArgsArraySchema = ToolArgsSchemaMeta<JsonValue[]> & {
+  type: "array";
+  items: ToolArgsSchemaNode;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+};
+
+export type ToolArgsObjectSchema = ToolArgsSchemaMeta<Record<string, JsonValue>> & {
+  type: "object";
+  properties?: Record<string, ToolArgsSchemaNode>;
+  required?: string[];
+};
+
+export type ToolArgsOneOfSchema = ToolArgsSchemaMeta & {
+  oneOf: ToolArgsSchemaNode[];
+};
+
+export type ToolArgsSchemaNode =
+  | ToolArgsStringSchema
+  | ToolArgsNumberSchema
+  | ToolArgsIntegerSchema
+  | ToolArgsBooleanSchema
+  | ToolArgsArraySchema
+  | ToolArgsObjectSchema
+  | ToolArgsOneOfSchema;
+
+export type ToolArgsSchema = ToolArgsObjectSchema;
+
 export type ToolSpecificHandler<TArgs = unknown, TResult = unknown> = (
   args: TArgs
 ) => TResult | Promise<TResult>;
 
-export type ToolInput<TArgs = unknown, TResult = unknown> = {
+export type ToolDefinition<TArgs = unknown, TResult = unknown> = {
   name: string;
   description: string;
-  input: ToolInputSchema<TArgs>;
+  argsSchema: ToolArgsSchema;
   timeoutMs?: number;
   handler?: ToolSpecificHandler<TArgs, TResult>;
 };
 
 export type SkillsInput = {
   guidance: string;
-  tools: ToolInput[];
+  tools: ToolDefinition[];
 };
 
 export type SerializableToolManifest = {
   name: string;
   description: string;
-  argsSchema: JsonSchema;
+  argsSchema: ToolArgsSchema;
   timeoutMs?: number;
 };
 
@@ -182,8 +245,8 @@ type EndedHandler = () => void;
 const TOOL_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_.-]*$/;
 
 export function defineTool<TArgs = unknown, TResult = unknown>(
-  tool: ToolInput<TArgs, TResult>
-): ToolInput<TArgs, TResult> {
+  tool: ToolDefinition<TArgs, TResult>
+): ToolDefinition<TArgs, TResult> {
   return tool;
 }
 
@@ -212,7 +275,7 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
       throw makeError("INVALID_INPUT", "skills.tools entries must be objects", { index });
     }
-    const rawTool = tool as Partial<ToolInput>;
+    const rawTool = tool as Partial<ToolDefinition> & { input?: unknown };
     if (typeof rawTool.name !== "string" || !TOOL_NAME_PATTERN.test(rawTool.name)) {
       throw makeError("INVALID_INPUT", "tool name is invalid", { index, toolName: rawTool.name });
     }
@@ -236,8 +299,13 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
     if (rawTool.handler !== undefined && typeof rawTool.handler !== "function") {
       throw makeError("INVALID_INPUT", "tool handler must be a function", { toolName: rawTool.name });
     }
+    if (rawTool.input !== undefined) {
+      throw makeError("INVALID_INPUT", "tool input is no longer supported; use argsSchema", {
+        toolName: rawTool.name,
+      });
+    }
 
-    const argsSchema = normalizeToolInputSchema(rawTool.input, rawTool.name);
+    const argsSchema = normalizeToolArgsSchema(rawTool.argsSchema, rawTool.name);
     if (rawTool.handler) handlers.set(rawTool.name, rawTool.handler);
     return {
       name: rawTool.name,
@@ -256,68 +324,24 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
   };
 }
 
-function normalizeToolInputSchema(input: unknown, toolName: string): JsonSchema {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw makeError("INVALID_INPUT", "tool input must be an object", { toolName });
+function normalizeToolArgsSchema(argsSchema: unknown, toolName: string): ToolArgsSchema {
+  if (!argsSchema || typeof argsSchema !== "object" || Array.isArray(argsSchema)) {
+    throw makeError("INVALID_INPUT", "tool argsSchema must be an object", { toolName });
   }
 
-  const objectInput = input as Record<string, unknown>;
-  if (typeof objectInput.type === "string") {
-    assertJsonSchemaObject(objectInput, toolName);
-    return deepCloneObject(objectInput);
+  const schema = argsSchema as Record<string, unknown>;
+  if (schema.type !== "object") {
+    throw makeError("INVALID_INPUT", "tool argsSchema must describe an object", { toolName });
   }
 
-  const properties: Record<string, JsonSchema> = {};
-  const required: string[] = [];
-  for (const [field, primitive] of Object.entries(objectInput)) {
-    if (!field.trim()) {
-      throw makeError("INVALID_INPUT", "tool input field name must be non-empty", { toolName });
-    }
-    if (!isToolInputPrimitive(primitive)) {
-      throw makeError("INVALID_INPUT", "tool input shorthand value is invalid", {
-        toolName,
-        field,
-      });
-    }
-    properties[field] = { type: primitive };
-    required.push(field);
-  }
-
-  return {
-    type: "object",
-    properties,
-    required,
-    additionalProperties: false,
-  };
-}
-
-function assertJsonSchemaObject(schema: Record<string, unknown>, toolName: string): void {
   try {
-    JSON.stringify(schema);
+    return JSON.parse(JSON.stringify(schema)) as ToolArgsSchema;
   } catch (err) {
-    throw makeError("INVALID_INPUT", "tool input JSON Schema must be serializable", {
+    throw makeError("INVALID_INPUT", "tool argsSchema must be serializable", {
       toolName,
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  if (schema.type !== "object") {
-    throw makeError("INVALID_INPUT", "tool input JSON Schema must describe an object", { toolName });
-  }
-}
-
-function deepCloneObject<T extends Record<string, unknown>>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function isToolInputPrimitive(value: unknown): value is ToolInputPrimitive {
-  return (
-    value === "string" ||
-    value === "number" ||
-    value === "boolean" ||
-    value === "integer" ||
-    value === "object" ||
-    value === "array"
-  );
 }
 
 export class Pedelec {

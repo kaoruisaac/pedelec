@@ -74,7 +74,7 @@ npm install ../path/to/pedelec/sdk
 ## 最小使用範例
 
 ```ts
-import { Pedelec } from "@kaoruisaac/pedelec";
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
 
 const pedelec = new Pedelec();
 
@@ -87,7 +87,11 @@ const session = await pedelec.createSession({
       defineTool({
         name: "get_current_page",
         description: "讀取目前瀏覽器頁面的 title 與 URL。",
-        input: {},
+        argsSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
         handler: () => ({
           url: location.href,
           title: document.title,
@@ -171,7 +175,16 @@ const session = await pedelec.createSession({
       defineTool({
         name: "update_counter",
         description: "依照 delta 更新畫面上的 counter。",
-        input: { delta: "number" },
+        argsSchema: {
+          type: "object",
+          required: ["delta"],
+          properties: {
+            delta: {
+              type: "number",
+              description: "Counter delta.",
+            },
+          },
+        },
       }),
     ],
   },
@@ -312,6 +325,8 @@ Pedelec 的 tool calling 流程是：
 5. SDK 觸發 `session.onTool()`。
 6. Web App 執行對應工具並 return result。
 7. SDK 自動把 result submit 回 Desktop Runtime，再交給 agent 繼續推理。
+
+每個 `defineTool` 使用 `argsSchema` 描述 tool arguments，這份描述會送給 provider / agent。root schema 必須是 object。`argsSchema` 是 Pedelec Tool Args Schema subset，不是完整 JSON Schema；它支援常見的 `string`、`number`、`integer`、`boolean`、`array`、`object`、`oneOf` node，以及 `description`、`default`、`examples`、`enum`、數值範圍、array 長度限制與 `required` 等欄位。`default` 只是給 agent 的提示，SDK 不會自動補值。舊的 shorthand `input` schema 不再支援。第一版也不支援 `$defs`、`$ref`、`additionalProperties`、`exclusiveMinimum`、`exclusiveMaximum`、`multipleOf`、`format`；需要重用 schema 時請用 TypeScript const。
 
 範例：
 

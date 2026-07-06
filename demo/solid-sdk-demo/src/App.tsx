@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus } from "pedelec";
+import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type ToolArgsSchema } from "pedelec";
 
 const MAX_EVENTS = 300;
 
@@ -76,6 +76,12 @@ type ConnectionState = {
   message: string;
 };
 
+const emptyArgsSchema = {
+  type: "object",
+  properties: {},
+  required: [],
+} satisfies ToolArgsSchema;
+
 function createDemoSkills() {
   return {
     guidance:
@@ -84,7 +90,7 @@ function createDemoSkills() {
       defineTool({
         name: "get_current_page",
         description: "Read the current browser page title and URL.",
-        input: {},
+        argsSchema: emptyArgsSchema,
         timeoutMs: 60000,
         handler: () => ({
           title: document.title,
@@ -94,26 +100,25 @@ function createDemoSkills() {
       defineTool({
         name: "get_selected_text",
         description: "Read the text currently selected on the page.",
-        input: {},
+        argsSchema: emptyArgsSchema,
         timeoutMs: 60000,
       }),
       defineTool({
         name: "ask_user",
         description: "Ask the user a question and wait for their text response.",
-        input: {
+        argsSchema: {
           type: "object",
           properties: {
             question: { type: "string" },
           },
           required: ["question"],
-          additionalProperties: false,
         },
         timeoutMs: 60000,
       }),
       defineTool({
         name: "throw_error",
         description: "Trigger the demo error path by throwing an error from the tool handler.",
-        input: {},
+        argsSchema: emptyArgsSchema,
         timeoutMs: 60000,
       }),
     ],

@@ -162,7 +162,11 @@ describe("Pedelec SDK", () => {
           defineTool({
             name: "get_app_state",
             description: "Get app state.",
-            input: {},
+            argsSchema: {
+              type: "object",
+              properties: {},
+              required: [],
+            },
             handler: () => ({ ok: true }),
           }),
         ],
@@ -185,7 +189,6 @@ describe("Pedelec SDK", () => {
                 type: "object",
                 properties: {},
                 required: [],
-                additionalProperties: false,
               },
             },
           ],
@@ -736,7 +739,11 @@ describe("Pedelec SDK", () => {
           defineTool({
             name: "update_counter",
             description: "Update counter.",
-            input: { delta: "number" },
+            argsSchema: {
+              type: "object",
+              properties: { delta: { type: "number" } },
+              required: ["delta"],
+            },
             timeoutMs: 3000,
             handler: (args: any) => ({ source: "inline", delta: args.delta }),
           }),
@@ -756,7 +763,6 @@ describe("Pedelec SDK", () => {
             type: "object",
             properties: { delta: { type: "number" } },
             required: ["delta"],
-            additionalProperties: false,
           },
           timeoutMs: 3000,
         },
@@ -809,7 +815,11 @@ describe("Pedelec SDK", () => {
         defineTool({
           name: "good_tool",
           description: "Good tool.",
-          input: {},
+          argsSchema: {
+            type: "object",
+            properties: {},
+            required: [],
+          },
         }),
       ],
     };
@@ -832,6 +842,119 @@ describe("Pedelec SDK", () => {
         skills: { ...validBase, tools: [{ ...validBase.tools[0], timeoutMs: 0 }] },
       } as any)
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("deep clones argsSchema before sending the manifest", async () => {
+    const pedelec = new Pedelec();
+    const argsSchema = {
+      type: "object",
+      required: ["delta"],
+      properties: {
+        delta: {
+          type: "number",
+          description: "Original delta.",
+        },
+      },
+    } as const;
+    const create = pedelec.createSession({
+      provider: "codex",
+      skills: {
+        guidance: "Use update_counter.",
+        tools: [
+          defineTool({
+            name: "update_counter",
+            description: "Update counter.",
+            argsSchema,
+          }),
+        ],
+      },
+    });
+    respondSettings(pageWindow, pageWindow.lastSent());
+    await nextTick();
+    const createRequest = pageWindow.lastSent();
+    (argsSchema.properties.delta as { description: string }).description = "Mutated delta.";
+
+    expect(createRequest.input.skills.tools[0].argsSchema.properties.delta.description).toBe(
+      "Original delta."
+    );
+    respondOk(pageWindow, createRequest, { sessionId: "thread_clone" });
+    await create;
+  });
+
+  it("rejects legacy input tool definitions at runtime", async () => {
+    const pedelec = new Pedelec();
+
+    await expect(
+      pedelec.createSession({
+        provider: "codex",
+        skills: {
+          guidance: "Use legacy_tool.",
+          tools: [
+            {
+              name: "legacy_tool",
+              description: "Legacy tool.",
+              input: { delta: "number" },
+              argsSchema: {
+                type: "object",
+                properties: {},
+                required: [],
+              },
+            },
+          ],
+        },
+      } as any)
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "tool input is no longer supported; use argsSchema",
+    });
+  });
+
+  it("rejects missing, non-object, non-object-root, and non-serializable argsSchema values", async () => {
+    const pedelec = new Pedelec();
+    const circular: any = { type: "object" };
+    circular.self = circular;
+
+    const makeSkills = (argsSchema: unknown) => ({
+      guidance: "Use bad_tool.",
+      tools: [
+        {
+          name: "bad_tool",
+          description: "Bad tool.",
+          ...(argsSchema === undefined ? {} : { argsSchema }),
+        },
+      ],
+    });
+
+    await expect(
+      pedelec.createSession({ provider: "codex", skills: makeSkills(undefined) } as any)
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "tool argsSchema must be an object",
+    });
+    await expect(
+      pedelec.createSession({ provider: "codex", skills: makeSkills([]) } as any)
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "tool argsSchema must be an object",
+    });
+    await expect(
+      pedelec.createSession({ provider: "codex", skills: makeSkills({ type: "array" }) } as any)
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "tool argsSchema must describe an object",
+    });
+    await expect(
+      pedelec.createSession({ provider: "codex", skills: makeSkills({ type: "object", value: 1n }) } as any)
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "tool argsSchema must be serializable",
+    });
+    await expect(
+      pedelec.createSession({ provider: "codex", skills: makeSkills(circular) } as any)
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "tool argsSchema must be serializable",
+    });
   });
 
   it("submits async tool handler results", async () => {
