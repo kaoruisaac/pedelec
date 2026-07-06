@@ -109,12 +109,6 @@ export default function App() {
     world = null;
   });
 
-  createEffect(() => {
-    conversation()
-    uiState()
-    panelMessageEl?.scrollTo(0, panelMessageEl.scrollHeight)
-  })
-
   async function initializeRuntime(mode: RenderMode, generation: number): Promise<void> {
     if (!stageElement) return;
     clearWorldUiState();
@@ -268,6 +262,7 @@ export default function App() {
 
   function appendConversationMessage(role: TextChatMessage["role"], text: string): void {
     setConversation((current) => [...current, { role, text }]);
+    panelMessageEl?.scrollTo(0, panelMessageEl.scrollHeight)
   }
 
   function appendToolConversationMessage(tool: string, result: ToolCallResult): void {

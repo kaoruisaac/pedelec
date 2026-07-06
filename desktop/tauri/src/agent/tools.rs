@@ -94,17 +94,6 @@ pub fn execute_tool(
 }
 
 fn pedelec_cli_tool_call(args: &Value, config: &AgentConfig) -> Result<Value, AgentError> {
-    let thread_id = config
-        .pedelec_thread_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            AgentError::new(
-                "PEDELEC_THREAD_ID_NOT_FOUND",
-                "Cannot call a Pedelec host tool without PEDELEC_THREAD_ID.",
-            )
-        })?;
     let tool_name = args
         .get("toolName")
         .and_then(Value::as_str)
@@ -127,7 +116,6 @@ fn pedelec_cli_tool_call(args: &Value, config: &AgentConfig) -> Result<Value, Ag
     let mut command = Command::new(cli_path);
     command
         .arg("tool-call")
-        .arg(thread_id)
         .arg(tool_name)
         .arg(json_args)
         .stdin(Stdio::null())
@@ -232,7 +220,6 @@ mod tests {
             sandbox,
             pedelec_cli_path: None,
             core_runtime_file: None,
-            pedelec_thread_id: None,
             max_transcript_bytes: 1024,
             max_tool_rounds: 8,
             max_list_files: 200,
@@ -242,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_tool_does_not_require_pedelec_thread_id() {
+    fn filesystem_tool_works_without_host_routing_config() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("README.md"), "hello").unwrap();
         let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
@@ -261,32 +248,13 @@ mod tests {
     }
 
     #[test]
-    fn host_tool_requires_pedelec_thread_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
-        let cfg = config(temp.path().to_path_buf());
-
-        let err = execute_tool(
-            "pedelec_cli.tool_call",
-            &serde_json::json!({ "toolName": "get_page", "args": {} }),
-            "session_inner",
-            &sandbox,
-            &cfg,
-        )
-        .unwrap_err();
-
-        assert_eq!(err.code, "PEDELEC_THREAD_ID_NOT_FOUND");
-    }
-
-    #[test]
-    fn host_tool_passes_outer_thread_id_to_pedelec_cli() {
+    fn host_tool_does_not_pass_thread_id_to_pedelec_cli() {
         let temp = tempfile::tempdir().unwrap();
         let capture = temp.path().join("args.txt");
         let cli = fake_pedelec_cli(temp.path(), &capture);
         let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
         let mut cfg = config(temp.path().to_path_buf());
         cfg.pedelec_cli_path = Some(cli);
-        cfg.pedelec_thread_id = Some("thread_outer".into());
 
         let result = execute_tool(
             "pedelec_cli.tool_call",
@@ -300,8 +268,10 @@ mod tests {
         assert_eq!(result["ok"], true);
         let args = std::fs::read_to_string(capture).unwrap();
         assert!(args.contains("tool-call"));
-        assert!(args.contains("thread_outer"));
         assert!(args.contains("get_page"));
+        assert!(args.contains("id"));
+        assert!(args.contains("1"));
+        assert!(!args.contains("thread_outer"));
         assert!(!args.contains("session_inner"));
     }
 

@@ -1080,7 +1080,7 @@ fn core_unavailable_error(_err: io::Error) -> PedelecError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pedelec_cli::run_tool_cli_with_runtime_file_path;
+    use crate::pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
     use crate::pedelec_core::{
         CommandSpec, CoreRuntime, CreateThreadOutput, OllamaProviderSettings, PedelecSettings,
         ProviderAdapterState, ProviderCode, ProviderSettings, SandboxManager, ThreadState,
@@ -1576,6 +1576,7 @@ mod tests {
 
         let mut subscription = subscribe_to_thread(&runtime_path, &output.thread_id);
         install_test_provider_command(&runtime, &output.thread_id, true, false);
+        let _thread_env = ThreadIdEnvGuard::set(Some(&output.thread_id));
 
         let send = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
@@ -1596,13 +1597,11 @@ mod tests {
         );
 
         let first_tool_runtime_path = runtime_path.clone();
-        let first_thread_id = output.thread_id.clone();
         let first_tool_handle = thread::spawn(move || {
             run_tool_cli_with_runtime_file_path(
                 vec![
                     "pedelec-cli".into(),
                     "tool-call".into(),
-                    first_thread_id,
                     "update_counter".into(),
                     r#"{"delta":2}"#.into(),
                 ],
@@ -1645,7 +1644,6 @@ mod tests {
             vec![
                 "pedelec-cli".into(),
                 "tool-call".into(),
-                output.thread_id.clone(),
                 "get_app_state".into(),
                 "{}".into(),
             ],
@@ -1759,11 +1757,11 @@ mod tests {
             20,
         );
 
+        let _env = ThreadIdEnvGuard::set(Some("thread_tool_timeout_cli"));
         let response = run_tool_cli_with_runtime_file_path(
             vec![
                 "pedelec-cli".into(),
                 "tool-call".into(),
-                "thread_tool_timeout_cli".into(),
                 "get_app_state".into(),
                 "{}".into(),
             ],
@@ -2531,13 +2529,13 @@ exit 0
 ## get_app_state
 
 ```bash
-pedelec-cli tool-call <thread_id> get_app_state '{}'
+pedelec-cli tool-call get_app_state '{}'
 ```
 
 ## update_counter
 
 ```bash
-pedelec-cli tool-call <thread_id> update_counter '{"delta":1}'
+pedelec-cli tool-call update_counter '{"delta":1}'
 ```
 "#
     }

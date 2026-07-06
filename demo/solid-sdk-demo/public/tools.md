@@ -14,7 +14,7 @@ Returns JSON like:
 ```
 
 ```bash
-pedelec-cli tool-call <thread_id> get_current_page '{}'
+pedelec-cli tool-call get_current_page '{}'
 ```
 
 ## get_selected_text
@@ -30,7 +30,7 @@ Returns JSON like:
 ```
 
 ```bash
-pedelec-cli tool-call <thread_id> get_selected_text '{}'
+pedelec-cli tool-call get_selected_text '{}'
 ```
 
 ## ask_user
@@ -46,7 +46,7 @@ Returns JSON like:
 ```
 
 ```bash
-pedelec-cli tool-call <thread_id> ask_user '{"question":"What should I do next?"}'
+pedelec-cli tool-call ask_user '{"question":"What should I do next?"}'
 ```
 
 ## throw_error
@@ -54,5 +54,5 @@ pedelec-cli tool-call <thread_id> ask_user '{"question":"What should I do next?"
 Trigger the demo error path by throwing an error from the tool handler. This is intended for testing error handling.
 
 ```bash
-pedelec-cli tool-call <thread_id> throw_error '{}'
+pedelec-cli tool-call throw_error '{}'
 ```

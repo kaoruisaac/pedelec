@@ -44,18 +44,17 @@ Do not invent tool names or call tools that are not listed in `skills/tools.md`.
 ## Command format
 
 ```bash
-pedelec-cli tool-call <thread_id> <tool_name> '<json_args>'
+pedelec-cli tool-call <tool_name> '<json_args>'
 ```
 
-- `<thread_id>`: The constant id to be included.
 - `<tool_name>`: exact tool name from `skills/tools.md`.
 - `<json_args>`: valid JSON object. Use `{}` when the tool has no arguments.
 
 Examples:
 
 ```bash
-pedelec-cli tool-call <thread_id> get_current_page '{}'
-pedelec-cli tool-call <thread_id> ask_user '{"question":"Which option do you prefer?"}'
+pedelec-cli tool-call get_current_page '{}'
+pedelec-cli tool-call ask_user '{"question":"Which option do you prefer?"}'
 ```
 
 ## JSON arguments
@@ -118,7 +117,7 @@ Each tool has a default timeout defined by the app.
 Some tools may allow `timeoutMs` in the JSON arguments:
 
 ```bash
-pedelec-cli tool-call <thread_id> long_running_tool '{"timeoutMs":120000}'
+pedelec-cli tool-call long_running_tool '{"timeoutMs":120000}'
 ```
 
 Use `timeoutMs` only when the tool documentation allows it or the task clearly needs more time.
@@ -2973,6 +2972,7 @@ pub mod error_codes {
     pub const TOOLS_MD_NOT_FOUND: &str = "TOOLS_MD_NOT_FOUND";
     pub const TOOL_NOT_FOUND: &str = "TOOL_NOT_FOUND";
     pub const TOOL_ARGS_INVALID: &str = "TOOL_ARGS_INVALID";
+    pub const PEDELEC_THREAD_ID_NOT_FOUND: &str = "PEDELEC_THREAD_ID_NOT_FOUND";
     pub const TOOL_TIMEOUT: &str = "TOOL_TIMEOUT";
     pub const PENDING_TOOL_REQUEST_EXISTS: &str = "PENDING_TOOL_REQUEST_EXISTS";
     pub const PENDING_TOOL_REQUEST_NOT_FOUND: &str = "PENDING_TOOL_REQUEST_NOT_FOUND";
@@ -4326,7 +4326,7 @@ fn unique_available_filename(
 
 fn write_builtin_pedelec_tool_skill(
     skills_dir: impl AsRef<Path>,
-    thread_id: &str,
+    _thread_id: &str,
 ) -> Result<SkillFile, PedelecError> {
     let skills_dir = skills_dir.as_ref();
     fs::create_dir_all(skills_dir).map_err(|err| {
@@ -4349,7 +4349,7 @@ fn write_builtin_pedelec_tool_skill(
     let target_path = canonical_skills_dir.join(BUILTIN_PEDELEC_TOOL_FILENAME);
     ensure_child_path(&canonical_skills_dir, &target_path)?;
 
-    let content = BUILTIN_PEDELEC_TOOL_TEMPLATE.replace("<thread_id>", thread_id);
+    let content = BUILTIN_PEDELEC_TOOL_TEMPLATE.to_string();
     fs::write(&target_path, content.as_bytes()).map_err(|err| {
         skill_download_error(
             "cannot write builtin pedelec tool skill",
@@ -7173,8 +7173,13 @@ mod tests {
             .join(BUILTIN_PEDELEC_TOOL_FILENAME);
         let content = fs::read_to_string(&skill_path).unwrap();
         assert!(skill_path.exists());
-        assert!(!content.contains("<thread_id>"));
-        assert!(content.contains(&format!("tool-call {}", output.thread_id)));
+        let old_placeholder = "<thread".to_string() + "_id>";
+        assert!(!content.contains(&old_placeholder));
+        assert!(!content.contains("thread_id"));
+        assert!(!content.contains("session id"));
+        assert!(!content.contains("PEDELEC_THREAD_ID"));
+        assert!(content.contains("pedelec-cli tool-call <tool_name> '<json_args>'"));
+        assert!(content.contains("pedelec-cli tool-call get_current_page '{}'"));
 
         let skill = thread
             .skills
@@ -7216,7 +7221,9 @@ mod tests {
             fs::read_to_string(skills_dir.join(BUILTIN_PEDELEC_TOOL_FILENAME)).unwrap();
         let downloaded_content = fs::read_to_string(skills_dir.join("pedelec-cli_1.md")).unwrap();
 
-        assert!(builtin_content.contains(&format!("tool-call {}", output.thread_id)));
+        assert!(builtin_content.contains("pedelec-cli tool-call <tool_name> '<json_args>'"));
+        let old_placeholder = "<thread".to_string() + "_id>";
+        assert!(!builtin_content.contains(&old_placeholder));
         assert_eq!(downloaded_content, "# downloaded\n");
         assert!(thread.skills.iter().any(|skill| {
             skill.original_url == BUILTIN_PEDELEC_TOOL_ORIGINAL_URL

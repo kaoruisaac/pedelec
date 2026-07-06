@@ -398,7 +398,6 @@ mod tests {
             sandbox,
             pedelec_cli_path: None,
             core_runtime_file: None,
-            pedelec_thread_id: None,
             max_transcript_bytes: 1024,
             max_tool_rounds: 8,
             max_list_files: 200,

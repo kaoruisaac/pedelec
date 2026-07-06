@@ -85,7 +85,6 @@ PEDELEC_AGENT_MAX_TOOL_ROUNDS=8
 
 PEDELEC_CLI_PATH=
 PEDELEC_CORE_RUNTIME_FILE=
-PEDELEC_THREAD_ID=
 PEDELEC_AGENT_PEDELEC_CLI_TIMEOUT_MS=60000
 ```
 
@@ -174,7 +173,7 @@ pedelec-agent \
 ```bash
 printf '%s' '請呼叫 get_current_page 並整理目前頁面資訊' | \
 OLLAMA_API_KEY=ollama \
-PEDELEC_THREAD_ID=<pedelec_thread_id> pedelec-agent \
+pedelec-agent \
   --sandbox . \
   --pedelec-cli ./desktop/tauri/target/debug/pedelec-cli \
   --core-runtime-file ~/.pedelec/runtime.json

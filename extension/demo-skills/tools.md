@@ -5,7 +5,7 @@
 Read current app state.
 
 ```bash
-pedelec-cli tool-call <thread_id> get_app_state '{}'
+pedelec-cli tool-call get_app_state '{}'
 ```
 
 ## update_counter
@@ -13,5 +13,5 @@ pedelec-cli tool-call <thread_id> get_app_state '{}'
 Update the demo counter by delta.
 
 ```bash
-pedelec-cli tool-call <thread_id> update_counter '{"delta":1}'
+pedelec-cli tool-call update_counter '{"delta":1}'
 ```

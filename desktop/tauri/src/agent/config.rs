@@ -27,7 +27,6 @@ pub struct AgentConfig {
     pub sandbox: PathBuf,
     pub pedelec_cli_path: Option<PathBuf>,
     pub core_runtime_file: Option<PathBuf>,
-    pub pedelec_thread_id: Option<String>,
     pub max_transcript_bytes: u64,
     pub max_tool_rounds: usize,
     pub max_list_files: usize,
@@ -93,11 +92,6 @@ pub(crate) fn resolve_config_with_settings_path(
             .or_else(|| env_path("PEDELEC_CORE_RUNTIME_FILE"))
             .or_else(|| env_path("PEDELEC_CORE_IPC_RUNTIME_FILE"))
             .or_else(|| env_file_path(&file_env, "PEDELEC_CORE_RUNTIME_FILE")),
-        pedelec_thread_id: env::var("PEDELEC_THREAD_ID")
-            .ok()
-            .or_else(|| file_env.get("PEDELEC_THREAD_ID").cloned())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
         max_transcript_bytes: get_u64(&file_env, "PEDELEC_AGENT_MAX_TRANSCRIPT_BYTES", 1_048_576)?,
         max_tool_rounds: get_usize(&file_env, "PEDELEC_AGENT_MAX_TOOL_ROUNDS", 100)?,
         max_list_files: get_usize(&file_env, "PEDELEC_AGENT_MAX_LIST_FILES", 200)?,

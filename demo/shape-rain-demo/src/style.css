@@ -442,6 +442,9 @@ input {
 .chat-bubble p {
   margin: 0;
 }
+.chat-bubble pre {
+  overflow: auto;
+}
 
 .chat-row[data-role="assistant"] .chat-bubble {
   border-radius: 14px 14px 14px 0;
