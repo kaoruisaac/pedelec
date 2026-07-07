@@ -1,0 +1,9 @@
+services:
+  shape-rain-demo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: shape-rain-demo:latest
+    ports:
+      - "5174:80"
+    restart: unless-stopped

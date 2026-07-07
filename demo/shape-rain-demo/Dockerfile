@@ -1,0 +1,18 @@
+FROM node:lts-alpine AS build
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm pkg set dependencies.pedelec="npm:@kaoruisaac/pedelec@latest" \
+  && rm package-lock.json \
+  && npm install
+
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
