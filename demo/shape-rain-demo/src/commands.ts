@@ -315,7 +315,7 @@ function normalizeSize(value: unknown, mode: RenderMode = "3d"): number {
     const named = value.trim().toLowerCase();
     if (named === "small") size = 12;
     else if (named === "medium") size = 28;
-    else if (named === "large") size = 40;
+    else if (named === "large") size = MAX_SIZE;
     else {
       const parsed = Number(named);
       size = Number.isFinite(parsed) ? clamp(parsed, MIN_SIZE, MAX_SIZE) : clamp(toNumber(value, 12), MIN_SIZE, MAX_SIZE);
@@ -332,8 +332,8 @@ function normalizeClosedPolygonSize(value: unknown, mode: RenderMode = "3d"): nu
   if (typeof value === "string") {
     const named = value.trim().toLowerCase();
     if (named === "small") size = 16;
-    else if (named === "large") size = 84;
     else if (named === "medium") size = 28;
+    else if (named === "large") size = 40;
     else size = clamp(toNumber(value, 18), CLOSED_MIN_SIZE, CLOSED_MAX_SIZE);
   } else {
     size = clamp(toNumber(value, 18), CLOSED_MIN_SIZE, CLOSED_MAX_SIZE);
