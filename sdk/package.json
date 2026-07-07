@@ -20,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/kaoruisaac/pedelec.git",
+    "url": "git+https://github.com/kaoruisaac/pedelec.git",
     "directory": "sdk"
   },
   "scripts": {
