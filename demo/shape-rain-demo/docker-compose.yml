@@ -5,5 +5,5 @@ services:
       dockerfile: Dockerfile
     image: shape-rain-demo:latest
     ports:
-      - "5174:80"
+      - "5174:5174"
     restart: unless-stopped

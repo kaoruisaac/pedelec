@@ -3,9 +3,7 @@ FROM node:lts-alpine AS build
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm pkg set dependencies.pedelec="npm:@kaoruisaac/pedelec@latest" \
-  && rm package-lock.json \
-  && npm install
+RUN npm install
 
 COPY . .
 RUN npm run build

@@ -19,7 +19,7 @@ export default defineConfig(({ command }) => ({
     ? {
         resolve: {
           alias: {
-            pedelec: resolve(sdkSourceDir, "index.ts"),
+            "@kaoruisaac/pedelec": resolve(sdkSourceDir, "index.ts"),
           },
         },
       }

@@ -11,7 +11,7 @@ import {
   type ToolArgsObjectSchema,
   type ToolArgsSchema,
   type ToolArgsSchemaNode,
-} from "pedelec";
+} from "@kaoruisaac/pedelec";
 import {
   normalizeSpawnClosedPolygonsCommand,
   normalizeSpawnCommand,

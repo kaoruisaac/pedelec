@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { FiChevronDown, FiX } from "solid-icons/fi";
-import type { PedelecError, PedelecSettings, ProviderCode, ProviderInfo } from "pedelec";
+import type { PedelecError, PedelecSettings, ProviderCode, ProviderInfo } from "@kaoruisaac/pedelec";
 import { forwardPopUp } from "../services/PopUpProvider";
 import "./SettingPop.css";
 
