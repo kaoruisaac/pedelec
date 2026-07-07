@@ -7,7 +7,6 @@ import solid from "vite-plugin-solid";
 const rootDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(rootDir, "../..");
 const sdkSourceDir = resolve(repoRoot, "sdk/src");
-const prodExtensionId = "ogccgaminlphbkeghldidiiimajfdpag";
 const devExtensionIdEnv = "PEDELEC_DEV_CHROME_EXTENSION_ID";
 
 export default defineConfig(({ command }) => ({
@@ -31,9 +30,11 @@ export default defineConfig(({ command }) => ({
 }));
 
 function pedelecDevExtensionIdPlugin() {
+  const devExtensionId = readDevExtensionId();
+  if (!devExtensionId) return null;
+
   const indexModuleId = normalizePath(resolve(sdkSourceDir, "index.ts"));
   const virtualModuleId = "\0pedelec-dev-extension-id";
-  const devExtensionId = readDevExtensionId() || prodExtensionId;
 
   return {
     name: "pedelec-dev-extension-id",
