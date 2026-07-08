@@ -2,10 +2,8 @@
 English | [繁體中文](./README.zh-TW.md)
 
 ---
-# Thanks for your patience — just a little longer.
-```
+## Thanks for your patience — just a little longer.
 The Pedelec App is still under review, but we expect the first official Windows and macOS desktop versions to be available very soon.
-```
 ---
 Pedelec is a bridge architecture that lets web frontends call local AI coding agents.
 
