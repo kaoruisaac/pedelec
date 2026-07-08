@@ -76,7 +76,8 @@ export type ToolArgsSchemaNode =
 export type ToolArgsSchema = ToolArgsObjectSchema;
 
 export type ToolSpecificHandler<TArgs = unknown, TResult = unknown> = (
-  args: TArgs
+  args: TArgs,
+  ctx: ToolCallContext
 ) => TResult | Promise<TResult>;
 
 export type ToolDefinition<
@@ -171,6 +172,48 @@ export type PedelecSessionStatus =
   | "ended"
   | "error";
 
+export type PedelecEventContext = {
+  sessionId: string;
+  provider: string;
+  model?: string;
+  sessionCreatedAt: number;
+  eventReceivedAt?: number;
+  eventEmittedAt: number;
+  turnId?: string;
+  turnStartedAt?: number;
+  source: "core" | "sdk";
+};
+
+export type ChatEventContext = PedelecEventContext & {
+  type: "chat_delta";
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+
+export type ToolCallContext = PedelecEventContext & {
+  type: "tool_call";
+  toolRequestId: string;
+  tool: string;
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+
+export type StatusEventContext = PedelecEventContext & {
+  type: "status_changed" | "sdk_status_changed";
+  status: PedelecSessionStatus;
+  previousStatus: PedelecSessionStatus;
+};
+
+export type ErrorEventContext = PedelecEventContext & {
+  type: "error" | "sdk_error";
+};
+
+export type EndedEventContext = PedelecEventContext & {
+  type: "ended" | "sdk_ended";
+};
+
 type ResponseMessage = {
   channelId: string;
   type: "response";
@@ -255,14 +298,25 @@ type PendingSend = {
   reject: (error: PedelecError) => void;
 };
 
-type ChatHandler = (text: string) => void;
+type ActiveTurn = {
+  turnId: string;
+  turnStartedAt: number;
+};
+
+type EventDispatchMeta = {
+  source: "core" | "sdk";
+  eventReceivedAt?: number;
+};
+
+type ChatHandler = (text: string, ctx: ChatEventContext) => void;
 type GenericToolHandler<TToolName extends string = string> = (
   tool: TToolName,
-  args: unknown
+  args: unknown,
+  ctx: ToolCallContext
 ) => unknown | Promise<unknown>;
-type ErrorHandler = (error: PedelecError) => void;
-type StatusHandler = (status: PedelecSessionStatus) => void;
-type EndedHandler = () => void;
+type ErrorHandler = (error: PedelecError, ctx: ErrorEventContext) => void;
+type StatusHandler = (status: PedelecSessionStatus, ctx: StatusEventContext) => void;
+type EndedHandler = (ctx: EndedEventContext) => void;
 
 const TOOL_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_.-]*$/;
 
@@ -691,8 +745,12 @@ export class Pedelec {
     }
 
     if (isSessionEvent(message) && this.isNewEvent(message)) {
+      const eventReceivedAt = Date.now();
       if (message.sessionId) {
-        this.sessions.get(message.sessionId)?.handleEvent(message);
+        this.sessions.get(message.sessionId)?.handleEvent(message, {
+          source: "core",
+          eventReceivedAt,
+        });
       } else if (message.type === "error") {
         this.broadcastError(normalizeError(message.error, "SDK_TRANSPORT_ERROR", "Pedelec transport error"));
       }
@@ -744,7 +802,7 @@ export class Pedelec {
 
   private broadcastError(error: PedelecError): void {
     for (const session of this.sessions.values()) {
-      session.handleEvent({ type: "error", sessionId: session.sessionId, error });
+      session.handleEvent({ type: "error", sessionId: session.sessionId, error }, { source: "sdk" });
     }
   }
 }
@@ -753,9 +811,11 @@ export class PedelecSession<TToolName extends string = string> {
   readonly sessionId: string;
   readonly provider: string;
   readonly model?: string;
+  readonly sessionCreatedAt = Date.now();
 
   private status: PedelecSessionStatus = "idle";
   private pendingSend: PendingSend | null = null;
+  private activeTurn: ActiveTurn | null = null;
   private genericToolHandler: GenericToolHandler<TToolName> | null = null;
   private inlineToolHandlers = new Map<string, ToolSpecificHandler>();
   private readonly namedToolHandlers = new Map<string, ToolSpecificHandler>();
@@ -786,7 +846,9 @@ export class PedelecSession<TToolName extends string = string> {
       return Promise.reject(makeError("SESSION_BUSY", "session is already running", { sessionId: this.sessionId }));
     }
 
-    this.setStatus("running");
+    const turn = createTurn();
+    this.activeTurn = turn;
+    this.setStatus("running", { source: "sdk" });
 
     const donePromise = new Promise<void>((resolve, reject) => {
       this.pendingSend = { resolve, reject };
@@ -799,8 +861,9 @@ export class PedelecSession<TToolName extends string = string> {
       })
       .catch((err) => {
         const error = normalizeError(err, "SEND_TEXT_FAILED", "sendText failed");
+        this.emitError(error, { source: "sdk" });
         this.clearPendingSend();
-        this.emitError(error);
+        this.finishActiveTurn(turn);
         throw error;
       });
 
@@ -874,58 +937,62 @@ export class PedelecSession<TToolName extends string = string> {
       });
     } catch (err) {
       const error = normalizeError(err, "END_SESSION_FAILED", "end failed");
-      this.emitError(error);
+      this.emitError(error, { source: "sdk" });
       throw error;
     }
 
-    this.markEnded();
+    this.markEnded({ source: "sdk" });
     this.client.unregisterSession(this.sessionId);
   }
 
-  handleEvent(event: SessionEvent): void {
+  handleEvent(event: SessionEvent, meta: EventDispatchMeta = { source: "sdk" }): void {
     if (event.type === "chat_delta") {
+      const turn = this.requireActiveTurn("chat_delta", meta);
+      if (!turn) return;
       for (const handler of this.chatHandlers) {
-        handler(event.text);
+        handler(event.text, this.createChatContext(meta, turn));
       }
       return;
     }
 
     if (event.type === "status_changed") {
-      this.setStatus(event.status);
+      this.setStatus(event.status, meta);
       if (event.status === "idle") {
         this.resolvePendingSend();
       } else if (event.status === "ended") {
-        this.markEnded();
+        this.markEnded(meta);
       } else if (event.status === "error") {
         const error = makeError("SESSION_ERROR", "session entered error status", { sessionId: this.sessionId });
+        this.emitError(error, meta);
         this.rejectPendingSend(error);
-        this.emitError(error);
       }
       return;
     }
 
     if (event.type === "tool_call") {
-      this.setStatus("waiting_tool_result");
-      this.handleToolCall(event);
+      const turn = this.requireActiveTurn("tool_call", meta);
+      if (!turn) return;
+      this.setStatus("waiting_tool_result", meta);
+      this.handleToolCall(event, meta, turn);
       return;
     }
 
     if (event.type === "done") {
-      this.setStatus("idle");
+      this.setStatus("idle", meta);
       this.resolvePendingSend();
       return;
     }
 
     if (event.type === "error") {
-      this.setStatus("error");
+      this.setStatus("error", meta);
       const error = normalizeError(event.error, "SESSION_ERROR", "session error");
+      this.emitError(error, meta);
       this.rejectPendingSend(error);
-      this.emitError(error);
       return;
     }
 
     if (event.type === "ended") {
-      this.markEnded();
+      this.markEnded(meta);
     }
   }
 
@@ -933,13 +1000,17 @@ export class PedelecSession<TToolName extends string = string> {
     this.inlineToolHandlers = new Map(handlers);
   }
 
-  private async handleToolCall(event: Extract<SessionEvent, { type: "tool_call" }>): Promise<void> {
+  private async handleToolCall(
+    event: Extract<SessionEvent, { type: "tool_call" }>,
+    meta: EventDispatchMeta,
+    turn: ActiveTurn
+  ): Promise<void> {
     let result: unknown;
     const namedHandler = this.namedToolHandlers.get(event.tool);
     const inlineHandler = this.inlineToolHandlers.get(event.tool);
     if (namedHandler) {
       try {
-        result = await namedHandler(event.args);
+        result = await namedHandler(event.args, this.createToolCallContext(event, meta, turn));
       } catch (err) {
         result = {
           error: normalizeError(err, "TOOL_HANDLER_ERROR", "Tool handler failed"),
@@ -947,7 +1018,7 @@ export class PedelecSession<TToolName extends string = string> {
       }
     } else if (inlineHandler) {
       try {
-        result = await inlineHandler(event.args);
+        result = await inlineHandler(event.args, this.createToolCallContext(event, meta, turn));
       } catch (err) {
         result = {
           error: normalizeError(err, "TOOL_HANDLER_ERROR", "Tool handler failed"),
@@ -955,7 +1026,11 @@ export class PedelecSession<TToolName extends string = string> {
       }
     } else if (this.genericToolHandler) {
       try {
-        result = await this.genericToolHandler(event.tool as TToolName, event.args);
+        result = await this.genericToolHandler(
+          event.tool as TToolName,
+          event.args,
+          this.createToolCallContext(event, meta, turn)
+        );
       } catch (err) {
         result = {
           error: normalizeError(err, "TOOL_HANDLER_ERROR", "Tool handler failed"),
@@ -976,7 +1051,9 @@ export class PedelecSession<TToolName extends string = string> {
         result,
       });
     } catch (err) {
-      this.emitError(normalizeError(err, "SUBMIT_TOOL_RESULT_FAILED", "submit_tool_result failed"));
+      this.emitError(normalizeError(err, "SUBMIT_TOOL_RESULT_FAILED", "submit_tool_result failed"), {
+        source: "sdk",
+      });
     }
   }
 
@@ -984,41 +1061,132 @@ export class PedelecSession<TToolName extends string = string> {
     const pending = this.pendingSend;
     this.pendingSend = null;
     pending?.resolve();
+    this.finishActiveTurn();
   }
 
   private rejectPendingSend(error: PedelecError): void {
     const pending = this.pendingSend;
     this.pendingSend = null;
     pending?.reject(error);
+    this.finishActiveTurn();
   }
 
   private clearPendingSend(): void {
     this.pendingSend = null;
   }
 
-  private markEnded(): void {
+  private markEnded(meta: EventDispatchMeta = { source: "sdk" }): void {
     const wasEnded = this.status === "ended";
-    this.setStatus("ended");
-    this.rejectPendingSend(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    this.setStatus("ended", meta);
     if (!wasEnded) {
       for (const handler of this.endedHandlers) {
-        handler();
+        handler(this.createEndedContext(meta));
       }
     }
+    this.rejectPendingSend(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    this.finishActiveTurn();
   }
 
-  private emitError(error: PedelecError): void {
+  private emitError(error: PedelecError, meta: EventDispatchMeta = { source: "sdk" }): void {
     for (const handler of this.errorHandlers) {
-      handler(error);
+      handler(error, this.createErrorContext(meta));
     }
   }
 
-  private setStatus(status: PedelecSessionStatus): void {
+  private setStatus(status: PedelecSessionStatus, meta: EventDispatchMeta = { source: "sdk" }): void {
     if (this.status === status) return;
+    const previousStatus = this.status;
     this.status = status;
     for (const handler of this.statusHandlers) {
-      handler(status);
+      handler(status, this.createStatusContext(status, previousStatus, meta));
     }
+  }
+
+  private requireActiveTurn(type: "chat_delta" | "tool_call", meta: EventDispatchMeta): ActiveTurn | null {
+    if (this.activeTurn) return this.activeTurn;
+
+    this.emitError(
+      makeError("SDK_PROTOCOL_ERROR", `${type} event was received without an active turn`, {
+        sessionId: this.sessionId,
+      }),
+      { source: "sdk", eventReceivedAt: meta.eventReceivedAt }
+    );
+    return null;
+  }
+
+  private finishActiveTurn(turn: ActiveTurn | null = this.activeTurn): void {
+    if (!turn || !this.activeTurn) return;
+    if (this.activeTurn.turnId === turn.turnId) {
+      this.activeTurn = null;
+    }
+  }
+
+  private createBaseContext(meta: EventDispatchMeta, turn: ActiveTurn | null = this.activeTurn): PedelecEventContext {
+    return {
+      sessionId: this.sessionId,
+      provider: this.provider,
+      model: this.model,
+      sessionCreatedAt: this.sessionCreatedAt,
+      ...(meta.eventReceivedAt === undefined ? {} : { eventReceivedAt: meta.eventReceivedAt }),
+      eventEmittedAt: Date.now(),
+      ...(turn ? { turnId: turn.turnId, turnStartedAt: turn.turnStartedAt } : {}),
+      source: meta.source,
+    };
+  }
+
+  private createChatContext(meta: EventDispatchMeta, turn: ActiveTurn): ChatEventContext {
+    return {
+      ...this.createBaseContext(meta, turn),
+      type: "chat_delta",
+      turnId: turn.turnId,
+      turnStartedAt: turn.turnStartedAt,
+      eventReceivedAt: meta.eventReceivedAt ?? Date.now(),
+      source: "core",
+    };
+  }
+
+  private createToolCallContext(
+    event: Extract<SessionEvent, { type: "tool_call" }>,
+    meta: EventDispatchMeta,
+    turn: ActiveTurn
+  ): ToolCallContext {
+    return {
+      ...this.createBaseContext(meta, turn),
+      type: "tool_call",
+      toolRequestId: event.toolRequestId,
+      tool: event.tool,
+      turnId: turn.turnId,
+      turnStartedAt: turn.turnStartedAt,
+      eventReceivedAt: meta.eventReceivedAt ?? Date.now(),
+      source: "core",
+    };
+  }
+
+  private createStatusContext(
+    status: PedelecSessionStatus,
+    previousStatus: PedelecSessionStatus,
+    meta: EventDispatchMeta
+  ): StatusEventContext {
+    return {
+      ...this.createBaseContext(meta),
+      type: meta.source === "core" ? "status_changed" : "sdk_status_changed",
+      status,
+      previousStatus,
+    };
+  }
+
+  private createErrorContext(meta: EventDispatchMeta): ErrorEventContext {
+    return {
+      ...this.createBaseContext(meta),
+      type: meta.source === "core" ? "error" : "sdk_error",
+    };
+  }
+
+  private createEndedContext(meta: EventDispatchMeta): EndedEventContext {
+    return {
+      ...this.createBaseContext(meta),
+      type: meta.source === "core" ? "ended" : "sdk_ended",
+    };
   }
 }
 
@@ -1087,6 +1255,17 @@ function createChannelId(): string {
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2);
   return `pedelec_${Date.now()}_${random}`;
+}
+
+function createTurn(): ActiveTurn {
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  return {
+    turnId: `turn_${Date.now()}_${random}`,
+    turnStartedAt: Date.now(),
+  };
 }
 
 function getCurrentOrigin(pageWindow: Window | null): string | null {

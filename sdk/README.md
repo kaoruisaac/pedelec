@@ -66,25 +66,26 @@ const session = await pedelec.createSession({
           properties: {},
           required: [],
         },
-        handler: () => ({
+        handler: (_args, ctx) => ({
           url: location.href,
           title: document.title,
+          turnId: ctx.turnId,
         }),
       }),
     ],
   },
 });
 
-session.onChat((text) => {
-  console.log(text);
+session.onChat((text, ctx) => {
+  console.log(ctx.turnId, text);
 });
 
-session.onStatus((status) => {
-  console.log("status", status);
+session.onStatus((status, ctx) => {
+  console.log("status", status, "previous", ctx.previousStatus);
 });
 
-session.onError((error) => {
-  console.error(error.code, error.message, error.details);
+session.onError((error, ctx) => {
+  console.error(ctx.type, error.code, error.message, error.details);
 });
 
 await session.sendText("Analyze the current page state.");
@@ -277,7 +278,8 @@ type CreateSessionInput =
 ```ts
 let assistantText = "";
 
-session.onChat((text) => {
+session.onChat((text, ctx) => {
+  console.debug("chat delta for turn", ctx.turnId, ctx.eventReceivedAt);
   assistantText += text;
   renderAssistantMessage(assistantText);
 });
@@ -286,8 +288,8 @@ session.onChat((text) => {
 The returned function unsubscribes the handler:
 
 ```ts
-const unsubscribe = session.onChat((text) => {
-  console.log(text);
+const unsubscribe = session.onChat((text, ctx) => {
+  console.log(ctx.turnId, text);
 });
 
 unsubscribe();
@@ -308,7 +310,8 @@ try {
 ## Session Status
 
 ```ts
-session.onStatus((status) => {
+session.onStatus((status, ctx) => {
+  console.debug("status changed from", ctx.previousStatus, "to", ctx.status);
   switch (status) {
     case "idle":
       break;
@@ -363,10 +366,11 @@ const session = await pedelec.createSession({
           properties: {},
           required: [],
         },
-        handler: () => ({
+        handler: (_args, ctx) => ({
           url: location.href,
           title: document.title,
           selectedText: window.getSelection()?.toString() ?? "",
+          turnId: ctx.turnId,
         }),
       }),
     ],
@@ -400,8 +404,9 @@ const session = await pedelec.createSession({
   },
 });
 
-session.onTool("update_counter", async (args) => {
+session.onTool("update_counter", async (args, ctx) => {
   const { delta } = args as { delta: number };
+  console.debug("tool call", ctx.toolRequestId, ctx.turnId);
   counter.value += delta;
   return {
     counter: counter.value,
@@ -412,7 +417,37 @@ session.onTool("update_counter", async (args) => {
 
 Tool results must be JSON-serializable. If no handler is registered, the SDK returns a `TOOL_HANDLER_NOT_FOUND` error result. If the handler throws, the SDK returns a `TOOL_HANDLER_ERROR` error result.
 
-The legacy generic form `session.onTool((tool, args) => ...)` remains available as a fallback handler.
+The generic form `session.onTool((tool, args, ctx) => ...)` remains available as a fallback handler.
+
+### Event Context and UI Lifecycles
+
+All user-facing event callbacks receive context metadata. The SDK provides `ctx.sessionId`, `ctx.provider`, `ctx.model`, `ctx.turnId`, `ctx.turnStartedAt`, `ctx.eventReceivedAt`, `ctx.eventEmittedAt`, and `ctx.source` where they apply. `turnId` is SDK-local metadata for one accepted `sendText()` turn; it is not sent to Core and should not be parsed.
+
+Apps should still use their own UI lifecycle state to decide whether a late callback is stale:
+
+```ts
+let lifecycleId = 0;
+
+function createWorldSession(session: PedelecSession) {
+  const generation = ++lifecycleId;
+
+  session.onTool("spawn_basic_shapes", async (args, ctx) => {
+    if (generation !== lifecycleId) {
+      return {
+        error: {
+          code: "STALE_TOOL_CALL",
+          message: "This tool call belongs to an older UI lifecycle.",
+        },
+      };
+    }
+
+    console.debug("handling tool", ctx.toolRequestId, ctx.turnId, ctx.turnStartedAt);
+    return spawnBasicShapes(args);
+  });
+}
+```
+
+The SDK context helps you inspect which session and turn produced an event. It does not automatically know whether your current canvas, page, render mode, or world instance is still valid.
 
 ### Tool Args Schema
 
@@ -448,8 +483,8 @@ If you have saved a `sessionId`, resume it later:
 ```ts
 const session = await pedelec.resumeSession("thread_abc123");
 
-session.onChat((text) => {
-  console.log(text);
+session.onChat((text, ctx) => {
+  console.log(ctx.turnId, text);
 });
 
 await session.sendText("Continue the previous task.");
@@ -468,8 +503,8 @@ After a session ends, future `sendText()` calls reject with `SESSION_ENDED`.
 Listen for runtime-ended sessions:
 
 ```ts
-session.onEnded(() => {
-  console.log("session ended");
+session.onEnded((ctx) => {
+  console.log("session ended", ctx.source);
 });
 ```
 
@@ -494,8 +529,8 @@ Low-level requests still use the SDK bridge timeout and reject with `PedelecErro
 Register `onError()` for session-level errors and use `try/catch` around async SDK calls.
 
 ```ts
-session.onError((error) => {
-  console.error("session error", error.code, error.message, error.details);
+session.onError((error, ctx) => {
+  console.error("session error", ctx.type, error.code, error.message, error.details);
 });
 
 try {
@@ -555,11 +590,11 @@ class PedelecSession {
   readonly model?: string;
 
   sendText(text: string): Promise<void>;
-  onChat(handler: (text: string) => void): () => void;
-  onTool(handler: (tool: string, args: unknown) => unknown | Promise<unknown>): () => void;
-  onError(handler: (error: PedelecError) => void): () => void;
-  onStatus(handler: (status: PedelecSessionStatus) => void): () => void;
-  onEnded(handler: () => void): () => void;
+  onChat(handler: (text: string, ctx: ChatEventContext) => void): () => void;
+  onTool(handler: (tool: string, args: unknown, ctx: ToolCallContext) => unknown | Promise<unknown>): () => void;
+  onError(handler: (error: PedelecError, ctx: ErrorEventContext) => void): () => void;
+  onStatus(handler: (status: PedelecSessionStatus, ctx: StatusEventContext) => void): () => void;
+  onEnded(handler: (ctx: EndedEventContext) => void): () => void;
   getStatus(): PedelecSessionStatus;
   end(): Promise<void>;
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PEDELEC_EXTENSION_ID } from "./extension-id";
-import { Pedelec, defineTool } from "./index";
+import { Pedelec, defineTool, type ToolCallContext } from "./index";
 
 type Listener<T> = (value: T) => void;
 
@@ -133,6 +133,15 @@ async function createProviderSession(
   });
   respondOk(pageWindow, createRequest, { sessionId });
   return { session: await create, createRequest };
+}
+
+async function startTurn(session: { sendText: (text: string) => Promise<void> }, pageWindow: MockWindow) {
+  const send = session.sendText("hello");
+  const request = pageWindow.lastSent();
+  expect(request).toMatchObject({ type: "send_text" });
+  respondOk(pageWindow, request);
+  await nextTick();
+  return { send, request };
 }
 
 describe("Pedelec SDK", () => {
@@ -685,6 +694,62 @@ describe("Pedelec SDK", () => {
     await first;
   });
 
+  it("passes context metadata to chat and status callbacks", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const chatContexts: any[] = [];
+    const statusContexts: any[] = [];
+    session.onChat((_text, ctx) => chatContexts.push(ctx));
+    session.onStatus((_status, ctx) => statusContexts.push(ctx));
+
+    const firstTurn = await startTurn(session, pageWindow);
+    expect(statusContexts[0]).toMatchObject({
+      type: "sdk_status_changed",
+      source: "sdk",
+      status: "running",
+      previousStatus: "idle",
+      sessionId: "thread_1",
+      provider: "codex",
+    });
+
+    emitEvent(pageWindow, firstTurn.request, {
+      type: "chat_delta",
+      sessionId: "thread_1",
+      seq: 1,
+      text: "hello",
+    });
+    emitEvent(pageWindow, firstTurn.request, { type: "done", sessionId: "thread_1", seq: 2 });
+    await firstTurn.send;
+
+    const firstTurnId = statusContexts[0].turnId;
+    expect(firstTurnId).toMatch(/^turn_/);
+    expect(statusContexts[0].turnStartedAt).toEqual(expect.any(Number));
+    expect(statusContexts[0].eventEmittedAt).toEqual(expect.any(Number));
+    expect(chatContexts[0]).toMatchObject({
+      type: "chat_delta",
+      source: "core",
+      sessionId: "thread_1",
+      turnId: firstTurnId,
+      turnStartedAt: statusContexts[0].turnStartedAt,
+      eventReceivedAt: expect.any(Number),
+      eventEmittedAt: expect.any(Number),
+    });
+    expect(statusContexts.at(-1)).toMatchObject({
+      type: "status_changed",
+      source: "core",
+      status: "idle",
+      previousStatus: "running",
+      turnId: firstTurnId,
+      turnStartedAt: statusContexts[0].turnStartedAt,
+    });
+    expect("seq" in chatContexts[0]).toBe(false);
+
+    const secondTurn = await startTurn(session, pageWindow);
+    emitEvent(pageWindow, secondTurn.request, { type: "done", sessionId: "thread_1", seq: 3 });
+    await secondTurn.send;
+    expect(statusContexts.at(-2).turnId).not.toBe(firstTurnId);
+  });
+
   it("routes chat deltas to the matching session and drops duplicate seq", async () => {
     const pedelec = new Pedelec();
     const { session: first } = await createProviderSession(pedelec, pageWindow, "codex", "thread_1");
@@ -695,12 +760,19 @@ describe("Pedelec SDK", () => {
     first.onChat((text) => firstText.push(text));
     second.onChat((text) => secondText.push(text));
 
+    const firstTurn = await startTurn(first, pageWindow);
+    const secondTurn = await startTurn(second, pageWindow);
     pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, text: "a" });
     pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_2", seq: 1, text: "b" });
     pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, text: "duplicate" });
 
     expect(firstText).toEqual(["a"]);
     expect(secondText).toEqual(["b"]);
+
+    emitEvent(pageWindow, firstTurn.request, { type: "done", sessionId: "thread_1", seq: 2 });
+    emitEvent(pageWindow, secondTurn.request, { type: "done", sessionId: "thread_2", seq: 2 });
+    await firstTurn.send;
+    await secondTurn.send;
   });
 
   it("ignores messages from another source or channel", async () => {
@@ -731,6 +803,8 @@ describe("Pedelec SDK", () => {
 
   it("normalizes skills, registers inline handlers, and lets named onTool override them", async () => {
     const pedelec = new Pedelec();
+    const inlineContexts: ToolCallContext[] = [];
+    const namedContexts: ToolCallContext[] = [];
     const create = pedelec.createSession({
       provider: "codex",
       skills: {
@@ -745,7 +819,10 @@ describe("Pedelec SDK", () => {
               required: ["delta"],
             },
             timeoutMs: 3000,
-            handler: (args: any) => ({ source: "inline", delta: args.delta }),
+            handler: (args: any, ctx) => {
+              inlineContexts.push(ctx);
+              return { source: "inline", delta: args.delta };
+            },
           }),
         ],
       },
@@ -771,11 +848,15 @@ describe("Pedelec SDK", () => {
     expect(JSON.stringify(createRequest.input.skills)).not.toContain("handler");
     respondOk(pageWindow, createRequest, { sessionId: "thread_skills" });
     const session = await create;
-    const disposeOverride = session.onTool("update_counter", (args: any) => ({
-      source: "named",
-      delta: args.delta,
-    }));
+    const disposeOverride = session.onTool("update_counter", (args: any, ctx) => {
+      namedContexts.push(ctx);
+      return {
+        source: "named",
+        delta: args.delta,
+      };
+    });
 
+    const turn = await startTurn(session, pageWindow);
     emitEvent(pageWindow, createRequest, {
       type: "tool_call",
       sessionId: "thread_skills",
@@ -789,6 +870,18 @@ describe("Pedelec SDK", () => {
       type: "submit_tool_result",
       result: { source: "named", delta: 2 },
     });
+    expect(namedContexts[0]).toMatchObject({
+      type: "tool_call",
+      source: "core",
+      sessionId: "thread_skills",
+      toolRequestId: "tool_override",
+      tool: "update_counter",
+      turnId: expect.stringMatching(/^turn_/),
+      turnStartedAt: expect.any(Number),
+      eventReceivedAt: expect.any(Number),
+      eventEmittedAt: expect.any(Number),
+    });
+    expect("seq" in namedContexts[0]).toBe(false);
     respondOk(pageWindow, pageWindow.lastSent());
 
     disposeOverride();
@@ -805,6 +898,17 @@ describe("Pedelec SDK", () => {
       type: "submit_tool_result",
       result: { source: "inline", delta: 3 },
     });
+    expect(inlineContexts[0]).toMatchObject({
+      type: "tool_call",
+      source: "core",
+      toolRequestId: "tool_inline",
+      tool: "update_counter",
+      turnId: namedContexts[0].turnId,
+      turnStartedAt: namedContexts[0].turnStartedAt,
+    });
+    respondOk(pageWindow, pageWindow.lastSent());
+    emitEvent(pageWindow, turn.request, { type: "done", sessionId: "thread_skills", seq: 3 });
+    await turn.send;
   });
 
   it("rejects invalid skills at runtime", async () => {
@@ -961,8 +1065,13 @@ describe("Pedelec SDK", () => {
     const pedelec = new Pedelec();
     const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
     const channelId = createRequest.channelId;
-    session.onTool(async (tool, args) => ({ ok: true, tool, args }));
+    const contexts: ToolCallContext[] = [];
+    session.onTool(async (tool, args, ctx) => {
+      contexts.push(ctx);
+      return { ok: true, tool, args };
+    });
 
+    const turn = await startTurn(session, pageWindow);
     pageWindow.emitFromExtension({
       source: "pedelec-sdk-extension",
       channelId,
@@ -985,6 +1094,20 @@ describe("Pedelec SDK", () => {
         args: { url: "https://example.test" },
       },
     });
+    expect(contexts[0]).toMatchObject({
+      type: "tool_call",
+      source: "core",
+      sessionId: "thread_1",
+      toolRequestId: "tool_1",
+      tool: "get_current_page",
+      turnId: expect.stringMatching(/^turn_/),
+      turnStartedAt: expect.any(Number),
+      eventReceivedAt: expect.any(Number),
+      eventEmittedAt: expect.any(Number),
+    });
+    respondOk(pageWindow, pageWindow.lastSent());
+    emitEvent(pageWindow, turn.request, { type: "done", sessionId: "thread_1", seq: 2 });
+    await turn.send;
   });
 
   it("submits an error result when the tool handler is missing or throws", async () => {
@@ -992,6 +1115,7 @@ describe("Pedelec SDK", () => {
     const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
     const channelId = createRequest.channelId;
 
+    const turn = await startTurn(session, pageWindow);
     pageWindow.emitFromExtension({
       source: "pedelec-sdk-extension",
       channelId,
@@ -1026,6 +1150,9 @@ describe("Pedelec SDK", () => {
       code: "TOOL_HANDLER_ERROR",
       message: "boom",
     });
+    respondOk(pageWindow, pageWindow.lastSent());
+    emitEvent(pageWindow, turn.request, { type: "done", sessionId: "thread_1", seq: 3 });
+    await turn.send;
   });
 
   it("blocks future sendText after ended", async () => {
@@ -1042,6 +1169,90 @@ describe("Pedelec SDK", () => {
     });
     expect(session.getStatus()).toBe("ended");
     expect(ended).toEqual(["ended"]);
+  });
+
+  it("passes context metadata to error and ended callbacks", async () => {
+    const pedelec = new Pedelec();
+    const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
+    const errorContexts: any[] = [];
+    const endedContexts: any[] = [];
+    session.onError((_error, ctx) => errorContexts.push(ctx));
+    session.onEnded((ctx) => endedContexts.push(ctx));
+
+    const turn = await startTurn(session, pageWindow);
+    emitEvent(pageWindow, turn.request, {
+      type: "error",
+      sessionId: "thread_1",
+      seq: 1,
+      error: { code: "PROVIDER_ERROR", message: "provider failed" },
+    });
+
+    await expect(turn.send).rejects.toMatchObject({ code: "PROVIDER_ERROR" });
+    expect(errorContexts[0]).toMatchObject({
+      type: "error",
+      source: "core",
+      sessionId: "thread_1",
+      turnId: expect.stringMatching(/^turn_/),
+      turnStartedAt: expect.any(Number),
+      eventReceivedAt: expect.any(Number),
+      eventEmittedAt: expect.any(Number),
+    });
+
+    pageWindow.emitFromExtension({
+      source: "pedelec-sdk-extension",
+      channelId: createRequest.channelId,
+      type: "ended",
+      sessionId: "thread_1",
+      seq: 2,
+    });
+
+    expect(endedContexts[0]).toMatchObject({
+      type: "ended",
+      source: "core",
+      sessionId: "thread_1",
+      eventReceivedAt: expect.any(Number),
+      eventEmittedAt: expect.any(Number),
+    });
+  });
+
+  it("marks SDK local request failures with sdk_error context", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const contexts: any[] = [];
+    session.onError((_error, ctx) => contexts.push(ctx));
+
+    const send = expect(session.sendText("hello")).rejects.toMatchObject({ code: "THREAD_BUSY" });
+    respondError(pageWindow, pageWindow.lastSent(), "THREAD_BUSY");
+
+    await send;
+    expect(contexts[0]).toMatchObject({
+      type: "sdk_error",
+      source: "sdk",
+      sessionId: "thread_1",
+      turnId: expect.stringMatching(/^turn_/),
+      turnStartedAt: expect.any(Number),
+      eventEmittedAt: expect.any(Number),
+    });
+    expect(contexts[0].eventReceivedAt).toBeUndefined();
+  });
+
+  it("marks local end() callbacks with sdk_ended context", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const contexts: any[] = [];
+    session.onEnded((ctx) => contexts.push(ctx));
+
+    const end = session.end();
+    respondOk(pageWindow, pageWindow.lastSent());
+    await end;
+
+    expect(contexts[0]).toMatchObject({
+      type: "sdk_ended",
+      source: "sdk",
+      sessionId: "thread_1",
+      eventEmittedAt: expect.any(Number),
+    });
+    expect(contexts[0].turnId).toBeUndefined();
   });
 
   it("rejects pending sends and fires onError on extension disconnect", async () => {
