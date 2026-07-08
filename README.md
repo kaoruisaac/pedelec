@@ -2,9 +2,13 @@
 English | [繁體中文](./README.zh-TW.md)
 
 ---
+
 ## Thanks for your patience — just a little longer.
+
 The Pedelec App is still under review, but we expect the first official Windows and macOS desktop versions to be available very soon.
+
 ---
+
 Pedelec is a bridge architecture that lets web frontends call local AI coding agents.
 
 Its core goal is: **to let a Web App create agent sessions through the SDK, send user messages, receive streamed agent responses, and safely hand tool calls back to the Web App whenever the agent needs to operate on frontend state.**
