@@ -11,6 +11,7 @@ import {
   type ToolArgsObjectSchema,
   type ToolArgsSchema,
   type ToolArgsSchemaNode,
+  type ToolCallContext,
 } from "@kaoruisaac/pedelec";
 import {
   normalizeSpawnClosedPolygonsCommand,
@@ -252,7 +253,11 @@ export default function App() {
     return { label: "Error", detail: "Action needed" };
   });
 
-  function createShapeRainSkills(generation: number) {
+  function isActiveSessionContext(ctx: { sessionId: string }): boolean {
+    return session()?.sessionId === ctx.sessionId;
+  }
+
+  function createShapeRainSkills() {
     return {
       guidance:
         "Use spawn_basic_shapes for simple geometry. Use spawn_closed_polygons for expressive custom silhouettes. Prefer tool calls over describing shapes without rendering them.",
@@ -263,7 +268,7 @@ export default function App() {
             "Spawn one or more batches of supported basic shapes at the top of the active Shape Rain stage. Use this when the user explicitly asks for simple geometry. Prefer numeric sizes from 12 to 24 by default unless the user asks for larger objects. The frontend validates the request, clamps counts and sizes, then renders falling shapes in the current 2D or 3D mode.",
           argsSchema: spawnBasicShapesArgsSchema,
           timeoutMs: 60000,
-          handler: (args) => handleTool("spawn_basic_shapes", args, generation),
+          handler: (args, ctx) => handleTool("spawn_basic_shapes", args, ctx),
         }),
         defineTool({
           name: "spawn_closed_polygons",
@@ -271,7 +276,7 @@ export default function App() {
             "Spawn custom closed polygon shapes in the active Shape Rain stage. Prefer this tool when the user asks for expressive, decorative, organic, symbolic, fantasy, natural, or custom silhouettes. Use multi-point contours to create richer shapes instead of reducing everything to basic geometry. The frontend validates contours, clamps counts and sizes, ignores invalid items, and renders in the current 2D or 3D mode.",
           argsSchema: spawnClosedPolygonsArgsSchema,
           timeoutMs: 60000,
-          handler: (args) => handleTool("spawn_closed_polygons", args, generation),
+          handler: (args, ctx) => handleTool("spawn_closed_polygons", args, ctx),
         }),
       ],
     };
@@ -346,7 +351,7 @@ export default function App() {
 
       const nextSession = await client.createSession({
         ...createSessionSettingsInput(sessionSettings()),
-        skills: createShapeRainSkills(generation),
+        skills: createShapeRainSkills(),
       });
       if (generation !== lifecycleId) {
         await nextSession.end().catch(() => undefined);
@@ -367,8 +372,8 @@ export default function App() {
 
   function registerSession(nextSession: PedelecSession, generation: number): void {
     sessionDisposer?.();
-    const disposeStatus = nextSession.onStatus((status) => {
-      if (generation !== lifecycleId) return;
+    const disposeStatus = nextSession.onStatus((status, ctx) => {
+      if (generation !== lifecycleId || !isActiveSessionContext(ctx)) return;
       setSessionStatus(status);
       if (status === "idle") {
         setUiState("ready");
@@ -389,24 +394,24 @@ export default function App() {
         setMessage(statusMessage);
       }
     });
-    const disposeError = nextSession.onError((error) => {
-      if (generation !== lifecycleId) return;
+    const disposeError = nextSession.onError((error, ctx) => {
+      if (generation !== lifecycleId || !isActiveSessionContext(ctx)) return;
       const friendly = friendlyPedelecError(error);
       appendConversationMessage("error", friendly.message);
       setUiState(friendly.disconnected ? "disconnected" : "error");
       setMessage(friendly.message);
     });
-    const disposeEnded = nextSession.onEnded(() => {
-      if (generation !== lifecycleId) return;
+    const disposeEnded = nextSession.onEnded((ctx) => {
+      if (generation !== lifecycleId || !isActiveSessionContext(ctx)) return;
       setSessionStatus("ended");
       setUiState("disconnected");
       setMessage("This Pedelec session ended. Connect again to start a new one.");
     });
-    const disposeChat = nextSession.onChat((text) => {
-      if (generation !== lifecycleId) return;
+    const disposeChat = nextSession.onChat((text, ctx) => {
+      if (generation !== lifecycleId || !isActiveSessionContext(ctx)) return;
       appendConversationMessage("assistant", text);
     });
-    const disposeTool = nextSession.onTool((tool, args) => handleTool(tool, args, generation));
+    const disposeTool = nextSession.onTool((tool, args, ctx) => handleTool(tool, args, ctx));
     sessionDisposer = () => {
       disposeStatus();
       disposeError();
@@ -505,17 +510,21 @@ export default function App() {
   function handleTool(
     tool: string,
     args: unknown,
-    generation = lifecycleId,
+    ctx: ToolCallContext,
   ): ToolCallResult {
-    if (generation !== lifecycleId || !world) {
-      const staleResult = {
+    if (!isActiveSessionContext(ctx) || !world) {
+      return {
         error: {
           code: "STALE_TOOL_CALL",
-          message: "This tool call belongs to an older render session.",
+          message: "This tool call belongs to an older session.",
+          details: {
+            sessionId: ctx.sessionId,
+            activeSessionId: session()?.sessionId ?? null,
+            toolRequestId: ctx.toolRequestId,
+            turnId: ctx.turnId,
+          },
         },
       };
-      appendToolConversationMessage(tool, staleResult);
-      return staleResult;
     }
     setUiState("generating");
     if (tool !== "spawn_basic_shapes" && tool !== "spawn_closed_polygons") {
