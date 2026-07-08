@@ -26,7 +26,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "prepublishOnly": "npm run test && npm run build"
+    "type-test": "tsc -p tsconfig.type-test.json",
+    "prepublishOnly": "npm run test && npm run type-test && npm run build"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

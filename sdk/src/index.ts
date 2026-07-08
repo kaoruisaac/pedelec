@@ -79,18 +79,29 @@ export type ToolSpecificHandler<TArgs = unknown, TResult = unknown> = (
   args: TArgs
 ) => TResult | Promise<TResult>;
 
-export type ToolDefinition<TArgs = unknown, TResult = unknown> = {
-  name: string;
+export type ToolDefinition<
+  TArgs = unknown,
+  TResult = unknown,
+  TName extends string = string,
+> = {
+  name: TName;
   description: string;
   argsSchema: ToolArgsSchema;
   timeoutMs?: number;
   handler?: ToolSpecificHandler<TArgs, TResult>;
 };
 
-export type SkillsInput = {
+export type SkillsInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
   guidance: string;
-  tools: ToolDefinition[];
+  tools: TTools;
 };
+
+export type ToolNameOf<TTools extends readonly ToolDefinition[]> = Extract<
+  TTools[number]["name"],
+  string
+>;
 
 export type SerializableToolManifest = {
   name: string;
@@ -104,21 +115,29 @@ export type SerializableSkillsManifest = {
   tools: SerializableToolManifest[];
 };
 
-type CreateSessionInputWithProvider = {
+type CreateSessionInputWithProvider<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
   provider: ProviderCode;
   model?: string;
-  skills?: SkillsInput;
+  skills?: SkillsInput<TTools>;
   autoEndOnDisconnect?: boolean;
 };
 
-type CreateSessionInputWithDefaults = {
+type CreateSessionInputWithDefaults<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
   provider?: undefined;
   model?: never;
-  skills?: SkillsInput;
+  skills?: SkillsInput<TTools>;
   autoEndOnDisconnect?: boolean;
 };
 
-export type CreateSessionInput = CreateSessionInputWithProvider | CreateSessionInputWithDefaults;
+export type CreateSessionInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> =
+  | CreateSessionInputWithProvider<TTools>
+  | CreateSessionInputWithDefaults<TTools>;
 
 export type ProviderInfo = {
   name: string;
@@ -237,16 +256,23 @@ type PendingSend = {
 };
 
 type ChatHandler = (text: string) => void;
-type GenericToolHandler = (tool: string, args: unknown) => unknown | Promise<unknown>;
+type GenericToolHandler<TToolName extends string = string> = (
+  tool: TToolName,
+  args: unknown
+) => unknown | Promise<unknown>;
 type ErrorHandler = (error: PedelecError) => void;
 type StatusHandler = (status: PedelecSessionStatus) => void;
 type EndedHandler = () => void;
 
 const TOOL_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_.-]*$/;
 
-export function defineTool<TArgs = unknown, TResult = unknown>(
-  tool: ToolDefinition<TArgs, TResult>
-): ToolDefinition<TArgs, TResult> {
+export function defineTool<
+  TArgs = unknown,
+  TResult = unknown,
+  const TName extends string = string,
+>(
+  tool: ToolDefinition<TArgs, TResult, TName>
+): ToolDefinition<TArgs, TResult, TName> {
   return tool;
 }
 
@@ -349,7 +375,7 @@ export class Pedelec {
   private readonly channelId: string;
   private readonly bridgeTimeoutMs: number;
   private readonly pendingRequests = new Map<string, PendingRequest>();
-  private readonly sessions = new Map<string, PedelecSession>();
+  private readonly sessions = new Map<string, PedelecSession<string>>();
   private readonly lastSeqBySession = new Map<string, number>();
   private nextRequestNumber = 1;
   private disconnectedError: PedelecError | null = null;
@@ -371,7 +397,11 @@ export class Pedelec {
     this.connectExtension();
   }
 
-  async createSession(input: CreateSessionInput = {}): Promise<PedelecSession> {
+  async createSession(): Promise<PedelecSession<string>>;
+  async createSession<const TTools extends readonly ToolDefinition[]>(
+    input: CreateSessionInput<TTools>
+  ): Promise<PedelecSession<ToolNameOf<TTools>>>;
+  async createSession(input: CreateSessionInput = {}): Promise<PedelecSession<string>> {
     const resolvedOrPromise = this.resolveCreateSessionInput(input);
     const resolvedInput =
       resolvedOrPromise instanceof Promise ? await resolvedOrPromise : resolvedOrPromise;
@@ -441,7 +471,7 @@ export class Pedelec {
     }
   }
 
-  async resumeSession(sessionId: string): Promise<PedelecSession> {
+  async resumeSession(sessionId: string): Promise<PedelecSession<string>> {
     if (!sessionId?.trim()) {
       throw makeError("INVALID_INPUT", "sessionId is required");
     }
@@ -621,14 +651,14 @@ export class Pedelec {
     provider: string,
     model: string | undefined,
     inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map()
-  ): PedelecSession {
+  ): PedelecSession<string> {
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.replaceInlineToolHandlers(inlineToolHandlers);
       return existing;
     }
 
-    const session = new PedelecSession(this, sessionId, provider, model, inlineToolHandlers);
+    const session = new PedelecSession<string>(this, sessionId, provider, model, inlineToolHandlers);
     this.sessions.set(sessionId, session);
     return session;
   }
@@ -719,14 +749,14 @@ export class Pedelec {
   }
 }
 
-export class PedelecSession {
+export class PedelecSession<TToolName extends string = string> {
   readonly sessionId: string;
   readonly provider: string;
   readonly model?: string;
 
   private status: PedelecSessionStatus = "idle";
   private pendingSend: PendingSend | null = null;
-  private genericToolHandler: GenericToolHandler | null = null;
+  private genericToolHandler: GenericToolHandler<TToolName> | null = null;
   private inlineToolHandlers = new Map<string, ToolSpecificHandler>();
   private readonly namedToolHandlers = new Map<string, ToolSpecificHandler>();
   private readonly chatHandlers = new Set<ChatHandler>();
@@ -782,13 +812,13 @@ export class PedelecSession {
     return () => this.chatHandlers.delete(handler);
   }
 
-  onTool(handler: GenericToolHandler): () => void;
+  onTool(handler: GenericToolHandler<TToolName>): () => void;
   onTool<TArgs = unknown, TResult = unknown>(
-    toolName: string,
+    toolName: TToolName,
     handler: ToolSpecificHandler<TArgs, TResult>
   ): () => void;
   onTool<TArgs = unknown, TResult = unknown>(
-    toolNameOrHandler: string | GenericToolHandler,
+    toolNameOrHandler: TToolName | GenericToolHandler<TToolName>,
     maybeHandler?: ToolSpecificHandler<TArgs, TResult>
   ): () => void {
     if (typeof toolNameOrHandler === "string") {
@@ -925,7 +955,7 @@ export class PedelecSession {
       }
     } else if (this.genericToolHandler) {
       try {
-        result = await this.genericToolHandler(event.tool, event.args);
+        result = await this.genericToolHandler(event.tool as TToolName, event.args);
       } catch (err) {
         result = {
           error: normalizeError(err, "TOOL_HANDLER_ERROR", "Tool handler failed"),
