@@ -186,4 +186,4 @@ pedelec-agent \
 - Prompt 只支援 stdin。
 - 不會修改檔案。
 - 不會讀取 sandbox 以外的路徑。
-- `pedelec_cli.tool_call` 只會執行 `pedelec-cli tool-call`，不開放任意 shell。
+- `bash` 是受限 command runner，只允許 `pedelec-cli tool-spec` 與 `pedelec-cli tool-call`，不開放任意 shell。

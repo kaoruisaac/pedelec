@@ -28,14 +28,15 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "pedelec_cli.tool_spec",
-                "description": "Read one Pedelec host app tool specification through pedelec-cli.",
+                "name": "bash",
+                "description": "Run a restricted Pedelec CLI command. This is not a full shell; only pedelec-cli tool-spec and pedelec-cli tool-call commands are allowed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "toolName": { "type": "string" }
+                        "command": { "type": "string" },
+                        "timeoutMs": { "type": "integer" }
                     },
-                    "required": ["toolName"],
+                    "required": ["command"],
                     "additionalProperties": false
                 }
             }
@@ -55,22 +56,6 @@ pub fn tool_definitions() -> Value {
                 }
             }
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "pedelec_cli.tool_call",
-                "description": "Call a Pedelec host app tool through pedelec-cli.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "toolName": { "type": "string" },
-                        "args": { "type": "object" }
-                    },
-                    "required": ["toolName", "args"],
-                    "additionalProperties": false
-                }
-            }
-        }
     ])
 }
 
@@ -99,8 +84,7 @@ pub fn execute_tool(
             let (text, truncated) = sandbox.read_text_file(path)?;
             Ok(serde_json::json!({ "path": path, "text": text, "truncated": truncated }))
         }
-        "pedelec_cli.tool_spec" => pedelec_cli_tool_spec(args, config),
-        "pedelec_cli.tool_call" => pedelec_cli_tool_call(args, config),
+        "bash" => bash_tool(args, config),
         _ => Err(AgentError::with_details(
             "INVALID_ARGUMENT",
             "Unknown tool",
@@ -109,72 +93,169 @@ pub fn execute_tool(
     }
 }
 
-fn pedelec_cli_tool_spec(args: &Value, config: &AgentConfig) -> Result<Value, AgentError> {
-    let tool_name = args
-        .get("toolName")
+fn bash_tool(args: &Value, config: &AgentConfig) -> Result<Value, AgentError> {
+    let command = args
+        .get("command")
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            AgentError::new("INVALID_ARGUMENT", "toolName must be a non-empty string")
-        })?;
+        .ok_or_else(|| AgentError::new("INVALID_ARGUMENT", "bash requires command"))?;
+    let timeout_ms = args
+        .get("timeoutMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(config.pedelec_cli_timeout_ms);
+    let argv = parse_restricted_bash_command(command)?;
+    validate_pedelec_cli_command(&argv)?;
     let cli_path = resolve_pedelec_cli(config)?;
-    let mut command = Command::new(cli_path);
-    command
-        .arg("tool-spec")
-        .arg(tool_name)
+    let mut process = Command::new(cli_path);
+    process
+        .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(runtime_file) = &config.core_runtime_file {
-        command.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
+        process.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
     }
-    run_pedelec_cli_command(command, config)
+    run_pedelec_cli_command(process, timeout_ms)
 }
 
-fn pedelec_cli_tool_call(args: &Value, config: &AgentConfig) -> Result<Value, AgentError> {
-    let tool_name = args
-        .get("toolName")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            AgentError::new("INVALID_ARGUMENT", "toolName must be a non-empty string")
-        })?;
-    let tool_args = args
-        .get("args")
-        .filter(|value| value.is_object())
-        .ok_or_else(|| AgentError::new("INVALID_ARGUMENT", "args must be a JSON object"))?;
-    let cli_path = resolve_pedelec_cli(config)?;
-    let json_args = serde_json::to_string(tool_args).map_err(|err| {
+fn parse_restricted_bash_command(command: &str) -> Result<Vec<String>, AgentError> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "command must be a non-empty pedelec-cli command.",
+        ));
+    }
+
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = trimmed.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut token_started = false;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(quote_char) => {
+                if ch == quote_char {
+                    quote = None;
+                } else if quote_char == '"' && ch == '$' {
+                    return Err(unsupported_shell_syntax(
+                        "environment variable expansion is not supported.",
+                    ));
+                } else {
+                    current.push(ch);
+                }
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    token_started = true;
+                }
+                ch if ch.is_whitespace() => {
+                    if token_started {
+                        args.push(std::mem::take(&mut current));
+                        token_started = false;
+                    }
+                    while chars.peek().is_some_and(|value| value.is_whitespace()) {
+                        chars.next();
+                    }
+                }
+                '|' | '>' | '<' | ';' | '&' => {
+                    return Err(unsupported_shell_syntax(
+                        "pipes, redirects, command chaining, and background commands are not supported.",
+                    ));
+                }
+                '$' => {
+                    return Err(unsupported_shell_syntax(
+                        "environment variable expansion and command substitution are not supported.",
+                    ));
+                }
+                _ => {
+                    token_started = true;
+                    current.push(ch);
+                }
+            },
+        }
+    }
+
+    if let Some(quote_char) = quote {
+        return Err(AgentError::with_details(
+            "INVALID_ARGUMENT",
+            "command contains an unterminated quote.",
+            serde_json::json!({ "quote": quote_char }),
+        ));
+    }
+    if token_started {
+        args.push(current);
+    }
+    if args.is_empty() {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "command must be a non-empty pedelec-cli command.",
+        ));
+    }
+    Ok(args)
+}
+
+fn unsupported_shell_syntax(message: &str) -> AgentError {
+    AgentError::new(
+        "UNSUPPORTED_SHELL_SYNTAX",
+        format!("{message} Use only: pedelec-cli tool-spec <tool_name> or pedelec-cli tool-call <tool_name> ..."),
+    )
+}
+
+fn validate_pedelec_cli_command(argv: &[String]) -> Result<(), AgentError> {
+    if argv.first().map(String::as_str) != Some("pedelec-cli") {
+        return Err(AgentError::with_details(
+            "COMMAND_NOT_ALLOWED",
+            "Only pedelec-cli tool commands are allowed.",
+            serde_json::json!({ "allowed": [
+                "pedelec-cli tool-spec <tool_name>",
+                "pedelec-cli tool-call <tool_name> ..."
+            ] }),
+        ));
+    }
+
+    match argv.get(1).map(String::as_str) {
+        Some("tool-spec") if argv.len() == 3 && !argv[2].trim().is_empty() => Ok(()),
+        Some("tool-spec") => Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "usage: pedelec-cli tool-spec <tool_name>",
+        )),
+        Some("tool-call") if argv.len() >= 3 && !argv[2].trim().is_empty() => Ok(()),
+        Some("tool-call") => Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "usage: pedelec-cli tool-call <tool_name> ...",
+        )),
+        _ => Err(AgentError::with_details(
+            "COMMAND_NOT_ALLOWED",
+            "Only pedelec-cli tool-spec and pedelec-cli tool-call commands are allowed.",
+            serde_json::json!({ "command": argv }),
+        )),
+    }
+}
+
+fn run_pedelec_cli_command(mut command: Command, timeout_ms: u64) -> Result<Value, AgentError> {
+    let timed_output = run_command_with_timeout(&mut command, timeout_ms).map_err(|err| {
         AgentError::with_details(
             "PEDELEC_CLI_FAILED",
-            "Failed to serialize tool args",
+            "Failed to execute pedelec-cli",
             serde_json::json!({ "error": err.to_string() }),
         )
     })?;
-    let mut command = Command::new(cli_path);
-    command
-        .arg("tool-call")
-        .arg(tool_name)
-        .arg(json_args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(runtime_file) = &config.core_runtime_file {
-        command.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
-    }
-    run_pedelec_cli_command(command, config)
-}
-
-fn run_pedelec_cli_command(command: Command, config: &AgentConfig) -> Result<Value, AgentError> {
-    let output =
-        run_command_with_timeout(command, config.pedelec_cli_timeout_ms).map_err(|err| {
-            AgentError::with_details(
-                "PEDELEC_CLI_FAILED",
-                "Failed to execute pedelec-cli",
-                serde_json::json!({ "error": err.to_string() }),
-            )
-        })?;
+    let output = timed_output.output;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if timed_output.timed_out {
+        return Err(AgentError::with_details(
+            "PEDELEC_CLI_TIMEOUT",
+            "pedelec-cli timed out.",
+            serde_json::json!({
+                "timeoutMs": timeout_ms,
+                "stdout": stdout,
+                "stderr": stderr
+            }),
+        ));
+    }
     if !output.status.success() {
         return Err(AgentError::with_details(
             "PEDELEC_CLI_FAILED",
@@ -182,7 +263,7 @@ fn run_pedelec_cli_command(command: Command, config: &AgentConfig) -> Result<Val
             serde_json::json!({
                 "status": output.status.code(),
                 "stdout": stdout,
-                "stderr": String::from_utf8_lossy(&output.stderr)
+                "stderr": stderr
             }),
         ));
     }
@@ -195,19 +276,30 @@ fn run_pedelec_cli_command(command: Command, config: &AgentConfig) -> Result<Val
     })
 }
 
+struct TimedOutput {
+    output: Output,
+    timed_out: bool,
+}
+
 fn run_command_with_timeout(
-    mut command: Command,
+    command: &mut Command,
     timeout_ms: u64,
-) -> Result<Output, std::io::Error> {
+) -> Result<TimedOutput, std::io::Error> {
     let mut child = command.spawn()?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1));
     loop {
         if child.try_wait()?.is_some() {
-            return child.wait_with_output();
+            return child.wait_with_output().map(|output| TimedOutput {
+                output,
+                timed_out: false,
+            });
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            return child.wait_with_output();
+            return child.wait_with_output().map(|output| TimedOutput {
+                output,
+                timed_out: true,
+            });
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -290,7 +382,16 @@ mod tests {
     }
 
     #[test]
-    fn host_tool_does_not_pass_thread_id_to_pedelec_cli() {
+    fn tool_definitions_expose_bash_not_old_native_host_tools() {
+        let tools = tool_definitions().to_string();
+
+        assert!(tools.contains("\"name\":\"bash\""));
+        assert!(!tools.contains("pedelec_cli.tool_spec"));
+        assert!(!tools.contains("pedelec_cli.tool_call"));
+    }
+
+    #[test]
+    fn bash_tool_does_not_pass_session_id_to_pedelec_cli() {
         let temp = tempfile::tempdir().unwrap();
         let capture = temp.path().join("args.txt");
         let cli = fake_pedelec_cli(temp.path(), &capture);
@@ -299,8 +400,10 @@ mod tests {
         cfg.pedelec_cli_path = Some(cli);
 
         let result = execute_tool(
-            "pedelec_cli.tool_call",
-            &serde_json::json!({ "toolName": "get_page", "args": { "id": 1 } }),
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-cli tool-call get_page '{\"id\":1}'"
+            }),
             "session_inner",
             &sandbox,
             &cfg,
@@ -315,6 +418,88 @@ mod tests {
         assert!(args.contains("1"));
         assert!(!args.contains("thread_outer"));
         assert!(!args.contains("session_inner"));
+    }
+
+    #[test]
+    fn bash_tool_rejects_non_pedelec_cli_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
+        let cfg = config(temp.path().to_path_buf());
+
+        let err = execute_tool(
+            "bash",
+            &serde_json::json!({ "command": "ls" }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "COMMAND_NOT_ALLOWED");
+    }
+
+    #[test]
+    fn bash_tool_rejects_unsupported_shell_syntax() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
+        let cfg = config(temp.path().to_path_buf());
+
+        let err = execute_tool(
+            "bash",
+            &serde_json::json!({ "command": "pedelec-cli tool-spec foo && rm -rf /" }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "UNSUPPORTED_SHELL_SYNTAX");
+    }
+
+    #[test]
+    fn parses_single_and_double_quoted_arguments() {
+        let single = parse_restricted_bash_command(
+            "pedelec-cli tool-call ask_user '{\"question\":\"要繼續嗎？\"}'",
+        )
+        .unwrap();
+        assert_eq!(
+            single,
+            vec![
+                "pedelec-cli",
+                "tool-call",
+                "ask_user",
+                "{\"question\":\"要繼續嗎？\"}"
+            ]
+        );
+
+        let double =
+            parse_restricted_bash_command("pedelec-cli tool-spec \"get current page\"").unwrap();
+        assert_eq!(double, vec!["pedelec-cli", "tool-spec", "get current page"]);
+    }
+
+    #[test]
+    fn parser_rejects_command_substitution() {
+        let err = parse_restricted_bash_command("pedelec-cli tool-spec $(cat secret)").unwrap_err();
+
+        assert_eq!(err.code, "UNSUPPORTED_SHELL_SYNTAX");
+    }
+
+    #[test]
+    fn old_native_host_tool_is_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
+        let cfg = config(temp.path().to_path_buf());
+
+        let err = execute_tool(
+            "pedelec_cli.tool_call",
+            &serde_json::json!({ "toolName": "get_page", "args": {} }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "INVALID_ARGUMENT");
     }
 
     #[cfg(windows)]

@@ -3904,7 +3904,8 @@ fn build_provider_instruction(thread: &ThreadState) -> String {
 1. Before reading or modifying any local files outside the sandbox: \"{}\", you must ask me for permission first.\n\
 2. You have full permissions to view all files under \"./skills/\" \n\
 3. You must now read \"./skills/tools.md\" inside the sandbox.\n\
-4. Your task is to respond to blocks below \"[Session Preparation]\" or \"[User Message]\" to complete the task. \"./skills/tools.md\" should be used preferentially when executing the task.
+4. You must now read \"./skills/pedelec-cli.md\" inside the sandbox.\n\
+5. Your task is to respond to blocks below \"[Session Preparation]\" or \"[User Message]\" to complete the task. \"./skills/tools.md\" and \"./skills/pedelec-cli.md\" should be used preferentially when executing the task.
 ------\n\n", thread.sandbox_path.to_string_lossy())
     } else {
         "".to_string()
