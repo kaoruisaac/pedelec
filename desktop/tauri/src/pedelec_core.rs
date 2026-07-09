@@ -23,127 +23,6 @@ const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 const THREAD_ID_BASE36_MIN_WIDTH: usize = 6;
 const THREAD_ID_BASE36_MAX_WIDTH: usize = 7;
 const THREAD_ID_MAX_COUNTER: u64 = 78_364_164_095;
-const BUILTIN_PEDELEC_TOOL_FILENAME: &str = "pedelec-cli.md";
-const BUILTIN_PEDELEC_TOOL_ORIGINAL_URL: &str = "builtin:pedelec-cli.md";
-const BUILTIN_PEDELEC_TOOL_TEMPLATE: &str = r##"# Pedelec Tool Calling
-
-Use `pedelec-cli` to call a host-app tool from inside a Pedelec provider session.
-
-This file explains how to inspect and call tools. Available tools are indexed in `skills/tools.md`.
-
-## When to call a tool
-
-Call `pedelec-cli` only when all conditions are true:
-
-- The user request needs information or an action from the host app.
-- The tool exists in `skills/tools.md`.
-- You have read that tool's full specification with `pedelec-cli tool-spec`.
-- You can provide valid JSON object arguments for that tool.
-
-Do not invent tool names or call tools that are not listed in `skills/tools.md`.
-
-## Command format
-
-```bash
-pedelec-cli tool-spec <tool_name>
-```
-
-```bash
-pedelec-cli tool-call <tool_name> '<json_args>'
-```
-
-- `<tool_name>`: exact tool name from `skills/tools.md`.
-- `<json_args>`: valid JSON object. Use `{}` when the tool has no arguments.
-
-Examples:
-
-```bash
-pedelec-cli tool-spec get_current_page
-pedelec-cli tool-call get_current_page '{}'
-pedelec-cli tool-spec ask_user
-pedelec-cli tool-call ask_user '{"question":"Which option do you prefer?"}'
-```
-
-## JSON arguments
-
-Arguments must always be a JSON object.
-
-Valid:
-
-```json
-{}
-```
-
-```json
-{"question":"Which option do you prefer?"}
-```
-
-Invalid:
-
-```json
-null
-```
-
-```json
-"hello"
-```
-
-```json
-["item"]
-```
-
-Prefer single quotes around the JSON in shell commands so inner double quotes do not need escaping.
-
-## Result handling
-
-`pedelec-cli` prints exactly one JSON object to stdout.
-
-Success:
-
-```json
-{"ok":true,"result":{}}
-```
-
-Failure:
-
-```json
-{"ok":false,"error":{"code":"TOOL_ARGS_INVALID","message":"tool args must be valid JSON","details":{}}}
-```
-
-Always inspect `ok`.
-
-- If `ok` is `true`, use `result`.
-- If `ok` is `false`, treat the call as failed.
-- If the failure is caused by invalid arguments, retry only after correcting the arguments.
-- Do not repeat the same failing call without changing anything.
-
-## Timeout
-
-Each tool has a default timeout defined by the app.
-
-Some tools may allow `timeoutMs` in the JSON arguments:
-
-```bash
-pedelec-cli tool-call long_running_tool '{"timeoutMs":120000}'
-```
-
-Use `timeoutMs` only when the tool documentation allows it or the task clearly needs more time.
-
-## Workflow
-
-1. Read `skills/tools.md`.
-2. Pick the exact tool name.
-3. Run `pedelec-cli tool-spec <tool_name>`.
-4. Build a valid JSON object for arguments.
-5. Run `pedelec-cli tool-call`.
-6. Parse stdout as JSON.
-7. Continue based on `ok`, `result`, or `error`.
-
-## Notes
-
-- `skills/tools.md` is the tool index.
-- `pedelec-cli tool-spec <tool_name>` returns the full args schema for one tool.
-"##;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -1353,14 +1232,17 @@ impl CoreRuntime {
             self.sandbox_manager
                 .create_thread_sandbox_with(&thread_id, |sandbox| {
                     let skills_dir = sandbox.join("skills");
-                    let mut skills =
-                        vec![write_builtin_pedelec_tool_skill(&skills_dir, &thread_id)?];
+                    fs::create_dir_all(&skills_dir).map_err(|err| {
+                        skill_download_error(
+                            "cannot create skills directory",
+                            None,
+                            Some(&skills_dir),
+                            err,
+                        )
+                    })?;
                     let registry = ToolRegistry::from_skills_input(input.skills.as_ref())?;
-                    skills.extend(write_generated_tool_skills(
-                        &skills_dir,
-                        input.skills.as_ref(),
-                        &registry,
-                    )?);
+                    let skills =
+                        write_generated_tool_skills(&skills_dir, input.skills.as_ref(), &registry)?;
                     Ok((skills, registry))
                 })?;
 
@@ -3904,8 +3786,8 @@ fn build_provider_instruction(thread: &ThreadState) -> String {
 1. Before reading or modifying any local files outside the sandbox: \"{}\", you must ask me for permission first.\n\
 2. You have full permissions to view all files under \"./skills/\" \n\
 3. You must now read \"./skills/tools.md\" inside the sandbox.\n\
-4. You must now read \"./skills/pedelec-cli.md\" inside the sandbox.\n\
-5. Your task is to respond to blocks below \"[Session Preparation]\" or \"[User Message]\" to complete the task. \"./skills/tools.md\" and \"./skills/pedelec-cli.md\" should be used preferentially when executing the task.
+4. Use \"./skills/tools.md\" as the source of available app tools and per-tool command examples.\n\
+5. Your task is to respond to blocks below \"[Session Preparation]\" or \"[User Message]\" to complete the task.
 ------\n\n", thread.sandbox_path.to_string_lossy())
     } else {
         "".to_string()
@@ -4710,54 +4592,6 @@ fn unique_available_filename(
             return filename;
         }
     }
-}
-
-fn write_builtin_pedelec_tool_skill(
-    skills_dir: impl AsRef<Path>,
-    _thread_id: &str,
-) -> Result<SkillFile, PedelecError> {
-    let skills_dir = skills_dir.as_ref();
-    fs::create_dir_all(skills_dir).map_err(|err| {
-        skill_download_error(
-            "cannot create skills directory",
-            None,
-            Some(skills_dir),
-            err,
-        )
-    })?;
-
-    let canonical_skills_dir = skills_dir.canonicalize().map_err(|err| {
-        skill_download_error(
-            "cannot canonicalize skills directory",
-            None,
-            Some(skills_dir),
-            err,
-        )
-    })?;
-    let target_path = canonical_skills_dir.join(BUILTIN_PEDELEC_TOOL_FILENAME);
-    ensure_child_path(&canonical_skills_dir, &target_path)?;
-
-    let content = BUILTIN_PEDELEC_TOOL_TEMPLATE.to_string();
-    fs::write(&target_path, content.as_bytes()).map_err(|err| {
-        skill_download_error(
-            "cannot write builtin pedelec tool skill",
-            Some(BUILTIN_PEDELEC_TOOL_ORIGINAL_URL),
-            Some(&target_path),
-            err,
-        )
-    })?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    let sha256 = format!("{:x}", hasher.finalize());
-
-    Ok(SkillFile {
-        original_url: BUILTIN_PEDELEC_TOOL_ORIGINAL_URL.to_string(),
-        original_filename: BUILTIN_PEDELEC_TOOL_FILENAME.to_string(),
-        local_path: target_path,
-        sha256,
-        size_bytes: content.len() as u64,
-    })
 }
 
 fn write_generated_tool_skills(
@@ -6982,6 +6816,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_instruction_references_tools_md_without_pedelec_cli_md() {
+        let now = chrono::Utc::now();
+        let thread = ThreadState {
+            thread_id: "thread_with_tools_md".into(),
+            provider: ProviderCode::Codex,
+            model: None,
+            sandbox_path: PathBuf::from("sandbox").join("thread_with_tools_md"),
+            skills: vec![SkillFile {
+                original_url: "generated:tools.md".into(),
+                original_filename: "tools.md".into(),
+                local_path: PathBuf::from("skills").join("tools.md"),
+                sha256: "sha".into(),
+                size_bytes: 2,
+            }],
+            status: ThreadStatus::Idle,
+            process_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let instruction = build_provider_instruction(&thread);
+
+        assert!(instruction.contains("./skills/tools.md"));
+        assert!(!instruction.contains("./skills/pedelec-cli.md"));
+        assert!(!instruction.contains("pedelec-cli.md"));
+    }
+
+    #[test]
     fn thread_event_serializes_snake_case_tags_and_camel_case_fields() {
         let status_event = ThreadEvent::StatusChanged {
             seq: 1,
@@ -7654,52 +7516,6 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_injects_builtin_pedelec_tool_skill() {
-        let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
-        let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
-            ..CoreRuntime::default()
-        };
-
-        let output = runtime
-            .create_thread(CreateThreadInput {
-                provider: ProviderCode::Codex,
-                model: None,
-                skills: None,
-            })
-            .unwrap();
-
-        let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
-        let skill_path = thread
-            .sandbox_path
-            .join("skills")
-            .join(BUILTIN_PEDELEC_TOOL_FILENAME);
-        let content = fs::read_to_string(&skill_path).unwrap();
-        assert!(skill_path.exists());
-        let old_placeholder = "<thread".to_string() + "_id>";
-        assert!(!content.contains(&old_placeholder));
-        assert!(!content.contains("thread_id"));
-        assert!(!content.contains("session id"));
-        assert!(!content.contains("PEDELEC_THREAD_ID"));
-        assert!(content.contains("pedelec-cli tool-call <tool_name> '<json_args>'"));
-        assert!(content.contains("pedelec-cli tool-call get_current_page '{}'"));
-
-        let skill = thread
-            .skills
-            .iter()
-            .find(|skill| {
-                skill.local_path.file_name().and_then(|name| name.to_str())
-                    == Some(BUILTIN_PEDELEC_TOOL_FILENAME)
-            })
-            .unwrap();
-        assert_eq!(skill.original_url, BUILTIN_PEDELEC_TOOL_ORIGINAL_URL);
-        assert_eq!(skill.original_filename, BUILTIN_PEDELEC_TOOL_FILENAME);
-        assert_eq!(skill.local_path, skill_path.canonicalize().unwrap());
-        assert_eq!(skill.size_bytes, content.len() as u64);
-    }
-
-    #[test]
     fn create_thread_generates_tools_md_and_per_tool_specs() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox_root = temp.path().join("sandbox");
@@ -7718,24 +7534,19 @@ mod tests {
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
         let skills_dir = thread.sandbox_path.join("skills");
-        let builtin_content =
-            fs::read_to_string(skills_dir.join(BUILTIN_PEDELEC_TOOL_FILENAME)).unwrap();
         let tools_md = fs::read_to_string(skills_dir.join("tools.md")).unwrap();
         let spec = fs::read_to_string(skills_dir.join("tools-get_app_state.json")).unwrap();
 
-        assert!(builtin_content.contains("pedelec-cli tool-call <tool_name> '<json_args>'"));
-        let old_placeholder = "<thread".to_string() + "_id>";
-        assert!(!builtin_content.contains(&old_placeholder));
         assert!(tools_md.contains("Use get_app_state."));
         assert!(tools_md.contains("pedelec-cli tool-spec get_app_state"));
         assert!(tools_md.contains("pedelec-cli tool-call get_app_state '<json_args>'"));
         assert!(!tools_md.contains("\"argsSchema\""));
         assert!(spec.contains("\"name\": \"get_app_state\""));
         assert!(!skills_dir.join("tools.json").exists());
-        assert!(thread.skills.iter().any(|skill| {
-            skill.original_url == BUILTIN_PEDELEC_TOOL_ORIGINAL_URL
-                && skill.local_path.file_name().and_then(|name| name.to_str())
-                    == Some(BUILTIN_PEDELEC_TOOL_FILENAME)
+        assert!(!skills_dir.join("pedelec-cli.md").exists());
+        assert!(!thread.skills.iter().any(|skill| {
+            skill.original_filename == "pedelec-cli.md"
+                || skill.original_url == "builtin:pedelec-cli.md"
         }));
         assert!(thread.skills.iter().any(|skill| {
             skill.original_url == "generated:tools.md"
@@ -7816,7 +7627,7 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_without_skills_does_not_generate_tools_md() {
+    fn create_thread_without_skills_creates_empty_skills_dir() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox_root = temp.path().join("sandbox");
         let mut runtime = CoreRuntime {
@@ -7836,7 +7647,12 @@ mod tests {
         assert_eq!(thread.status, ThreadStatus::Idle);
         assert_eq!(thread.process_id, None);
         assert_eq!(runtime.running_process_count(), 0);
-        assert!(!thread.sandbox_path.join("skills").join("tools.md").exists());
+        let skills_dir = thread.sandbox_path.join("skills");
+        assert!(skills_dir.exists());
+        assert!(skills_dir.is_dir());
+        assert!(!skills_dir.join("tools.md").exists());
+        assert!(!skills_dir.join("pedelec-cli.md").exists());
+        assert!(thread.skills.is_empty());
     }
 
     #[test]
@@ -8174,7 +7990,8 @@ mod tests {
         for value in [&command.prompt, &command.stdin] {
             assert!(value.contains("[Hard Rules]"));
             assert!(value.contains("./skills/tools.md"));
-            assert!(value.contains("./skills/pedelec-cli.md"));
+            assert!(!value.contains("./skills/pedelec-cli.md"));
+            assert!(!value.contains("pedelec-cli.md"));
         }
     }
 
@@ -8183,6 +8000,7 @@ mod tests {
             assert!(!value.contains("[Hard Rules]"));
             assert!(!value.contains("./skills/tools.md"));
             assert!(!value.contains("./skills/pedelec-cli.md"));
+            assert!(!value.contains("pedelec-cli.md"));
         }
     }
 
