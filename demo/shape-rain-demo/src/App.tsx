@@ -412,6 +412,9 @@ export default function App() {
       appendConversationMessage("assistant", text);
     });
     const disposeTool = nextSession.onTool((tool, args, ctx) => handleTool(tool, args, ctx));
+    if (nextSession.provider === 'ollama') {
+      nextSession.prepare()
+    }
     sessionDisposer = () => {
       disposeStatus();
       disposeError();

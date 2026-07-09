@@ -694,6 +694,140 @@ describe("Pedelec SDK", () => {
     await first;
   });
 
+  it("prepare sends prepare_session and suppresses prepare chat output", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const text: string[] = [];
+    session.onChat((delta) => text.push(delta));
+
+    const prepare = session.prepare();
+    const request = pageWindow.lastSent();
+    expect(request).toMatchObject({
+      type: "prepare_session",
+      sessionId: "thread_1",
+    });
+    respondOk(pageWindow, request);
+    emitEvent(pageWindow, request, {
+      type: "chat_delta",
+      sessionId: "thread_1",
+      seq: 1,
+      text: "PEDELEC_PREPARED",
+    });
+    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 2 });
+
+    await prepare;
+    expect(text).toEqual([]);
+    expect(session.getStatus()).toBe("idle");
+  });
+
+  it("coalesces in-flight prepare calls and skips later prepare after success", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+
+    const first = session.prepare();
+    const second = session.prepare();
+    expect(second).toBe(first);
+    const request = pageWindow.lastSent();
+    expect(request).toMatchObject({ type: "prepare_session" });
+    respondOk(pageWindow, request);
+    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 1 });
+    await Promise.all([first, second]);
+
+    const sentCount = pageWindow.port.sent.length;
+    await session.prepare();
+    expect(pageWindow.port.sent.length).toBe(sentCount);
+  });
+
+  it("sendText waits for in-flight prepare and falls back after prepare failure", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+
+    const prepare = session.prepare();
+    const prepareRequest = pageWindow.lastSent();
+    const send = session.sendText("after prepare");
+    expect(pageWindow.lastSent()).toBe(prepareRequest);
+
+    respondError(pageWindow, prepareRequest, "PREPARE_FAILED");
+    await expect(prepare).rejects.toMatchObject({ code: "PREPARE_FAILED" });
+    await nextTick();
+
+    const sendRequest = pageWindow.lastSent();
+    expect(sendRequest).toMatchObject({
+      type: "send_text",
+      sessionId: "thread_1",
+      text: "after prepare",
+    });
+    respondOk(pageWindow, sendRequest);
+    emitEvent(pageWindow, sendRequest, { type: "done", sessionId: "thread_1", seq: 1 });
+    await send;
+  });
+
+  it("prepare error followed by idle does not poison later sendText", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+
+    const prepare = session.prepare();
+    const prepareRequest = pageWindow.lastSent();
+    emitEvent(pageWindow, prepareRequest, {
+      type: "error",
+      sessionId: "thread_1",
+      seq: 1,
+      error: { code: "PROVIDER_COMMAND_FAILED", message: "prepare failed" },
+    });
+    emitEvent(pageWindow, prepareRequest, {
+      type: "status_changed",
+      sessionId: "thread_1",
+      seq: 2,
+      status: "idle",
+    });
+    respondError(pageWindow, prepareRequest, "PROVIDER_COMMAND_FAILED");
+
+    await expect(prepare).rejects.toMatchObject({ code: "PROVIDER_COMMAND_FAILED" });
+    expect(session.getStatus()).toBe("idle");
+
+    const send = session.sendText("hello");
+    const sendRequest = pageWindow.lastSent();
+    expect(sendRequest).toMatchObject({ type: "send_text", text: "hello" });
+    respondOk(pageWindow, sendRequest);
+    emitEvent(pageWindow, sendRequest, { type: "done", sessionId: "thread_1", seq: 3 });
+    await send;
+  });
+
+  it("prepare handles tool calls and includes prepare turn context", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const contexts: ToolCallContext[] = [];
+    session.onTool("get_app_state", (_args, ctx) => {
+      contexts.push(ctx);
+      return { ok: true };
+    });
+
+    const prepare = session.prepare();
+    const request = pageWindow.lastSent();
+    respondOk(pageWindow, request);
+    emitEvent(pageWindow, request, {
+      type: "tool_call",
+      sessionId: "thread_1",
+      seq: 1,
+      toolRequestId: "tool_prepare",
+      tool: "get_app_state",
+      args: {},
+    });
+    await nextTick();
+    expect(pageWindow.lastSent()).toMatchObject({
+      type: "submit_tool_result",
+      toolRequestId: "tool_prepare",
+      result: { ok: true },
+    });
+    respondOk(pageWindow, pageWindow.lastSent());
+    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 2 });
+    await prepare;
+    expect(contexts[0]).toMatchObject({
+      type: "tool_call",
+      turnKind: "prepare",
+    });
+  });
+
   it("passes context metadata to chat and status callbacks", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);

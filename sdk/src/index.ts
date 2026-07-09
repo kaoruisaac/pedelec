@@ -181,6 +181,7 @@ export type PedelecEventContext = {
   eventEmittedAt: number;
   turnId?: string;
   turnStartedAt?: number;
+  turnKind?: "user" | "prepare";
   source: "core" | "sdk";
 };
 
@@ -301,6 +302,7 @@ type PendingSend = {
 type ActiveTurn = {
   turnId: string;
   turnStartedAt: number;
+  kind: "user" | "prepare";
 };
 
 type EventDispatchMeta = {
@@ -815,6 +817,9 @@ export class PedelecSession<TToolName extends string = string> {
 
   private status: PedelecSessionStatus = "idle";
   private pendingSend: PendingSend | null = null;
+  private pendingPrepare: PendingSend | null = null;
+  private preparePromise: Promise<void> | null = null;
+  private prepared = false;
   private activeTurn: ActiveTurn | null = null;
   private genericToolHandler: GenericToolHandler<TToolName> | null = null;
   private inlineToolHandlers = new Map<string, ToolSpecificHandler>();
@@ -837,7 +842,7 @@ export class PedelecSession<TToolName extends string = string> {
     this.inlineToolHandlers = new Map(inlineToolHandlers);
   }
 
-  sendText(text: string): Promise<void> {
+  prepare(): Promise<void> {
     if (this.status === "ended") {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
@@ -846,7 +851,63 @@ export class PedelecSession<TToolName extends string = string> {
       return Promise.reject(makeError("SESSION_BUSY", "session is already running", { sessionId: this.sessionId }));
     }
 
-    const turn = createTurn();
+    if (this.prepared) {
+      return Promise.resolve();
+    }
+
+    if (this.preparePromise) {
+      return this.preparePromise;
+    }
+
+    const turn = createTurn("prepare");
+    this.activeTurn = turn;
+    this.setStatus("running", { source: "sdk" });
+
+    const donePromise = new Promise<void>((resolve, reject) => {
+      this.pendingPrepare = { resolve, reject };
+    });
+
+    const requestPromise = this.client
+      .request("prepare_session", {
+        sessionId: this.sessionId,
+      })
+      .catch((err) => {
+        const error = normalizeError(err, "PREPARE_FAILED", "prepare failed");
+        this.emitError(error, { source: "sdk" });
+        this.clearPendingPrepare();
+        this.finishActiveTurn(turn);
+        throw error;
+      });
+
+    this.preparePromise = Promise.all([requestPromise, donePromise])
+      .then(() => {
+        this.prepared = true;
+      })
+      .finally(() => {
+        this.preparePromise = null;
+      });
+
+    return this.preparePromise;
+  }
+
+  async sendText(text: string): Promise<void> {
+    if (this.preparePromise) {
+      try {
+        await this.preparePromise;
+      } catch {
+        // prepare is an optimization; sendText falls back to the original first-run path.
+      }
+    }
+
+    if (this.status === "ended") {
+      return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    }
+
+    if (this.pendingSend || this.pendingPrepare) {
+      return Promise.reject(makeError("SESSION_BUSY", "session is already running", { sessionId: this.sessionId }));
+    }
+
+    const turn = createTurn("user");
     this.activeTurn = turn;
     this.setStatus("running", { source: "sdk" });
 
@@ -949,6 +1010,7 @@ export class PedelecSession<TToolName extends string = string> {
     if (event.type === "chat_delta") {
       const turn = this.requireActiveTurn("chat_delta", meta);
       if (!turn) return;
+      if (turn.kind === "prepare") return;
       for (const handler of this.chatHandlers) {
         handler(event.text, this.createChatContext(meta, turn));
       }
@@ -958,13 +1020,13 @@ export class PedelecSession<TToolName extends string = string> {
     if (event.type === "status_changed") {
       this.setStatus(event.status, meta);
       if (event.status === "idle") {
-        this.resolvePendingSend();
+        this.resolveActivePending();
       } else if (event.status === "ended") {
         this.markEnded(meta);
       } else if (event.status === "error") {
         const error = makeError("SESSION_ERROR", "session entered error status", { sessionId: this.sessionId });
         this.emitError(error, meta);
-        this.rejectPendingSend(error);
+        this.rejectActivePending(error);
       }
       return;
     }
@@ -979,7 +1041,7 @@ export class PedelecSession<TToolName extends string = string> {
 
     if (event.type === "done") {
       this.setStatus("idle", meta);
-      this.resolvePendingSend();
+      this.resolveActivePending();
       return;
     }
 
@@ -987,7 +1049,7 @@ export class PedelecSession<TToolName extends string = string> {
       this.setStatus("error", meta);
       const error = normalizeError(event.error, "SESSION_ERROR", "session error");
       this.emitError(error, meta);
-      this.rejectPendingSend(error);
+      this.rejectActivePending(error);
       return;
     }
 
@@ -1064,6 +1126,21 @@ export class PedelecSession<TToolName extends string = string> {
     this.finishActiveTurn();
   }
 
+  private resolvePendingPrepare(): void {
+    const pending = this.pendingPrepare;
+    this.pendingPrepare = null;
+    pending?.resolve();
+    this.finishActiveTurn();
+  }
+
+  private resolveActivePending(): void {
+    if (this.activeTurn?.kind === "prepare") {
+      this.resolvePendingPrepare();
+    } else {
+      this.resolvePendingSend();
+    }
+  }
+
   private rejectPendingSend(error: PedelecError): void {
     const pending = this.pendingSend;
     this.pendingSend = null;
@@ -1071,8 +1148,27 @@ export class PedelecSession<TToolName extends string = string> {
     this.finishActiveTurn();
   }
 
+  private rejectPendingPrepare(error: PedelecError): void {
+    const pending = this.pendingPrepare;
+    this.pendingPrepare = null;
+    pending?.reject(error);
+    this.finishActiveTurn();
+  }
+
+  private rejectActivePending(error: PedelecError): void {
+    if (this.activeTurn?.kind === "prepare") {
+      this.rejectPendingPrepare(error);
+    } else {
+      this.rejectPendingSend(error);
+    }
+  }
+
   private clearPendingSend(): void {
     this.pendingSend = null;
+  }
+
+  private clearPendingPrepare(): void {
+    this.pendingPrepare = null;
   }
 
   private markEnded(meta: EventDispatchMeta = { source: "sdk" }): void {
@@ -1084,6 +1180,7 @@ export class PedelecSession<TToolName extends string = string> {
       }
     }
     this.rejectPendingSend(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    this.rejectPendingPrepare(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     this.finishActiveTurn();
   }
 
@@ -1129,7 +1226,7 @@ export class PedelecSession<TToolName extends string = string> {
       sessionCreatedAt: this.sessionCreatedAt,
       ...(meta.eventReceivedAt === undefined ? {} : { eventReceivedAt: meta.eventReceivedAt }),
       eventEmittedAt: Date.now(),
-      ...(turn ? { turnId: turn.turnId, turnStartedAt: turn.turnStartedAt } : {}),
+      ...(turn ? { turnId: turn.turnId, turnStartedAt: turn.turnStartedAt, turnKind: turn.kind } : {}),
       source: meta.source,
     };
   }
@@ -1257,7 +1354,7 @@ function createChannelId(): string {
   return `pedelec_${Date.now()}_${random}`;
 }
 
-function createTurn(): ActiveTurn {
+function createTurn(kind: ActiveTurn["kind"] = "user"): ActiveTurn {
   const random =
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
@@ -1265,6 +1362,7 @@ function createTurn(): ActiveTurn {
   return {
     turnId: `turn_${Date.now()}_${random}`,
     turnStartedAt: Date.now(),
+    kind,
   };
 }
 

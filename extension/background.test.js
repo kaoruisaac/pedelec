@@ -668,6 +668,58 @@ test("SDK create_session forwards cursor provider", async () => {
   assert.equal(nativePort.lastSent().model, "gpt-5");
 });
 
+test("SDK prepare_session forwards prepare_thread", async () => {
+  const { chrome, nativePort } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = await createSdkSession(background, nativePort);
+
+  sdkPort.emit({
+    type: "prepare_session",
+    channelId: "channel_1",
+    requestId: "sdk_prepare",
+    sessionId: "thread_sdk",
+  });
+  await tick();
+
+  assert.equal(nativePort.lastSent().type, "prepare_thread");
+  assert.equal(nativePort.lastSent().threadId, "thread_sdk");
+  respondNative(nativePort, nativePort.lastSent(), { threadId: "thread_sdk", prepared: true });
+  await tick();
+  assert.deepEqual(sdkPort.lastSent(), {
+    channelId: "channel_1",
+    type: "response",
+    requestId: "sdk_prepare",
+    ok: true,
+    result: {},
+  });
+});
+
+test("unapproved external prepare_session opens approval without native host", async () => {
+  const { chrome, nativePort, getConnectNativeCallCount, getOpenPopupCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  background.handleSdkExternalConnect(sdkPort);
+
+  sdkPort.emit({
+    type: "prepare_session",
+    channelId: "channel_1",
+    requestId: "sdk_prepare",
+    sessionId: "thread_sdk",
+  });
+  await tick();
+  await tick();
+
+  assert.equal(getOpenPopupCallCount(), 1);
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(nativePort.sent.length, 0);
+  assert.equal(sdkPort.sent.length, 0);
+  assert.deepEqual(background.getPendingApproval(), {
+    origin: "https://app.example.test",
+    requestedAt: background.getPendingApproval().requestedAt,
+    requestCount: 1,
+  });
+});
+
 test("SDK create_session forwards claude provider", async () => {
   const { chrome, nativePort } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });

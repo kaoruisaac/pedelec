@@ -1023,6 +1023,18 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
+      if (message.type === "prepare_session") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        await sendNativeRequest("prepare_thread", {
+          threadId: message.sessionId,
+        });
+        postSdkResponse(port, channelId, requestId, true, {});
+        return;
+      }
+
       if (message.type === "submit_tool_result") {
         await sendNativeRequest("submit_tool_result", {
           threadId: message.sessionId,

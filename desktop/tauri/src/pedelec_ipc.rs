@@ -1,5 +1,6 @@
 use crate::pedelec_core::{
-    error_codes, CreateThreadInput, EndThreadInput, PedelecError, SendTextInput, SharedCoreRuntime,
+    error_codes, CreateThreadInput, EndThreadInput, PedelecError, PrepareThreadInput,
+    PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime,
     SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolSpecInput,
     UpdateSettingsInput,
 };
@@ -384,6 +385,13 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
             },
             Err(err) => error_response(&request.request_id, err),
         },
+        "prepare_thread" => match decode_payload::<PrepareThreadInput>(&request) {
+            Ok(input) => match prepare_provider_process(runtime, input) {
+                Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                Err(err) => error_response(&request.request_id, err),
+            },
+            Err(err) => error_response(&request.request_id, err),
+        },
         "end_thread" => match decode_payload::<EndThreadInput>(&request) {
             Ok(input) => match runtime.lock().unwrap().end_thread(input) {
                 Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
@@ -509,25 +517,57 @@ pub fn start_provider_process(
 ) -> Result<crate::pedelec_core::SendTextOutput, PedelecError> {
     let thread_id = input.thread_id.clone();
     let start = runtime.lock().unwrap().begin_send_text(input)?;
+    start_provider_process_with_command(
+        runtime,
+        thread_id,
+        start.command,
+        RunningProviderProcessPurpose::UserMessage,
+    )?;
+    Ok(start.output)
+}
 
+pub fn prepare_provider_process(
+    runtime: SharedCoreRuntime,
+    input: PrepareThreadInput,
+) -> Result<PrepareThreadOutput, PedelecError> {
+    let thread_id = input.thread_id.clone();
+    let start = runtime.lock().unwrap().begin_prepare_thread(input)?;
+    let Some(command) = start.command else {
+        return Ok(start.output);
+    };
+    start_provider_process_with_command(
+        runtime,
+        thread_id,
+        command,
+        RunningProviderProcessPurpose::Prepare,
+    )?;
+    Ok(start.output)
+}
+
+fn start_provider_process_with_command(
+    runtime: SharedCoreRuntime,
+    thread_id: String,
+    command_spec: crate::pedelec_core::CommandSpec,
+    purpose: RunningProviderProcessPurpose,
+) -> Result<(), PedelecError> {
     let resolved_program =
-        match resolve_provider_program(&start.command.program, &start.command.env) {
+        match resolve_provider_program(&command_spec.program, &command_spec.env) {
             Ok(resolved_program) => resolved_program,
             Err(err) => {
                 let error = PedelecError::with_details(
                     error_codes::PROVIDER_PROCESS_START_FAILED,
                     "provider program could not be found",
-                    provider_start_error_details(&thread_id, &start.command, None, Some(err)),
+                    provider_start_error_details(&thread_id, &command_spec, None, Some(err)),
                 );
                 runtime
                     .lock()
                     .unwrap()
-                    .fail_provider_process_start(&thread_id, error.clone());
+                    .fail_provider_process_start(&thread_id, error.clone(), purpose);
                 return Err(error);
             }
         };
 
-    let mut command = build_provider_process_command(&start.command, &resolved_program);
+    let mut command = build_provider_process_command(&command_spec, &resolved_program);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -537,7 +577,7 @@ pub fn start_provider_process(
                 "provider process could not be started",
                 provider_start_error_details(
                     &thread_id,
-                    &start.command,
+                    &command_spec,
                     Some(&resolved_program),
                     Some(ProviderProgramResolveError {
                         candidates: Vec::new(),
@@ -548,7 +588,7 @@ pub fn start_provider_process(
             runtime
                 .lock()
                 .unwrap()
-                .fail_provider_process_start(&thread_id, error.clone());
+                .fail_provider_process_start(&thread_id, error.clone(), purpose);
             return Err(error);
         }
     };
@@ -557,10 +597,10 @@ pub fn start_provider_process(
     runtime
         .lock()
         .unwrap()
-        .emit_provider_command_started(&thread_id, process_id, &start.command);
+        .emit_provider_command_started(&thread_id, process_id, &command_spec);
 
     if let Some(mut stdin) = child.stdin.take() {
-        if let Err(err) = stdin.write_all(start.command.stdin.as_bytes()) {
+        if let Err(err) = stdin.write_all(command_spec.stdin.as_bytes()) {
             let _ = child.kill();
             let error = PedelecError::with_details(
                 error_codes::PROVIDER_STDIN_CLOSED,
@@ -574,7 +614,7 @@ pub fn start_provider_process(
             runtime
                 .lock()
                 .unwrap()
-                .fail_provider_process_start(&thread_id, error.clone());
+                .fail_provider_process_start(&thread_id, error.clone(), purpose);
             return Err(error);
         }
     } else {
@@ -590,7 +630,7 @@ pub fn start_provider_process(
         runtime
             .lock()
             .unwrap()
-            .fail_provider_process_start(&thread_id, error.clone());
+            .fail_provider_process_start(&thread_id, error.clone(), purpose);
         return Err(error);
     }
 
@@ -600,7 +640,7 @@ pub fn start_provider_process(
     runtime
         .lock()
         .unwrap()
-        .register_provider_process(&thread_id, process_id, Arc::clone(&child));
+        .register_provider_process(&thread_id, process_id, Arc::clone(&child), purpose);
 
     if let Some(stdout) = stdout {
         spawn_provider_reader(
@@ -620,7 +660,7 @@ pub fn start_provider_process(
     }
     spawn_provider_waiter(runtime, thread_id, process_id, child);
 
-    Ok(start.output)
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2254,6 +2294,7 @@ mod tests {
             ProviderAdapterState {
                 provider_session_id: None,
                 last_process_id: None,
+                has_user_message: false,
             },
         );
         runtime.tool_registry.insert(

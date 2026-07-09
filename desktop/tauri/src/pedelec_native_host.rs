@@ -164,7 +164,7 @@ fn native_message_to_core_request(
     }
 
     let payload = match request_type.as_str() {
-        "create_thread" | "send_text" | "end_thread" | "subscribe_thread" => {
+        "create_thread" | "send_text" | "prepare_thread" | "end_thread" | "subscribe_thread" => {
             Some(Value::Object(object))
         }
         "list_providers" | "get_settings" | "update_settings" => Some(Value::Object(object)),
@@ -753,6 +753,7 @@ mod tests {
             ProviderAdapterState {
                 provider_session_id: None,
                 last_process_id: None,
+                has_user_message: false,
             },
         );
     }

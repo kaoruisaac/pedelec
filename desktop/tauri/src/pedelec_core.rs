@@ -195,6 +195,8 @@ pub struct ThreadState {
 pub struct ProviderAdapterState {
     pub provider_session_id: Option<String>,
     pub last_process_id: Option<u32>,
+    #[serde(default)]
+    pub has_user_message: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -490,6 +492,21 @@ pub struct SendTextOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct PrepareThreadInput {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareThreadOutput {
+    pub thread_id: String,
+    pub prepared: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub already_prepared: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct EndThreadInput {
     pub thread_id: String,
 }
@@ -551,6 +568,12 @@ pub struct SendTextStart {
 }
 
 #[derive(Debug, Clone)]
+pub struct PrepareThreadStart {
+    pub output: PrepareThreadOutput,
+    pub command: Option<CommandSpec>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CommandSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -573,6 +596,13 @@ pub struct RunPromptProviderContext {
 pub(crate) struct RunningProviderProcess {
     process_id: u32,
     child: Arc<Mutex<Option<Child>>>,
+    purpose: RunningProviderProcessPurpose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunningProviderProcessPurpose {
+    UserMessage,
+    Prepare,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -580,6 +610,11 @@ pub enum ThreadEventPartial {
     AssistantMessage { text: String },
     ProviderSessionIdUpdated { provider_session_id: String },
     ProviderError { error: PedelecError },
+}
+
+enum ProviderTurnKind<'a> {
+    UserMessage { message: &'a str },
+    Prepare,
 }
 
 trait ProviderAdapter {
@@ -1347,6 +1382,7 @@ impl CoreRuntime {
             ProviderAdapterState {
                 provider_session_id: None,
                 last_process_id: None,
+                has_user_message: false,
             },
         );
         self.tool_registry.insert(thread_id.clone(), registry);
@@ -1472,6 +1508,9 @@ impl CoreRuntime {
         let thread = self.thread_manager.thread_mut(&input.thread_id)?;
         thread.status = ThreadStatus::Running;
         thread.updated_at = Utc::now();
+        if let Some(provider_state) = self.thread_manager.provider_state_mut(&input.thread_id) {
+            provider_state.has_user_message = true;
+        }
         self.event_bus
             .emit_status_changed(&input.thread_id, ThreadStatus::Running);
 
@@ -1483,20 +1522,117 @@ impl CoreRuntime {
         })
     }
 
+    pub fn begin_prepare_thread(
+        &mut self,
+        input: PrepareThreadInput,
+    ) -> Result<PrepareThreadStart, PedelecError> {
+        {
+            let thread = self.thread_manager.thread(&input.thread_id)?;
+            match thread.status {
+                ThreadStatus::Running | ThreadStatus::WaitingToolResult | ThreadStatus::Starting => {
+                    return Err(PedelecError::with_details(
+                        error_codes::THREAD_BUSY,
+                        "thread is already running",
+                        serde_json::json!({ "threadId": input.thread_id }),
+                    ));
+                }
+                ThreadStatus::Ended => {
+                    return Err(PedelecError::with_details(
+                        error_codes::THREAD_ENDED,
+                        "thread has ended",
+                        serde_json::json!({ "threadId": input.thread_id }),
+                    ));
+                }
+                ThreadStatus::Stopping => {
+                    return Err(PedelecError::with_details(
+                        error_codes::THREAD_BUSY,
+                        "thread is stopping",
+                        serde_json::json!({ "threadId": input.thread_id }),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        if self
+            .thread_manager
+            .provider_state(&input.thread_id)
+            .and_then(|state| state.provider_session_id.as_deref())
+            .is_some()
+        {
+            return Ok(PrepareThreadStart {
+                output: PrepareThreadOutput {
+                    thread_id: input.thread_id,
+                    prepared: true,
+                    already_prepared: Some(true),
+                },
+                command: None,
+            });
+        }
+
+        #[cfg(test)]
+        let test_command = self.test_provider_command.clone();
+
+        #[cfg(test)]
+        let command = if let Some(command) = test_command {
+            command
+        } else {
+            self.build_prepare_thread_command(&input)?
+        };
+
+        #[cfg(not(test))]
+        let command = self.build_prepare_thread_command(&input)?;
+
+        let thread = self.thread_manager.thread_mut(&input.thread_id)?;
+        thread.status = ThreadStatus::Running;
+        thread.updated_at = Utc::now();
+        self.event_bus
+            .emit_status_changed(&input.thread_id, ThreadStatus::Running);
+
+        Ok(PrepareThreadStart {
+            output: PrepareThreadOutput {
+                thread_id: input.thread_id,
+                prepared: true,
+                already_prepared: Some(false),
+            },
+            command: Some(command),
+        })
+    }
+
     fn build_send_text_command(
         &mut self,
         input: &SendTextInput,
     ) -> Result<CommandSpec, PedelecError> {
-        let thread = self.thread_manager.thread(&input.thread_id)?.clone();
+        self.build_provider_turn_command(
+            &input.thread_id,
+            ProviderTurnKind::UserMessage {
+                message: &input.message,
+            },
+        )
+    }
+
+    fn build_prepare_thread_command(
+        &mut self,
+        input: &PrepareThreadInput,
+    ) -> Result<CommandSpec, PedelecError> {
+        self.build_provider_turn_command(&input.thread_id, ProviderTurnKind::Prepare)
+    }
+
+    fn build_provider_turn_command(
+        &mut self,
+        thread_id: &str,
+        kind: ProviderTurnKind<'_>,
+    ) -> Result<CommandSpec, PedelecError> {
+        let thread = self.thread_manager.thread(thread_id)?.clone();
         let provider_state = self
             .thread_manager
-            .provider_state(&input.thread_id)
+            .provider_state(thread_id)
             .cloned()
             .ok_or_else(|| {
                 PedelecError::with_details(
                     error_codes::PROVIDER_NOT_FOUND,
                     "provider state was not found for thread",
-                    serde_json::json!({ "threadId": input.thread_id }),
+                    serde_json::json!({ "threadId": thread_id }),
                 )
             })?;
         let settings = self.get_settings()?;
@@ -1510,19 +1646,44 @@ impl CoreRuntime {
                 .clone()
                 .unwrap_or_else(default_runtime_file_path_for_provider),
         };
-        let adapter = self.thread_manager.provider_adapter(&input.thread_id)?;
+        let adapter = self.thread_manager.provider_adapter(thread_id)?;
         if adapter.code() != ctx.thread.provider {
             return Err(PedelecError::with_details(
                 error_codes::PROVIDER_NOT_FOUND,
                 "provider adapter does not match thread provider",
-                serde_json::json!({ "threadId": input.thread_id }),
+                serde_json::json!({ "threadId": thread_id }),
             ));
         }
 
-        if let Some(provider_session_id) = provider_state.provider_session_id.as_deref() {
-            adapter.build_resume_command(&ctx, provider_session_id, &input.message)
-        } else {
-            adapter.build_run_command(&ctx, &input.message)
+        match kind {
+            ProviderTurnKind::UserMessage { message } => {
+                if let Some(provider_session_id) = provider_state.provider_session_id.as_deref() {
+                    let resume_message = if provider_state.has_user_message {
+                        message.to_string()
+                    } else {
+                        build_provider_user_message_task(message)
+                    };
+                    adapter.build_resume_command(&ctx, provider_session_id, &resume_message)
+                } else {
+                    adapter.build_run_command(&ctx, message)
+                }
+            }
+            ProviderTurnKind::Prepare => {
+                let capabilities = adapter.capabilities();
+                if !capabilities.supports_resume_by_session_id
+                    || !capabilities.supports_provider_generated_session_id_parse
+                {
+                    return Err(PedelecError::with_details(
+                        error_codes::PROVIDER_PREPARE_UNSUPPORTED,
+                        "provider does not support prepare",
+                        serde_json::json!({
+                            "threadId": thread_id,
+                            "provider": provider_code_as_str(&ctx.thread.provider)
+                        }),
+                    ));
+                }
+                adapter.build_run_command(&ctx, &build_provider_prepare_task())
+            }
         }
     }
 
@@ -1531,6 +1692,7 @@ impl CoreRuntime {
         thread_id: &str,
         process_id: u32,
         child: Arc<Mutex<Option<Child>>>,
+        purpose: RunningProviderProcessPurpose,
     ) {
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             thread.process_id = Some(process_id);
@@ -1541,21 +1703,38 @@ impl CoreRuntime {
         }
         self.running_processes.insert(
             thread_id.to_string(),
-            RunningProviderProcess { process_id, child },
+            RunningProviderProcess {
+                process_id,
+                child,
+                purpose,
+            },
         );
     }
 
-    pub fn fail_provider_process_start(&mut self, thread_id: &str, error: PedelecError) {
+    pub fn fail_provider_process_start(
+        &mut self,
+        thread_id: &str,
+        error: PedelecError,
+        purpose: RunningProviderProcessPurpose,
+    ) {
         self.running_processes.remove(thread_id);
         self.tool_request_broker.clear_thread(thread_id);
+        let status = match purpose {
+            RunningProviderProcessPurpose::UserMessage => ThreadStatus::Error,
+            RunningProviderProcessPurpose::Prepare => ThreadStatus::Idle,
+        };
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
-            thread.status = ThreadStatus::Error;
+            thread.status = status.clone();
             thread.process_id = None;
             thread.updated_at = Utc::now();
         }
-        self.event_bus
-            .emit_status_changed(thread_id, ThreadStatus::Error);
-        self.event_bus.emit_error(thread_id, error);
+        if purpose == RunningProviderProcessPurpose::Prepare {
+            self.event_bus.emit_error(thread_id, error);
+            self.event_bus.emit_status_changed(thread_id, status);
+        } else {
+            self.event_bus.emit_status_changed(thread_id, status);
+            self.event_bus.emit_error(thread_id, error);
+        }
     }
 
     pub fn emit_provider_command_started(
@@ -1594,13 +1773,25 @@ impl CoreRuntime {
         process_id: u32,
         status: ExitStatus,
     ) {
-        if self
+        let purpose = if self
             .running_processes
             .get(thread_id)
             .is_some_and(|running| running.process_id == process_id)
         {
-            self.running_processes.remove(thread_id);
-        }
+            self.running_processes
+                .remove(thread_id)
+                .map(|running| running.purpose)
+        } else {
+            None
+        };
+
+        let prepare_missing_provider_session_id =
+            purpose == Some(RunningProviderProcessPurpose::Prepare)
+                && self
+                    .thread_manager
+                    .provider_state(thread_id)
+                    .and_then(|state| state.provider_session_id.as_deref())
+                    .is_none();
 
         let Ok(thread) = self.thread_manager.thread_mut(thread_id) else {
             return;
@@ -1616,58 +1807,89 @@ impl CoreRuntime {
         if status.success() {
             thread.status = ThreadStatus::Idle;
             thread.updated_at = Utc::now();
+            if prepare_missing_provider_session_id {
+                self.tool_request_broker.clear_thread(thread_id);
+                self.event_bus.emit_error(
+                    thread_id,
+                    PedelecError::with_details(
+                        error_codes::PREPARE_SESSION_ID_MISSING,
+                        "provider session id was not found after prepare",
+                        serde_json::json!({ "threadId": thread_id }),
+                    ),
+                );
+            }
             self.event_bus
                 .emit_status_changed(thread_id, ThreadStatus::Idle);
         } else {
-            thread.status = ThreadStatus::Error;
+            let is_prepare = purpose == Some(RunningProviderProcessPurpose::Prepare);
+            thread.status = if is_prepare {
+                ThreadStatus::Idle
+            } else {
+                ThreadStatus::Error
+            };
             thread.updated_at = Utc::now();
             self.tool_request_broker.clear_thread(thread_id);
-            self.event_bus
-                .emit_status_changed(thread_id, ThreadStatus::Error);
-            self.event_bus.emit_error(
-                thread_id,
-                PedelecError::with_details(
-                    error_codes::PROVIDER_COMMAND_FAILED,
-                    "provider command failed",
-                    serde_json::json!({
-                        "threadId": thread_id,
-                        "processId": process_id,
-                        "exitCode": status.code()
-                    }),
-                ),
+            let next_status = thread.status.clone();
+            let error = PedelecError::with_details(
+                error_codes::PROVIDER_COMMAND_FAILED,
+                "provider command failed",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "processId": process_id,
+                    "exitCode": status.code()
+                }),
             );
+            if is_prepare {
+                self.event_bus.emit_error(thread_id, error);
+                self.event_bus.emit_status_changed(thread_id, next_status);
+            } else {
+                self.event_bus.emit_status_changed(thread_id, next_status);
+                self.event_bus.emit_error(thread_id, error);
+            }
         }
     }
 
     pub fn fail_provider_process_wait(&mut self, thread_id: &str, process_id: u32, err: String) {
-        if self
+        let purpose = if self
             .running_processes
             .get(thread_id)
             .is_some_and(|running| running.process_id == process_id)
         {
-            self.running_processes.remove(thread_id);
-        }
+            self.running_processes
+                .remove(thread_id)
+                .map(|running| running.purpose)
+        } else {
+            None
+        };
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             if thread.process_id == Some(process_id) {
                 thread.process_id = None;
             }
             if !matches!(thread.status, ThreadStatus::Ended | ThreadStatus::Stopping) {
-                thread.status = ThreadStatus::Error;
+                let is_prepare = purpose == Some(RunningProviderProcessPurpose::Prepare);
+                thread.status = if is_prepare {
+                    ThreadStatus::Idle
+                } else {
+                    ThreadStatus::Error
+                };
                 thread.updated_at = Utc::now();
-                self.event_bus
-                    .emit_status_changed(thread_id, ThreadStatus::Error);
-                self.event_bus.emit_error(
-                    thread_id,
-                    PedelecError::with_details(
-                        error_codes::PROVIDER_COMMAND_FAILED,
-                        "provider command wait failed",
-                        serde_json::json!({
-                            "threadId": thread_id,
-                            "processId": process_id,
-                            "error": err
-                        }),
-                    ),
+                let next_status = thread.status.clone();
+                let error = PedelecError::with_details(
+                    error_codes::PROVIDER_COMMAND_FAILED,
+                    "provider command wait failed",
+                    serde_json::json!({
+                        "threadId": thread_id,
+                        "processId": process_id,
+                        "error": err
+                    }),
                 );
+                if is_prepare {
+                    self.event_bus.emit_error(thread_id, error);
+                    self.event_bus.emit_status_changed(thread_id, next_status);
+                } else {
+                    self.event_bus.emit_status_changed(thread_id, next_status);
+                    self.event_bus.emit_error(thread_id, error);
+                }
             }
         }
     }
@@ -3111,6 +3333,8 @@ pub mod error_codes {
     pub const PROVIDER_PROCESS_STOP_FAILED: &str = "PROVIDER_PROCESS_STOP_FAILED";
     pub const PROVIDER_STDIN_CLOSED: &str = "PROVIDER_STDIN_CLOSED";
     pub const PROVIDER_COMMAND_FAILED: &str = "PROVIDER_COMMAND_FAILED";
+    pub const PROVIDER_PREPARE_UNSUPPORTED: &str = "PROVIDER_PREPARE_UNSUPPORTED";
+    pub const PREPARE_SESSION_ID_MISSING: &str = "PREPARE_SESSION_ID_MISSING";
     pub const SKILL_URL_INVALID: &str = "SKILL_URL_INVALID";
     pub const SKILL_DOWNLOAD_FAILED: &str = "SKILL_DOWNLOAD_FAILED";
     pub const SANDBOX_CREATE_FAILED: &str = "SANDBOX_CREATE_FAILED";
@@ -3646,7 +3870,25 @@ fn build_provider_env(
 }
 
 fn build_provider_run_prompt(thread: &ThreadState, message: &str) -> String {
-    format!("{}{message}", build_provider_instruction(thread))
+    let instruction = build_provider_instruction(thread);
+    if instruction.is_empty() {
+        return message.to_string();
+    }
+    if message.starts_with("[Session Preparation]") {
+        return format!("{instruction}{message}");
+    }
+    format!("{}{}", instruction, build_provider_user_message_task(message))
+}
+
+fn build_provider_user_message_task(message: &str) -> String {
+    format!("[User Message]\n{message}")
+}
+
+fn build_provider_prepare_task() -> String {
+    "[Session Preparation]\n\n\
+After preparation is complete, reply with exactly:\n\n\
+PEDELEC_PREPARED"
+        .to_string()
 }
 
 fn build_provider_resume_prompt(message: &str) -> String {
@@ -3660,15 +3902,10 @@ fn build_provider_instruction(thread: &ThreadState) -> String {
     let app_tools_instruction = if has_tools_md {
         format!("[Hard Rules]\n\
 1. Before reading or modifying any local files outside the sandbox: \"{}\", you must ask me for permission first.\n\
-2. You have full permissions to view all files under \"./skills/\" and to use pedelec-cli, neither of which requires you to be prompted.\n\
+2. You have full permissions to view all files under \"./skills/\" \n\
 3. You must now read \"./skills/tools.md\" inside the sandbox.\n\
-4. Your task is to respond to blocks below \"[User Message]\" to complete the task. Pedelec-tools should be used preferentially when executing the task.
-5. Do not read every generated tool spec up front. When you need one tool's arguments, run `pedelec-cli tool-spec <tool_name>`.
-\n\
-[pedelec-cli]\n\
-This environment needs to communicate with the frontend through pedelec-cli.\n\
-For how to use pedelec-cli, refer to: \"./skills/pedelec-cli.md\" inside the sandbox.\n\
-------\n\n[User Message]\n", thread.sandbox_path.to_string_lossy())
+4. Your task is to respond to blocks below \"[Session Preparation]\" or \"[User Message]\" to complete the task. \"./skills/tools.md\" should be used preferentially when executing the task.
+------\n\n", thread.sandbox_path.to_string_lossy())
     } else {
         "".to_string()
     };
@@ -7316,6 +7553,7 @@ mod tests {
             ProviderAdapterState {
                 provider_session_id: None,
                 last_process_id: None,
+                has_user_message: false,
             },
         );
 
@@ -7600,6 +7838,130 @@ mod tests {
         assert!(!thread.sandbox_path.join("skills").join("tools.md").exists());
     }
 
+    #[test]
+    fn prepare_thread_builds_prepare_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_root = temp.path().join("sandbox");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                model: None,
+                skills: Some(sample_skills_input()),
+            })
+            .unwrap();
+
+        let start = runtime
+            .begin_prepare_thread(PrepareThreadInput {
+                thread_id: output.thread_id.clone(),
+            })
+            .unwrap();
+        let command = start.command.unwrap();
+
+        assert!(command.stdin.contains("[Session Preparation]"));
+        assert!(command.stdin.contains("PEDELEC_PREPARED"));
+        assert!(command.stdin.contains(
+            "respond to blocks below \"[Session Preparation]\" or \"[User Message]\""
+        ));
+        assert!(!command.stdin.contains("\n[User Message]\n"));
+        assert_eq!(
+            runtime.thread_manager.thread(&output.thread_id).unwrap().status,
+            ThreadStatus::Running
+        );
+    }
+
+    #[test]
+    fn prepare_thread_noops_when_provider_session_id_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_root = temp.path().join("sandbox");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                model: None,
+                skills: Some(sample_skills_input()),
+            })
+            .unwrap();
+        runtime
+            .thread_manager
+            .provider_state_mut(&output.thread_id)
+            .unwrap()
+            .provider_session_id = Some("session_123".into());
+
+        let start = runtime
+            .begin_prepare_thread(PrepareThreadInput {
+                thread_id: output.thread_id.clone(),
+            })
+            .unwrap();
+
+        assert!(start.command.is_none());
+        assert_eq!(start.output.prepared, true);
+        assert_eq!(start.output.already_prepared, Some(true));
+        assert_eq!(
+            runtime.thread_manager.thread(&output.thread_id).unwrap().status,
+            ThreadStatus::Idle
+        );
+    }
+
+    #[test]
+    fn send_text_after_prepare_uses_resume_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_root = temp.path().join("sandbox");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                model: None,
+                skills: Some(sample_skills_input()),
+            })
+            .unwrap();
+        let thread_id = output.thread_id.clone();
+        let prepare = runtime
+            .begin_prepare_thread(PrepareThreadInput {
+                thread_id: thread_id.clone(),
+            })
+            .unwrap();
+        assert!(prepare.command.unwrap().stdin.contains("[Session Preparation]"));
+        runtime
+            .thread_manager
+            .provider_state_mut(&thread_id)
+            .unwrap()
+            .provider_session_id = Some("session_123".into());
+        runtime.thread_manager.thread_mut(&thread_id).unwrap().status = ThreadStatus::Idle;
+
+        let send = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.clone(),
+                message: "hello".into(),
+            })
+            .unwrap();
+
+        assert!(send.command.args.contains(&"resume".to_string()));
+        assert!(send.command.args.contains(&"session_123".to_string()));
+        assert_eq!(send.command.stdin, build_provider_user_message_task("hello"));
+
+        runtime.thread_manager.thread_mut(&thread_id).unwrap().status = ThreadStatus::Idle;
+        let second_send = runtime
+            .begin_send_text(SendTextInput {
+                thread_id,
+                message: "again".into(),
+            })
+            .unwrap();
+        assert_eq!(second_send.command.stdin, "again");
+    }
+
     fn sample_skills_input() -> CreateThreadSkillsInput {
         CreateThreadSkillsInput {
             guidance: "Use get_app_state.".into(),
@@ -7728,6 +8090,7 @@ mod tests {
             ProviderAdapterState {
                 provider_session_id: None,
                 last_process_id: None,
+                has_user_message: false,
             },
         );
         runtime.tool_registry.insert(
@@ -7766,6 +8129,7 @@ mod tests {
         let sandbox_path = temp.join("sandbox").join(thread_id);
         fs::create_dir_all(sandbox_path.join("logs")).unwrap();
         let now = chrono::Utc::now();
+        let has_user_message = provider_session_id.is_some();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
@@ -7787,6 +8151,7 @@ mod tests {
             ProviderAdapterState {
                 provider_session_id,
                 last_process_id: None,
+                has_user_message,
             },
         );
         runtime
