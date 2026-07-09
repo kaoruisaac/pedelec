@@ -25,7 +25,10 @@ You cannot:\n\
 When you need file content, call fs.read_text_file.\n\
 When you need to discover available files, call fs.list_text_files.\n\
 Do not claim you modified files.\n\
-Do not invent file contents.";
+Do not invent file contents.\n\n\
+[Hard Rules]\n\
+When you're not entirely sure what the User wants you to do, read \"./skills/tools.md\" first.
+";
 
 pub fn run() -> i32 {
     match run_inner(std::env::args().collect()) {
