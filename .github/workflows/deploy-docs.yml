@@ -34,7 +34,7 @@ jobs:
 
       - name: Install documentation dependencies
         working-directory: dev-docs
-        run: npm ci
+        run: npm install
 
       - name: Build static documentation site
         working-directory: dev-docs
