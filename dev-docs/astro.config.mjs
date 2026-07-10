@@ -7,7 +7,7 @@ export default defineConfig({
   base: '/pedelec',
   integrations: [
     starlight({
-      title: 'Pedelec Documentation',
+      title: 'Pedelec',
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/kaoruisaac/pedelec' }],
       locales: {
         root: {
