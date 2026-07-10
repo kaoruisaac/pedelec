@@ -11,7 +11,7 @@ The Pedelec App is still under review, but we expect the first official Windows 
 
 ---
 
-### [Pedelec Document](https://kaoruisaac.github.io/pedelec)
+### ➡️ [Pedelec Document](https://kaoruisaac.github.io/pedelec) 🔗
 
 Pedelec is a bridge architecture that lets web frontends call local AI coding agents.
 
