@@ -2,543 +2,384 @@
 
 [![npm version](https://img.shields.io/npm/v/@kaoruisaac/pedelec.svg)](https://www.npmjs.com/package/@kaoruisaac/pedelec)
 
-Browser SDK for connecting a web app to the Pedelec Chrome Extension and Desktop Runtime.
+Browser SDK for connecting a web app to local AI agents through the Pedelec Chrome Extension and Desktop App.
 
-The SDK lets a browser page create local agent sessions, send user text, receive streamed assistant output, handle tool calls in the web app, and resume or end sessions.
+Use it to:
+
+- create and resume agent sessions;
+- send prompts and receive streamed responses;
+- expose browser-side tools that can read or update your app state.
+
+> Pedelec SDK runs in a browser page. It is not intended for Node.js, SSR server code, or background workers.
 
 ## Requirements
 
-Pedelec SDK runs in a browser page context. It is not intended for Node.js, SSR server code, or background workers.
+The user must have:
 
-Before using it, the user needs:
+1. the Pedelec Chrome Extension installed;
+2. the Pedelec Desktop App running;
+3. the required provider available locally.
 
-- Pedelec Chrome Extension installed.
-- Pedelec Desktop App running.
-- Chrome Native Messaging host registered by the Desktop App.
-- The target provider available locally. CLI-backed providers use commands such as `codex`, `gemini`, `opencode`, `cursor`, or `claude`; the Ollama provider uses Pedelec's bundled `pedelec-agent`.
+Supported provider codes are `codex`, `gemini`, `opencode`, `cursor`, `claude`, and `ollama`.
 
-## Installation
-
-Install from npm:
+## Install
 
 ```bash
 npm install @kaoruisaac/pedelec
 ```
 
-Import the SDK in browser-side TypeScript:
-
 ```ts
 import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
 ```
 
-For local development before publishing:
-
-```bash
-npm install ../path/to/pedelec/sdk
-```
-
-To build the SDK from this repository:
-
-```bash
-cd sdk
-npm install
-npm run build
-```
-
-## Quick Start
+## Quick start
 
 ```ts
-import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
+import {
+  Pedelec,
+  defineTool,
+  type ToolArgsSchema,
+} from "@kaoruisaac/pedelec";
+
+const noArgs = {
+  type: "object",
+  properties: {},
+  required: [],
+} satisfies ToolArgsSchema;
+
+const tools = [
+  defineTool({
+    name: "get_current_page",
+    description: "Read the current browser page title and URL.",
+    argsSchema: noArgs,
+    handler: () => ({
+      title: document.title,
+      url: location.href,
+    }),
+  }),
+] as const;
 
 const pedelec = new Pedelec();
 
 const session = await pedelec.createSession({
   provider: "codex",
-  model: "gpt-5",
   skills: {
-    guidance: "Use get_current_page when you need browser page context.",
-    tools: [
-      defineTool({
-        name: "get_current_page",
-        description: "Read the current browser page title and URL.",
-        argsSchema: {
-          type: "object",
-          properties: {},
-          required: [],
-        },
-        handler: (_args, ctx) => ({
-          url: location.href,
-          title: document.title,
-          turnId: ctx.turnId,
-        }),
-      }),
-    ],
+    guidance: "Use get_current_page when page identity is required.",
+    tools,
   },
 });
 
-session.onChat((text, ctx) => {
-  console.log(ctx.turnId, text);
+let assistantText = "";
+
+session.onChat((delta) => {
+  assistantText += delta;
+  console.log(assistantText);
 });
 
-session.onStatus((status, ctx) => {
-  console.log("status", status, "previous", ctx.previousStatus);
+session.onStatus((status) => {
+  console.log("status", status);
 });
 
-session.onError((error, ctx) => {
-  console.error(ctx.type, error.code, error.message, error.details);
+session.onError((error) => {
+  console.error(error.code, error.message, error.details);
 });
 
-await session.sendText("Analyze the current page state.");
+await session.sendText("Describe the current page.");
 ```
 
-`sendText()` resolves after the current agent turn is done. If the same session is already running a prompt, another `sendText()` rejects with `SESSION_BUSY`.
+`onChat()` receives incremental text chunks. Append them instead of treating each chunk as a complete message.
 
-## Create a Client
+`sendText()` resolves when the current agent turn finishes. A session processes only one turn at a time; another call made while it is busy rejects with `SESSION_BUSY`.
 
-```ts
-const pedelec = new Pedelec({
-  bridgeTimeoutMs: 30_000,
-});
-```
+## Creating a session
 
-`bridgeTimeoutMs` controls how long SDK requests wait for an extension response. The default is 30 seconds. Values below 1 ms are clamped to 1 ms.
-
-## Check Approval Status
-
-The extension may ask the user to approve the current origin before a page can create or resume sessions. You can check status before showing a connect button.
-
-```ts
-const status = await pedelec.getApprovalStatus();
-
-if (!status.installed) {
-  console.log("Pedelec extension is not available.");
-} else if (!status.approved) {
-  console.log(`${status.origin} still needs approval.`);
-}
-```
-
-Return shape:
-
-```ts
-type ApprovalStatus = {
-  installed: boolean;
-  approved: boolean;
-  origin: string | null;
-};
-```
-
-If the extension cannot be reached, `getApprovalStatus()` returns `{ installed: false, approved: false, origin }` instead of throwing for extension unavailable cases.
-
-## Providers
-
-List available providers on the user's machine:
-
-```ts
-const providers = await pedelec.listProviders();
-
-for (const provider of providers) {
-  console.log(provider.code, provider.available, provider.path, provider.error);
-}
-```
-
-```ts
-type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama";
-
-type ProviderInfo = {
-  name: string;
-  code: ProviderCode;
-  path: string | null;
-  available: boolean;
-  error: string | null;
-};
-```
-
-Supported provider codes:
-
-| Provider | Code | Example model |
-| --- | --- | --- |
-| Codex | `codex` | `gpt-5` |
-| Gemini | `gemini` | provider-supported model id |
-| OpenCode | `opencode` | `ollama/qwen2.5-coder:14b` |
-| Cursor | `cursor` | `gpt-5` |
-| Claude Code | `claude` | `sonnet` |
-| Ollama | `ollama` | `qwen3-14b-32k:latest` |
-
-`available: false` usually means the provider CLI is not installed or is not available in `PATH`.
-For Ollama, `available: true` only means Pedelec can find `pedelec-agent`; it does not mean the Ollama server is running or the selected model is installed.
-
-## Settings
-
-Read the Desktop App default provider and per-provider models:
-
-```ts
-const settings = await pedelec.getSettings();
-
-console.log(settings.defaultProvider);
-console.log(settings.defaultModels.codex);
-console.log(settings.defaultModels.gemini);
-console.log(settings.defaultModels.ollama);
-```
-
-```ts
-type PedelecSettings = {
-  defaultProvider: ProviderCode | null;
-  defaultModels: Partial<Record<ProviderCode, string>>;
-};
-```
-
-## Create Sessions
-
-Use the Desktop App default provider:
+Use the provider and model configured in the Desktop App:
 
 ```ts
 const session = await pedelec.createSession();
 ```
 
-Use default provider with skills:
+Choose a provider explicitly:
 
 ```ts
 const session = await pedelec.createSession({
-  skills: {
-    guidance: "Use update_counter when the user asks to change the counter.",
-    tools: [
-      defineTool({
-        name: "update_counter",
-        description: "Update the visible counter by delta.",
-        argsSchema: {
-          type: "object",
-          required: ["delta"],
-          properties: {
-            delta: {
-              type: "number",
-              description: "Counter delta.",
-            },
-          },
-        },
-      }),
-    ],
-  },
+  provider: "gemini",
 });
 ```
 
-If no default provider is configured, this rejects with `DEFAULT_PROVIDER_NOT_SET`. If the default provider is configured but unavailable, it rejects with `DEFAULT_PROVIDER_UNAVAILABLE`. If the default provider has its own default model, the SDK sends that model with the session request.
-
-Use an explicit provider:
+Choose both provider and model:
 
 ```ts
 const session = await pedelec.createSession({
   provider: "codex",
+  model: "provider-supported-model-id",
 });
 ```
 
-When only `provider` is passed, the SDK uses that provider's own Desktop App default model if one is configured. Otherwise, it sends the provider without a model and lets the provider CLI use its own default behavior.
-Ollama is the exception: it requires a model, so provider-only Ollama sessions need `defaultModels.ollama` or they fail with `MODEL_REQUIRED`.
+Model names are provider-specific strings. When only `provider` is provided, the SDK uses that provider's default model from the Desktop App when one is configured.
 
-Use an explicit provider and model:
+Register listeners immediately after creating the session and before the first `sendText()` call so early events are not missed.
+
+### Optional warm-up
 
 ```ts
-const session = await pedelec.createSession({
-  provider: "ollama",
-  model: "qwen3-14b-32k:latest",
+await session.prepare();
+```
+
+`prepare()` starts provider setup before the first real prompt. It is optional; `sendText()` works without it. If preparation is already running, `sendText()` waits for it and falls back to the normal first-run path if preparation fails.
+
+## Writing tools
+
+A tool has two parts:
+
+1. a serializable definition sent to the agent;
+2. a browser-side handler that performs the action.
+
+```ts
+const counter = { value: 0 };
+
+type UpdateCounterArgs = {
+  delta: number;
+};
+
+type UpdateCounterResult = {
+  value: number;
+};
+
+const updateCounter = defineTool<
+  UpdateCounterArgs,
+  UpdateCounterResult
+>({
+  name: "update_counter",
+  description: "Increase or decrease the visible counter by a signed delta.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      delta: {
+        type: "integer",
+        description: "Signed amount to add to the counter.",
+        minimum: -100,
+        maximum: 100,
+      },
+    },
+    required: ["delta"],
+  },
+  timeoutMs: 10_000,
+  handler: (args) => {
+    counter.value += args.delta;
+    return { value: counter.value };
+  },
 });
 ```
 
-Ollama sessions are executed by the `pedelec-agent` binary bundled with the Desktop App, not by the `ollama` CLI. You still need to start the local Ollama server yourself. Ollama requires a model from the session input or `defaultModels.ollama`; otherwise the CoreRuntime returns `MODEL_REQUIRED`.
+### Tool fields
 
-By default, SDK-created sessions are page-scoped. `autoEndOnDisconnect` defaults to `true`, so the Desktop thread is ended when the last SDK connection for that session disconnects, such as on page refresh or tab close. Keep the default for demo and page-scoped apps. Set `autoEndOnDisconnect: false` when you need to resume the same session after navigation or share it across pages:
+| Field | Purpose |
+| --- | --- |
+| `name` | Stable agent-facing identifier. Lowercase snake case is recommended. |
+| `description` | Explains what the tool does, what state it reads or changes, and important constraints. |
+| `argsSchema` | Describes the arguments the agent must provide. The root must always be an object. |
+| `timeoutMs` | Optional positive integer. Core currently defaults to 60 seconds. |
+| `handler` | Optional sync or async browser function that returns the tool result. |
+
+Tool names must match `^[a-zA-Z][a-zA-Z0-9_.-]*$` and must be unique within one `skills.tools` array.
+
+`argsSchema` supports the Pedelec Tool Args Schema subset: `string`, `number`, `integer`, `boolean`, `array`, `object`, and `oneOf`. It is not full JSON Schema.
+
+For a no-argument tool, still use an object schema:
+
+```ts
+const noArgs = {
+  type: "object",
+  properties: {},
+  required: [],
+} satisfies ToolArgsSchema;
+```
+
+TypeScript annotations improve authoring but do not validate arguments received at runtime. Validate important or destructive tool inputs inside the handler.
+
+### Handler styles
+
+#### Inline handler
+
+Keep the implementation next to the definition:
+
+```ts
+const getSelectedText = defineTool({
+  name: "get_selected_text",
+  description: "Read the text currently selected on the page.",
+  argsSchema: noArgs,
+  handler: () => ({
+    text: window.getSelection()?.toString() ?? "",
+  }),
+});
+```
+
+Only the serializable metadata is sent to Core. The function remains in the browser.
+
+#### Named handler
+
+Register or override a handler after session creation:
+
+```ts
+const dispose = session.onTool(
+  "update_counter",
+  async (args: UpdateCounterArgs, ctx) => {
+    console.log(ctx.toolRequestId, ctx.turnId);
+    counter.value += args.delta;
+    return { value: counter.value };
+  },
+);
+
+// Remove the handler when its UI or state is destroyed.
+dispose();
+```
+
+Named handlers are useful when the implementation belongs to a mounted component or when handlers must be restored after resuming a session.
+
+#### Generic fallback handler
+
+```ts
+const dispose = session.onTool(async (tool, args, ctx) => {
+  switch (tool) {
+    case "get_current_page":
+      return { title: document.title, url: location.href };
+    default:
+      return {
+        error: {
+          code: "UNSUPPORTED_TOOL",
+          message: `No application handler for ${tool}`,
+        },
+      };
+  }
+});
+```
+
+Handler priority is:
+
+1. named `session.onTool("tool_name", handler)`;
+2. inline `handler` from `defineTool()`;
+3. generic `session.onTool((tool, args, ctx) => ...)`;
+4. automatic `TOOL_HANDLER_NOT_FOUND` result.
+
+### Preserve tool-name types
+
+Keep tools in a readonly tuple so `session.onTool()` only accepts declared names:
+
+```ts
+const tools = [getSelectedText, updateCounter] as const;
+
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use the declared tools for page operations.",
+    tools,
+  },
+});
+
+session.onTool("update_counter", handleCounter);
+// session.onTool("misspelled_name", handler); // TypeScript error
+```
+
+### Tool results and errors
+
+Return JSON-compatible data: primitives, arrays, and plain objects. Convert values such as `Date`, typed arrays, DOM objects, and class instances before returning them.
+
+Return a structured error when failure is an expected domain result:
+
+```ts
+return {
+  error: {
+    code: "NO_SELECTION",
+    message: "There is no active editor selection.",
+    retryable: false,
+  },
+};
+```
+
+Throw only for unexpected failures. The SDK catches thrown handler errors and sends a `TOOL_HANDLER_ERROR` result to the agent.
+
+## Session events and status
+
+```ts
+session.onStatus((status, ctx) => {
+  console.log(ctx.previousStatus, "->", status);
+});
+```
+
+Possible statuses:
+
+- `idle` — ready for another prompt;
+- `running` — the agent is processing a turn;
+- `waiting_tool_result` — a browser tool handler is running;
+- `ended` — the session cannot accept more input;
+- `error` — the session entered an error state.
+
+All event registration methods return an unsubscribe function.
+
+## Resume and end sessions
+
+Sessions end automatically when their last SDK connection disconnects by default. Use `autoEndOnDisconnect: false` when a session must survive navigation or reload:
 
 ```ts
 const session = await pedelec.createSession({
   provider: "codex",
   autoEndOnDisconnect: false,
 });
+
+localStorage.setItem("pedelec-session-id", session.sessionId);
 ```
 
-`model` cannot be provided without `provider`.
+Resume it later:
 
 ```ts
-type CreateSessionInput =
-  | {
-      provider: ProviderCode;
-      model?: string;
-      skills?: SkillsInput;
-      autoEndOnDisconnect?: boolean;
-    }
-  | {
-      provider?: undefined;
-      skills?: SkillsInput;
-      autoEndOnDisconnect?: boolean;
-    };
-```
+const sessionId = localStorage.getItem("pedelec-session-id");
 
-## Stream Responses
+if (sessionId) {
+  const session = await pedelec.resumeSession(sessionId);
 
-`onChat()` receives text deltas. A delta is not guaranteed to be a sentence or paragraph, so UI code should append chunks.
+  // Restore listeners and browser tool handlers before sending text.
+  session.onChat(appendAssistantDelta);
+  session.onTool("update_counter", handleCounter);
 
-```ts
-let assistantText = "";
-
-session.onChat((text, ctx) => {
-  console.debug("chat delta for turn", ctx.turnId, ctx.eventReceivedAt);
-  assistantText += text;
-  renderAssistantMessage(assistantText);
-});
-```
-
-The returned function unsubscribes the handler:
-
-```ts
-const unsubscribe = session.onChat((text, ctx) => {
-  console.log(ctx.turnId, text);
-});
-
-unsubscribe();
-```
-
-## Send Text
-
-```ts
-try {
-  await session.sendText("Summarize this workspace.");
-} catch (error) {
-  console.error("send failed", error);
+  await session.sendText("Continue the previous task.");
 }
 ```
 
-`sendText(text)` sets the session status to `running`, sends the prompt to the runtime, and resolves after a `done` or idle status event. It rejects if the session ends, errors, disconnects, or is already busy.
-
-## Session Status
-
-```ts
-session.onStatus((status, ctx) => {
-  console.debug("status changed from", ctx.previousStatus, "to", ctx.status);
-  switch (status) {
-    case "idle":
-      break;
-    case "running":
-      break;
-    case "waiting_tool_result":
-      break;
-    case "ended":
-      break;
-    case "error":
-      break;
-  }
-});
-
-console.log(session.getStatus());
-```
-
-```ts
-type PedelecSessionStatus =
-  | "idle"
-  | "running"
-  | "waiting_tool_result"
-  | "ended"
-  | "error";
-```
-
-| Status | Meaning |
-| --- | --- |
-| `idle` | The session can accept another prompt. |
-| `running` | The agent is processing user text. |
-| `waiting_tool_result` | The agent requested a tool result from the web app. |
-| `ended` | The session has ended and cannot receive more text. |
-| `error` | The session entered an error state. |
-
-## Tool Calling
-
-Use `skills` to tell the agent what tools your web app can handle. `guidance` is high-level instruction for the agent, and `tools` is the typed list of callable frontend capabilities. Core automatically generates `tools.md` and per-tool spec artifacts inside the sandbox; SDK users do not write or host those files.
-
-Inline handlers are registered locally and are not sent to Core:
-
-```ts
-const session = await pedelec.createSession({
-  provider: "codex",
-  skills: {
-    guidance: "Use get_current_page for browser context.",
-    tools: [
-      defineTool({
-        name: "get_current_page",
-        description: "Read the current browser page title and URL.",
-        argsSchema: {
-          type: "object",
-          properties: {},
-          required: [],
-        },
-        handler: (_args, ctx) => ({
-          url: location.href,
-          title: document.title,
-          selectedText: window.getSelection()?.toString() ?? "",
-          turnId: ctx.turnId,
-        }),
-      }),
-    ],
-  },
-});
-```
-
-You can also register handlers after session creation. A named `onTool(name, handler)` handler overrides an inline handler for the same tool:
-
-```ts
-const session = await pedelec.createSession({
-  provider: "codex",
-  skills: {
-    guidance: "Use update_counter when the user asks to change the counter.",
-    tools: [
-      defineTool({
-        name: "update_counter",
-        description: "Update the visible counter by delta.",
-        argsSchema: {
-          type: "object",
-          required: ["delta"],
-          properties: {
-            delta: {
-              type: "number",
-              description: "Counter delta.",
-            },
-          },
-        },
-      }),
-    ],
-  },
-});
-
-session.onTool("update_counter", async (args, ctx) => {
-  const { delta } = args as { delta: number };
-  console.debug("tool call", ctx.toolRequestId, ctx.turnId);
-  counter.value += delta;
-  return {
-    counter: counter.value,
-    delta,
-  };
-});
-```
-
-Tool results must be JSON-serializable. If no handler is registered, the SDK returns a `TOOL_HANDLER_NOT_FOUND` error result. If the handler throws, the SDK returns a `TOOL_HANDLER_ERROR` error result.
-
-The generic form `session.onTool((tool, args, ctx) => ...)` remains available as a fallback handler.
-
-### Event Context and UI Lifecycles
-
-All user-facing event callbacks receive context metadata. The SDK provides `ctx.sessionId`, `ctx.provider`, `ctx.model`, `ctx.turnId`, `ctx.turnStartedAt`, `ctx.eventReceivedAt`, `ctx.eventEmittedAt`, and `ctx.source` where they apply. `turnId` is SDK-local metadata for one accepted `sendText()` turn; it is not sent to Core and should not be parsed.
-
-Apps should still use their own UI lifecycle state to decide whether a late callback is stale:
-
-```ts
-let lifecycleId = 0;
-
-function createWorldSession(session: PedelecSession) {
-  const generation = ++lifecycleId;
-
-  session.onTool("spawn_basic_shapes", async (args, ctx) => {
-    if (generation !== lifecycleId) {
-      return {
-        error: {
-          code: "STALE_TOOL_CALL",
-          message: "This tool call belongs to an older UI lifecycle.",
-        },
-      };
-    }
-
-    console.debug("handling tool", ctx.toolRequestId, ctx.turnId, ctx.turnStartedAt);
-    return spawnBasicShapes(args);
-  });
-}
-```
-
-The SDK context helps you inspect which session and turn produced an event. It does not automatically know whether your current canvas, page, render mode, or world instance is still valid.
-
-### Tool Args Schema
-
-`defineTool` uses `argsSchema` to describe the tool arguments sent to the provider and agent. The root schema must be an object:
-
-```ts
-defineTool({
-  name: "update_counter",
-  description: "Update the visible counter by delta.",
-  argsSchema: {
-    type: "object",
-    required: ["delta"],
-    properties: {
-      delta: {
-        type: "number",
-        description: "Counter delta.",
-      },
-    },
-  },
-});
-```
-
-`argsSchema` is the Pedelec Tool Args Schema subset, not full JSON Schema. It supports common `string`, `number`, `integer`, `boolean`, `array`, `object`, and `oneOf` nodes with fields such as `description`, `default`, `examples`, `enum`, `minimum`, `maximum`, `minItems`, `maxItems`, and `required`.
-
-`default` is guidance for the agent; the SDK does not automatically fill missing argument values. Shorthand schemas such as `input: { delta: "number" }` are no longer supported.
-
-The first version does not support `$defs`, `$ref`, `additionalProperties`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, or `format`. Reuse schema fragments with TypeScript constants instead of JSON Schema references.
-
-## Resume Sessions
-
-If you have saved a `sessionId`, resume it later:
-
-```ts
-const session = await pedelec.resumeSession("thread_abc123");
-
-session.onChat((text, ctx) => {
-  console.log(ctx.turnId, text);
-});
-
-await session.sendText("Continue the previous task.");
-```
-
-`resumeSession(sessionId)` rejects with `INVALID_INPUT` when `sessionId` is empty.
-
-## End Sessions
+When `autoEndOnDisconnect` is disabled, your app owns cleanup:
 
 ```ts
 await session.end();
 ```
 
-After a session ends, future `sendText()` calls reject with `SESSION_ENDED`.
-
-Listen for runtime-ended sessions:
+## Check connection and providers
 
 ```ts
-session.onEnded((ctx) => {
-  console.log("session ended", ctx.source);
-});
+const approval = await pedelec.getApprovalStatus();
+const providers = await pedelec.listProviders();
+
+const availableProviders = providers.filter((provider) => provider.available);
 ```
 
-## Low-Level Requests
+`getApprovalStatus()` returns `installed`, `approved`, and the current `origin`. The extension may ask the user to approve an origin when it first creates or resumes a session.
 
-Most apps should use the typed methods above. `request<T>(type, payload)` is exposed for advanced integrations that need to call bridge operations directly.
+## Error handling
 
-```ts
-const result = await pedelec.request<{ sessionId: string }>("create_session", {
-  input: {
-    provider: "codex",
-    skills: undefined,
-    autoEndOnDisconnect: true,
-  },
-});
-```
-
-Low-level requests still use the SDK bridge timeout and reject with `PedelecError` objects.
-
-## Error Handling
-
-Register `onError()` for session-level errors and use `try/catch` around async SDK calls.
+Use both `try/catch` for the action that initiated a request and `onError()` for asynchronous session-level failures:
 
 ```ts
 session.onError((error, ctx) => {
-  console.error("session error", ctx.type, error.code, error.message, error.details);
+  console.error(ctx.sessionId, error.code, error.message, error.details);
 });
 
 try {
   await session.sendText("Update the selected content.");
 } catch (error) {
-  console.error("request failed", error);
+  console.error("Turn failed", error);
 }
 ```
+
+SDK errors have this shape:
 
 ```ts
 type PedelecError = {
@@ -548,54 +389,9 @@ type PedelecError = {
 };
 ```
 
-Common error codes:
+Common codes include `EXTENSION_UNAVAILABLE`, `EXTENSION_DISCONNECTED`, `SESSION_BUSY`, `SESSION_ENDED`, `INVALID_INPUT`, and provider/runtime-specific errors.
 
-| Code | Meaning |
-| --- | --- |
-| `EXTENSION_UNAVAILABLE` | The SDK is not running in a supported browser page, or the extension cannot be reached. |
-| `EXTENSION_DISCONNECTED` | The extension connection was interrupted. |
-| `SDK_BRIDGE_TIMEOUT` | The extension did not respond before `bridgeTimeoutMs`. |
-| `SDK_PROTOCOL_ERROR` | The extension response did not match the SDK protocol. |
-| `SDK_TRANSPORT_ERROR` | A bridge request failed at the transport layer. |
-| `APPROVAL_REJECTED` | The user rejected approval for the current origin. |
-| `APPROVAL_TIMEOUT` | The user did not complete origin approval in time. |
-| `OPEN_POPUP_FAILED` | The extension could not open the approval popup. |
-| `NATIVE_HOST_UNAVAILABLE` | Chrome Native Messaging host cannot be reached. |
-| `DEFAULT_PROVIDER_NOT_SET` | The Desktop App has no default provider configured. |
-| `DEFAULT_PROVIDER_UNAVAILABLE` | The configured default provider is not currently available. |
-| `INVALID_INPUT` | The request input is invalid, such as model without provider or empty session id. |
-| `SESSION_BUSY` | The session already has a prompt in progress. |
-| `SESSION_ENDED` | The session has ended. |
-| `SESSION_ERROR` | The runtime reported a session error. |
-| `TOOL_HANDLER_NOT_FOUND` | The agent called a tool but no web app handler is registered. |
-| `TOOL_HANDLER_ERROR` | The web app tool handler threw an error. |
-| `SUBMIT_TOOL_RESULT_FAILED` | The SDK could not submit a tool result back to the runtime. |
+## Documentation
 
-## Public API Summary
-
-```ts
-class Pedelec {
-  constructor(options?: { bridgeTimeoutMs?: number });
-  createSession(input?: CreateSessionInput): Promise<PedelecSession>;
-  listProviders(): Promise<ProviderInfo[]>;
-  getSettings(): Promise<PedelecSettings>;
-  getApprovalStatus(): Promise<ApprovalStatus>;
-  resumeSession(sessionId: string): Promise<PedelecSession>;
-  request<T>(type: string, payload?: Record<string, unknown>): Promise<T>;
-}
-
-class PedelecSession {
-  readonly sessionId: string;
-  readonly provider: string;
-  readonly model?: string;
-
-  sendText(text: string): Promise<void>;
-  onChat(handler: (text: string, ctx: ChatEventContext) => void): () => void;
-  onTool(handler: (tool: string, args: unknown, ctx: ToolCallContext) => unknown | Promise<unknown>): () => void;
-  onError(handler: (error: PedelecError, ctx: ErrorEventContext) => void): () => void;
-  onStatus(handler: (status: PedelecSessionStatus, ctx: StatusEventContext) => void): () => void;
-  onEnded(handler: (ctx: EndedEventContext) => void): () => void;
-  getStatus(): PedelecSessionStatus;
-  end(): Promise<void>;
-}
-```
+- [Pedelec documentation](https://kaoruisaac.github.io/pedelec/)
+- [GitHub repository](https://github.com/kaoruisaac/pedelec)
