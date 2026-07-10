@@ -1,3 +1,5 @@
+![Pedelec](./assets/readme-banner.png)
+
 # Pedelec
 English | [繁體中文](./README.zh-TW.md)
 
@@ -8,6 +10,8 @@ English | [繁體中文](./README.zh-TW.md)
 The Pedelec App is still under review, but we expect the first official Windows and macOS desktop versions to be available very soon.
 
 ---
+
+### [Pedelec Document](https://kaoruisaac.github.io/pedelec)
 
 Pedelec is a bridge architecture that lets web frontends call local AI coding agents.
 

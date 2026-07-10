@@ -1,3 +1,5 @@
+![Pedelec](./assets/readme-banner.png)
+
 # Pedelec
 [English](./README.md) | 繁體中文
 
@@ -8,6 +10,8 @@
 Pedelec App 目前還在審核階段， 相信正式的第一版 Windows 跟 MacOS desktop app 可以很快跟大家見面
 
 ---
+
+### [Pedelec 文檔](https://kaoruisaac.github.io/pedelec/zh-tw)
 
 Pedelec 是一套讓網頁前端可以呼叫本機 AI coding agent 的橋接架構。
 
