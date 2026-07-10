@@ -110,36 +110,6 @@ Pedelec's Ollama provider uses the bundled `pedelec-agent`, not the `ollama` CLI
 - install the chosen model; and
 - choose a model explicitly or set the Ollama default model.
 
-## Local SDK development from this repository
-
-When developing the SDK and application together before publishing a package version, install the repository's `sdk/` folder by path:
-
-```bash
-npm install ../path/to/pedelec/sdk
-```
-
-Build the SDK first:
-
-```bash
-cd ../path/to/pedelec/sdk
-npm install
-npm run test
-npm run type-test
-npm run build
-```
-
-Then restart the application's development server so the bundler reloads the package output.
-
-:::caution
-A local path dependency only replaces the npm package. It does not automatically update or install the extension and desktop runtime.
-:::
-
-## Development origin
-
-Use either `http://localhost:<port>` or `http://127.0.0.1:<port>`. The extension does not accept every plain-HTTP hostname.
-
-Because approval is stored per origin, changing the port creates a different origin. Keep a stable development port when possible.
-
 ## Next step
 
 Complete the [Quick start](./quick-start/) to create a real session, stream assistant output, and cleanly end the session.
