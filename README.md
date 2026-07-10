@@ -1,6 +1,5 @@
 ![Pedelec](./assets/readme-banner.png)
 
-# Pedelec
 English | [繁體中文](./README.zh-TW.md)
 
 ---
