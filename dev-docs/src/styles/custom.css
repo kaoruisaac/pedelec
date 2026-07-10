@@ -1,0 +1,19 @@
+.counter-demo {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.counter-demo p { margin-top: 0; }
+
+.counter-actions { display: flex; gap: 0.5rem; }
+
+.counter-actions button {
+  background: var(--sl-color-accent);
+  border: 0;
+  border-radius: 0.25rem;
+  color: var(--sl-color-black);
+  cursor: pointer;
+  font: inherit;
+  padding: 0.4rem 0.75rem;
+}

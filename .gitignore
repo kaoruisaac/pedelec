@@ -4,6 +4,7 @@ node_modules/
 # Frontend build output
 dist/
 dist-ssr/
+.astro/
 
 # Vite
 .vite/
