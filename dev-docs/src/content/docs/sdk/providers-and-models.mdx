@@ -1,0 +1,193 @@
+---
+title: Providers, Models, and Settings
+description: Discover local providers, read Desktop App defaults, and choose provider and model inputs correctly.
+sidebar:
+  order: 2
+---
+
+A Pedelec session runs through one provider. The provider determines how agent work is executed, what model identifiers are accepted, how authentication works, and whether data leaves the user's machine.
+
+## Provider codes
+
+```ts
+type ProviderCode =
+  | "codex"
+  | "gemini"
+  | "opencode"
+  | "cursor"
+  | "claude"
+  | "ollama";
+```
+
+Provider codes are lowercase and stable at the SDK boundary. Display names, executable paths, versions, and model catalogs are discovered or configured separately.
+
+## Discover providers
+
+```ts
+const providers = await pedelec.listProviders();
+```
+
+```ts
+type ProviderInfo = {
+  name: string;
+  code: ProviderCode;
+  path: string | null;
+  available: boolean;
+  error: string | null;
+};
+```
+
+### Fields
+
+- `name`: human-readable provider name suitable for a picker.
+- `code`: value to pass to `createSession()`.
+- `path`: executable path detected by Core, or `null` when unavailable or not represented as a normal provider CLI path.
+- `available`: whether Core currently considers the provider usable enough to select.
+- `error`: provider discovery/setup detail when unavailable, otherwise usually `null`.
+
+```ts
+const availableProviders = providers.filter((provider) => provider.available);
+
+for (const provider of providers) {
+  console.log(
+    provider.available ? "ready" : "unavailable",
+    provider.name,
+    provider.path,
+    provider.error,
+  );
+}
+```
+
+Do not hide unavailable providers without explanation. Showing the provider and its error helps the user repair `PATH`, installation, or configuration.
+
+## Read Desktop App settings
+
+```ts
+const settings = await pedelec.getSettings();
+```
+
+```ts
+type PedelecSettings = {
+  defaultProvider: ProviderCode | null;
+  defaultModels: Partial<Record<ProviderCode, string>>;
+};
+```
+
+These are user-level Desktop App settings. The SDK exposes the default provider and optional per-provider model strings, not the Desktop App's entire internal settings object.
+
+```ts
+const defaultProvider = settings.defaultProvider;
+const codexModel = settings.defaultModels.codex;
+const ollamaModel = settings.defaultModels.ollama;
+```
+
+Treat settings as a snapshot. They can change in the Desktop App after your read.
+
+## Session selection rules
+
+### Omit provider and model
+
+```ts
+const session = await pedelec.createSession();
+```
+
+The SDK:
+
+1. calls `getSettings()`;
+2. requires `defaultProvider`;
+3. calls `listProviders()` and verifies that default provider is available;
+4. uses its configured default model when present.
+
+Possible SDK errors include `DEFAULT_PROVIDER_NOT_SET` and `DEFAULT_PROVIDER_UNAVAILABLE`.
+
+### Provide only the provider
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+});
+```
+
+The SDK reads settings and applies `defaultModels.codex` when configured. Otherwise it sends no model, allowing the provider to use its own default behavior.
+
+Unlike the no-provider form, the SDK does not pre-assert explicit-provider availability. Core or the provider can reject later. Use `listProviders()` when you want a proactive picker.
+
+### Provide provider and model
+
+```ts
+const session = await pedelec.createSession({
+  provider: "claude",
+  model: "sonnet",
+});
+```
+
+The explicit model overrides the Desktop default for that session.
+
+### Model without provider is invalid
+
+```ts
+// TypeScript rejects this shape, and runtime validation also rejects it.
+await pedelec.createSession({
+  model: "some-model",
+});
+```
+
+This fails with `INVALID_INPUT` because a model identifier has no meaning without a provider namespace.
+
+## Model identifiers are provider-specific
+
+Pedelec does not maintain one universal list of valid models. The string is passed to the provider adapter. Valid IDs can change with the installed provider version.
+
+Good UI patterns include:
+
+- defaulting to the Desktop App's configured value;
+- allowing an empty model for providers with useful CLI defaults;
+- labeling the model input with the selected provider;
+- preserving exact user-entered IDs; and
+- surfacing provider errors rather than replacing them with a generic message.
+
+Do not present examples in documentation as a guaranteed model catalog.
+
+## Ollama behavior
+
+The Ollama provider differs from CLI-backed providers:
+
+- Pedelec uses its bundled `pedelec-agent` to communicate with an Ollama-compatible server.
+- `ProviderInfo.available === true` means that agent executable is available.
+- It does not guarantee that the server is reachable.
+- It does not guarantee that the selected model is installed.
+- A model is required from explicit session input or `defaultModels.ollama`.
+
+```ts
+const session = await pedelec.createSession({
+  provider: "ollama",
+  model: "your-installed-model",
+});
+```
+
+Without a model, Core returns `MODEL_REQUIRED`.
+
+## Provider picker example
+
+```ts
+const [providers, settings] = await Promise.all([
+  pedelec.listProviders(),
+  pedelec.getSettings(),
+]);
+
+const choices = providers.map((provider) => ({
+  value: provider.code,
+  label: provider.name,
+  disabled: !provider.available,
+  help: provider.error,
+  defaultModel: settings.defaultModels[provider.code] ?? "",
+}));
+```
+
+When the user changes provider, update the model field to that provider's saved default only when doing so will not silently overwrite a deliberate edit.
+
+## Privacy and provider choice
+
+Pedelec's bridge is local, but a cloud provider CLI can send context to its service. The model/provider selector is therefore also a data-routing choice. Applications handling sensitive content should disclose which provider will receive the prompt and tool descriptions.
+
+Continue with [Creating sessions](./creating-sessions/).

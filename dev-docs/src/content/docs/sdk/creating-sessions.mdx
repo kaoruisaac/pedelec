@@ -1,0 +1,198 @@
+---
+title: Creating Sessions
+description: Create sessions with defaults, explicit providers, models, skills, and disconnect lifecycle options.
+sidebar:
+  order: 3
+---
+
+A `PedelecSession` represents one agent thread managed by the desktop runtime. Create it through a `Pedelec` client.
+
+## Signatures
+
+```ts
+createSession(): Promise<PedelecSession<string>>;
+
+createSession<const TTools extends readonly ToolDefinition[]>(
+  input: CreateSessionInput<TTools>,
+): Promise<PedelecSession<ToolNameOf<TTools>>>;
+```
+
+```ts
+type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
+  | {
+      provider: ProviderCode;
+      model?: string;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    }
+  | {
+      provider?: undefined;
+      model?: never;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    };
+```
+
+The generic overload carries literal tool names into the returned session's named `onTool()` API.
+
+## Use Desktop defaults
+
+```ts
+const session = await pedelec.createSession();
+```
+
+This uses the Desktop App's `defaultProvider` and optional default model. It is convenient when your application wants to respect the user's global choice.
+
+It fails before session creation when:
+
+- no default provider is configured: `DEFAULT_PROVIDER_NOT_SET`;
+- the configured default provider is not available: `DEFAULT_PROVIDER_UNAVAILABLE`.
+
+## Explicit provider
+
+```ts
+const session = await pedelec.createSession({
+  provider: "gemini",
+});
+```
+
+The SDK still reads Desktop settings to find `defaultModels.gemini`. If no model is configured, the provider receives no explicit model.
+
+For a provider picker, call `listProviders()` first and prevent selection of unavailable entries. The runtime remains the source of truth because availability can change between discovery and creation.
+
+## Explicit provider and model
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  model: "provider-supported-model-id",
+});
+```
+
+Pedelec treats the model as an opaque provider-specific string. An invalid model normally fails in Core or provider execution.
+
+## Add skills and tools
+
+```ts
+import { defineTool } from "@kaoruisaac/pedelec";
+
+const tools = [
+  defineTool({
+    name: "get_current_page",
+    description: "Read the current browser page title and URL.",
+    argsSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    handler: () => ({
+      title: document.title,
+      url: location.href,
+    }),
+  }),
+] as const;
+
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use get_current_page when page identity is required.",
+    tools,
+  },
+});
+```
+
+The serializable fields are sent to Core. Inline handler functions remain in the SDK session instance.
+
+Basic input validation occurs before the request:
+
+- `skills` must be an object;
+- `guidance` must be a string;
+- `tools` must be an array;
+- names must match the tool naming rule and be unique;
+- descriptions must be non-empty;
+- `timeoutMs` must be a positive integer;
+- the root `argsSchema` must be a serializable object schema.
+
+Invalid definitions reject with `INVALID_INPUT`.
+
+## Page-scoped sessions
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: true,
+});
+```
+
+`autoEndOnDisconnect` defaults to `true`. When the final SDK route for this session disconnects—commonly because the tab closes or reloads—the extension asks Core to end the session.
+
+Use this default for:
+
+- demos;
+- route-local assistants;
+- temporary page context; and
+- sessions that should not survive an accidental abandoned tab.
+
+## Persistent/resumable sessions
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+
+localStorage.setItem("pedelec-session-id", session.sessionId);
+```
+
+Use `false` when the application deliberately plans to resume after navigation or page reload.
+
+The application then owns cleanup. If it never resumes or ends old IDs, desktop sessions can remain longer than intended.
+
+## Returned session properties
+
+```ts
+console.log(session.sessionId);
+console.log(session.provider);
+console.log(session.model);
+console.log(session.sessionCreatedAt);
+```
+
+- `sessionId`: stable identifier used by `resumeSession()`.
+- `provider`: provider used when this SDK handle was registered.
+- `model`: selected model when known to the SDK.
+- `sessionCreatedAt`: browser timestamp when this `PedelecSession` object was constructed, not necessarily the original Core thread creation time after resume.
+
+A newly resumed handle currently may not contain provider/model metadata because `resumeSession()` receives only a session ID from the bridge. Persist that metadata in your own application if it is required after reload.
+
+## Register before sending
+
+Create the UI handlers immediately after session creation and before the first turn:
+
+```ts
+const session = await pedelec.createSession({ provider: "codex" });
+
+const offChat = session.onChat(appendDelta);
+const offStatus = session.onStatus(renderStatus);
+const offError = session.onError(renderError);
+
+await session.sendText("Start the task.");
+```
+
+This prevents early status or streamed output from being missed.
+
+## Creation failures
+
+Common creation errors include:
+
+- `EXTENSION_UNAVAILABLE` or `EXTENSION_DISCONNECTED`;
+- approval errors;
+- native host/Core runtime errors;
+- `DEFAULT_PROVIDER_NOT_SET`;
+- `DEFAULT_PROVIDER_UNAVAILABLE`;
+- `MODEL_REQUIRED` for Ollama;
+- `INVALID_INPUT` for invalid SDK input; and
+- provider-specific configuration errors from Core.
+
+No session object is returned when creation fails. Keep UI state separate from a partially assigned variable and return to a reconnectable state.
+
+Continue with [Preparing and sending a turn](./sending-messages/).

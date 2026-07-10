@@ -1,0 +1,189 @@
+---
+title: Tool Context and UI Lifecycle Safety
+description: Use ToolCallContext and application-owned generation tokens to prevent stale tool calls from modifying new UI state.
+sidebar:
+  order: 6
+---
+
+A tool call can arrive after the user has switched routes, replaced an editor, loaded another document, or recreated a canvas. The SDK tells you which session and turn produced the call, but it cannot know whether your current UI instance is still the intended target.
+
+## Tool context
+
+```ts
+type ToolCallContext = PedelecEventContext & {
+  type: "tool_call";
+  toolRequestId: string;
+  tool: string;
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+```
+
+Useful fields:
+
+- `sessionId`: session that emitted the call;
+- `toolRequestId`: unique request identifier used by the runtime;
+- `tool`: requested tool name;
+- `turnId`: SDK-local active turn;
+- `turnStartedAt`: browser time when the turn began;
+- `eventReceivedAt`: browser time when the event reached the SDK;
+- `provider` and `model`: metadata known by the session handle;
+- `source`: tool calls are Core-originated.
+
+Use these fields for routing, diagnostics, and correlation. They do not prove that an editor object captured by a closure is still current.
+
+## The stale-closure problem
+
+```ts
+const editor = currentEditor;
+
+session.onTool("replace_selection", (args) => {
+  // editor may no longer be the visible/current editor.
+  return editor.replaceSelection(args.text);
+});
+```
+
+If the user opens another document, the old handler may mutate hidden or disposed state—or worse, a reused object with different meaning.
+
+## Generation token pattern
+
+Maintain an application-owned lifecycle generation:
+
+```ts
+let editorGeneration = 0;
+
+function attachEditorTools(session: PedelecSession, editor: Editor) {
+  const generation = ++editorGeneration;
+
+  return session.onTool(
+    "replace_selection",
+    (args: { text: string }, ctx) => {
+      if (generation !== editorGeneration) {
+        return {
+          error: {
+            code: "STALE_TOOL_CALL",
+            message: "This tool call belongs to an older editor lifecycle.",
+            details: {
+              sessionId: ctx.sessionId,
+              turnId: ctx.turnId,
+            },
+          },
+        };
+      }
+
+      if (editor.isDisposed()) {
+        return {
+          error: {
+            code: "EDITOR_DISPOSED",
+            message: "The target editor no longer exists.",
+          },
+        };
+      }
+
+      return editor.replaceSelection(args.text);
+    },
+  );
+}
+```
+
+When replacing the UI context, increment the generation and unregister the old handler.
+
+## Resource identity pattern
+
+For document tools, capture and verify the resource ID:
+
+```ts
+function registerDocumentTools(session: PedelecSession, documentId: string) {
+  return session.onTool("rename_document", async (args) => {
+    if (documentStore.activeId !== documentId) {
+      return {
+        error: {
+          code: "DOCUMENT_CHANGED",
+          message: "The active document changed before the tool ran.",
+        },
+      };
+    }
+
+    return documentStore.rename(documentId, args.name);
+  });
+}
+```
+
+This is stronger than checking only `turnId`, because the same turn can outlive a route or document transition.
+
+## Multi-session routing
+
+Do not let the currently selected UI session determine where all events are written:
+
+```ts
+session.onTool((tool, args, ctx) => {
+  const state = sessionStore.get(ctx.sessionId);
+  if (!state) {
+    return {
+      error: {
+        code: "SESSION_UI_NOT_FOUND",
+        message: "No UI state is attached to this session.",
+      },
+    };
+  }
+
+  return state.tools.run(tool, args, ctx);
+});
+```
+
+Every session should have explicit application-owned state and cleanup.
+
+## SPA route changes
+
+On navigation:
+
+1. mark the old lifecycle invalid;
+2. resolve/cancel pending interactive tools;
+3. unregister named and generic handlers that reference the old route;
+4. decide whether the session should end, persist, or be owned by a higher-level store;
+5. register tools for the new route only after its state is ready.
+
+With `autoEndOnDisconnect: false`, route navigation may retain the same Core session. This makes correct handler replacement essential.
+
+## Multiple tabs
+
+Two tabs can resume the same session. Both may receive events or register handlers depending on extension routing. Decide which tab owns mutations.
+
+Possible strategies:
+
+- store a lease/owner token in shared storage;
+- use `BroadcastChannel` to elect an active controller;
+- make tools read-only in secondary tabs;
+- reject mutation tools when the tab lacks ownership; or
+- avoid cross-tab resume entirely.
+
+The SDK does not provide distributed UI locking.
+
+## Destructive tools
+
+For irreversible actions, check more than lifecycle:
+
+- current authenticated user permission;
+- exact resource ID and version;
+- whether the action was already applied;
+- whether explicit user confirmation is required;
+- bounds and allowed values; and
+- idempotency/replay behavior.
+
+```ts
+if (args.expectedVersion !== document.version) {
+  return {
+    error: {
+      code: "VERSION_CONFLICT",
+      message: "The document changed. Read the current state before retrying.",
+    },
+  };
+}
+```
+
+## Context IDs are opaque
+
+Do not derive security or authorization from `sessionId`, `turnId`, or `toolRequestId`. They are correlation identifiers, not proof of user intent or permission.
+
+Continue with [Tool errors and timeouts](./errors-and-timeouts/).

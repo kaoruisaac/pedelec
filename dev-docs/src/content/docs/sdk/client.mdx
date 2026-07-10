@@ -1,0 +1,156 @@
+---
+title: Creating the Client
+description: Configure Pedelec, understand the extension port, choose a client lifetime, and handle bridge timeouts.
+sidebar:
+  order: 1
+---
+
+`Pedelec` is the entry point to the browser SDK. One instance owns one external connection to the Pedelec Chrome Extension and manages request correlation, bridge timeouts, event routing, and the session objects created through that client.
+
+## Constructor
+
+```ts
+import { Pedelec } from "@kaoruisaac/pedelec";
+
+const pedelec = new Pedelec();
+```
+
+The constructor immediately attempts to connect to the configured Pedelec Extension ID. It does not wait for the Desktop App or provider to become available.
+
+If the constructor runs without a browser `window`, or if `chrome.runtime.connect` is unavailable, the instance records an `EXTENSION_UNAVAILABLE` state. Later bridge methods reject from that state. The same instance does not automatically retry after hydration.
+
+## Options
+
+```ts
+const pedelec = new Pedelec({
+  bridgeTimeoutMs: 30_000,
+});
+```
+
+```ts
+type PedelecOptions = {
+  bridgeTimeoutMs?: number;
+};
+```
+
+### `bridgeTimeoutMs`
+
+Maximum time a request waits for a response from the extension bridge.
+
+- Default: `30_000` milliseconds.
+- Values below `1` are clamped to `1`.
+- The timeout applies to SDK bridge requests such as `listProviders()`, `getSettings()`, `createSession()`, and low-level `request<T>()` calls.
+- It is not the same as a tool's `timeoutMs`.
+- It does not limit the total duration of `sendText()`. `sendText()` first waits for its bridge request and then waits for the active agent turn to finish.
+
+A timeout rejects with `SDK_BRIDGE_TIMEOUT` and includes request metadata in `details`.
+
+```ts
+try {
+  await pedelec.listProviders();
+} catch (error) {
+  if ((error as { code?: string }).code === "SDK_BRIDGE_TIMEOUT") {
+    showConnectionHelp();
+  }
+}
+```
+
+Increasing this value can help on unusually slow local startup paths, but a very large value can also leave the UI looking frozen when the extension or native bridge is broken. Prefer visible loading state and layer-specific troubleshooting.
+
+## Recommended lifetime
+
+Use one client per browser page lifecycle.
+
+```ts
+let pedelec: Pedelec | null = null;
+
+export function getPedelec() {
+  pedelec ??= new Pedelec();
+  return pedelec;
+}
+```
+
+A single client can create and track multiple `PedelecSession` objects. Sharing the client avoids unnecessary extension ports and gives the SDK one place to route session events.
+
+Do not treat a client as a cross-page singleton. A page refresh creates a new JavaScript environment and therefore a new client and extension port.
+
+## Browser-only initialization
+
+### Plain browser application
+
+```ts
+if (typeof window !== "undefined") {
+  const pedelec = new Pedelec();
+  startPedelecUI(pedelec);
+}
+```
+
+### Framework lifecycle
+
+Create the client in the framework's browser lifecycle and keep it out of server-serialized state.
+
+```ts
+// Conceptual example
+onBrowserMount(() => {
+  const pedelec = new Pedelec();
+  setPedelecClient(pedelec);
+});
+```
+
+Avoid this in an SSR module:
+
+```ts
+// Do not do this in a module imported by the server renderer.
+export const pedelec = new Pedelec();
+```
+
+That instance is constructed while `window` is missing and remains unavailable after hydration.
+
+## Extension connection behavior
+
+The client creates a unique `channelId` and opens an external runtime port. Every request contains that channel ID and a unique request ID. Session events are ignored when they belong to another channel.
+
+When the port disconnects:
+
+- all pending bridge requests reject;
+- the client records `EXTENSION_DISCONNECTED`;
+- each registered session receives an SDK-originated error callback; and
+- the client does not automatically open a replacement port.
+
+The usual recovery is to disable active controls and ask the user to reload the page after checking the extension. Creating a second client in the same broken page may help only when the extension is available again and your application has deliberately cleaned up the old session state.
+
+## Client versus session responsibility
+
+| Client (`Pedelec`) | Session (`PedelecSession`) |
+| --- | --- |
+| Extension transport | One agent conversation/thread |
+| Provider and settings queries | Turn lifecycle |
+| Create/resume requests | Chat, status, tool, error callbacks |
+| Request timeout | `prepare()`, `sendText()`, `end()` |
+| Event routing by session ID | Session status and handler registration |
+
+## Health checks
+
+No single method proves that every layer is healthy:
+
+```ts
+const approval = await pedelec.getApprovalStatus();
+const providers = approval.installed
+  ? await pedelec.listProviders()
+  : [];
+```
+
+- `getApprovalStatus()` primarily checks the browser-to-extension layer.
+- `listProviders()` also needs the native host and Desktop Core.
+- Creating a session verifies the selected provider configuration more deeply.
+- Sending a turn verifies provider execution.
+
+Use progressive checks rather than one permanent `connected` boolean.
+
+## Multiple clients
+
+Multiple clients are technically possible. Each opens a separate extension port and receives its own channel-specific events. Prefer multiple clients only when separate application roots truly need independent lifecycles.
+
+For multiple views of the same session, it is usually simpler to share one client and application store. When a session is routed through several SDK connections, `autoEndOnDisconnect` ends it only after its final route disappears.
+
+Continue with [Providers, models, and settings](./providers-and-models/).

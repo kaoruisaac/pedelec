@@ -1,0 +1,151 @@
+---
+title: Error Codes
+description: Common SDK, approval, transport, configuration, session, tool, Core, and provider errors with recovery guidance.
+sidebar:
+  order: 5
+---
+
+Pedelec rejects async methods and emits session errors as objects:
+
+```ts
+type PedelecError = {
+  code: string;
+  message: string;
+  details?: unknown;
+};
+```
+
+```ts
+try {
+  await session.sendText(text);
+} catch (error) {
+  const value = error as PedelecError;
+  console.error(value.code, value.message, value.details);
+}
+```
+
+The tables below document common codes from the SDK and current bridge/runtime. Provider adapters can return additional codes. Always include a fallback for unknown values.
+
+## Browser and Extension
+
+| Code | Meaning | Recommended response | Retry? |
+| --- | --- | --- | --- |
+| `EXTENSION_UNAVAILABLE` | SDK is outside a supported page context or cannot reach the Extension | Check browser profile, installation, supported origin, and client initialization | After fixing environment; create a fresh client/page |
+| `EXTENSION_DISCONNECTED` | Existing Extension port closed | Disable active controls; check Extension; reload/recreate client state | Not on the same broken client |
+| `INVALID_ORIGIN` | Extension popup received a non-HTTP(S) origin | Use HTTPS, localhost, or 127.0.0.1 as supported | After changing origin |
+| `STORAGE_ERROR` | Extension could not read/write approved origins | Check Extension health/storage; reinstall if persistent | A limited retry is reasonable |
+
+`getApprovalStatus()` converts `EXTENSION_UNAVAILABLE` and `EXTENSION_DISCONNECTED` into `installed: false` instead of throwing.
+
+## Origin approval
+
+| Code | Meaning | Recommended response | Retry? |
+| --- | --- | --- | --- |
+| `CREATE_SESSION_NOT_APPROVED` | Origin could not be verified or another origin is pending | Explain the conflict/origin issue | After the condition clears |
+| `APPROVAL_REJECTED` | User rejected or closed approval | Return to connect-ready state | Only after explicit user action |
+| `APPROVAL_TIMEOUT` | Approval was not completed in time | Tell user to keep popup open; offer connect again | Yes, user initiated |
+| `OPEN_POPUP_FAILED` | Extension could not open its popup | Ask user to click the Extension icon manually | Yes after manual action |
+
+## Native and Core transport
+
+| Code | Meaning | Recommended response | Retry? |
+| --- | --- | --- | --- |
+| `NATIVE_HOST_UNAVAILABLE` | Extension cannot connect to registered native host | Start/repair Desktop App installation and host registration | After repair |
+| `NATIVE_CONNECTION_CLOSED` | Native Messaging connection closed | Restart Desktop App and verify host | Read-only operation may retry after recovery |
+| `CORE_RUNTIME_UNAVAILABLE` | Native host cannot reach a valid running Core runtime | Start/restart Pedelec Desktop | After Core is running |
+| `IPC_UNAVAILABLE` | Local Core IPC could not bind, connect, parse, or respond | Restart Desktop App; inspect local logs | After recovery |
+| `MESSAGE_TOO_LARGE` | Local IPC message exceeded its size limit | Reduce prompt/tool/result payload | Only with smaller data |
+| `SDK_BRIDGE_TIMEOUT` | Extension did not answer within `bridgeTimeoutMs` | Check all downstream layers; avoid repeated writes | After diagnosing connection |
+| `SDK_TRANSPORT_ERROR` | Generic bridge request failure | Inspect `message/details`; verify Extension/native/Core | Depends on operation |
+| `SDK_PROTOCOL_ERROR` | Response/event shape or request type did not match SDK expectations | Align component versions; report reproducible mismatch | Usually not until versions/config fixed |
+
+## Provider and configuration
+
+| Code | Meaning | Recommended response | Retry? |
+| --- | --- | --- | --- |
+| `DEFAULT_PROVIDER_NOT_SET` | No Desktop default provider exists | Ask user to choose one or pass `provider` explicitly | After configuration |
+| `DEFAULT_PROVIDER_UNAVAILABLE` | Configured default is currently unavailable | Choose/install another provider | After configuration |
+| `MODEL_REQUIRED` | Provider, notably Ollama, requires a model | Pass `model` or configure provider default | After adding model |
+| `INVALID_INPUT` | SDK input is invalid | Fix application code/input shape | Not unchanged |
+
+Provider-specific errors can describe authentication, executable startup, model support, server connectivity, or provider output parsing. Display the provider and preserve the original message.
+
+## Session and turn
+
+| Code | Meaning | Recommended response | Retry? |
+| --- | --- | --- | --- |
+| `SESSION_BUSY` | Session already has an active prepare/turn | Wait until `idle`; prevent duplicate submit | Yes after idle |
+| `SESSION_ENDED` | Session can no longer accept work | Create or resume another valid session | Not on this handle |
+| `SESSION_ERROR` | Runtime reported error state | Show failure; inspect provider/runtime detail | Usually create/recover deliberately |
+| `PREPARE_FAILED` | SDK fallback code for failed preparation request | Continue normal send path if appropriate | Preparation can be retried deliberately |
+| `SEND_TEXT_FAILED` | SDK fallback code for failed send request | Preserve prompt; inspect transport/runtime | Only after state is known |
+| `END_SESSION_FAILED` | End request failed; Core state is uncertain | Keep UI explicit; retry or verify runtime | Carefully |
+| `AUTO_END_SESSION_FAILED` | Extension failed to end a disconnected auto-end session | Surface cleanup warning/log; verify Desktop | Carefully, often manual cleanup |
+
+Underlying structured errors are preserved when available, so fallback codes may be replaced by a more specific transport or runtime code.
+
+## Tools
+
+| Code | Meaning | Where it appears | Response |
+| --- | --- | --- | --- |
+| `TOOL_HANDLER_NOT_FOUND` | No named, inline, or generic handler matched | Error result sent to agent | Restore/register handler; fix name/lifecycle |
+| `TOOL_HANDLER_ERROR` | Handler threw or rejected | Error result sent to agent | Log unexpected exception; return domain errors for expected cases |
+| `SUBMIT_TOOL_RESULT_FAILED` | SDK could not deliver handler result | `session.onError()` SDK event | Reconcile side effects; inspect disconnect/timeout/serialization |
+
+A Core tool timeout can also lead to a session/runtime error or a later `SUBMIT_TOOL_RESULT_FAILED`. The browser handler is not forcibly cancelled.
+
+## Retry classification
+
+### Generally safe after fixing the cause
+
+- provider/settings reads;
+- approval status reads;
+- provider discovery;
+- session creation that failed before a session ID was returned;
+- read-only tools known not to have executed.
+
+### Require reconciliation before retry
+
+- `sendText()` after a transport failure, because provider execution may have started;
+- mutating tool calls when result delivery failed;
+- `end()` when Core state is uncertain;
+- timeouts where local work may still finish.
+
+### Do not retry unchanged
+
+- `INVALID_INPUT`;
+- `MODEL_REQUIRED` without adding a model;
+- `DEFAULT_PROVIDER_NOT_SET` without configuration;
+- `SESSION_ENDED` on the same handle;
+- permission/domain errors without changed state or user intent.
+
+## Unknown codes
+
+```ts
+function messageForError(error: PedelecError) {
+  switch (error.code) {
+    case "SESSION_BUSY":
+      return "The current task is still running.";
+    case "NATIVE_HOST_UNAVAILABLE":
+      return "Start or repair the Pedelec Desktop App.";
+    default:
+      return error.message || "Pedelec request failed.";
+  }
+}
+```
+
+Do not discard unknown `code`, `message`, or safe diagnostic details. They may come from a provider or a newer runtime version.
+
+## Logging guidance
+
+Useful fields include:
+
+- error code and message;
+- operation name;
+- `sessionId` when available;
+- provider/model;
+- `turnId` and `toolRequestId` for event/tool errors;
+- component versions; and
+- whether the error originated from `core` or `sdk`.
+
+Do not log full prompts, selected page data, tool args, or results by default.

@@ -1,0 +1,186 @@
+---
+title: Session 狀態與 Events
+description: 理解 session states、status transitions、callback context、SDK-originated 與 runtime-originated events。
+sidebar:
+  order: 6
+---
+
+`PedelecSession` 維護 browser-side status，並提供 status、error 與 end lifecycle callbacks。
+
+## Status values
+
+```ts
+type PedelecSessionStatus =
+  | "idle"
+  | "running"
+  | "waiting_tool_result"
+  | "ended"
+  | "error";
+```
+
+| Status | 意義 | 可呼叫 `sendText()`？ |
+| --- | --- | --- |
+| `idle` | 沒有 active turn，可接收下一個 prompt | 可以 |
+| `running` | Preparation 或 user turn active | 不可以 |
+| `waiting_tool_result` | Agent 已要求 frontend tool，正在等待 | 不可以 |
+| `ended` | Session 永久結束 | 不可以 |
+| `error` | Runtime 回報 session error | 不可以；依產品策略建立或 resume session |
+
+新 `PedelecSession` object 的 local initial status 是 `idle`。
+
+## 常見 transitions
+
+沒有 tool 的 turn：
+
+```text
+idle → running → idle
+```
+
+包含 frontend tool：
+
+```text
+idle
+  → running
+  → waiting_tool_result
+  → running
+  → idle
+```
+
+Active state 也可能直接 error 或 ended：
+
+```text
+running → error
+running → ended
+waiting_tool_result → error
+waiting_tool_result → ended
+```
+
+不要假設每個理論 intermediate status 都一定會在 UI 出現。Event 可能被 normalize、de-duplicate，或非常接近地到達。
+
+## 監聽 status changes
+
+```ts
+const offStatus = session.onStatus((status, ctx) => {
+  console.log(ctx.previousStatus, "→", status);
+  console.log(ctx.type, ctx.source);
+});
+```
+
+只有 value 改變時 callback 才執行。Registration 不會立即 emit initial status。
+
+```ts
+renderStatus(session.getStatus());
+const offStatus = session.onStatus(renderStatus);
+```
+
+## Local 與 Core-originated status
+
+為了 UI 即時反應，SDK 可在 Core response 前先 emit：
+
+- `sendText()` 與 `prepare()` local set `running`；
+- tool event 處理時 set `waiting_tool_result`；
+- `end()` request 成功後 local mark ended。
+
+Context 可辨識來源：
+
+```ts
+ctx.source // "sdk" | "core"
+ctx.type   // "sdk_status_changed" | "status_changed"
+```
+
+Core event 使用 `source: "core"`；SDK 內部主動變更使用 `source: "sdk"`。
+
+Status handler 會去重。SDK 已設為 `running`，Core 後續也回報 `running` 時，不會再 callback 一次。
+
+## Error events
+
+```ts
+const offError = session.onError((error, ctx) => {
+  console.error(error.code, error.message, error.details);
+  console.debug(ctx.type, ctx.source, ctx.sessionId);
+});
+```
+
+```ts
+type ErrorEventContext = PedelecEventContext & {
+  type: "error" | "sdk_error";
+};
+```
+
+`onError()` 適合 session-wide observation、logging 與 UI；發起 action 的 promise 仍要 catch。
+
+Error callback 不一定代表 status 變成 `error`。例如 tool result submission 失敗會 emit SDK `SUBMIT_TOOL_RESULT_FAILED`，最終 session state 仍由 Runtime 決定。
+
+## Ended events
+
+```ts
+const offEnded = session.onEnded((ctx) => {
+  console.log("ended by", ctx.source);
+});
+```
+
+```ts
+type EndedEventContext = PedelecEventContext & {
+  type: "ended" | "sdk_ended";
+};
+```
+
+Session 第一次變成 ended 時，無論是 runtime event 或 local `end()` 成功，都只執行一次 `onEnded()`。
+
+Session end 時，pending `sendText()` 或 `prepare()` 會 reject `SESSION_ENDED`。
+
+## Common context fields
+
+```ts
+type PedelecEventContext = {
+  sessionId: string;
+  provider: string;
+  model?: string;
+  sessionCreatedAt: number;
+  eventReceivedAt?: number;
+  eventEmittedAt: number;
+  turnId?: string;
+  turnStartedAt?: number;
+  turnKind?: "user" | "prepare";
+  source: "core" | "sdk";
+};
+```
+
+不是每個 event 都有所有欄位：
+
+- Core chat/tool callback 有 received time 與 active turn metadata。
+- Local status change 可能發生在 Core event 前，沒有 `eventReceivedAt`。
+- Active turn 之外的 end/error 可能沒有 turn fields。
+- 新的 resumed handle 若應用程式沒自行保存，可能有空 provider metadata。
+
+## Tool-call context
+
+Tool handler 還會收到：
+
+```ts
+ctx.type;          // "tool_call"
+ctx.toolRequestId; // Core tool request identifier
+ctx.tool;          // tool name
+ctx.turnId;
+```
+
+`toolRequestId` 可用於 diagnostics 與 application bookkeeping，不需要手動 submit result；SDK 會自動送出 handler return value。
+
+## Event order 與 duplicate protection
+
+Core event 可包含 per-session sequence number。Client 會忽略 sequence 不比上一個更新的 event。Application 自己 handler 內的 async work 仍要能處理 rapid transition 與 late completion。
+
+## UI mapping
+
+```ts
+session.onStatus((status) => {
+  setSendEnabled(status === "idle");
+  setBusy(status === "running" || status === "waiting_tool_result");
+  setToolWaiting(status === "waiting_tool_result");
+  setSessionClosed(status === "ended");
+});
+```
+
+Interactive tool 正在等待使用者時，不要把 `waiting_tool_result` 只顯示成 frozen。應呈現對應 modal 或操作提示。
+
+下一頁：[Session Lifecycle 與 Resume](./session-lifecycle/)。

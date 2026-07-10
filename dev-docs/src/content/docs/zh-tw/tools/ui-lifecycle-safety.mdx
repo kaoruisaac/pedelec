@@ -1,0 +1,189 @@
+---
+title: Tool Context 與 UI Lifecycle Safety
+description: 使用 ToolCallContext 與 application-owned generation token，避免 stale tool call 修改新的 UI state。
+sidebar:
+  order: 6
+---
+
+Tool call 到達時，使用者可能已切換 route、替換 editor、載入另一份 document 或重建 canvas。SDK 能說明 call 來自哪個 session/turn，但不知道目前 UI instance 是否仍是原本目標。
+
+## Tool context
+
+```ts
+type ToolCallContext = PedelecEventContext & {
+  type: "tool_call";
+  toolRequestId: string;
+  tool: string;
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+```
+
+重要欄位：
+
+- `sessionId`：發出 call 的 session；
+- `toolRequestId`：runtime 的 unique request identifier；
+- `tool`：tool name；
+- `turnId`：SDK-local active turn；
+- `turnStartedAt`：turn 開始的 browser time；
+- `eventReceivedAt`：event 到達 SDK 的 browser time；
+- `provider`、`model`：session handle 已知 metadata；
+- `source`：tool call 來自 Core。
+
+可用於 routing、diagnostics 與 correlation，但不能證明 closure 捕捉的 editor 仍是 current。
+
+## Stale closure 問題
+
+```ts
+const editor = currentEditor;
+
+session.onTool("replace_selection", (args) => {
+  // editor 可能已不是 visible/current editor。
+  return editor.replaceSelection(args.text);
+});
+```
+
+使用者開啟另一份 document 後，舊 handler 可能修改 hidden/disposed state，甚至修改已被重用但意義不同的 object。
+
+## Generation token pattern
+
+Application 自行維護 lifecycle generation：
+
+```ts
+let editorGeneration = 0;
+
+function attachEditorTools(session: PedelecSession, editor: Editor) {
+  const generation = ++editorGeneration;
+
+  return session.onTool(
+    "replace_selection",
+    (args: { text: string }, ctx) => {
+      if (generation !== editorGeneration) {
+        return {
+          error: {
+            code: "STALE_TOOL_CALL",
+            message: "This tool call belongs to an older editor lifecycle.",
+            details: {
+              sessionId: ctx.sessionId,
+              turnId: ctx.turnId,
+            },
+          },
+        };
+      }
+
+      if (editor.isDisposed()) {
+        return {
+          error: {
+            code: "EDITOR_DISPOSED",
+            message: "The target editor no longer exists.",
+          },
+        };
+      }
+
+      return editor.replaceSelection(args.text);
+    },
+  );
+}
+```
+
+更換 UI context 時 increment generation，並 unregister old handler。
+
+## Resource identity pattern
+
+Document tool 捕捉並驗證 resource ID：
+
+```ts
+function registerDocumentTools(session: PedelecSession, documentId: string) {
+  return session.onTool("rename_document", async (args) => {
+    if (documentStore.activeId !== documentId) {
+      return {
+        error: {
+          code: "DOCUMENT_CHANGED",
+          message: "The active document changed before the tool ran.",
+        },
+      };
+    }
+
+    return documentStore.rename(documentId, args.name);
+  });
+}
+```
+
+這比只檢查 `turnId` 更強，因為同一 turn 可能跨過 route/document transition。
+
+## Multi-session routing
+
+不要用目前 selected UI session 決定所有 event 寫入位置：
+
+```ts
+session.onTool((tool, args, ctx) => {
+  const state = sessionStore.get(ctx.sessionId);
+  if (!state) {
+    return {
+      error: {
+        code: "SESSION_UI_NOT_FOUND",
+        message: "No UI state is attached to this session.",
+      },
+    };
+  }
+
+  return state.tools.run(tool, args, ctx);
+});
+```
+
+每個 session 都應有 explicit application-owned state 與 cleanup。
+
+## SPA route changes
+
+Navigation 時：
+
+1. 將 old lifecycle 標成 invalid；
+2. resolve/cancel pending interactive tools；
+3. unregister 引用 old route 的 named/generic handlers；
+4. 決定 session end、persist 或交給 higher-level store；
+5. new route state ready 後再註冊 tools。
+
+`autoEndOnDisconnect: false` 時 route navigation 可能保留同一 Core session，因此正確 handler replacement 特別重要。
+
+## Multiple tabs
+
+兩個 tabs 可以 resume 同一 session，並可能各自收到 events/註冊 handlers。產品必須決定哪一個 tab 擁有 mutation 權限。
+
+策略：
+
+- 在 shared storage 保存 lease/owner token；
+- 用 `BroadcastChannel` 選 active controller；
+- secondary tab 只提供 read-only tools；
+- tab 沒 ownership 時 reject mutation tool；
+- 完全避免 cross-tab resume。
+
+SDK 不提供 distributed UI locking。
+
+## Destructive tools
+
+Irreversible action 除了 lifecycle 還要檢查：
+
+- current user permission；
+- exact resource ID 與 version；
+- action 是否已 apply；
+- 是否需要 explicit confirmation；
+- bounds 與 allowed values；
+- idempotency/replay behavior。
+
+```ts
+if (args.expectedVersion !== document.version) {
+  return {
+    error: {
+      code: "VERSION_CONFLICT",
+      message: "The document changed. Read the current state before retrying.",
+    },
+  };
+}
+```
+
+## Context IDs 是 opaque
+
+不要從 `sessionId`、`turnId` 或 `toolRequestId` 推導 security/authorization。它們是 correlation identifier，不是 user intent 或 permission 的證明。
+
+下一頁：[Tool Errors 與 Timeouts](./errors-and-timeouts/)。

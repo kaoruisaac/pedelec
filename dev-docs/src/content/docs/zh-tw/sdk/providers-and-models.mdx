@@ -1,0 +1,193 @@
+---
+title: Providers、Models 與 Settings
+description: 探測本機 providers、讀取 Desktop App defaults，並正確決定 provider 與 model input。
+sidebar:
+  order: 2
+---
+
+每個 Pedelec session 會使用一個 provider。Provider 決定 agent 如何執行、接受哪些 model id、如何 authentication，以及資料是否可能離開使用者電腦。
+
+## Provider codes
+
+```ts
+type ProviderCode =
+  | "codex"
+  | "gemini"
+  | "opencode"
+  | "cursor"
+  | "claude"
+  | "ollama";
+```
+
+SDK boundary 的 provider code 固定使用 lowercase。Display name、executable path、version 與 model catalog 另外探測或設定。
+
+## 探測 providers
+
+```ts
+const providers = await pedelec.listProviders();
+```
+
+```ts
+type ProviderInfo = {
+  name: string;
+  code: ProviderCode;
+  path: string | null;
+  available: boolean;
+  error: string | null;
+};
+```
+
+### 欄位
+
+- `name`：適合顯示在 picker 的名稱。
+- `code`：傳給 `createSession()` 的值。
+- `path`：Core 探測到的 executable path；unavailable 或不是一般 CLI path 時可為 `null`。
+- `available`：Core 目前是否認為 provider 已足以被選擇。
+- `error`：unavailable 時的 discovery/setup 說明，正常時通常為 `null`。
+
+```ts
+const availableProviders = providers.filter((provider) => provider.available);
+
+for (const provider of providers) {
+  console.log(
+    provider.available ? "ready" : "unavailable",
+    provider.name,
+    provider.path,
+    provider.error,
+  );
+}
+```
+
+不要毫無說明地隱藏 unavailable provider。顯示 provider 與 error 有助於使用者修復 `PATH`、installation 或 configuration。
+
+## 讀取 Desktop App settings
+
+```ts
+const settings = await pedelec.getSettings();
+```
+
+```ts
+type PedelecSettings = {
+  defaultProvider: ProviderCode | null;
+  defaultModels: Partial<Record<ProviderCode, string>>;
+};
+```
+
+這些是使用者層級的 Desktop App settings。SDK 只公開 default provider 與 optional per-provider model string，不公開 Desktop App 所有內部設定。
+
+```ts
+const defaultProvider = settings.defaultProvider;
+const codexModel = settings.defaultModels.codex;
+const ollamaModel = settings.defaultModels.ollama;
+```
+
+Settings 是 read 時的 snapshot，之後可能被使用者在 Desktop App 修改。
+
+## Session 選擇規則
+
+### 不指定 provider 與 model
+
+```ts
+const session = await pedelec.createSession();
+```
+
+SDK 會：
+
+1. 呼叫 `getSettings()`；
+2. 要求存在 `defaultProvider`；
+3. 呼叫 `listProviders()`，確認 default provider available；
+4. 有 default model 時一起使用。
+
+可能收到 `DEFAULT_PROVIDER_NOT_SET` 或 `DEFAULT_PROVIDER_UNAVAILABLE`。
+
+### 只指定 provider
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+});
+```
+
+SDK 會讀 settings，若有 `defaultModels.codex` 就套用；沒有則不傳 model，讓 provider 使用自己的 default behavior。
+
+和省略 provider 的形式不同，SDK 不會先 assert explicit provider availability。Core 或 provider 可能稍後拒絕。需要 proactive picker 時先用 `listProviders()`。
+
+### 同時指定 provider 與 model
+
+```ts
+const session = await pedelec.createSession({
+  provider: "claude",
+  model: "sonnet",
+});
+```
+
+Explicit model 會覆蓋該 session 的 Desktop default。
+
+### 只有 model 是 invalid
+
+```ts
+// TypeScript 與 runtime validation 都會拒絕。
+await pedelec.createSession({
+  model: "some-model",
+});
+```
+
+Model identifier 沒有 provider namespace 就沒有意義，因此會收到 `INVALID_INPUT`。
+
+## Model identifier 由 provider 決定
+
+Pedelec 沒有一份 universal valid-model list。String 會交給 provider adapter，合法 ID 可能隨本機 provider version 改變。
+
+好的 UI pattern：
+
+- 預設使用 Desktop App 已設定的值；
+- provider 本身有好用 default 時允許空 model；
+- model input 清楚標示目前 provider；
+- 保留使用者輸入的精確 ID；
+- 顯示 provider error，不要全部改成 generic message。
+
+文件中的 sample model 不應被當成保證支援清單。
+
+## Ollama 行為
+
+Ollama 和 CLI provider 不同：
+
+- Pedelec 使用內附 `pedelec-agent` 連到 Ollama-compatible server。
+- `ProviderInfo.available === true` 表示 agent executable 可用。
+- 不代表 server reachable。
+- 不代表指定 model 已安裝。
+- 必須從 session input 或 `defaultModels.ollama` 取得 model。
+
+```ts
+const session = await pedelec.createSession({
+  provider: "ollama",
+  model: "your-installed-model",
+});
+```
+
+沒有 model 時 Core 回傳 `MODEL_REQUIRED`。
+
+## Provider picker 範例
+
+```ts
+const [providers, settings] = await Promise.all([
+  pedelec.listProviders(),
+  pedelec.getSettings(),
+]);
+
+const choices = providers.map((provider) => ({
+  value: provider.code,
+  label: provider.name,
+  disabled: !provider.available,
+  help: provider.error,
+  defaultModel: settings.defaultModels[provider.code] ?? "",
+}));
+```
+
+使用者切換 provider 時，只在不會覆蓋刻意編輯內容的情況下，才把 model 欄位更新成該 provider saved default。
+
+## Privacy 與 provider choice
+
+Pedelec bridge 在本機，但 cloud provider CLI 可能將 context 傳到其服務。因此 provider/model selector 同時也是 data-routing choice。處理敏感資料時，應清楚顯示哪個 provider 會收到 prompt 與 tool descriptions。
+
+下一頁：[建立 Sessions](./creating-sessions/)。

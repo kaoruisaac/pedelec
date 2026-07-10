@@ -1,0 +1,196 @@
+---
+title: 建立 Sessions
+description: 使用 defaults、explicit provider、model、skills 與 disconnect lifecycle options 建立 session。
+sidebar:
+  order: 3
+---
+
+`PedelecSession` 代表由 Desktop Runtime 管理的一個 agent thread，必須透過 `Pedelec` client 建立。
+
+## Signatures
+
+```ts
+createSession(): Promise<PedelecSession<string>>;
+
+createSession<const TTools extends readonly ToolDefinition[]>(
+  input: CreateSessionInput<TTools>,
+): Promise<PedelecSession<ToolNameOf<TTools>>>;
+```
+
+```ts
+type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
+  | {
+      provider: ProviderCode;
+      model?: string;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    }
+  | {
+      provider?: undefined;
+      model?: never;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    };
+```
+
+Generic overload 會把 literal tool names 帶入回傳 session 的 named `onTool()` API。
+
+## 使用 Desktop defaults
+
+```ts
+const session = await pedelec.createSession();
+```
+
+此形式使用 Desktop App 的 `defaultProvider` 與 optional default model，適合希望尊重使用者 global choice 的應用程式。
+
+以下情況會在建立前失敗：
+
+- 沒有 default provider：`DEFAULT_PROVIDER_NOT_SET`；
+- default provider unavailable：`DEFAULT_PROVIDER_UNAVAILABLE`。
+
+## Explicit provider
+
+```ts
+const session = await pedelec.createSession({
+  provider: "gemini",
+});
+```
+
+SDK 仍會讀 Desktop settings，取得 `defaultModels.gemini`。沒有設定時不傳 explicit model。
+
+Provider picker 建議先呼叫 `listProviders()`，避免選 unavailable entry；但 availability 可能在探測和建立之間改變，Runtime 仍是最終 source of truth。
+
+## Explicit provider 與 model
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  model: "provider-supported-model-id",
+});
+```
+
+Pedelec 將 model 視為 provider-specific opaque string。Invalid model 通常由 Core 或 provider execution 回報。
+
+## 加入 skills 與 tools
+
+```ts
+import { defineTool } from "@kaoruisaac/pedelec";
+
+const tools = [
+  defineTool({
+    name: "get_current_page",
+    description: "Read the current browser page title and URL.",
+    argsSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    handler: () => ({
+      title: document.title,
+      url: location.href,
+    }),
+  }),
+] as const;
+
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use get_current_page when page identity is required.",
+    tools,
+  },
+});
+```
+
+Serializable fields 會送到 Core；inline handler function 只保留在 SDK session instance。
+
+Request 發出前會進行基本 validation：
+
+- `skills` 必須是 object；
+- `guidance` 必須是 string；
+- `tools` 必須是 array；
+- tool name 必須符合規則且不可重複；
+- description 不可為空；
+- `timeoutMs` 必須是 positive integer；
+- root `argsSchema` 必須是 serializable object schema。
+
+Invalid definition 會收到 `INVALID_INPUT`。
+
+## Page-scoped sessions
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: true,
+});
+```
+
+`autoEndOnDisconnect` 預設 `true`。當這個 session 最後一條 SDK route disconnect，例如 tab close 或 reload，Extension 會請 Core end session。
+
+適合：
+
+- demo；
+- route-local assistant；
+- temporary page context；
+- 不希望 abandoned tab 留下 session 的情況。
+
+## Persistent／resumable sessions
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+
+localStorage.setItem("pedelec-session-id", session.sessionId);
+```
+
+需要 navigation 或 reload 後 resume 時使用 `false`。
+
+此時 cleanup 由應用程式負責；若永遠不 resume 或 end 舊 ID，Desktop session 可能比 UI 預期存活更久。
+
+## 回傳 session properties
+
+```ts
+console.log(session.sessionId);
+console.log(session.provider);
+console.log(session.model);
+console.log(session.sessionCreatedAt);
+```
+
+- `sessionId`：供 `resumeSession()` 使用的 stable identifier。
+- `provider`：這個 SDK handle 註冊時使用的 provider。
+- `model`：SDK 已知的 selected model。
+- `sessionCreatedAt`：這個 browser-side `PedelecSession` object 建立的時間；resume 後不等於原始 Core thread creation time。
+
+目前新建立的 resumed handle 可能沒有 provider/model metadata，因為 `resumeSession()` 從 bridge 只取得 session ID。Reload 後 UI 需要這些欄位時，請自行保存。
+
+## 傳送前先註冊 handler
+
+```ts
+const session = await pedelec.createSession({ provider: "codex" });
+
+const offChat = session.onChat(appendDelta);
+const offStatus = session.onStatus(renderStatus);
+const offError = session.onError(renderError);
+
+await session.sendText("Start the task.");
+```
+
+這可以避免漏掉早期 status 或 streamed output。
+
+## 建立失敗
+
+常見 creation errors：
+
+- `EXTENSION_UNAVAILABLE`／`EXTENSION_DISCONNECTED`；
+- approval errors；
+- native host/Core runtime errors；
+- `DEFAULT_PROVIDER_NOT_SET`；
+- `DEFAULT_PROVIDER_UNAVAILABLE`；
+- Ollama 的 `MODEL_REQUIRED`；
+- invalid SDK input 的 `INVALID_INPUT`；
+- Core 回傳的 provider-specific configuration error。
+
+建立失敗時不會回傳 session object。UI state 請和半完成的 local variable 分開，讓使用者可以重新連線。
+
+下一頁：[準備與傳送 Turn](./sending-messages/)。

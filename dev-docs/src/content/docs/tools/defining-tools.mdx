@@ -1,0 +1,262 @@
+---
+title: Defining Tools
+description: Define names, descriptions, schemas, timeouts, handlers, and TypeScript types with defineTool.
+sidebar:
+  order: 2
+---
+
+Use `defineTool()` to create a `ToolDefinition` while preserving literal tool names and handler types.
+
+## Basic definition
+
+```ts
+import { defineTool } from "@kaoruisaac/pedelec";
+
+const updateCounter = defineTool({
+  name: "update_counter",
+  description: "Increase or decrease the visible counter by a signed delta.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      delta: {
+        type: "integer",
+        description: "Signed amount to add to the counter.",
+        minimum: -100,
+        maximum: 100,
+      },
+    },
+    required: ["delta"],
+  },
+  timeoutMs: 10_000,
+  handler: (args: { delta: number }) => {
+    counter.value += args.delta;
+    return { value: counter.value };
+  },
+});
+```
+
+`defineTool()` returns the definition unchanged. Its value is type inference and a consistent authoring pattern; runtime validation happens when the tools are normalized for session creation.
+
+## `ToolDefinition`
+
+```ts
+type ToolDefinition<
+  TArgs = unknown,
+  TResult = unknown,
+  TName extends string = string,
+> = {
+  name: TName;
+  description: string;
+  argsSchema: ToolArgsSchema;
+  timeoutMs?: number;
+  handler?: ToolSpecificHandler<TArgs, TResult>;
+};
+```
+
+## Name rules
+
+Tool names must match:
+
+```text
+^[a-zA-Z][a-zA-Z0-9_.-]*$
+```
+
+That means:
+
+- first character must be an ASCII letter;
+- later characters may be letters, digits, `_`, `.`, or `-`;
+- spaces are not allowed;
+- names must be unique within one `skills.tools` array.
+
+Recommended style is lowercase snake case:
+
+```text
+get_current_page
+update_counter
+editor.replace_selection
+```
+
+Use stable names. Renaming a tool changes the agent-facing capability and requires handler updates.
+
+## Write a useful description
+
+The description helps the agent choose the correct tool. State:
+
+1. what the tool does;
+2. what state it reads or changes;
+3. important constraints; and
+4. when a similar tool should be preferred.
+
+```ts
+// Better
+"Replace the currently selected editor text. Fails when there is no selection. Use insert_text when the user has no selection."
+
+// Too vague
+"Edit text."
+```
+
+Do not hide destructive behavior. A description should make side effects explicit.
+
+## Argument schema
+
+The root must be an object schema, even for a no-argument tool.
+
+```ts
+const noArgs = {
+  type: "object",
+  properties: {},
+  required: [],
+} satisfies ToolArgsSchema;
+```
+
+For parameters:
+
+```ts
+const argsSchema = {
+  type: "object",
+  properties: {
+    documentId: {
+      type: "string",
+      description: "Application document identifier.",
+      minLength: 1,
+    },
+    mode: {
+      type: "string",
+      enum: ["append", "replace"],
+    },
+  },
+  required: ["documentId", "mode"],
+} satisfies ToolArgsSchema;
+```
+
+The schema is a Pedelec-supported subset, not full JSON Schema. See [Tool Args Schema](./args-schema/).
+
+## Timeout
+
+`timeoutMs` is optional and must be a positive integer.
+
+```ts
+timeoutMs: 60_000
+```
+
+If omitted, Core currently uses its default tool timeout of 60 seconds. Choose a longer value only for intentionally interactive or long-running operations. A large timeout should be paired with visible UI and cleanup behavior.
+
+The timeout does not cancel JavaScript inside the handler. If the runtime stops waiting first, a late result can fail to submit.
+
+## Inline handler
+
+```ts
+const readSelection = defineTool({
+  name: "get_selected_text",
+  description: "Read the text currently selected in the page.",
+  argsSchema: noArgs,
+  handler: () => ({
+    text: window.getSelection()?.toString() ?? "",
+  }),
+});
+```
+
+The handler is stored in the SDK session and removed from the serializable manifest. It is never written into the Core sandbox.
+
+Inline handlers are convenient when definition and implementation naturally live together. Register a named handler later when implementation belongs to a mounted component or must override the default.
+
+## Type the handler
+
+You can type the handler parameter directly:
+
+```ts
+const resize = defineTool({
+  name: "resize_canvas",
+  description: "Resize the current canvas.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      width: { type: "integer", minimum: 1 },
+      height: { type: "integer", minimum: 1 },
+    },
+    required: ["width", "height"],
+  },
+  handler: (args: { width: number; height: number }) => {
+    canvas.resize(args.width, args.height);
+    return { width: args.width, height: args.height };
+  },
+});
+```
+
+Or provide generics:
+
+```ts
+type ResizeArgs = { width: number; height: number };
+type ResizeResult = { width: number; height: number };
+
+const resize = defineTool<ResizeArgs, ResizeResult>({
+  name: "resize_canvas",
+  description: "Resize the current canvas.",
+  argsSchema: resizeSchema,
+  handler: (args) => canvas.resize(args.width, args.height),
+});
+```
+
+TypeScript types do not validate runtime agent input. Validate at the handler boundary.
+
+## Preserve tool-name literals
+
+```ts
+const tools = [getCurrentPage, updateCounter] as const;
+
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use the declared tools for page operations.",
+    tools,
+  },
+});
+
+session.onTool("update_counter", handleCounter);
+// A misspelled literal can be rejected by TypeScript for this session type.
+```
+
+Without a readonly/literal-preserving array, tool names may widen to `string`, reducing the value of the typed named handler API.
+
+## Nested object example
+
+```ts
+const createCard = defineTool({
+  name: "create_card",
+  description: "Create a card in the active board column.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      card: {
+        type: "object",
+        properties: {
+          title: { type: "string", minLength: 1, maxLength: 120 },
+          labels: {
+            type: "array",
+            items: { type: "string" },
+            maxItems: 10,
+            uniqueItems: true,
+          },
+        },
+        required: ["title"],
+      },
+    },
+    required: ["card"],
+  },
+});
+```
+
+## Validation failures during creation
+
+Session creation rejects with `INVALID_INPUT` for issues such as:
+
+- invalid or duplicate name;
+- empty description;
+- non-positive/non-integer timeout;
+- missing or non-object root schema;
+- legacy `input` shorthand; or
+- a schema that cannot be serialized.
+
+Fix the definition in application code. These are developer errors, not user retry conditions.
+
+Continue with [Tool Args Schema](./args-schema/).

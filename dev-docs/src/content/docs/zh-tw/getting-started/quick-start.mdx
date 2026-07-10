@@ -1,0 +1,205 @@
+---
+title: 快速開始
+description: 建立 Pedelec client 與 session、串流接收回應、處理狀態和錯誤，最後結束 session。
+sidebar:
+  order: 3
+---
+
+本頁會使用第一個 available provider 建立一個 browser-side session，並加入可實際使用 UI 所需的最小 lifecycle handling。
+
+## 1. 建立 client
+
+請在應用程式已進入 browser 後建立：
+
+```ts
+import {
+  Pedelec,
+  type PedelecError,
+  type PedelecSession,
+} from "@kaoruisaac/pedelec";
+
+const pedelec = new Pedelec();
+```
+
+同一個 page 通常共用這個 client，不要每次點按鈕就建立新的 instance。
+
+## 2. 檢查 Extension 與 providers
+
+```ts
+const approval = await pedelec.getApprovalStatus();
+
+if (!approval.installed) {
+  throw new Error("請安裝或啟用 Pedelec Chrome Extension。 ");
+}
+
+const providers = await pedelec.listProviders();
+const provider = providers.find((item) => item.available);
+
+if (!provider) {
+  throw new Error("請啟動 Pedelec Desktop 並設定可用 provider。 ");
+}
+```
+
+讀取 approval status 不會主動要求核准。真正建立或 resume session 時，尚未核准的網站才會進入 approval flow。
+
+## 3. 建立 session
+
+```ts
+const session = await pedelec.createSession({
+  provider: provider.code,
+});
+```
+
+只提供 `provider` 時，SDK 會讀取 Desktop App settings；該 provider 有 default model 就一起使用，沒有則交給 provider 自己的 default behavior。Ollama 仍必須有明確或已設定的 model。
+
+## 4. 傳送前先註冊 callbacks
+
+```ts
+let assistantText = "";
+
+const unsubscribeChat = session.onChat((delta, ctx) => {
+  assistantText += delta;
+  renderAssistantMessage(assistantText);
+  console.debug("turn", ctx.turnId, "received", delta.length, "characters");
+});
+
+const unsubscribeStatus = session.onStatus((status, ctx) => {
+  renderSessionStatus(status);
+  setComposerDisabled(status !== "idle");
+  console.debug(ctx.previousStatus, "→", status, ctx.source);
+});
+
+const unsubscribeError = session.onError((error, ctx) => {
+  renderError(`${error.code}: ${error.message}`);
+  console.error(ctx.type, error.details);
+});
+
+const unsubscribeEnded = session.onEnded(() => {
+  setComposerDisabled(true);
+});
+```
+
+`onStatus()` 只在狀態變化時觸發。初始狀態請使用 `session.getStatus()`。
+
+## 5. 傳送訊息
+
+```ts
+try {
+  assistantText = "";
+  setComposerDisabled(true);
+
+  await session.sendText("說明這個應用程式可以做什麼。 ");
+
+  console.log("本次 agent turn 已完成。 ");
+} catch (error) {
+  const pedelecError = error as PedelecError;
+  renderError(`${pedelecError.code}: ${pedelecError.message}`);
+} finally {
+  if (session.getStatus() === "idle") {
+    setComposerDisabled(false);
+  }
+}
+```
+
+`sendText()` 會等待 Core 發出 completion，或將 session 恢復成 `idle` 後才 resolve，不是 transport 接到文字後就立即完成。
+
+一個 session 同時只接受一個 active turn。Turn 進行中請 disable send button，同時仍需捕捉 `SESSION_BUSY`，避免兩條 application path race。
+
+## 6. 結束與清理
+
+```ts
+await session.end();
+
+unsubscribeChat();
+unsubscribeStatus();
+unsubscribeError();
+unsubscribeEnded();
+```
+
+對已 ended 的 session 再呼叫 `end()` 不會重複執行。Session 一旦結束，就不能再接收新訊息。
+
+## 完整範例
+
+```ts
+import {
+  Pedelec,
+  type PedelecError,
+  type PedelecSession,
+} from "@kaoruisaac/pedelec";
+
+let activeSession: PedelecSession | null = null;
+let disposeSessionHandlers: (() => void) | null = null;
+
+export async function connectAndRun(prompt: string) {
+  const pedelec = new Pedelec();
+
+  const approval = await pedelec.getApprovalStatus();
+  if (!approval.installed) {
+    throw new Error("Pedelec Extension 目前無法使用。 ");
+  }
+
+  const providers = await pedelec.listProviders();
+  const provider = providers.find((item) => item.available);
+  if (!provider) {
+    throw new Error("目前沒有 available provider。 ");
+  }
+
+  const session = await pedelec.createSession({
+    provider: provider.code,
+  });
+  activeSession = session;
+
+  let text = "";
+  const offChat = session.onChat((delta) => {
+    text += delta;
+    document.querySelector("#answer")!.textContent = text;
+  });
+  const offStatus = session.onStatus((status) => {
+    document.querySelector("#status")!.textContent = status;
+  });
+  const offError = session.onError((error) => {
+    document.querySelector("#error")!.textContent =
+      `${error.code}: ${error.message}`;
+  });
+  const offEnded = session.onEnded(() => {
+    document.querySelector("#status")!.textContent = "ended";
+  });
+
+  disposeSessionHandlers = () => {
+    offChat();
+    offStatus();
+    offError();
+    offEnded();
+  };
+
+  try {
+    await session.sendText(prompt);
+  } catch (error) {
+    const value = error as PedelecError;
+    console.error(value.code, value.message, value.details);
+    throw error;
+  }
+}
+
+export async function disconnect() {
+  const session = activeSession;
+  activeSession = null;
+
+  try {
+    await session?.end();
+  } finally {
+    disposeSessionHandlers?.();
+    disposeSessionHandlers = null;
+  }
+}
+```
+
+## Production UI 還需要補什麼
+
+- 不要只 throw generic error，應提供 approval 操作說明；
+- 讓使用者選擇 provider 與 model；
+- 依頁面需求定義 tools；
+- 依 lifecycle 需求保存或刻意丟棄 `sessionId`；
+- 分開處理 Extension、native host、Core 與 provider failure。
+
+接著閱讀[網站核准與連線狀態](./approval-and-connection/)，或開始定義 [browser-side tools](../tools/overview/)。

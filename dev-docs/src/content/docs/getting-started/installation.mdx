@@ -1,0 +1,145 @@
+---
+title: Installation
+description: Install the SDK and verify the extension, desktop runtime, native host, and provider chain.
+sidebar:
+  order: 2
+---
+
+## Install the npm package
+
+Add the SDK to your web application:
+
+```bash
+npm install @kaoruisaac/pedelec
+```
+
+Import the runtime API from browser-side code:
+
+```ts
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
+```
+
+The package is ESM and includes its TypeScript declaration file. It does not install the Chrome Extension, Desktop App, provider CLIs, or Ollama models.
+
+## Install the user-side components
+
+The user running your web application needs a compatible set of Pedelec components:
+
+1. Install the Pedelec Desktop App for the target operating system.
+2. Start the app so the Core Runtime is available.
+3. Confirm that the app has registered the Chrome Native Messaging host.
+4. Install and enable the Pedelec Chrome Extension in the same Chrome profile.
+5. Install and authenticate at least one provider, or configure Ollama.
+
+Use the official release channel for the Pedelec version your application targets. Keeping the SDK, extension, and desktop runtime reasonably aligned avoids protocol mismatches.
+
+## Create the client in browser code
+
+```ts
+import { Pedelec } from "@kaoruisaac/pedelec";
+
+export function createPedelecClient() {
+  if (typeof window === "undefined") {
+    throw new Error("Pedelec can only be initialized in the browser.");
+  }
+
+  return new Pedelec();
+}
+```
+
+Prefer one client instance per page lifecycle. A client owns one extension port and can manage multiple sessions.
+
+## Verify the extension
+
+```ts
+const pedelec = createPedelecClient();
+const approval = await pedelec.getApprovalStatus();
+
+if (!approval.installed) {
+  throw new Error("The Pedelec extension is unavailable.");
+}
+
+console.log("Current origin:", approval.origin);
+console.log("Already approved:", approval.approved);
+```
+
+`getApprovalStatus()` intentionally converts extension-unavailable and extension-disconnected cases into `{ installed: false, approved: false, origin }`. Other failures may still throw.
+
+## Verify the desktop runtime and providers
+
+`listProviders()` crosses the full extension and native bridge. It is therefore a useful connectivity test:
+
+```ts
+const providers = await pedelec.listProviders();
+
+for (const provider of providers) {
+  console.table({
+    code: provider.code,
+    available: provider.available,
+    path: provider.path,
+    error: provider.error,
+  });
+}
+
+if (!providers.some((provider) => provider.available)) {
+  throw new Error("No Pedelec provider is currently available.");
+}
+```
+
+Interpret failures by layer:
+
+- `EXTENSION_UNAVAILABLE`: browser-side extension connection is missing.
+- `NATIVE_HOST_UNAVAILABLE`: extension exists but cannot reach the registered host.
+- `CORE_RUNTIME_UNAVAILABLE` or `IPC_UNAVAILABLE`: the host cannot reach the running desktop Core.
+- `available: false`: Core is working, but that provider is not ready.
+
+## Provider setup notes
+
+### CLI-backed providers
+
+The Desktop App must be able to find the executable in its own environment. A command that works in an already-open terminal may still be missing from the environment inherited by a graphical desktop app. Restart the Desktop App after changing `PATH`.
+
+Authentication is provider-specific. Complete the provider's normal login or credential setup before creating a session.
+
+### Ollama
+
+Pedelec's Ollama provider uses the bundled `pedelec-agent`, not the `ollama` CLI as the provider process. You still need to:
+
+- run an Ollama-compatible server;
+- configure its base URL in the Desktop App when it is not the default;
+- install the chosen model; and
+- choose a model explicitly or set the Ollama default model.
+
+## Local SDK development from this repository
+
+When developing the SDK and application together before publishing a package version, install the repository's `sdk/` folder by path:
+
+```bash
+npm install ../path/to/pedelec/sdk
+```
+
+Build the SDK first:
+
+```bash
+cd ../path/to/pedelec/sdk
+npm install
+npm run test
+npm run type-test
+npm run build
+```
+
+Then restart the application's development server so the bundler reloads the package output.
+
+:::caution
+A local path dependency only replaces the npm package. It does not automatically update or install the extension and desktop runtime.
+:::
+
+## Development origin
+
+Use either `http://localhost:<port>` or `http://127.0.0.1:<port>`. The extension does not accept every plain-HTTP hostname.
+
+Because approval is stored per origin, changing the port creates a different origin. Keep a stable development port when possible.
+
+## Next step
+
+Complete the [Quick start](./quick-start/) to create a real session, stream assistant output, and cleanly end the session.

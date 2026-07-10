@@ -1,0 +1,174 @@
+---
+title: Session Lifecycle 與 Resume
+description: 選擇 page-scoped 或 persistent session、保存 session ID、安全 resume、重新註冊 handlers 並 end session。
+sidebar:
+  order: 7
+---
+
+Session lifetime 是產品決策。Pedelec 預設 page-scoped lifecycle，但也能讓 Core session 保留，之後重新 resume。
+
+## Page-scoped lifecycle
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: true,
+});
+```
+
+`true` 是預設值。Extension 追蹤附著於 session 的 SDK routes；最後一條 route disconnect 後會請 Core end thread。
+
+常見 disconnect 原因：
+
+- 關閉 tab；
+- page reload；
+- navigation 銷毀 JavaScript page；
+- Extension reload/update；
+- browser 或 Extension process interruption。
+
+Session 不應超出目前 visible application context 時使用 page-scoped。
+
+## Persistent lifecycle
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+
+const record = {
+  sessionId: session.sessionId,
+  provider: session.provider,
+  model: session.model,
+};
+localStorage.setItem("pedelec-session", JSON.stringify(record));
+```
+
+`false` 代表 SDK route 消失時不自動 end Core session，application 之後可用 saved ID resume。
+
+只有在已有 retention 與 cleanup policy 時使用。永遠不 resume 或 end 的 session 可能在 Desktop state 存活得比 UI 暗示更久。
+
+## Resume session
+
+```ts
+const session = await pedelec.resumeSession(savedSessionId);
+```
+
+`resumeSession()`：
+
+1. 要求 non-empty session ID；
+2. 目前 origin 未核准時觸發 approval；
+3. 將目前 SDK route subscribe 到既有 Core thread；
+4. 回傳 `PedelecSession` handle。
+
+空 ID 會收到 `INVALID_INPUT`。
+
+Core 不再認得 ID 時會回傳 runtime error；SDK 不會靜默建立 replacement session。
+
+## 每次都要重新註冊 browser handlers
+
+JavaScript function 無法跨 reload 保存。Resume 後重新 attach：
+
+```ts
+const session = await pedelec.resumeSession(record.sessionId);
+
+const offChat = session.onChat(handleChat);
+const offStatus = session.onStatus(handleStatus);
+const offError = session.onError(handleError);
+const offEnded = session.onEnded(handleEnded);
+const offTool = session.onTool("update_counter", handleUpdateCounter);
+```
+
+原始 `createSession({ skills })` 的 inline handlers 不會在新 page 自動重建。Core session 仍有 tool manifest，但 resumed browser 必須替可能被 agent 呼叫的 tools 註冊 handlers。
+
+Generic fallback 可協助 migration，但不應取代每個 tool 的 deliberate validation。
+
+## Resume 後的 provider/model metadata
+
+目前 resume bridge 回傳 `sessionId`，不是完整 Core session record，因此新 resumed handle 可能是：
+
+```ts
+session.provider === "";
+session.model === undefined;
+```
+
+Reload 後 UI 需要這些欄位時，請和 session ID 一起保存，或從 application-owned persistence 載入。不要假設 `resumeSession()` 會 rehydrate 所有 metadata。
+
+`session.sessionCreatedAt` 是 browser-side handle construction time，不是原始 Core creation time。
+
+## 避免意外 resume 兩次
+
+SSR hydration、React Strict Mode development 或 duplicated effect 可能重複呼叫 resume。請用 application state guard：
+
+```ts
+let resumePromise: Promise<PedelecSession> | null = null;
+
+function resumeOnce(id: string) {
+  resumePromise ??= pedelec.resumeSession(id);
+  return resumePromise;
+}
+```
+
+切換 ID 時再明確清除或替換 guard。
+
+## End session
+
+```ts
+await session.end();
+```
+
+成功 `end()` 會：
+
+- 請 Core end session；
+- 將 SDK handle mark `ended`；
+- emit 一次 `onEnded()`；
+- 從 client unregister session；
+- 未來 `sendText()`／`prepare()` 收到 `SESSION_ENDED`。
+
+同一個已 ended handle 再呼叫 `end()` 會直接 resolve，不送第二次 request。
+
+End request 失敗時，`end()` emit SDK error 並 reject。因 Core state 不確定，failed call 不會先 local mark ended。
+
+## Cleanup pattern
+
+```ts
+async function disposeSession() {
+  const current = session;
+  session = null;
+
+  try {
+    if (current && current.getStatus() !== "ended") {
+      await current.end();
+    }
+  } finally {
+    for (const dispose of handlerDisposers) dispose();
+    handlerDisposers = [];
+    localStorage.removeItem("pedelec-session");
+  }
+}
+```
+
+使用 `autoEndOnDisconnect: false` 時，只有在產品確定 session 不再可恢復或不再需要時，才移除 persisted ID。
+
+## Multiple routes 與 tabs
+
+Extension 可以將一個 session route 給多條 SDK connections。Automatic end enabled 時，要等最後一條 route 消失才會 end，這也帶來協調問題：
+
+- session 同時只允許一個 active turn；
+- 兩個 tab 可能 race 並收到 `SESSION_BUSY`；
+- tool handler 可能存在於多個 page context；
+- application state 可能在 tabs 間分歧。
+
+除非刻意支援 cross-tab collaboration，建議保存 ownership token 或避免多個 active controller。
+
+## 如何選擇 lifecycle
+
+| 需求 | 建議設定 |
+| --- | --- |
+| 只屬於單一 page 的 temporary assistant | `autoEndOnDisconnect: true` |
+| Full reload 後 resume | `false` + persist `sessionId` |
+| Multi-page workflow | `false` + explicit ownership/cleanup |
+| 敏感且短暫的 context | 優先 `true` 並 explicit `end()` |
+| Long-running task | `false`，加上清楚 status 與 recovery UX |
+
+下一區：[前端 Tools](../tools/overview/)。

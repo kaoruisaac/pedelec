@@ -1,0 +1,185 @@
+---
+title: Tool Errors 與 Timeouts
+description: 處理 missing handler、thrown error、submission failure、runtime timeout、serialization problem 與安全 retry。
+sidebar:
+  order: 7
+---
+
+Tool failure 可能發生在多個 layer。應區分 expected application-domain result、SDK handler failure、serialization/transport failure 與 runtime timeout。
+
+## 預期內 domain errors
+
+Tool 正常執行，但 action 無法完成時回傳 structured error：
+
+```ts
+return {
+  error: {
+    code: "NO_ACTIVE_SELECTION",
+    message: "Select text before using replace_selection.",
+    details: {
+      documentId: activeDocument.id,
+    },
+    retryable: true,
+  },
+};
+```
+
+這是 normal result，SDK 會送給 agent，不會因此自動呼叫 `session.onError()`。
+
+適合用於：
+
+- resource missing；
+- current UI state invalid；
+- permission denial；
+- user cancellation；
+- version conflict；
+- validation failure。
+
+## `TOOL_HANDLER_NOT_FOUND`
+
+沒有 named、inline 或 generic handler 時，SDK 產生包含 `TOOL_HANDLER_NOT_FOUND` 的 error result 並送給 agent。通常是 integration bug：
+
+- tool 在 `skills.tools` 但未實作；
+- definition 與 registration name 不一致；
+- resumed page 未 restore handlers；
+- component cleanup 太早；
+- handler 註冊在另一個 session object。
+
+## `TOOL_HANDLER_ERROR`
+
+Selected handler throw/reject 時，SDK catch 並轉成 `TOOL_HANDLER_ERROR` result。
+
+```ts
+session.onTool("save", async () => {
+  throw new Error("Database unavailable");
+});
+```
+
+Raw exception 不會讓 SDK event listener crash，agent 會收到 normalized failure。
+
+需要 stack trace 或更完整 diagnostics 時，請在 handler 內先 application log，因 serialized error result 會保持精簡。
+
+## `SUBMIT_TOOL_RESULT_FAILED`
+
+取得 result 後，SDK 會呼叫 bridge `submit_tool_result`。Request 失敗時 session emit SDK error：
+
+```ts
+session.onError((error) => {
+  if (error.code === "SUBMIT_TOOL_RESULT_FAILED") {
+    showToolTransportFailure();
+  }
+});
+```
+
+可能原因：
+
+- Extension/native/Core disconnect；
+- handler pending 時 session ended；
+- Core 已 timeout 該 request；
+- result 無法 clone/serialize；
+- runtime 拒絕 request ID。
+
+Agent 可能無法繼續。不要盲目 retry 有 side effect 的 handler，因 operation 可能已完成，只是 result delivery 失敗。
+
+## Timeout
+
+```ts
+timeoutMs: 60_000
+```
+
+省略時 Core 目前預設 60 秒。Timeout 控制 runtime 等 result 的時間，不會強制停止 page JavaScript。
+
+Handler late resolve 時：
+
+1. application side effect 可能已完成；
+2. Core 可能已 fail 或繼續 turn；
+3. result submission 可能失敗；
+4. session 可能 emit `SUBMIT_TOOL_RESULT_FAILED` 或 runtime session error。
+
+Handler 應在 deadline 前 settle，並自行實作 cancellation/cleanup。
+
+## Serialization failures
+
+請回傳 plain JSON-compatible values。問題範例：
+
+```ts
+return document.body;       // DOM node
+return () => 1;             // function
+return { value: 1n };       // BigInt
+return cyclicObject;        // cycle
+return new Map();            // 意圖結構會丟失
+return new File(...);        // browser object，不是 compact JSON
+```
+
+轉換：
+
+```ts
+return {
+  html: document.body.innerHTML,
+  entries: [...map.entries()],
+  size: file.size,
+  name: file.name,
+};
+```
+
+也要留意 payload size。Large result 增加 bridge cost，也可能超過 local IPC/message limit。大型 artifact 應只回傳 application-owned ID。
+
+## Validation errors
+
+Schema 改善 agent output，但不會讓 args 變可信。Routine bad input 應回 domain error，不要 throw：
+
+```ts
+function validateMoveArgs(raw: unknown) {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.shapeId !== "string") return null;
+  if (typeof value.x !== "number" || !Number.isFinite(value.x)) return null;
+  if (typeof value.y !== "number" || !Number.isFinite(value.y)) return null;
+  return { shapeId: value.shapeId, x: value.x, y: value.y };
+}
+
+session.onTool("move_shape", (raw) => {
+  const args = validateMoveArgs(raw);
+  if (!args) {
+    return {
+      error: {
+        code: "INVALID_TOOL_ARGS",
+        message: "shapeId, x, and y are required.",
+      },
+    };
+  }
+  return scene.move(args);
+});
+```
+
+## Retry policy
+
+| Failure | 適合 automatic retry？ |
+| --- | --- |
+| Read-only tool 在 execution 前 transport failed | Connection recovery 後有時可以 |
+| Domain validation error | 不可；需改 input |
+| User cancelled | 除非使用者重新要求，否則不可 |
+| Handler 在 side effect 前 throw | Operation 已知 idempotent 時可能可以 |
+| Mutation 後 result submission failed | 通常不可；先 reconcile state |
+| Tool timeout | 不自動 retry；原 handler 可能仍完成 |
+| Stale UI lifecycle | 不可；agent 應先讀 current state |
+
+需要安全 retry 的 tool 可加入 idempotency key 或 expected-version field。
+
+## Logging
+
+記錄足以診斷但不洩漏 secret 的 correlation data：
+
+```ts
+console.error("tool failed", {
+  sessionId: ctx.sessionId,
+  turnId: ctx.turnId,
+  toolRequestId: ctx.toolRequestId,
+  tool: ctx.tool,
+  code: error.code,
+});
+```
+
+Tool args 可能包含 private page/user data，不要預設完整 logging。
+
+精確型別與 signature 請看 [Tools API Reference](../reference/tools/)。

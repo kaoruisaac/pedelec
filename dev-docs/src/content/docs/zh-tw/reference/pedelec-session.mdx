@@ -1,0 +1,256 @@
+---
+title: PedelecSession API
+description: PedelecSession 的 properties、turn、events、tool handler、status 與 lifecycle reference。
+sidebar:
+  order: 2
+---
+
+`PedelecSession<TToolName>` 代表一個 Core agent session。
+
+```ts
+import type { PedelecSession } from "@kaoruisaac/pedelec";
+```
+
+Application 應透過 `Pedelec.createSession()` 或 `Pedelec.resumeSession()` 取得，不直接 constructor。
+
+## Type parameter
+
+```ts
+class PedelecSession<TToolName extends string = string>
+```
+
+`TToolName` 收窄 named `onTool(name, handler)` overload。`createSession()` 可從 readonly tools array 推導。
+
+## Properties
+
+### `sessionId`
+
+```ts
+readonly sessionId: string
+```
+
+Core session/thread identifier。使用 `autoEndOnDisconnect: false` 並準備 resume 時保存。
+
+### `provider`
+
+```ts
+readonly provider: string
+```
+
+此 SDK handle 註冊時已知 provider。Fresh resumed handle 目前可能是 empty string。
+
+### `model`
+
+```ts
+readonly model?: string
+```
+
+此 SDK handle 已知 model。沒有 explicit/default model，或 fresh resume 後可能是 `undefined`。
+
+### `sessionCreatedAt`
+
+```ts
+readonly sessionCreatedAt: number
+```
+
+這個 session object construction 的 browser `Date.now()`。Resume 後不保證是原始 Core thread creation time。
+
+## `prepare()`
+
+```ts
+prepare(): Promise<void>
+```
+
+在第一個 user turn 前 optional prepare provider/session startup。
+
+行為：
+
+- 成功後 idempotent；
+- concurrent prepare calls 共用 promise；
+- active user turn 時 reject `SESSION_BUSY`；
+- ended 後 reject `SESSION_ENDED`；
+- preparation chat delta 不送到 `onChat()`；
+- 仍可 emit status/error；
+- 不是 `sendText()` 必要前置。
+
+```ts
+await session.prepare().catch(() => {
+  // Preparation 只是 optimization，保留 sendText。
+});
+```
+
+## `sendText()`
+
+```ts
+sendText(text: string): Promise<void>
+```
+
+開始一個 user turn。Completion/idle 後 resolve；turn failed、session ended 或已有 active turn 時 reject。
+
+Text output 由 `onChat()` 提供。
+
+```ts
+await session.sendText("Analyze the current page.");
+```
+
+SDK 不 trim，也不強制 non-empty；composer 應自行 validate。
+
+常見 errors：`SESSION_BUSY`、`SESSION_ENDED`、`SEND_TEXT_FAILED`、`SESSION_ERROR` 與 transport/provider error。
+
+## `onChat()`
+
+```ts
+onChat(
+  handler: (text: string, ctx: ChatEventContext) => void,
+): () => void
+```
+
+註冊 incremental text handler，回傳 unsubscribe function。
+
+```ts
+const off = session.onChat((delta, ctx) => {
+  transcript.append(ctx.turnId, delta);
+});
+```
+
+Preparation output 不送到 chat handlers。
+
+## `onTool()`
+
+### Generic fallback overload
+
+```ts
+onTool(
+  handler: (
+    tool: TToolName,
+    args: unknown,
+    ctx: ToolCallContext,
+  ) => unknown | Promise<unknown>,
+): () => void
+```
+
+### Named overload
+
+```ts
+onTool<TArgs = unknown, TResult = unknown>(
+  toolName: TToolName,
+  handler: ToolSpecificHandler<TArgs, TResult>,
+): () => void
+```
+
+Named > inline > generic fallback。
+
+```ts
+const off = session.onTool(
+  "update_counter",
+  (args: { delta: number }) => ({
+    value: counter.add(args.delta),
+  }),
+);
+```
+
+Handler 可 sync/async，回傳 JSON-compatible value。Throw 會轉成給 agent 的 `TOOL_HANDLER_ERROR` result。
+
+## `onError()`
+
+```ts
+onError(
+  handler: (error: PedelecError, ctx: ErrorEventContext) => void,
+): () => void
+```
+
+觀察 Core 與 SDK session errors。
+
+```ts
+const off = session.onError((error, ctx) => {
+  console.error(ctx.source, error.code, error.message, error.details);
+});
+```
+
+仍需 catch `prepare()`、`sendText()`、`end()` promise。
+
+## `onStatus()`
+
+```ts
+onStatus(
+  handler: (
+    status: PedelecSessionStatus,
+    ctx: StatusEventContext,
+  ) => void,
+): () => void
+```
+
+Local status value 改變時執行，不會立即 emit initial value。
+
+```ts
+renderStatus(session.getStatus());
+const off = session.onStatus(renderStatus);
+```
+
+## `onEnded()`
+
+```ts
+onEnded(handler: (ctx: EndedEventContext) => void): () => void
+```
+
+Session 第一次 ended 時執行一次。
+
+```ts
+const off = session.onEnded(() => {
+  disableComposer();
+});
+```
+
+## `getStatus()`
+
+```ts
+getStatus(): PedelecSessionStatus
+```
+
+回傳目前 browser-side status snapshot。
+
+```ts
+if (session.getStatus() === "idle") {
+  await session.sendText(text);
+}
+```
+
+適合 UI gating，但不能取代 catch `SESSION_BUSY`，因 check 與 request 之間 state 可能改變。
+
+## `end()`
+
+```ts
+end(): Promise<void>
+```
+
+結束 Core session 並 mark SDK handle ended。
+
+成功後：
+
+- `onEnded()` 執行一次；
+- pending turn/preparation reject `SESSION_ENDED`；
+- session 從 client registry 移除；
+- 後續 `sendText()`／`prepare()` reject。
+
+Already-ended handle 呼叫 `end()` 立即 resolve。
+
+End request 失敗時 emit SDK error 並 reject，不會假裝 Core 已成功 ended。
+
+## Handler cleanup
+
+所有 event registration 都回傳 `() => void` disposer。Owning component/state destroy 時呼叫。
+
+Unsubscribe 不會 cancel 已執行中的 provider turn 或 handler promise。
+
+## Status values
+
+```ts
+type PedelecSessionStatus =
+  | "idle"
+  | "running"
+  | "waiting_tool_result"
+  | "ended"
+  | "error";
+```
+
+Transitions 與 context fields 詳見 [Session 狀態與 Events](../sdk/status-and-events/)。

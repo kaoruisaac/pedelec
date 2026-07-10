@@ -1,0 +1,171 @@
+---
+title: 串流回應
+description: 累積 chat delta、依 turn 與 session 分組、安全 unsubscribe，並避免常見 streaming UI 錯誤。
+sidebar:
+  order: 5
+---
+
+`session.onChat()` 會在 active user turn 中接收 incremental assistant text。
+
+## Signature
+
+```ts
+const unsubscribe = session.onChat((text, ctx) => {
+  // text 是一個 delta
+});
+```
+
+```ts
+type ChatEventContext = PedelecEventContext & {
+  type: "chat_delta";
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+```
+
+Delta 可能是一個字、標點、數個句子或其他任意 chunk。Chunk boundary 沒有語意。
+
+## 累積一個 response
+
+```ts
+let assistantText = "";
+
+const offChat = session.onChat((delta) => {
+  assistantText += delta;
+  renderAssistantMessage(assistantText);
+});
+
+await session.sendText("Explain this screen.");
+offChat();
+```
+
+不要每個 delta 都建立一個 message bubble。
+
+```ts
+// 錯誤：會產生大量極短訊息。
+session.onChat((delta) => {
+  messages.push({ role: "assistant", text: delta });
+});
+```
+
+每個 turn 建立一個 assistant message，再 append delta。
+
+## 依 turn 分組
+
+```ts
+type AssistantMessage = {
+  id: string;
+  sessionId: string;
+  turnId: string;
+  text: string;
+};
+
+const messages = new Map<string, AssistantMessage>();
+
+session.onChat((delta, ctx) => {
+  const key = `${ctx.sessionId}:${ctx.turnId}`;
+  const current = messages.get(key) ?? {
+    id: key,
+    sessionId: ctx.sessionId,
+    turnId: ctx.turnId,
+    text: "",
+  };
+
+  current.text += delta;
+  messages.set(key, current);
+  renderMessages([...messages.values()]);
+});
+```
+
+`turnId` 由 SDK 為一次已接受的 `sendText()` 或 `prepare()` lifecycle 產生；chat delta 只會顯示 user turn。請當 opaque ID：
+
+- 不要解析其中 timestamp；
+- 不要依賴 prefix；
+- 不要當成 provider resume ID；
+- 不要期待 page reload 後保留。
+
+## 多 sessions
+
+即使 handler 已附著在特定 session，每個 callback 仍包含 `ctx.sessionId`，方便 generic store 與 logging。
+
+```ts
+session.onChat((delta, ctx) => {
+  transcriptStore.append(ctx.sessionId, ctx.turnId, delta);
+});
+```
+
+UI 切換 active session 時，仍要正確記錄非目前可見 session 的 delta，不要誤加到 selected transcript。
+
+## Timing fields
+
+- `sessionCreatedAt`：browser-side session object 建立時間。
+- `turnStartedAt`：SDK 接受 local turn 的時間。
+- `eventReceivedAt`：SDK 從 Extension 收到 Core event 的時間。
+- `eventEmittedAt`：SDK 建立 callback context 並送出 handler 的時間。
+
+可用於 diagnostics 與 UI metrics，但只是 browser clock，不是 distributed tracing guarantee。
+
+## Rendering performance
+
+Delta 很頻繁時可能造成過多 framework render。先確保 correctness，再視需要 batch：
+
+```ts
+let buffer = "";
+let scheduled = false;
+
+session.onChat((delta) => {
+  buffer += delta;
+  if (scheduled) return;
+
+  scheduled = true;
+  requestAnimationFrame(() => {
+    scheduled = false;
+    renderAssistantMessage(buffer);
+  });
+});
+```
+
+不要丟失最後文字。使用 batching 時，可在 `sendText()` completion 強制最後一次 render。
+
+## Unsubscribe 與 component cleanup
+
+每個 registration 都回傳 cleanup function：
+
+```ts
+const offChat = session.onChat(handleDelta);
+
+onComponentCleanup(() => {
+  offChat();
+});
+```
+
+Unsubscribe 只停止該 handler 的 callback，不會停止 provider turn 或 end session。
+
+Component 重複 mount 卻不 cleanup，會造成 duplicate append 與 memory growth。
+
+## Error 與 completion boundary
+
+沒有專用的「message complete」callback。請用 `sendText()` promise 或 status 回到 `idle` 作為 turn boundary。
+
+```ts
+let text = "";
+const off = session.onChat((delta) => (text += delta));
+
+try {
+  await session.sendText(prompt);
+  saveCompletedAssistantMessage(text);
+} catch (error) {
+  saveInterruptedAssistantMessage(text, error);
+} finally {
+  off();
+}
+```
+
+失敗 turn 仍可能已輸出 partial text。產品需決定保留、標記 interrupted 或丟棄。
+
+## HTML 與 Markdown safety
+
+Delta 是 provider 產生的 plain text。若將累積內容 render 成 Markdown 或 HTML，必須使用和其他 untrusted model output 相同的 sanitization 與 CSP。不要未經可信 sanitizer 直接放進 `innerHTML`。
+
+下一頁：[Session 狀態與 Events](./status-and-events/)。

@@ -1,0 +1,159 @@
+---
+title: 準備與傳送 Turn
+description: 正確使用 prepare 與 sendText、避免 concurrent turns，並將 turn completion 映射到 UI state。
+sidebar:
+  order: 4
+---
+
+一個 session 同時只處理一個 turn。`prepare()` 是 optional optimization；`sendText()` 會啟動 user turn，並在 turn 完成後 resolve。
+
+## Optional preparation
+
+```ts
+await session.prepare();
+```
+
+`prepare()` 讓 Desktop Runtime 在第一個真實 prompt 前先準備 provider session，可將部分 startup work 提前到使用者開啟 assistant panel 的時刻。
+
+重要行為：
+
+- 非必要；不呼叫也能直接 `sendText()`。
+- 成功一次後，後續呼叫立即 resolve。
+- Concurrent calls 共用同一個 in-flight preparation promise。
+- User turn active 時呼叫會收到 `SESSION_BUSY`。
+- Session ended 後呼叫會收到 `SESSION_ENDED`。
+- Preparation turn 的 assistant text 不會送進 `onChat()`。
+- Status event 仍可能顯示 preparation lifecycle。
+
+```ts
+async function warmUpAssistant() {
+  try {
+    await session.prepare();
+  } catch (error) {
+    // Preparation 只是 optimization，保留一般 send flow。
+    console.warn("Pedelec preparation failed", error);
+  }
+}
+```
+
+Preparation 進行中呼叫 `sendText()` 時，會先等待該 promise。Preparation 失敗後，`sendText()` 會 fallback 到一般 first-run path，不會永久阻擋 user turn。
+
+## 傳送 user turn
+
+```ts
+await session.sendText("Summarize the selected document.");
+```
+
+SDK 依序：
+
+1. 等待 in-flight preparation；
+2. session ended 或已有 active turn 時 reject；
+3. 建立 SDK-local turn metadata；
+4. 以 `ctx.source === "sdk"` 將 status 設為 `running`；
+5. 經 bridge 傳送 `send_text`；
+6. dispatch streamed chat、status、tool events；
+7. 收到 `done` 或 `idle` 後 resolve；
+8. turn error、session ended 或 transport setup 失敗時 reject。
+
+## Completion semantics
+
+`sendText()` 不回傳 assistant text，文字必須從 `onChat()` 取得。
+
+```ts
+let output = "";
+const offChat = session.onChat((delta) => {
+  output += delta;
+});
+
+await session.sendText("Write a title.");
+console.log("Final accumulated output:", output);
+offChat();
+```
+
+Promise resolve 表示 SDK 觀察到 turn complete，不代表 rendering framework 已經把最後狀態 paint 到畫面。
+
+## 同一 session 不允許 concurrent turns
+
+```ts
+const first = session.sendText("First task");
+const second = session.sendText("Second task"); // SESSION_BUSY
+await first;
+```
+
+需要 sequential prompts 時由 application queue：
+
+```ts
+let queue = Promise.resolve();
+
+function enqueuePrompt(text: string) {
+  queue = queue.then(() => session.sendText(text));
+  return queue;
+}
+```
+
+Production queue 要針對每個 task catch 並重新檢查 session status；否則一個 rejected promise 會讓後續 `.then()` 停止。
+
+## Composer state
+
+Status 加上 local submit guard：
+
+```ts
+let submitting = false;
+
+async function submitPrompt(text: string) {
+  if (submitting || session.getStatus() !== "idle") return;
+  submitting = true;
+  renderComposerDisabled(true);
+
+  try {
+    await session.sendText(text);
+  } finally {
+    submitting = false;
+    renderComposerDisabled(session.getStatus() !== "idle");
+  }
+}
+```
+
+兩者都需要：
+
+- `getStatus()` 擋住明顯 invalid send；
+- `submitting` 關閉 reactive UI update 前的同步 race；
+- SDK 的 `SESSION_BUSY` 是最終 authority。
+
+`waiting_tool_result` 期間 session 仍然 busy。若 agent 正在等 modal 或前端操作，不要把 normal prompt composer 提早打開。
+
+## Empty text
+
+目前 SDK 會 forward 傳入 string，不強制 trimmed non-empty。應用程式通常應先擋掉：
+
+```ts
+const text = input.value.trim();
+if (!text) return;
+await session.sendText(text);
+```
+
+## Error handling
+
+Promise rejection 與 `onError()` 都要處理：
+
+```ts
+session.onError((error, ctx) => {
+  logSessionError(ctx.sessionId, error);
+});
+
+try {
+  await session.sendText(text);
+} catch (error) {
+  showTurnFailure(error);
+}
+```
+
+Promise rejection 適合處理發起本次 action 的 UI；`onError()` 還能收到 asynchronous session problem，例如 tool-result submission failure 或 Extension disconnect broadcast。
+
+常見錯誤包括 `SESSION_BUSY`、`SESSION_ENDED`、`SEND_TEXT_FAILED`、`SESSION_ERROR`、transport error 與 provider-specific error。
+
+## 目前沒有 turn cancellation API
+
+Public SDK 目前只有結束整個 session 的 `end()`，沒有 per-turn cancel。除非產品接受「Stop generation」會結束整個 session，或未來 SDK 加入 cancel，否則不要呈現無法正確實作的 stop button。
+
+下一頁：[串流回應](./streaming-responses/)。

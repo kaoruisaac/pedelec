@@ -1,0 +1,261 @@
+---
+title: 定義 Tools
+description: 使用 defineTool 定義 name、description、schema、timeout、handler 與 TypeScript types。
+sidebar:
+  order: 2
+---
+
+使用 `defineTool()` 建立 `ToolDefinition`，同時保留 literal tool name 與 handler types。
+
+## 基本定義
+
+```ts
+import { defineTool } from "@kaoruisaac/pedelec";
+
+const updateCounter = defineTool({
+  name: "update_counter",
+  description: "Increase or decrease the visible counter by a signed delta.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      delta: {
+        type: "integer",
+        description: "Signed amount to add to the counter.",
+        minimum: -100,
+        maximum: 100,
+      },
+    },
+    required: ["delta"],
+  },
+  timeoutMs: 10_000,
+  handler: (args: { delta: number }) => {
+    counter.value += args.delta;
+    return { value: counter.value };
+  },
+});
+```
+
+`defineTool()` 原樣回傳 definition，價值在 type inference 與一致 authoring pattern；runtime validation 發生在建立 session 前 normalize tools 時。
+
+## `ToolDefinition`
+
+```ts
+type ToolDefinition<
+  TArgs = unknown,
+  TResult = unknown,
+  TName extends string = string,
+> = {
+  name: TName;
+  description: string;
+  argsSchema: ToolArgsSchema;
+  timeoutMs?: number;
+  handler?: ToolSpecificHandler<TArgs, TResult>;
+};
+```
+
+## Name rules
+
+Tool name 必須符合：
+
+```text
+^[a-zA-Z][a-zA-Z0-9_.-]*$
+```
+
+代表：
+
+- 第一個字元必須是 ASCII letter；
+- 後續可使用 letter、digit、`_`、`.`、`-`；
+- 不可有空格；
+- 同一個 `skills.tools` array 內 name 必須唯一。
+
+建議 lowercase snake case：
+
+```text
+get_current_page
+update_counter
+editor.replace_selection
+```
+
+Name 應保持 stable。重新命名會改變 agent-facing capability，也必須同步更新 handler。
+
+## 寫出有用的 description
+
+Description 幫助 agent 選對 tool，應說明：
+
+1. tool 做什麼；
+2. 讀取或修改哪些 state；
+3. 重要限制；
+4. 什麼情況應改用相似 tool。
+
+```ts
+// 較好
+"Replace the currently selected editor text. Fails when there is no selection. Use insert_text when the user has no selection."
+
+// 太模糊
+"Edit text."
+```
+
+不要隱藏 destructive behavior，description 應明確說明 side effect。
+
+## Argument schema
+
+Root 必須是 object，即使沒有參數：
+
+```ts
+const noArgs = {
+  type: "object",
+  properties: {},
+  required: [],
+} satisfies ToolArgsSchema;
+```
+
+有參數：
+
+```ts
+const argsSchema = {
+  type: "object",
+  properties: {
+    documentId: {
+      type: "string",
+      description: "Application document identifier.",
+      minLength: 1,
+    },
+    mode: {
+      type: "string",
+      enum: ["append", "replace"],
+    },
+  },
+  required: ["documentId", "mode"],
+} satisfies ToolArgsSchema;
+```
+
+這是 Pedelec 支援的 subset，不是完整 JSON Schema。詳見 [Tool Args Schema](./args-schema/)。
+
+## Timeout
+
+`timeoutMs` optional，且必須是 positive integer。
+
+```ts
+timeoutMs: 60_000
+```
+
+省略時 Core 目前使用 60 秒 default tool timeout。只有 intentional interactive 或 long-running operation 才設更長，並搭配 visible UI 與 cleanup。
+
+Timeout 不會 cancel handler 內的 JavaScript。Runtime 先停止等待時，late result 可能 submit 失敗。
+
+## Inline handler
+
+```ts
+const readSelection = defineTool({
+  name: "get_selected_text",
+  description: "Read the text currently selected in the page.",
+  argsSchema: noArgs,
+  handler: () => ({
+    text: window.getSelection()?.toString() ?? "",
+  }),
+});
+```
+
+Handler 保存在 SDK session，會從 serializable manifest 移除，不會寫入 Core sandbox。
+
+Definition 與 implementation 自然放一起時很方便；若 implementation 屬於 mounted component 或要 override default，可在建立後註冊 named handler。
+
+## Handler typing
+
+直接標示參數：
+
+```ts
+const resize = defineTool({
+  name: "resize_canvas",
+  description: "Resize the current canvas.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      width: { type: "integer", minimum: 1 },
+      height: { type: "integer", minimum: 1 },
+    },
+    required: ["width", "height"],
+  },
+  handler: (args: { width: number; height: number }) => {
+    canvas.resize(args.width, args.height);
+    return { width: args.width, height: args.height };
+  },
+});
+```
+
+或使用 generics：
+
+```ts
+type ResizeArgs = { width: number; height: number };
+type ResizeResult = { width: number; height: number };
+
+const resize = defineTool<ResizeArgs, ResizeResult>({
+  name: "resize_canvas",
+  description: "Resize the current canvas.",
+  argsSchema: resizeSchema,
+  handler: (args) => canvas.resize(args.width, args.height),
+});
+```
+
+TypeScript type 不會驗證 agent runtime input，handler boundary 仍要 validation。
+
+## 保留 literal tool names
+
+```ts
+const tools = [getCurrentPage, updateCounter] as const;
+
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use the declared tools for page operations.",
+    tools,
+  },
+});
+
+session.onTool("update_counter", handleCounter);
+```
+
+沒有 readonly/literal-preserving array 時，name 可能 widen 成 `string`，降低 typed named handler API 的價值。
+
+## Nested object example
+
+```ts
+const createCard = defineTool({
+  name: "create_card",
+  description: "Create a card in the active board column.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      card: {
+        type: "object",
+        properties: {
+          title: { type: "string", minLength: 1, maxLength: 120 },
+          labels: {
+            type: "array",
+            items: { type: "string" },
+            maxItems: 10,
+            uniqueItems: true,
+          },
+        },
+        required: ["title"],
+      },
+    },
+    required: ["card"],
+  },
+});
+```
+
+## 建立時 validation failures
+
+以下問題會讓 session creation reject `INVALID_INPUT`：
+
+- invalid 或 duplicate name；
+- empty description；
+- timeout 非 positive integer；
+- root schema 缺少或不是 object；
+- legacy `input` shorthand；
+- schema 無法 serialize。
+
+這些是 developer error，不是適合讓使用者 retry 的情況。
+
+下一頁：[Tool Args Schema](./args-schema/)。

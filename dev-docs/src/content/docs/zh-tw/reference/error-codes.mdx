@@ -1,0 +1,151 @@
+---
+title: Error Codes
+description: SDK、approval、transport、configuration、session、tool、Core 與 provider 常見錯誤及 recovery guidance。
+sidebar:
+  order: 5
+---
+
+Pedelec async method rejection 與 session error event 使用：
+
+```ts
+type PedelecError = {
+  code: string;
+  message: string;
+  details?: unknown;
+};
+```
+
+```ts
+try {
+  await session.sendText(text);
+} catch (error) {
+  const value = error as PedelecError;
+  console.error(value.code, value.message, value.details);
+}
+```
+
+以下是 SDK 與目前 bridge/runtime 的常見 codes。Provider adapter 可能回傳其他 code，因此一定要有 unknown fallback。
+
+## Browser 與 Extension
+
+| Code | 意義 | 建議處理 | Retry？ |
+| --- | --- | --- | --- |
+| `EXTENSION_UNAVAILABLE` | 不在支援的 page context，或無法連到 Extension | 檢查 profile、installation、origin、client initialization | 修復後建立 fresh client/page |
+| `EXTENSION_DISCONNECTED` | 既有 Extension port 關閉 | Disable controls、檢查 Extension、reload/recreate state | 不在同一 broken client |
+| `INVALID_ORIGIN` | Extension popup 收到非 HTTP(S) origin | 使用支援的 HTTPS、localhost 或 127.0.0.1 | 改 origin 後 |
+| `STORAGE_ERROR` | Extension 無法讀寫 approved origins | 檢查 Extension/storage；持續發生時重裝 | 可有限度 retry |
+
+`getApprovalStatus()` 會將 `EXTENSION_UNAVAILABLE`/`EXTENSION_DISCONNECTED` 轉為 `installed: false`，不 throw。
+
+## Origin approval
+
+| Code | 意義 | 建議處理 | Retry？ |
+| --- | --- | --- | --- |
+| `CREATE_SESSION_NOT_APPROVED` | Origin 無法驗證，或另一 origin pending | 說明 conflict/origin 問題 | 條件解除後 |
+| `APPROVAL_REJECTED` | 使用者拒絕或關閉 approval | 回到 connect-ready | 使用者明確操作後 |
+| `APPROVAL_TIMEOUT` | 未在時限內完成 | 提醒保持 popup 開啟，提供 connect again | 可以，user initiated |
+| `OPEN_POPUP_FAILED` | Extension 無法自動開 popup | 請使用者手動點 Extension icon | Manual action 後 |
+
+## Native 與 Core transport
+
+| Code | 意義 | 建議處理 | Retry？ |
+| --- | --- | --- | --- |
+| `NATIVE_HOST_UNAVAILABLE` | Extension 無法連到 registered native host | 啟動/修復 Desktop App installation 與 host registration | 修復後 |
+| `NATIVE_CONNECTION_CLOSED` | Native Messaging connection 關閉 | 重啟 Desktop App | Recovery 後 read-only 可重試 |
+| `CORE_RUNTIME_UNAVAILABLE` | Native host 無法連到 valid running Core | 啟動/重啟 Pedelec Desktop | Core ready 後 |
+| `IPC_UNAVAILABLE` | Local Core IPC bind/connect/parse/respond 失敗 | 重啟 Desktop App、查看 local logs | Recovery 後 |
+| `MESSAGE_TOO_LARGE` | Local IPC message 超過 size limit | 縮小 prompt/tool/result payload | 只在資料縮小後 |
+| `SDK_BRIDGE_TIMEOUT` | Extension 未在 `bridgeTimeoutMs` 內回應 | 檢查下游 layers，不要重複 write | 診斷後 |
+| `SDK_TRANSPORT_ERROR` | Generic bridge failure | 查看 message/details，驗證 Extension/native/Core | 視 operation |
+| `SDK_PROTOCOL_ERROR` | Response/event shape 或 request type 不相容 | 對齊 component versions，回報 reproducible mismatch | 通常修復前不可 |
+
+## Provider 與 configuration
+
+| Code | 意義 | 建議處理 | Retry？ |
+| --- | --- | --- | --- |
+| `DEFAULT_PROVIDER_NOT_SET` | Desktop 沒有 default provider | 請使用者選擇，或 explicit pass provider | 設定後 |
+| `DEFAULT_PROVIDER_UNAVAILABLE` | Configured default unavailable | 選擇/安裝其他 provider | 設定後 |
+| `MODEL_REQUIRED` | Provider（特別是 Ollama）需要 model | 傳 `model` 或設定 default | 加 model 後 |
+| `INVALID_INPUT` | SDK input invalid | 修正 application code/input shape | 不可原樣重試 |
+
+Provider-specific errors 可能描述 authentication、executable startup、model support、server connectivity 或 output parsing。請顯示 provider 並保留原始 message。
+
+## Session 與 turn
+
+| Code | 意義 | 建議處理 | Retry？ |
+| --- | --- | --- | --- |
+| `SESSION_BUSY` | 已有 active prepare/turn | 等待 `idle`，阻止 duplicate submit | Idle 後 |
+| `SESSION_ENDED` | Session 不再接受工作 | 建立或 resume 另一個 valid session | 同 handle 不可 |
+| `SESSION_ERROR` | Runtime 回報 error state | 顯示失敗，查看 provider/runtime detail | 需 deliberate recovery |
+| `PREPARE_FAILED` | Preparation request 的 SDK fallback code | 視情況繼續 normal send | 可 deliberate retry |
+| `SEND_TEXT_FAILED` | Send request 的 SDK fallback code | 保留 prompt，檢查 transport/runtime | 確認 state 後 |
+| `END_SESSION_FAILED` | End request 失敗，Core state 不確定 | UI 保持明確，retry 或 verify runtime | 謹慎 |
+| `AUTO_END_SESSION_FAILED` | Extension 無法清理 disconnected auto-end session | 記錄 cleanup warning，檢查 Desktop | 謹慎/manual cleanup |
+
+Underlying structured error 存在時會保留，所以 fallback code 可能被更具體的 transport/runtime code 取代。
+
+## Tools
+
+| Code | 意義 | 出現位置 | 處理 |
+| --- | --- | --- | --- |
+| `TOOL_HANDLER_NOT_FOUND` | 沒有 named/inline/generic match | 送給 agent 的 error result | Restore/register handler，修正 name/lifecycle |
+| `TOOL_HANDLER_ERROR` | Handler throw/reject | 送給 agent 的 error result | Log unexpected exception；expected failure 回 domain error |
+| `SUBMIT_TOOL_RESULT_FAILED` | SDK 無法 delivery result | `session.onError()` SDK event | Reconcile side effect，檢查 disconnect/timeout/serialization |
+
+Core tool timeout 也可能導致 session/runtime error 或後續 `SUBMIT_TOOL_RESULT_FAILED`。Browser handler 不會被強制 cancel。
+
+## Retry classification
+
+### 修復原因後通常安全
+
+- provider/settings read；
+- approval status read；
+- provider discovery；
+- session ID 尚未回傳前就失敗的 creation；
+- 已知尚未執行的 read-only tool。
+
+### Retry 前必須 reconcile
+
+- transport failure 後的 `sendText()`，因 provider execution 可能已開始；
+- mutation tool result delivery failure；
+- Core state 不確定的 `end()`；
+- local work 可能仍完成的 timeout。
+
+### 不可 unchanged retry
+
+- `INVALID_INPUT`；
+- 沒加 model 的 `MODEL_REQUIRED`；
+- 沒設定的 `DEFAULT_PROVIDER_NOT_SET`；
+- 同一 handle 的 `SESSION_ENDED`；
+- 沒有改變 state/user intent 的 permission/domain error。
+
+## Unknown codes
+
+```ts
+function messageForError(error: PedelecError) {
+  switch (error.code) {
+    case "SESSION_BUSY":
+      return "目前任務仍在執行。";
+    case "NATIVE_HOST_UNAVAILABLE":
+      return "請啟動或修復 Pedelec Desktop App。";
+    default:
+      return error.message || "Pedelec request failed.";
+  }
+}
+```
+
+不要丟棄 unknown `code`、`message` 或安全的 diagnostic details；可能來自 provider 或較新的 runtime。
+
+## Logging guidance
+
+適合記錄：
+
+- error code/message；
+- operation name；
+- 有的話 `sessionId`；
+- provider/model；
+- event/tool error 的 `turnId`、`toolRequestId`；
+- component versions；
+- error source 是 `core` 或 `sdk`。
+
+不要預設記錄完整 prompts、selected page data、tool args 或 results。

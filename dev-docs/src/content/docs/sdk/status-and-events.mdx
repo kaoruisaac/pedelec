@@ -1,0 +1,188 @@
+---
+title: Session Status and Events
+description: Interpret session states, status transitions, callback contexts, SDK-originated events, and runtime-originated events.
+sidebar:
+  order: 6
+---
+
+A `PedelecSession` keeps a browser-side status and exposes lifecycle callbacks for status, errors, and end events.
+
+## Status values
+
+```ts
+type PedelecSessionStatus =
+  | "idle"
+  | "running"
+  | "waiting_tool_result"
+  | "ended"
+  | "error";
+```
+
+| Status | Meaning | Can call `sendText()`? |
+| --- | --- | --- |
+| `idle` | No active turn; ready for another prompt | Yes |
+| `running` | Preparation or a user turn is active | No |
+| `waiting_tool_result` | The agent requested a frontend tool and is waiting | No |
+| `ended` | The session is permanently ended | No |
+| `error` | Runtime reported a session error | No; recover by app policy, often a new/resumed session |
+
+New `PedelecSession` objects begin in `idle` locally.
+
+## Common transitions
+
+A turn without tools commonly follows:
+
+```text
+idle → running → idle
+```
+
+A turn with a frontend tool commonly follows:
+
+```text
+idle
+  → running
+  → waiting_tool_result
+  → running
+  → idle
+```
+
+The runtime may end or error from an active state:
+
+```text
+running → error
+running → ended
+waiting_tool_result → error
+waiting_tool_result → ended
+```
+
+Do not build UI logic that assumes every theoretical intermediate status must appear. Events can be normalized, de-duplicated, or arrive close together.
+
+## Observe status changes
+
+```ts
+const offStatus = session.onStatus((status, ctx) => {
+  console.log(ctx.previousStatus, "→", status);
+  console.log(ctx.type, ctx.source);
+});
+```
+
+The callback runs only when the value changes. Registering does not immediately emit the initial status.
+
+```ts
+renderStatus(session.getStatus());
+const offStatus = session.onStatus(renderStatus);
+```
+
+## Local versus Core-originated status
+
+The SDK can emit a status before Core replies, for responsive UI:
+
+- `sendText()` and `prepare()` set `running` locally;
+- a tool event sets `waiting_tool_result` while being handled;
+- `end()` marks the session ended locally after its request succeeds.
+
+Context identifies origin:
+
+```ts
+ctx.source // "sdk" | "core"
+ctx.type   // "sdk_status_changed" | "status_changed"
+```
+
+A Core event uses `source: "core"`. A state transition initiated inside the SDK uses `source: "sdk"`.
+
+Status handlers are de-duplicated. If the SDK already set `running` and Core later reports `running`, no second callback occurs because the value did not change.
+
+## Error events
+
+```ts
+const offError = session.onError((error, ctx) => {
+  console.error(error.code, error.message, error.details);
+  console.debug(ctx.type, ctx.source, ctx.sessionId);
+});
+```
+
+```ts
+type ErrorEventContext = PedelecEventContext & {
+  type: "error" | "sdk_error";
+};
+```
+
+Use `onError()` for session-wide observation, logging, and UI. Also catch promises from the action that initiated work.
+
+An error callback does not always mean the session status becomes `error`. For example, a failed submission of a tool result emits `SUBMIT_TOOL_RESULT_FAILED` from the SDK, while the runtime may later determine the final session state.
+
+## Ended events
+
+```ts
+const offEnded = session.onEnded((ctx) => {
+  console.log("ended by", ctx.source);
+});
+```
+
+```ts
+type EndedEventContext = PedelecEventContext & {
+  type: "ended" | "sdk_ended";
+};
+```
+
+`onEnded()` runs once when the session first becomes ended, whether caused by a runtime event or a successful local `end()` call.
+
+Pending `sendText()` or `prepare()` work rejects with `SESSION_ENDED` when the session ends.
+
+## Common context fields
+
+```ts
+type PedelecEventContext = {
+  sessionId: string;
+  provider: string;
+  model?: string;
+  sessionCreatedAt: number;
+  eventReceivedAt?: number;
+  eventEmittedAt: number;
+  turnId?: string;
+  turnStartedAt?: number;
+  turnKind?: "user" | "prepare";
+  source: "core" | "sdk";
+};
+```
+
+Not every field exists for every event:
+
+- Core chat/tool callbacks include received time and active turn metadata.
+- Local status changes can occur before a Core event and may not have `eventReceivedAt`.
+- End/error events outside an active turn may not have turn fields.
+- A newly resumed session handle may have blank provider metadata in the current SDK if the application did not retain it separately.
+
+## Tool-call context
+
+Tool handlers receive extra fields:
+
+```ts
+ctx.type;          // "tool_call"
+ctx.toolRequestId; // Core tool request identifier
+ctx.tool;          // tool name
+ctx.turnId;
+```
+
+Use `toolRequestId` for diagnostics and application bookkeeping, not for manually submitting results. The SDK submits the handler's return value automatically.
+
+## Event order and duplicate protection
+
+Core events can include a per-session sequence number. The client ignores an event whose sequence is not newer than the last one seen for that session. Application code should still be resilient to rapid transitions and late asynchronous work inside its own handlers.
+
+## UI mapping
+
+A simple mapping:
+
+```ts
+session.onStatus((status) => {
+  setSendEnabled(status === "idle");
+  setBusy(status === "running" || status === "waiting_tool_result");
+  setToolWaiting(status === "waiting_tool_result");
+  setSessionClosed(status === "ended");
+});
+```
+
+Do not map `waiting_tool_result` to a generic frozen state when an interactive tool is intentionally waiting for user input. Show the relevant modal or instruction.
+
+Continue with [Session lifecycle and resume](./session-lifecycle/).

@@ -1,0 +1,174 @@
+---
+title: Session Lifecycle and Resume
+description: Choose page-scoped or persistent sessions, save session IDs, resume safely, re-register handlers, and end sessions.
+sidebar:
+  order: 7
+---
+
+Session lifetime is a product decision. Pedelec defaults to a page-scoped lifecycle, but applications can keep a Core session alive for later resume.
+
+## Page-scoped lifecycle
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: true,
+});
+```
+
+`true` is the default. The extension tracks which SDK routes are attached to the session. When the final route disconnects, it asks Core to end the thread.
+
+Common disconnect causes:
+
+- tab close;
+- page reload;
+- navigation that destroys the JavaScript page;
+- extension reload/update;
+- browser or extension process interruption.
+
+Use page-scoped sessions when the session should not outlive the visible application context.
+
+## Persistent lifecycle
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+
+const record = {
+  sessionId: session.sessionId,
+  provider: session.provider,
+  model: session.model,
+};
+localStorage.setItem("pedelec-session", JSON.stringify(record));
+```
+
+With `false`, loss of the SDK route does not automatically end the Core session. The application can later resume using the saved ID.
+
+Use this only when you have a deliberate retention and cleanup policy. A session that is never resumed or ended can remain in Desktop state longer than the UI implies.
+
+## Resume a session
+
+```ts
+const session = await pedelec.resumeSession(savedSessionId);
+```
+
+`resumeSession()`:
+
+1. requires a non-empty session ID;
+2. triggers origin approval if the current origin is not approved;
+3. subscribes the current SDK route to the existing Core thread;
+4. returns a `PedelecSession` handle.
+
+An empty ID rejects with `INVALID_INPUT`.
+
+If Core no longer knows the ID, the runtime returns an error. The SDK does not silently create a replacement session.
+
+## Re-register every browser handler
+
+Handlers are JavaScript functions and cannot survive reload. Resume first, then attach them again:
+
+```ts
+const session = await pedelec.resumeSession(record.sessionId);
+
+const offChat = session.onChat(handleChat);
+const offStatus = session.onStatus(handleStatus);
+const offError = session.onError(handleError);
+const offEnded = session.onEnded(handleEnded);
+const offTool = session.onTool("update_counter", handleUpdateCounter);
+```
+
+Inline handlers from the original `createSession({ skills })` call are not automatically reconstructed by a new page. The Core session still has its tool manifest, but the newly resumed browser must register handlers for any tools the agent may call.
+
+A generic fallback is useful during migration, but it should not replace deliberate per-tool validation.
+
+## Provider and model metadata after resume
+
+The current resume bridge returns the `sessionId`, not the full Core session record. Therefore a newly constructed resumed handle may expose:
+
+```ts
+session.provider === "";
+session.model === undefined;
+```
+
+If the UI needs these fields after reload, save them with the session ID or load them from application-owned persistence. Do not assume `resumeSession()` rehydrates all metadata.
+
+`session.sessionCreatedAt` is the time the browser-side handle was constructed, not the original Core session creation time.
+
+## Avoid resuming twice accidentally
+
+SSR hydration, React Strict Mode development behavior, or duplicated effects can call resume more than once. Guard the operation in application state:
+
+```ts
+let resumePromise: Promise<PedelecSession> | null = null;
+
+function resumeOnce(id: string) {
+  resumePromise ??= pedelec.resumeSession(id);
+  return resumePromise;
+}
+```
+
+Clear or replace that guard deliberately when switching IDs.
+
+## End a session
+
+```ts
+await session.end();
+```
+
+A successful `end()`:
+
+- asks Core to end the session;
+- marks the SDK handle `ended`;
+- emits `onEnded()` once;
+- unregisters the session from the client; and
+- causes future `sendText()`/`prepare()` calls to reject with `SESSION_ENDED`.
+
+Calling `end()` again on the same already-ended handle resolves without another request.
+
+If the end request fails, `end()` emits an SDK error and rejects. The session is not locally marked ended by that failed call, because Core state is uncertain.
+
+## Cleanup pattern
+
+```ts
+async function disposeSession() {
+  const current = session;
+  session = null;
+
+  try {
+    if (current && current.getStatus() !== "ended") {
+      await current.end();
+    }
+  } finally {
+    for (const dispose of handlerDisposers) dispose();
+    handlerDisposers = [];
+    localStorage.removeItem("pedelec-session");
+  }
+}
+```
+
+When using `autoEndOnDisconnect: false`, remove persisted IDs only after your product has decided the session is no longer recoverable or desired.
+
+## Multiple routes and tabs
+
+The extension can route one session to more than one SDK connection. With automatic end enabled, the session ends only after the final route disappears. This enables shared observation but also creates coordination concerns:
+
+- only one active turn is allowed by the session;
+- two tabs can race and receive `SESSION_BUSY`;
+- tool handlers may exist in more than one page context;
+- application state can diverge across tabs.
+
+Unless cross-tab collaboration is intentional, store an ownership token or prevent multiple active controllers.
+
+## Choosing a lifecycle
+
+| Requirement | Suggested setting |
+| --- | --- |
+| Temporary assistant tied to one page | `autoEndOnDisconnect: true` |
+| Resume after a full reload | `false` + persist `sessionId` |
+| Multi-page workflow | `false` + explicit ownership/cleanup |
+| Sensitive transient context | Prefer `true` and explicit `end()` |
+| Long-running task | `false`, plus clear status and recovery UX |
+
+Next, learn how the session can call [frontend tools](../tools/overview/).

@@ -1,0 +1,130 @@
+---
+title: Requirements and Browser Support
+description: Check browser, origin, desktop runtime, native host, provider, and SSR requirements before using the SDK.
+sidebar:
+  order: 1
+---
+
+Pedelec is a browser-to-local-runtime integration. Installing the npm package is only one part of the setup. The user's browser and machine must also provide the extension, desktop runtime, native messaging registration, and at least one usable provider.
+
+## Required components
+
+### 1. A supported browser page
+
+The SDK connects through `chrome.runtime.connect(extensionId)`. It must run in a normal browser page where the Pedelec Chrome Extension is installed and external connections are allowed.
+
+The current extension accepts these page origins:
+
+- production pages served over `https://`;
+- `http://localhost/...`; and
+- `http://127.0.0.1/...`.
+
+A production site served only over plain HTTP is not an allowed external origin. `file://` pages, opaque origins, and arbitrary LAN HTTP hostnames are also not part of the supported connection pattern.
+
+:::note
+Origin includes scheme, host, and port. For example, `http://localhost:3000` and `http://localhost:5173` are different origins and may require separate approval.
+:::
+
+### 2. Pedelec Chrome Extension
+
+The extension must be installed and enabled in the same browser profile that opens the web application.
+
+`getApprovalStatus()` reports `installed: false` when the SDK cannot reach the extension. This result can also represent an extension connection that was lost, so the UI should describe it as “extension unavailable” rather than assuming it was never installed.
+
+### 3. Pedelec Desktop App
+
+The desktop application must be running when an operation requires Core Runtime access. It owns sessions, provider processes, settings, and the local runtime endpoint.
+
+The extension may be reachable while the desktop application is not. In that case, approval status can still show the extension as installed, but provider or session operations fail when the native host cannot reach Core.
+
+### 4. Registered Native Messaging host
+
+The Desktop App must register the Pedelec native host for Chrome. The extension uses that host to cross the browser security boundary.
+
+If registration is missing or broken, expect `NATIVE_HOST_UNAVAILABLE`, `NATIVE_CONNECTION_CLOSED`, or a Core runtime availability error.
+
+### 5. At least one available provider
+
+Use `listProviders()` to inspect the user's machine:
+
+```ts
+const providers = await pedelec.listProviders();
+const available = providers.filter((provider) => provider.available);
+```
+
+CLI-backed providers normally require the provider command to be:
+
+- installed;
+- visible in the environment used by the Desktop App;
+- authenticated if the provider requires login; and
+- compatible with the selected model identifier.
+
+For Ollama, provider availability only confirms that Pedelec can find its bundled agent executable. It does not prove that the Ollama server is running or that the requested model exists.
+
+## JavaScript and package requirements
+
+The SDK package is ESM and ships TypeScript declarations. It is intended for modern frontend build tools and browser-side TypeScript or JavaScript.
+
+```ts
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
+```
+
+No framework is required. SolidJS, React, Vue, Astro client islands, and vanilla TypeScript can all use the same public API as long as client initialization happens in the browser.
+
+## Unsupported execution environments
+
+Do not construct the client in:
+
+- Node.js scripts;
+- an SSR server render;
+- server actions or API routes;
+- a Web Worker or Service Worker;
+- a browser extension background worker that is not a normal approved page integration; or
+- test runners without a compatible Chrome extension runtime mock.
+
+The constructor detects the absence of `window` and creates a client that rejects transport calls with `EXTENSION_UNAVAILABLE`. That client does not later reconnect itself when hydration occurs. Create a new client inside a browser-only lifecycle instead.
+
+```ts
+let pedelec: Pedelec | undefined;
+
+if (typeof window !== "undefined") {
+  pedelec = new Pedelec();
+}
+```
+
+Framework integrations should prefer their client lifecycle hook rather than a module-level condition. For example, initialize inside SolidJS `onMount()` or React `useEffect()`.
+
+## SSR-safe package usage
+
+Importing types is safe on the server:
+
+```ts
+import type { PedelecSession, ProviderInfo } from "@kaoruisaac/pedelec";
+```
+
+Importing the runtime module is also generally possible, but calling `new Pedelec()` during server rendering creates an unusable disconnected instance. Keep the instance outside serialized server state and create it after hydration.
+
+## Provider and model compatibility
+
+Pedelec forwards model identifiers to the selected provider. A model string is not validated against a universal Pedelec catalog. Use an identifier accepted by the provider version installed on the user's machine.
+
+Ollama requires a model from either:
+
+- `createSession({ provider: "ollama", model: "..." })`; or
+- the Desktop App's `defaultModels.ollama` setting.
+
+Without one, session creation fails with `MODEL_REQUIRED`.
+
+## Preflight checklist
+
+Before showing the main agent UI, verify:
+
+1. The code is running after browser hydration.
+2. `getApprovalStatus()` does not report the extension as unavailable.
+3. The current origin can be approved.
+4. `listProviders()` returns at least one available provider.
+5. The Desktop App remains running.
+6. The model field, when provided, is meaningful to the selected provider.
+7. The UI handles disconnects and does not assume setup remains valid forever.
+
+Continue with [Installation](./installation/) to add the package and verify the complete chain.

@@ -1,0 +1,166 @@
+---
+title: Preparing and Sending a Turn
+description: Use prepare and sendText correctly, prevent concurrent turns, and map turn completion to UI state.
+sidebar:
+  order: 4
+---
+
+A session processes one turn at a time. `prepare()` is an optional optimization; `sendText()` starts a user turn and resolves after that turn completes.
+
+## Optional preparation
+
+```ts
+await session.prepare();
+```
+
+`prepare()` asks the desktop runtime to prepare the provider session before the first real prompt. This can move some startup work into an earlier moment, such as when the user opens an assistant panel.
+
+Important behavior:
+
+- It is optional. `sendText()` works without it.
+- After one successful preparation, later calls resolve immediately.
+- Concurrent calls share the same in-flight preparation promise.
+- Calling it while a user turn is active rejects with `SESSION_BUSY`.
+- Calling it after session end rejects with `SESSION_ENDED`.
+- Assistant text emitted during the preparation turn is not delivered through `onChat()`.
+- Status events can still show the preparation lifecycle.
+
+```ts
+async function warmUpAssistant() {
+  try {
+    await session.prepare();
+  } catch (error) {
+    // Preparation is an optimization. Keep the normal send flow available.
+    console.warn("Pedelec preparation failed", error);
+  }
+}
+```
+
+If `sendText()` is called while preparation is in progress, it waits for that promise. If preparation fails, `sendText()` falls back to the normal first-run path rather than permanently blocking the user turn.
+
+## Send a user turn
+
+```ts
+await session.sendText("Summarize the selected document.");
+```
+
+The SDK performs these steps:
+
+1. waits for in-flight preparation, if any;
+2. rejects if the session ended or another turn is active;
+3. creates SDK-local turn metadata;
+4. sets status to `running` with `ctx.source === "sdk"`;
+5. sends `send_text` through the bridge;
+6. dispatches streamed chat, status, and tool events;
+7. resolves when a `done` event or `idle` status completes the active turn;
+8. rejects if the turn errors, the session ends, or transport setup fails.
+
+## Completion semantics
+
+`sendText()` does not return the assistant text. Read text through `onChat()`.
+
+```ts
+let output = "";
+const offChat = session.onChat((delta) => {
+  output += delta;
+});
+
+await session.sendText("Write a title.");
+console.log("Final accumulated output:", output);
+offChat();
+```
+
+The promise resolving means the SDK observed turn completion. It does not mean your rendering framework has necessarily painted the final state to the screen.
+
+## No concurrent turns in one session
+
+```ts
+const first = session.sendText("First task");
+const second = session.sendText("Second task"); // rejects with SESSION_BUSY
+await first;
+```
+
+Queue work in the application when sequential prompts are desired:
+
+```ts
+let queue = Promise.resolve();
+
+function enqueuePrompt(text: string) {
+  queue = queue.then(() => session.sendText(text));
+  return queue;
+}
+```
+
+Do not use this simple queue after session end without error recovery, because one rejected promise can stop later `.then()` work. A production queue should catch each task and re-check session status.
+
+## Composer state
+
+Use status plus a local submit guard:
+
+```ts
+let submitting = false;
+
+async function submitPrompt(text: string) {
+  if (submitting || session.getStatus() !== "idle") return;
+  submitting = true;
+  renderComposerDisabled(true);
+
+  try {
+    await session.sendText(text);
+  } finally {
+    submitting = false;
+    renderComposerDisabled(session.getStatus() !== "idle");
+  }
+}
+```
+
+Why keep both?
+
+- `getStatus()` prevents obvious invalid sends.
+- `submitting` closes the small synchronous gap before reactive UI updates.
+- The SDK's `SESSION_BUSY` check remains the final authority.
+
+During `waiting_tool_result`, the session is still busy. Do not re-enable the normal prompt composer just because the provider is waiting on a modal or frontend action.
+
+## Empty text
+
+The SDK currently forwards the provided string and does not enforce non-empty trimmed text in `sendText()`. Applications should normally reject empty input before calling it:
+
+```ts
+const text = input.value.trim();
+if (!text) return;
+await session.sendText(text);
+```
+
+## Error handling
+
+Use both promise rejection and `onError()`:
+
+```ts
+session.onError((error, ctx) => {
+  logSessionError(ctx.sessionId, error);
+});
+
+try {
+  await session.sendText(text);
+} catch (error) {
+  showTurnFailure(error);
+}
+```
+
+Promise rejection is useful for the action that initiated the turn. `onError()` also captures asynchronous session-level problems such as a failed tool-result submission or extension disconnect broadcast.
+
+Common errors:
+
+- `SESSION_BUSY`;
+- `SESSION_ENDED`;
+- `SEND_TEXT_FAILED` fallback for a rejected send request;
+- `SESSION_ERROR` from runtime state;
+- extension/native/Core transport errors; and
+- provider-specific errors.
+
+## There is no cancellation API
+
+The public SDK currently provides `end()` for ending the session, but no per-turn cancel method. Do not present a “Stop generation” button unless your application is prepared to end the whole session or a future SDK version adds explicit cancellation.
+
+Continue with [Streaming responses](./streaming-responses/).

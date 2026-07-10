@@ -1,0 +1,231 @@
+---
+title: 註冊 Tool Handlers
+description: 使用 inline、named、generic handlers，理解 priority、cleanup、return value 與 errors。
+sidebar:
+  order: 4
+---
+
+Tool definition 告訴 agent capability 存在；handler 是實際執行操作的 browser function。
+
+Pedelec 支援三種 handler style。
+
+## Inline handler
+
+直接放在 `defineTool()`：
+
+```ts
+const getCurrentPage = defineTool({
+  name: "get_current_page",
+  description: "Read the current page title and URL.",
+  argsSchema: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  handler: () => ({
+    title: document.title,
+    url: location.href,
+  }),
+});
+```
+
+適合 definition 與 implementation 應放一起的 stable capability。
+
+Handler function 只留在 browser，Core 只收到 serializable metadata。
+
+## Named handler
+
+Session 建立後依 name 註冊：
+
+```ts
+const offUpdateCounter = session.onTool(
+  "update_counter",
+  async (args: { delta: number }, ctx) => {
+    console.debug(ctx.toolRequestId, ctx.turnId);
+    const value = await counterStore.add(args.delta);
+    return { value };
+  },
+);
+```
+
+Named handler 適合：
+
+- implementation 依賴 mounted component；
+- 特定 session 需要 override；
+- 需要 explicit per-tool validation；
+- resumed session 要恢復 browser handlers。
+
+回傳 function 會在它仍是該 name current handler 時移除 registration。
+
+## Generic fallback handler
+
+```ts
+const offFallback = session.onTool(async (tool, args, ctx) => {
+  switch (tool) {
+    case "get_current_page":
+      return { title: document.title, url: location.href };
+    default:
+      return {
+        error: {
+          code: "UNSUPPORTED_TOOL",
+          message: `No application handler for ${tool}`,
+        },
+      };
+  }
+});
+```
+
+同一時間只保存一個 generic fallback；註冊新的會替換舊的。Cleanup 只會在同一 function 仍是 current 時移除。
+
+Generic handler 適合 central routing 或 diagnostics，不應成為省略 tool-specific validation 的理由。
+
+## Priority
+
+`update_counter` call 依序尋找：
+
+1. `session.onTool("update_counter", handler)`；
+2. tool definition 的 inline `handler`；
+3. generic fallback；
+4. 產生 `TOOL_HANDLER_NOT_FOUND` result。
+
+Named handler 會 override inline default。
+
+## Sync 與 async result
+
+都支援：
+
+```ts
+session.onTool("read_value", () => ({ value: store.value }));
+
+session.onTool("save_document", async (args) => {
+  const result = await api.save(args);
+  return { id: result.id, savedAt: result.savedAt };
+});
+```
+
+Async handler pending 時，session 保持 `waiting_tool_result`。
+
+## JSON-compatible return values
+
+可回傳：
+
+- `null`；
+- string、number、boolean；
+- JSON-compatible array；
+- JSON-compatible plain object。
+
+Rich value 要明確轉換：
+
+```ts
+return {
+  savedAt: date.toISOString(),
+  bytes: Array.from(uint8Array),
+  selection: {
+    start: selection.start,
+    end: selection.end,
+  },
+};
+```
+
+不要回傳 DOM node、function、cyclic object 或 browser handle。
+
+## 預期內的 domain failure
+
+Tool 正常執行，但 domain condition 不允許時回傳 structured error：
+
+```ts
+return {
+  error: {
+    code: "NO_SELECTION",
+    message: "There is no active editor selection.",
+    details: { documentId },
+  },
+};
+```
+
+SDK 把它當 normal result 送給 agent，shape 由 application 決定。
+
+建議統一：
+
+```ts
+type ToolErrorResult = {
+  error: {
+    code: string;
+    message: string;
+    details?: unknown;
+    retryable?: boolean;
+  };
+};
+```
+
+`details` 必須 JSON-compatible，且不要包含 secrets。
+
+## 非預期 handler failure
+
+Programming failure 或 unexpected exception 才 throw：
+
+```ts
+session.onTool("save_document", async (args) => {
+  const response = await save(args);
+  if (!response.ok) {
+    throw new Error(`Save failed with ${response.status}`);
+  }
+  return response.data;
+});
+```
+
+SDK catch 後提交：
+
+```ts
+{
+  error: {
+    code: "TOOL_HANDLER_ERROR",
+    message: "..."
+  }
+}
+```
+
+Raw exception 不會直接從 internal tool dispatcher 原樣 throw 到原本的 `sendText()` call；agent 會收到 error result，再決定回應或 recovery。
+
+## Missing handler
+
+沒有 matching handler 時，SDK 自動回傳包含 `TOOL_HANDLER_NOT_FOUND` 的 result。
+
+通常是 developer/lifecycle bug：
+
+- 宣告 tool 卻未實作；
+- resumed page 未恢復 handler；
+- component 太早 unmount；
+- name 只改了一邊。
+
+## Cleanup
+
+```ts
+const disposers = [
+  session.onTool("tool_a", handleA),
+  session.onTool("tool_b", handleB),
+  session.onTool(handleFallback),
+];
+
+function cleanup() {
+  for (const dispose of disposers) dispose();
+}
+```
+
+Destroy handler 依賴的 state 前先 unregister。已經 executing 的 call 不會因 unregister 自動 cancel；handler 仍需要 lifecycle check。
+
+## 不要只相信 TypeScript
+
+```ts
+session.onTool("update_counter", (args: { delta: number }) => {
+  // Annotation 改善 authoring，但 runtime args 來自 agent。
+  if (!Number.isFinite(args.delta)) {
+    return invalidArgs("delta must be finite");
+  }
+  return counterStore.add(args.delta);
+});
+```
+
+重要操作請使用 validation library 或小型 manual guards。
+
+下一頁：[互動式與長時間 Tools](./interactive-tools/)。

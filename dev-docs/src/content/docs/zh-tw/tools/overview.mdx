@@ -1,0 +1,200 @@
+---
+title: Tool Calling 概覽
+description: 透過明確宣告的 browser-side tools，讓 agent 讀取或修改前端狀態。
+sidebar:
+  order: 1
+---
+
+Tool calling 是 Pedelec agent 向 Web App 取得資訊，或要求執行受控制前端操作的方式。
+
+適合使用 tool 的情境：
+
+- 讀取目前 page URL、selected text、active document 或 editor state；
+- 修改 counter、canvas、scene、form 或 application setting；
+- 向使用者取得 confirmation 或額外 input；
+- 透過 application-owned API 匯出文件；
+- 查詢 provider process 無法直接取得的 frontend-only data。
+
+## 基本模型
+
+建立 session 時，application 宣告一組 capabilities：
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use get_current_page when you need page identity.",
+    tools: [getCurrentPageTool],
+  },
+});
+```
+
+`skills` 包含：
+
+```ts
+type SkillsInput<TTools extends readonly ToolDefinition[]> = {
+  guidance: string;
+  tools: TTools;
+};
+```
+
+### `guidance`
+
+說明 agent 應在何時、如何使用 tools 的 high-level instruction。內容應具體且 operational。
+
+好的 guidance：
+
+```text
+Use get_selected_text before editing the user's selection. Never guess the selection.
+Ask for confirmation before destructive changes.
+```
+
+過於模糊：
+
+```text
+Use tools when useful.
+```
+
+### `tools`
+
+Serializable tool definitions，每個包含 name、description、argument schema、optional timeout，以及 optional browser-side inline handler。
+
+## 完整流程
+
+```text
+Web App 宣告 skills 與 tools
+  ↓
+Desktop Core 產生 agent-facing tool artifacts
+  ↓
+Agent 決定呼叫 tool
+  ↓
+Core emit tool_call 並等待
+  ↓
+SDK status 變成 waiting_tool_result
+  ↓
+Browser handler 讀取或修改前端狀態
+  ↓
+Handler 回傳 JSON-serializable result
+  ↓
+SDK 自動提交 result
+  ↓
+Agent 繼續同一個 turn
+```
+
+Application 不需要 hosting `tools.md` 或 tool-spec files。Core 會在 session sandbox 內產生 agent 需要的 artifacts。
+
+## 完整的小型 tool
+
+```ts
+import { defineTool } from "@kaoruisaac/pedelec";
+
+const getCurrentPage = defineTool({
+  name: "get_current_page",
+  description: "Read the title, URL, and selected text of the current browser page.",
+  argsSchema: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  handler: (_args, ctx) => ({
+    title: document.title,
+    url: location.href,
+    selectedText: window.getSelection()?.toString() ?? "",
+    observedForTurn: ctx.turnId,
+  }),
+});
+
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Call get_current_page instead of guessing page state.",
+    tools: [getCurrentPage],
+  },
+});
+```
+
+`handler` function 只留在 browser。Core 只收到 tool name、description、schema 與 timeout，不會收到 executable frontend code。
+
+## Handler 在 page context 執行
+
+Handler 可以使用 Web App 原本就能使用的能力：
+
+- DOM APIs；
+- framework stores/signals/state；
+- IndexedDB 或 local storage；
+- canvas/editor APIs；
+- 已登入的 application APIs；
+- modal 與 user interactions。
+
+因此 tool 必須保持 narrow。能用小型 domain-specific tool 時，不要提供 generic「execute JavaScript」、「fetch any URL」或「change arbitrary state」。
+
+## Trust model
+
+Agent-generated tool args 是 untrusted input。Schema 幫助 agent 產生預期 shape，但 handler 仍要驗證 business rule 與 authorization。
+
+```ts
+session.onTool("delete_document", async (args) => {
+  const { documentId } = args as { documentId?: unknown };
+
+  if (typeof documentId !== "string") {
+    return {
+      error: {
+        code: "INVALID_DOCUMENT_ID",
+        message: "documentId must be a string.",
+      },
+    };
+  }
+
+  if (!canDeleteDocument(documentId)) {
+    return {
+      error: {
+        code: "NOT_ALLOWED",
+        message: "The current user cannot delete this document.",
+      },
+    };
+  }
+
+  return deleteDocument(documentId);
+});
+```
+
+Tool 不應繞過 UI 原本執行的 permission check。
+
+## Results
+
+Handler return value 會自動送回 agent。請回傳 plain JSON-compatible data：
+
+```ts
+return {
+  ok: true,
+  updatedCount: 4,
+  affectedIds: ["a", "b"],
+};
+```
+
+避免 DOM node、function、帶隱藏 state 的 class instance、`BigInt`、symbol 與 cyclic object。
+
+## Handler 選擇順序
+
+SDK 收到 call 時依序使用：
+
+1. `session.onTool(name, handler)` 註冊的 named handler；
+2. matching `defineTool()` 的 inline `handler`；
+3. generic `session.onTool((tool, args, ctx) => ...)` fallback；
+4. 自動產生 `TOOL_HANDLER_NOT_FOUND` error result。
+
+因此 application 可以集中宣告 tool，再針對特定 session/component override。
+
+## Session status
+
+Core 等待 result 時，`session.getStatus()` 是 `waiting_tool_result`，session 仍 busy，不能再呼叫 `sendText()`。
+
+Immediate tool 可能只短暫停留；interactive tool 則可能在 modal 等待使用者時維持一段時間。
+
+## Tool call 屬於同一個 turn
+
+Tool call 不會建立新 user turn。`ctx.turnId` 仍對應原本 `sendText()`；result 回傳後 provider 繼續 reasoning，也可能在完成前再呼叫其他 tool。
+
+不要假設一個 turn 只有一個 tool call。Application 應支援 sequential calls；目前同時 pending 的 request 數量則由 Core runtime behavior 限制。
+
+下一頁：[定義 Tools](./defining-tools/)。

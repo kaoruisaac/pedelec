@@ -1,0 +1,276 @@
+---
+title: Tool Args Schema
+description: 使用 Pedelec 的 JSON-compatible schema subset 描述 tool args，並理解支援與不支援欄位。
+sidebar:
+  order: 3
+---
+
+`argsSchema` 描述 agent 呼叫 tool 時應傳送的 arguments。Pedelec 使用一套適合常見 frontend tool input 的 JSON-compatible subset。
+
+它不是完整 JSON Schema specification。
+
+## Root schema
+
+Root 必須永遠是 object：
+
+```ts
+import type { ToolArgsSchema } from "@kaoruisaac/pedelec";
+
+const schema = {
+  type: "object",
+  properties: {
+    query: { type: "string" },
+  },
+  required: ["query"],
+} satisfies ToolArgsSchema;
+```
+
+No-argument tool 仍使用 object：
+
+```ts
+const emptySchema = {
+  type: "object",
+  properties: {},
+  required: [],
+} satisfies ToolArgsSchema;
+```
+
+## Shared metadata
+
+Schema node 可包含：
+
+```ts
+{
+  description?: string;
+  default?: JsonValue;
+  examples?: JsonValue[];
+}
+```
+
+`default` 與 `examples` 是給 agent 的 guidance；SDK 不會把 missing default 自動填入收到的 args。
+
+```ts
+{
+  type: "string",
+  description: "Output language.",
+  default: "en",
+  examples: ["en", "zh-TW"]
+}
+```
+
+Optional property 缺少時怎麼處理，仍由 handler 決定。
+
+## String
+
+```ts
+{
+  type: "string",
+  enum?: string[],
+  minLength?: number,
+  maxLength?: number,
+  pattern?: string
+}
+```
+
+```ts
+role: {
+  type: "string",
+  enum: ["viewer", "editor"],
+  description: "Role to assign."
+}
+```
+
+`pattern` 是 regular-expression pattern string，請保持簡單且 portable。
+
+## Number 與 integer
+
+```ts
+{
+  type: "number" | "integer",
+  enum?: number[],
+  minimum?: number,
+  maximum?: number
+}
+```
+
+Count 或 pixel dimension 不需要 fraction 時使用 `integer`。
+
+```ts
+delta: {
+  type: "integer",
+  minimum: -10,
+  maximum: 10
+}
+```
+
+## Boolean
+
+```ts
+{
+  type: "boolean",
+  enum?: boolean[]
+}
+```
+
+Boolean 通常不需要 enum，但 type 有提供。
+
+## Array
+
+```ts
+{
+  type: "array",
+  items: ToolArgsSchemaNode,
+  minItems?: number,
+  maxItems?: number,
+  uniqueItems?: boolean
+}
+```
+
+```ts
+ids: {
+  type: "array",
+  items: { type: "string", minLength: 1 },
+  minItems: 1,
+  maxItems: 50,
+  uniqueItems: true
+}
+```
+
+請設定合理 bounds，不要讓 agent-generated array 發出 unbounded bulk operation。
+
+## Object
+
+```ts
+{
+  type: "object",
+  properties?: Record<string, ToolArgsSchemaNode>,
+  required?: string[]
+}
+```
+
+```ts
+position: {
+  type: "object",
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" }
+  },
+  required: ["x", "y"]
+}
+```
+
+`required` 只放真的有定義且 handler 必須取得的 property name。
+
+## `oneOf`
+
+```ts
+{
+  oneOf: ToolArgsSchemaNode[]
+}
+```
+
+```ts
+target: {
+  oneOf: [
+    {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"]
+    },
+    {
+      type: "object",
+      properties: { index: { type: "integer", minimum: 0 } },
+      required: ["index"]
+    }
+  ]
+}
+```
+
+Alternatives 應容易區分。Ambiguous branches 會讓 agent output 與 application validation 更困難。
+
+## 重用 schema fragments
+
+不支援 `$ref` 與 `$defs`，改用 TypeScript constants：
+
+```ts
+import type { ToolArgsSchemaNode } from "@kaoruisaac/pedelec";
+
+const pointSchema = {
+  type: "object",
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" },
+  },
+  required: ["x", "y"],
+} satisfies ToolArgsSchemaNode;
+
+const moveShapeSchema = {
+  type: "object",
+  properties: {
+    shapeId: { type: "string", minLength: 1 },
+    destination: pointSchema,
+  },
+  required: ["shapeId", "destination"],
+} satisfies ToolArgsSchema;
+```
+
+## 不支援欄位
+
+第一版 documented schema 不支援：
+
+- `$defs`、`$ref`；
+- `additionalProperties`；
+- `format`；
+- `exclusiveMinimum`、`exclusiveMaximum`；
+- `multipleOf`；
+- supported `oneOf` 以外的完整 condition/composition keywords；
+- arbitrary custom keywords。
+
+不要直接複製大型 OpenAPI 或 JSON Schema document 並假設可用。
+
+## Serialization requirements
+
+SDK 會透過 JSON serialization clone schema 後送往 Core，因此不可包含：
+
+- function；
+- symbol；
+- `BigInt`；
+- cyclic reference；
+- 在 JSON 中會失去意義的 behavior object。
+
+Serialization failure 會讓 session creation reject `INVALID_INPUT`。
+
+## 仍需要 runtime validation
+
+Schema 協助 provider/Core 理解預期 shape，不取代 application-level validation。
+
+```ts
+session.onTool("update_counter", (raw) => {
+  const args = raw as { delta?: unknown };
+
+  if (!Number.isInteger(args.delta) || Math.abs(args.delta as number) > 100) {
+    return {
+      error: {
+        code: "INVALID_DELTA",
+        message: "delta must be an integer between -100 and 100.",
+      },
+    };
+  }
+
+  return updateCounter(args.delta as number);
+});
+```
+
+Authorization、current state、resource existence 以及 schema 無法表達的 business rule 都要額外驗證。
+
+## Schema 設計建議
+
+- 少量 explicit properties 優於 generic object。
+- Domain 小且 stable 時使用 enum。
+- Non-obvious field 加 description。
+- Array 與 numeric operation 加 bounds。
+- Destructive intent 明確寫出。
+- 避免沒有 clear discriminator、卻會大幅改變行為的 optional field。
+- Input 保持可安全 inspect/log 的大小。
+
+下一頁：[註冊 Tool Handlers](./handlers/)。

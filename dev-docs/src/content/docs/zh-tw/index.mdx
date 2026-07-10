@@ -1,22 +1,111 @@
 ---
-title: Pedelec 文件
-description: 連接 Web App 與本機 AI coding agents 的 bridge 架構文件。
+title: Pedelec SDK
+description: 讓瀏覽器應用程式透過 Pedelec Desktop Runtime 連接在使用者電腦上執行的 AI coding agent。
 template: splash
+sidebar:
+  order: 1
 hero:
-  title: Pedelec 文件
-  tagline: 連接 Web App 與本機 AI coding agents 的 bridge 架構。
+  title: Pedelec SDK
+  tagline: 用安全且具型別的橋接方式，讓本機 AI agent 與 Web App 協作。
   actions:
-    - text: 開始使用
-      link: ./getting-started/
+    - text: 開始整合
+      link: ./getting-started/quick-start/
       icon: right-arrow
       variant: primary
-    - text: SDK 概覽
-      link: ./sdk-overview/
-      icon: right-arrow
-footer:
-  links:
-    - text: 在 GitHub 查看 Pedelec
-      link: https://github.com/kaoruisaac/pedelec
+    - text: 了解 Tool Calling
+      link: ./tools/overview/
+      icon: external
+      variant: secondary
 ---
 
-歡迎來到 Pedelec 官方文件。此網站為連接 Web App 與本機 AI coding agents 的指南奠定基礎。
+Pedelec 是一套 browser SDK 與本機橋接架構，讓 Web App 可以和 Codex、Gemini、OpenCode、Cursor、Claude Code，或使用 Ollama 的 agent 協作。
+
+Web App 可以透過 Pedelec：
+
+- 在使用者電腦上建立 agent session；
+- 傳送使用者指令並接收串流輸出的文字；
+- 將範圍明確的前端能力以 tool 的形式提供給 agent；
+- 恢復或結束 session；
+- 在 UI 顯示連線、網站核准、provider 與 session lifecycle 狀態。
+
+## Pedelec 解決什麼問題
+
+一般聊天 API 通常只接收文字再回傳文字，但 agent 整合經常需要更多能力：
+
+- agent 可能需要讀取目前頁面、編輯器、canvas、選取內容或應用程式 state；
+- agent turn 暫停時，Web App 可能需要開啟對話框等待使用者確認；
+- 使用者可能想沿用已經安裝並登入的本機 provider CLI；
+- 瀏覽器頁面不應直接取得任意啟動本機 process 的權限。
+
+Pedelec 將責任拆開。Web App 負責 UI 與 tool handler；Pedelec Extension 與 Desktop Runtime 負責本機傳輸、session lifecycle 以及 provider process。
+
+```text
+Web App
+  ↓ @kaoruisaac/pedelec
+Pedelec Chrome Extension
+  ↓ Chrome Native Messaging
+Pedelec native host
+  ↓ 本機 Core IPC
+Pedelec Desktop Runtime
+  ↓ provider process
+Codex / Gemini / OpenCode / Cursor / Claude Code / Ollama
+```
+
+SDK 不會要求 Web App 自行啟動 localhost server，也不會直接啟動 provider executable。它只和已安裝的 Extension 溝通，再由 Extension 將通過使用者核准的要求送往 Desktop Runtime。
+
+## 最小互動範例
+
+```ts
+import { Pedelec } from "@kaoruisaac/pedelec";
+
+const pedelec = new Pedelec();
+const session = await pedelec.createSession({ provider: "codex" });
+
+let answer = "";
+session.onChat((delta) => {
+  answer += delta;
+  renderAssistantMessage(answer);
+});
+
+await session.sendText("說明目前的任務。 ");
+```
+
+`onChat()` 收到的是逐段文字，不是一次完成的訊息。`sendText()` 會在本次 agent turn 完成後才 resolve，而不是訊息剛送上 transport 時就 resolve。
+
+## Browser-side tools
+
+Tool 是 Web App 明確開放給 agent 的一小段能力。Handler 在 browser page 中執行，因此可以讀取前端 state 或進行受限制的 UI 操作。
+
+```ts
+import { defineTool } from "@kaoruisaac/pedelec";
+
+const readPage = defineTool({
+  name: "get_current_page",
+  description: "Read the current page title and URL.",
+  argsSchema: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  handler: () => ({
+    title: document.title,
+    url: location.href,
+  }),
+});
+```
+
+只開放 agent 真正需要的最小能力。Tool args 是由 agent 產生，必須視為不可信任的輸入。
+
+## 哪些部分在本機，哪些部分可能使用網路
+
+Browser Extension、native host 與 Desktop Runtime 之間的 Pedelec bridge 位於本機。後續是否使用外部網路，取決於選擇的 provider。雲端型 provider CLI 可能將 prompt、tool 描述或相關 context 傳送到其服務；Ollama 是否完全在本機，也取決於使用者的 Ollama 設定。
+
+Pedelec 不會把所有 provider 自動變成離線模型。資料敏感時，Web App 應清楚向使用者顯示目前選擇的 provider。
+
+## 建議閱讀順序
+
+- 整合前先確認[環境需求與瀏覽器支援](./getting-started/requirements/)。
+- 依照[快速開始](./getting-started/quick-start/)建立 session 並接收第一段回應。
+- 閱讀 [Pedelec 如何運作](./concepts/how-pedelec-works/)理解外部可觀察的架構與信任邊界。
+- 使用 [Tool Calling](./tools/overview/)讓 agent 讀取或操作前端狀態。
+- 在 [`Pedelec` API Reference](./reference/pedelec/)查詢精確方法與型別。

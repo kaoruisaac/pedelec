@@ -1,0 +1,231 @@
+---
+title: Registering Tool Handlers
+description: Use inline, named, and generic handlers; understand priority, cleanup, return values, and errors.
+sidebar:
+  order: 4
+---
+
+A tool definition tells the agent that a capability exists. A handler is the browser function that actually performs it.
+
+Pedelec supports three handler styles.
+
+## Inline handler
+
+Place `handler` directly in `defineTool()`:
+
+```ts
+const getCurrentPage = defineTool({
+  name: "get_current_page",
+  description: "Read the current page title and URL.",
+  argsSchema: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  handler: () => ({
+    title: document.title,
+    url: location.href,
+  }),
+});
+```
+
+Use inline handlers for stable capabilities whose implementation belongs next to their definition.
+
+The handler function stays in the browser. Only serializable tool metadata is sent to Core.
+
+## Named handler
+
+Register by tool name after session creation:
+
+```ts
+const offUpdateCounter = session.onTool(
+  "update_counter",
+  async (args: { delta: number }, ctx) => {
+    console.debug(ctx.toolRequestId, ctx.turnId);
+    const value = await counterStore.add(args.delta);
+    return { value };
+  },
+);
+```
+
+Named handlers are useful when:
+
+- implementation depends on a mounted component;
+- a particular session needs an override;
+- you want explicit per-tool validation; or
+- a resumed session needs its browser handlers restored.
+
+The returned function removes that registration if it is still the current handler for the name.
+
+## Generic fallback handler
+
+```ts
+const offFallback = session.onTool(async (tool, args, ctx) => {
+  switch (tool) {
+    case "get_current_page":
+      return { title: document.title, url: location.href };
+    default:
+      return {
+        error: {
+          code: "UNSUPPORTED_TOOL",
+          message: `No application handler for ${tool}`,
+        },
+      };
+  }
+});
+```
+
+Only one generic fallback is stored at a time. Registering another replaces the previous fallback. The cleanup function removes it only if that same function is still current.
+
+Use a generic handler for central routing or diagnostics, not as an excuse to skip tool-specific validation.
+
+## Priority
+
+For a tool named `update_counter`, the SDK selects:
+
+1. `session.onTool("update_counter", handler)`;
+2. inline `handler` from its tool definition;
+3. generic `session.onTool((tool, args, ctx) => ...)`;
+4. generated `TOOL_HANDLER_NOT_FOUND` result.
+
+A named handler therefore overrides an inline default.
+
+## Sync and async results
+
+Both are supported:
+
+```ts
+session.onTool("read_value", () => ({ value: store.value }));
+
+session.onTool("save_document", async (args) => {
+  const result = await api.save(args);
+  return { id: result.id, savedAt: result.savedAt };
+});
+```
+
+The session remains in `waiting_tool_result` while an async handler is pending.
+
+## JSON-compatible return values
+
+Return values should consist of:
+
+- `null`;
+- strings, numbers, and booleans;
+- arrays of JSON-compatible values; and
+- plain objects with JSON-compatible values.
+
+Convert richer values explicitly:
+
+```ts
+return {
+  savedAt: date.toISOString(),
+  bytes: Array.from(uint8Array),
+  selection: {
+    start: selection.start,
+    end: selection.end,
+  },
+};
+```
+
+Do not return DOM nodes, functions, cyclic objects, or browser handles.
+
+## Expected domain failure
+
+Return a structured error result when failure is part of the tool's normal domain:
+
+```ts
+return {
+  error: {
+    code: "NO_SELECTION",
+    message: "There is no active editor selection.",
+    details: { documentId },
+  },
+};
+```
+
+The SDK treats this as a normal tool result and submits it to the agent. Your application controls the shape.
+
+A consistent recommended shape is:
+
+```ts
+type ToolErrorResult = {
+  error: {
+    code: string;
+    message: string;
+    details?: unknown;
+    retryable?: boolean;
+  };
+};
+```
+
+Keep `details` JSON-compatible and avoid secrets.
+
+## Unexpected handler failure
+
+Throw for programming failures or unexpected operational exceptions:
+
+```ts
+session.onTool("save_document", async (args) => {
+  const response = await save(args);
+  if (!response.ok) {
+    throw new Error(`Save failed with ${response.status}`);
+  }
+  return response.data;
+});
+```
+
+The SDK catches the exception and submits:
+
+```ts
+{
+  error: {
+    code: "TOOL_HANDLER_ERROR",
+    message: "..."
+  }
+}
+```
+
+The exception does not escape from the async internal tool dispatcher to your original `sendText()` call as the raw exception. The agent receives an error result and may respond or recover.
+
+## Missing handler
+
+When no handler matches, the SDK automatically returns a result containing `TOOL_HANDLER_NOT_FOUND`.
+
+This is usually a developer/lifecycle bug:
+
+- the tool was declared but never implemented;
+- a resumed page did not restore handlers;
+- a component unmounted too early; or
+- the tool name changed in only one place.
+
+## Cleanup
+
+```ts
+const disposers = [
+  session.onTool("tool_a", handleA),
+  session.onTool("tool_b", handleB),
+  session.onTool(handleFallback),
+];
+
+function cleanup() {
+  for (const dispose of disposers) dispose();
+}
+```
+
+Unregister handlers before destroying the application state they reference. If a call is already executing, unregistering does not cancel that JavaScript promise; the handler must have its own lifecycle check.
+
+## Do not trust TypeScript alone
+
+```ts
+session.onTool("update_counter", (args: { delta: number }) => {
+  // The annotation improves authoring, but runtime args still came from an agent.
+  if (!Number.isFinite(args.delta)) {
+    return invalidArgs("delta must be finite");
+  }
+  return counterStore.add(args.delta);
+});
+```
+
+Use a validation library or small manual guards for important operations.
+
+Continue with [Interactive and long-running tools](./interactive-tools/).

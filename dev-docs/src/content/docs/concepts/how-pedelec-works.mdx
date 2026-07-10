@@ -1,0 +1,142 @@
+---
+title: How Pedelec Works
+description: Understand the SDK, extension, native host, desktop runtime, provider, and frontend tool flow.
+sidebar:
+  order: 2
+---
+
+Pedelec connects a browser page to an AI agent without giving the page direct access to local processes. The connection is split into several components, each with a narrow responsibility.
+
+## Components
+
+### Web application
+
+Your application creates the `Pedelec` client and session objects. It renders messages and status, accepts user input, and implements any frontend tools made available to the agent.
+
+The application is responsible for:
+
+- deciding when to create, resume, or end a session;
+- displaying provider and connection state;
+- accumulating streamed text into messages;
+- validating tool arguments before changing application state;
+- cleaning up event handlers and pending UI interactions; and
+- deciding whether an event still belongs to the current page, route, canvas, or editor instance.
+
+### TypeScript SDK
+
+`@kaoruisaac/pedelec` provides the public browser API:
+
+- `Pedelec` manages the extension connection and request/response bridge.
+- `PedelecSession` represents one agent session.
+- `defineTool()` preserves useful TypeScript types while defining a serializable tool manifest.
+- event callbacks normalize chat, status, tool, error, and ended events for the application.
+
+The SDK must be instantiated in a browser page. It is not a Node.js client and is not a server-side transport.
+
+### Chrome Extension
+
+The extension accepts external SDK connections from allowed web origins. It:
+
+- identifies the requesting origin;
+- asks the user to approve an origin before session creation or resume;
+- stores approved origins locally in extension storage;
+- forwards requests through Chrome Native Messaging; and
+- routes runtime events back to the correct SDK channel and session.
+
+The extension is also responsible for page-disconnect behavior such as automatically ending a page-scoped session when its last SDK route disappears.
+
+### Native Messaging host
+
+The native host is the Chrome-approved bridge from the extension into the installed desktop application. The web page does not connect to this executable directly.
+
+If the host is missing or not registered, SDK operations that need the desktop runtime fail with errors such as `NATIVE_HOST_UNAVAILABLE`.
+
+### Desktop runtime
+
+The Pedelec Desktop App owns the Core Runtime. It:
+
+- creates and tracks sessions;
+- stores provider and model settings;
+- prepares a sandbox for a session;
+- launches or resumes the selected provider process;
+- converts provider output into normalized events;
+- generates tool artifacts for the agent; and
+- waits for tool results before continuing the agent turn.
+
+The browser application does not need to know the Core IPC protocol or provider-specific command-line details.
+
+### Provider
+
+A provider is the agent backend selected for a session, such as `codex`, `gemini`, `opencode`, `cursor`, `claude`, or `ollama`.
+
+Provider availability depends on the user's machine. CLI-backed providers usually require the relevant command to be installed, present in `PATH`, and authenticated. Ollama sessions use Pedelec's bundled agent executable but still require a reachable Ollama server and an installed model.
+
+## What happens during `createSession()`
+
+A typical explicit-provider session follows this flow:
+
+1. The application calls `pedelec.createSession({ provider, model, skills })`.
+2. The SDK validates the basic input and serializes the skills manifest. Inline handler functions remain in the browser and are not sent to Core.
+3. The extension checks whether the page origin is approved. If it is not, the session request waits while the extension popup asks the user.
+4. The extension opens a Native Messaging connection when needed.
+5. The desktop runtime creates a session and sandbox, then returns a `sessionId`.
+6. The extension subscribes the current SDK route to that session.
+7. The SDK returns a `PedelecSession` object.
+
+Creating a session does not necessarily launch a long-running provider process immediately. Provider execution is managed by the desktop runtime when the session is prepared or receives a turn.
+
+## What happens during `sendText()`
+
+```text
+sendText(text)
+  ↓
+SDK marks the session running
+  ↓
+Extension forwards send_text
+  ↓
+Desktop runtime starts/resumes provider work
+  ↓
+Provider emits assistant output and/or a tool call
+  ↓
+SDK dispatches onChat(), onStatus(), or onTool()
+  ↓
+Runtime emits done/idle
+  ↓
+sendText() resolves
+```
+
+The SDK assigns a local `turnId` after accepting a turn. This helps the UI group callbacks, but it is not a provider session identifier and must not be parsed.
+
+Only one active turn is allowed per session. A second `sendText()` while the first is active rejects with `SESSION_BUSY`.
+
+## What happens during a tool call
+
+1. The application included a tool definition in `skills.tools`.
+2. Core generated the agent-facing tool files in the session sandbox.
+3. The agent decides that it needs the tool and issues a tool call.
+4. Core emits a normalized tool event and waits for a result.
+5. The SDK sets the session status to `waiting_tool_result`.
+6. The SDK selects a handler in this order: named handler, inline handler, generic fallback.
+7. The handler runs in the browser page and returns a JSON-serializable result.
+8. The SDK submits the result through the extension and desktop runtime.
+9. The agent continues and the session eventually returns to `idle`, ends, or errors.
+
+The SDK handles the transport, but the application owns the semantics and safety of the operation. For example, a tool named `delete_layer` should still check that the requested layer exists and that the current editor generation is valid.
+
+## Ownership boundaries
+
+| Concern | Owner |
+| --- | --- |
+| Message and status UI | Web application |
+| Validation of agent-generated tool arguments | Web application |
+| Origin approval | Extension and user |
+| Browser-to-native transport | Extension and native host |
+| Session and provider lifecycle | Desktop runtime |
+| Provider authentication and network behavior | Selected provider and user configuration |
+| Determining whether a late callback is stale | Web application |
+
+## No application-managed localhost server
+
+The SDK does not require your web application to expose a local port. The extension uses Native Messaging, and the native host talks to the desktop runtime over Pedelec's local Core IPC. Those internal transports are implementation details and should not be called directly by normal SDK integrations.
+
+For exact browser and origin constraints, continue to [Requirements and browser support](../getting-started/requirements/).

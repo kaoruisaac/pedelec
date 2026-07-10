@@ -1,0 +1,258 @@
+---
+title: PedelecSession API
+description: Property, turn, event, tool-handler, status, and lifecycle reference for PedelecSession.
+sidebar:
+  order: 2
+---
+
+`PedelecSession<TToolName>` represents one Core agent session.
+
+```ts
+import type { PedelecSession } from "@kaoruisaac/pedelec";
+```
+
+Applications obtain sessions from `Pedelec.createSession()` or `Pedelec.resumeSession()` rather than constructing the class directly.
+
+## Type parameter
+
+```ts
+class PedelecSession<TToolName extends string = string>
+```
+
+`TToolName` narrows the named `onTool(name, handler)` overload. `createSession()` can infer it from a readonly tools array.
+
+## Properties
+
+### `sessionId`
+
+```ts
+readonly sessionId: string
+```
+
+Core session/thread identifier. Persist it when using `autoEndOnDisconnect: false` and planning to resume.
+
+### `provider`
+
+```ts
+readonly provider: string
+```
+
+Provider known when this SDK handle was registered. A fresh resumed handle may currently expose an empty string.
+
+### `model`
+
+```ts
+readonly model?: string
+```
+
+Model known by this SDK handle. It can be `undefined` when no explicit/default model was selected or after a fresh resume.
+
+### `sessionCreatedAt`
+
+```ts
+readonly sessionCreatedAt: number
+```
+
+Browser `Date.now()` timestamp when this session object was constructed. It is not guaranteed to be the original Core thread creation time after resume.
+
+## `prepare()`
+
+```ts
+prepare(): Promise<void>
+```
+
+Optionally prepares provider/session startup before the first user turn.
+
+Behavior:
+
+- idempotent after success;
+- concurrent prepare calls share one promise;
+- rejects with `SESSION_BUSY` during an active user turn;
+- rejects with `SESSION_ENDED` after end;
+- hides preparation chat deltas from `onChat()`;
+- can emit status/error events;
+- is not required before `sendText()`.
+
+```ts
+await session.prepare().catch(() => {
+  // Keep sendText available; preparation is an optimization.
+});
+```
+
+## `sendText()`
+
+```ts
+sendText(text: string): Promise<void>
+```
+
+Starts one user turn.
+
+The promise resolves after a completion/idle event and rejects when the turn fails, the session ends, or another turn is already active.
+
+Text output is delivered through `onChat()`.
+
+```ts
+await session.sendText("Analyze the current page.");
+```
+
+The SDK does not trim or require non-empty text; applications should validate composer input.
+
+Common errors: `SESSION_BUSY`, `SESSION_ENDED`, `SEND_TEXT_FAILED`, `SESSION_ERROR`, and transport/provider errors.
+
+## `onChat()`
+
+```ts
+onChat(
+  handler: (text: string, ctx: ChatEventContext) => void,
+): () => void
+```
+
+Registers an incremental text handler and returns an unsubscribe function.
+
+```ts
+const off = session.onChat((delta, ctx) => {
+  transcript.append(ctx.turnId, delta);
+});
+```
+
+Preparation output is not delivered to chat handlers.
+
+## `onTool()`
+
+### Generic fallback overload
+
+```ts
+onTool(
+  handler: (
+    tool: TToolName,
+    args: unknown,
+    ctx: ToolCallContext,
+  ) => unknown | Promise<unknown>,
+): () => void
+```
+
+### Named overload
+
+```ts
+onTool<TArgs = unknown, TResult = unknown>(
+  toolName: TToolName,
+  handler: ToolSpecificHandler<TArgs, TResult>,
+): () => void
+```
+
+Named handlers override inline handlers; inline handlers override the generic fallback.
+
+```ts
+const off = session.onTool(
+  "update_counter",
+  (args: { delta: number }) => ({
+    value: counter.add(args.delta),
+  }),
+);
+```
+
+Handlers may be sync or async. Return JSON-compatible values. Throwing is converted into a `TOOL_HANDLER_ERROR` result for the agent.
+
+## `onError()`
+
+```ts
+onError(
+  handler: (error: PedelecError, ctx: ErrorEventContext) => void,
+): () => void
+```
+
+Observes Core and SDK session errors.
+
+```ts
+const off = session.onError((error, ctx) => {
+  console.error(ctx.source, error.code, error.message, error.details);
+});
+```
+
+Still catch promises from `prepare()`, `sendText()`, and `end()`.
+
+## `onStatus()`
+
+```ts
+onStatus(
+  handler: (
+    status: PedelecSessionStatus,
+    ctx: StatusEventContext,
+  ) => void,
+): () => void
+```
+
+Runs when the local status value changes. It does not immediately emit the initial value.
+
+```ts
+renderStatus(session.getStatus());
+const off = session.onStatus(renderStatus);
+```
+
+## `onEnded()`
+
+```ts
+onEnded(handler: (ctx: EndedEventContext) => void): () => void
+```
+
+Runs once when the session first becomes ended.
+
+```ts
+const off = session.onEnded(() => {
+  disableComposer();
+});
+```
+
+## `getStatus()`
+
+```ts
+getStatus(): PedelecSessionStatus
+```
+
+Returns the current browser-side status snapshot.
+
+```ts
+if (session.getStatus() === "idle") {
+  await session.sendText(text);
+}
+```
+
+This is useful for UI gating but does not replace catching `SESSION_BUSY`, because state can change between the check and the request.
+
+## `end()`
+
+```ts
+end(): Promise<void>
+```
+
+Ends the Core session and marks the SDK handle ended.
+
+On success:
+
+- `onEnded()` runs once;
+- pending turn/preparation rejects with `SESSION_ENDED`;
+- the session is removed from the client registry;
+- later `sendText()`/`prepare()` rejects.
+
+Calling `end()` on an already-ended handle resolves immediately.
+
+If the end request fails, the method emits an SDK error and rejects; it does not claim Core ended successfully.
+
+## Handler cleanup
+
+All event registrations return a `() => void` disposer. Call them when the owning component or application state is destroyed.
+
+Unsubscribing does not cancel an already-running provider turn or handler promise.
+
+## Status values
+
+```ts
+type PedelecSessionStatus =
+  | "idle"
+  | "running"
+  | "waiting_tool_result"
+  | "ended"
+  | "error";
+```
+
+See [Session status and events](../sdk/status-and-events/) for transitions and context fields.

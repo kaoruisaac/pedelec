@@ -1,0 +1,258 @@
+---
+title: Pedelec API
+description: Constructor and method reference for the Pedelec browser client.
+sidebar:
+  order: 1
+---
+
+`Pedelec` is the browser client that owns the Chrome Extension bridge and creates or resumes `PedelecSession` objects.
+
+```ts
+import { Pedelec } from "@kaoruisaac/pedelec";
+```
+
+## Constructor
+
+```ts
+new Pedelec(options?: PedelecOptions)
+```
+
+```ts
+type PedelecOptions = {
+  bridgeTimeoutMs?: number;
+};
+```
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `options.bridgeTimeoutMs` | `number` | `30_000` | Maximum wait for an Extension bridge response. Values below 1 are clamped to 1. |
+
+The constructor attempts to connect to the Pedelec Chrome Extension immediately. Construct it only in a browser page after hydration.
+
+```ts
+const pedelec = new Pedelec({
+  bridgeTimeoutMs: 30_000,
+});
+```
+
+## `createSession()`
+
+```ts
+createSession(): Promise<PedelecSession<string>>;
+
+createSession<const TTools extends readonly ToolDefinition[]>(
+  input: CreateSessionInput<TTools>,
+): Promise<PedelecSession<ToolNameOf<TTools>>>;
+```
+
+Creates a new Core session and subscribes the current SDK channel to it.
+
+### Input
+
+```ts
+type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
+  | {
+      provider: ProviderCode;
+      model?: string;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    }
+  | {
+      provider?: undefined;
+      model?: never;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    };
+```
+
+### Resolution rules
+
+- No `provider`: use Desktop `defaultProvider`; verify it is available; use its default model if configured.
+- `provider` only: use that provider and its Desktop default model when configured.
+- `provider` + `model`: use both explicit values.
+- `model` without `provider`: invalid.
+- `autoEndOnDisconnect`: defaults to `true`.
+
+### Returns
+
+A `PedelecSession` registered in this client.
+
+### Common errors
+
+- approval and transport errors;
+- `DEFAULT_PROVIDER_NOT_SET`;
+- `DEFAULT_PROVIDER_UNAVAILABLE`;
+- `INVALID_INPUT`;
+- `MODEL_REQUIRED` for Ollama without a model;
+- provider/Core creation errors.
+
+### Example
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: true,
+});
+```
+
+## `listProviders()`
+
+```ts
+listProviders(): Promise<ProviderInfo[]>
+```
+
+Returns provider discovery results from Desktop Core.
+
+```ts
+type ProviderInfo = {
+  name: string;
+  code: ProviderCode;
+  path: string | null;
+  available: boolean;
+  error: string | null;
+};
+```
+
+```ts
+const providers = await pedelec.listProviders();
+const ready = providers.filter((provider) => provider.available);
+```
+
+`available` is a discovery/setup signal, not a guarantee that every model or remote service is ready.
+
+### Common errors
+
+Extension, native host, Core IPC, and bridge timeout errors.
+
+## `getSettings()`
+
+```ts
+getSettings(): Promise<PedelecSettings>
+```
+
+Reads the SDK-visible Desktop defaults.
+
+```ts
+type PedelecSettings = {
+  defaultProvider: ProviderCode | null;
+  defaultModels: Partial<Record<ProviderCode, string>>;
+};
+```
+
+The SDK validates the returned shape. An incompatible response rejects with `SDK_PROTOCOL_ERROR`.
+
+```ts
+const settings = await pedelec.getSettings();
+console.log(settings.defaultProvider);
+```
+
+## `getApprovalStatus()`
+
+```ts
+getApprovalStatus(): Promise<ApprovalStatus>
+```
+
+```ts
+type ApprovalStatus = {
+  installed: boolean;
+  approved: boolean;
+  origin: string | null;
+};
+```
+
+Reads the current origin's Extension approval state.
+
+Special behavior: when the Extension is unavailable or disconnected, this method resolves instead of throwing:
+
+```ts
+{
+  installed: false,
+  approved: false,
+  origin: location.origin
+}
+```
+
+Other errors, such as protocol/storage failures, may reject.
+
+Calling this method does not open the approval popup. `createSession()` or `resumeSession()` triggers approval when required.
+
+## `resumeSession()`
+
+```ts
+resumeSession(sessionId: string): Promise<PedelecSession<string>>
+```
+
+Subscribes this SDK client to an existing Core session.
+
+```ts
+const session = await pedelec.resumeSession(savedSessionId);
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `sessionId` | `string` | Non-empty Core session/thread identifier. |
+
+### Returns
+
+A session handle registered in this client. A newly resumed handle may not contain provider/model metadata because the current bridge response returns only the ID.
+
+### Common errors
+
+- `INVALID_INPUT` for an empty ID;
+- approval errors;
+- session-not-found/runtime errors;
+- transport errors.
+
+After resume, register chat, status, error, ended, and tool handlers again.
+
+## `request<T>()`
+
+```ts
+request<T>(
+  type: string,
+  payload?: Record<string, unknown>,
+): Promise<T>
+```
+
+Low-level bridge request API.
+
+```ts
+const result = await pedelec.request<{ sessionId: string }>(
+  "create_session",
+  {
+    input: {
+      provider: "codex",
+      autoEndOnDisconnect: true,
+    },
+  },
+);
+```
+
+:::caution
+Prefer typed public methods. `request<T>()` does not validate that your generic `T` matches the runtime response, and low-level operation names/payloads are easier to misuse.
+:::
+
+The method:
+
+- rejects immediately when the client has a stored disconnect error;
+- applies `bridgeTimeoutMs`;
+- generates a request ID;
+- posts through the Extension port; and
+- normalizes failed bridge responses as `PedelecError`.
+
+`T` is compile-time only.
+
+## Client disconnection
+
+When the Extension port disconnects, pending requests reject and registered sessions receive an SDK error event. This client does not expose a reconnect method. Recover by restoring the external conditions and creating a fresh browser client/page lifecycle.
+
+## Related references
+
+- [`PedelecSession`](./pedelec-session/)
+- [Tools API](./tools/)
+- [Types](./types/)
+- [Error codes](./error-codes/)

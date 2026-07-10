@@ -1,0 +1,284 @@
+---
+title: Tool Args Schema
+description: Describe tool arguments with Pedelec's JSON-compatible schema subset and understand its supported and unsupported fields.
+sidebar:
+  order: 3
+---
+
+`argsSchema` describes the arguments an agent should send to a tool. Pedelec uses a JSON-compatible subset designed for common frontend tool inputs.
+
+It is not the complete JSON Schema specification.
+
+## Root schema
+
+The root must always be an object:
+
+```ts
+import type { ToolArgsSchema } from "@kaoruisaac/pedelec";
+
+const schema = {
+  type: "object",
+  properties: {
+    query: { type: "string" },
+  },
+  required: ["query"],
+} satisfies ToolArgsSchema;
+```
+
+A no-argument tool still uses an object:
+
+```ts
+const emptySchema = {
+  type: "object",
+  properties: {},
+  required: [],
+} satisfies ToolArgsSchema;
+```
+
+## Shared metadata
+
+Schema nodes can include:
+
+```ts
+{
+  description?: string;
+  default?: JsonValue;
+  examples?: JsonValue[];
+}
+```
+
+`default` and `examples` guide the agent. The SDK does not automatically insert a missing default into received args.
+
+```ts
+{
+  type: "string",
+  description: "Output language.",
+  default: "en",
+  examples: ["en", "zh-TW"]
+}
+```
+
+Your handler must still decide what to do when an optional property is missing.
+
+## String
+
+```ts
+{
+  type: "string",
+  enum?: string[],
+  minLength?: number,
+  maxLength?: number,
+  pattern?: string
+}
+```
+
+Example:
+
+```ts
+role: {
+  type: "string",
+  enum: ["viewer", "editor"],
+  description: "Role to assign."
+}
+```
+
+`pattern` is a string representation of a regular-expression pattern. Keep patterns simple and portable.
+
+## Number and integer
+
+```ts
+{
+  type: "number" | "integer",
+  enum?: number[],
+  minimum?: number,
+  maximum?: number
+}
+```
+
+Use `integer` for counts and pixel dimensions when fractions are not meaningful.
+
+```ts
+delta: {
+  type: "integer",
+  minimum: -10,
+  maximum: 10
+}
+```
+
+## Boolean
+
+```ts
+{
+  type: "boolean",
+  enum?: boolean[]
+}
+```
+
+Usually `enum` is unnecessary for booleans, but it is part of the type.
+
+## Array
+
+```ts
+{
+  type: "array",
+  items: ToolArgsSchemaNode,
+  minItems?: number,
+  maxItems?: number,
+  uniqueItems?: boolean
+}
+```
+
+Example:
+
+```ts
+ids: {
+  type: "array",
+  items: { type: "string", minLength: 1 },
+  minItems: 1,
+  maxItems: 50,
+  uniqueItems: true
+}
+```
+
+Use sensible bounds. An agent-generated array should not be able to request an unbounded bulk operation.
+
+## Object
+
+```ts
+{
+  type: "object",
+  properties?: Record<string, ToolArgsSchemaNode>,
+  required?: string[]
+}
+```
+
+Example:
+
+```ts
+position: {
+  type: "object",
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" }
+  },
+  required: ["x", "y"]
+}
+```
+
+Only put property names in `required` that are actually defined and required by your handler.
+
+## `oneOf`
+
+```ts
+{
+  oneOf: ToolArgsSchemaNode[]
+}
+```
+
+Example:
+
+```ts
+target: {
+  oneOf: [
+    {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"]
+    },
+    {
+      type: "object",
+      properties: { index: { type: "integer", minimum: 0 } },
+      required: ["index"]
+    }
+  ]
+}
+```
+
+Prefer clearly distinguishable alternatives. Ambiguous branches make agent output and application validation harder.
+
+## Reuse schema fragments
+
+`$ref` and `$defs` are not supported. Reuse TypeScript constants:
+
+```ts
+import type { ToolArgsSchemaNode } from "@kaoruisaac/pedelec";
+
+const pointSchema = {
+  type: "object",
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" },
+  },
+  required: ["x", "y"],
+} satisfies ToolArgsSchemaNode;
+
+const moveShapeSchema = {
+  type: "object",
+  properties: {
+    shapeId: { type: "string", minLength: 1 },
+    destination: pointSchema,
+  },
+  required: ["shapeId", "destination"],
+} satisfies ToolArgsSchema;
+```
+
+## Unsupported fields
+
+The documented first schema version does not support fields such as:
+
+- `$defs` and `$ref`;
+- `additionalProperties`;
+- `format`;
+- `exclusiveMinimum` and `exclusiveMaximum`;
+- `multipleOf`;
+- full JSON Schema conditionals and composition keywords beyond the supported `oneOf` shape; and
+- arbitrary custom keywords.
+
+Do not copy a large OpenAPI or JSON Schema document into `argsSchema` and assume it will work.
+
+## Serialization requirements
+
+The SDK clones the schema through JSON serialization before sending it to Core. Therefore the schema cannot contain:
+
+- functions;
+- symbols;
+- `BigInt`;
+- cyclic references; or
+- values with meaningful behavior that is lost in JSON.
+
+A serialization failure rejects session creation with `INVALID_INPUT`.
+
+## Runtime validation is still required
+
+The schema helps the provider and Core understand the expected shape. It does not replace application-level validation.
+
+```ts
+session.onTool("update_counter", (raw) => {
+  const args = raw as { delta?: unknown };
+
+  if (!Number.isInteger(args.delta) || Math.abs(args.delta as number) > 100) {
+    return {
+      error: {
+        code: "INVALID_DELTA",
+        message: "delta must be an integer between -100 and 100.",
+      },
+    };
+  }
+
+  return updateCounter(args.delta as number);
+});
+```
+
+Validate authorization, current application state, resource existence, and any rules that cannot be expressed in the schema.
+
+## Schema design guidance
+
+- Prefer a few explicit properties over one generic object.
+- Use enums when the domain is small and stable.
+- Add descriptions to non-obvious fields.
+- Add bounds to arrays and numeric operations.
+- Make destructive intent explicit.
+- Avoid optional fields that radically change behavior without a clear discriminator.
+- Keep tool inputs small enough to inspect and log safely.
+
+Continue with [Registering tool handlers](./handlers/).

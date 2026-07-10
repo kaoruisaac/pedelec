@@ -1,0 +1,156 @@
+---
+title: 建立 Client
+description: 設定 Pedelec、理解 Extension port、選擇 client lifetime 並處理 bridge timeout。
+sidebar:
+  order: 1
+---
+
+`Pedelec` 是 browser SDK 的入口。一個 instance 擁有一條連向 Pedelec Chrome Extension 的 external connection，並負責 request correlation、bridge timeout、event routing，以及透過這個 client 建立的 session objects。
+
+## Constructor
+
+```ts
+import { Pedelec } from "@kaoruisaac/pedelec";
+
+const pedelec = new Pedelec();
+```
+
+Constructor 會立刻嘗試連到設定好的 Pedelec Extension ID，不會等待 Desktop App 或 provider ready。
+
+若執行時沒有 browser `window`，或不存在 `chrome.runtime.connect`，instance 會記錄 `EXTENSION_UNAVAILABLE`。後續 bridge method 會從這個狀態 reject；hydration 後同一 instance 不會自動 retry。
+
+## Options
+
+```ts
+const pedelec = new Pedelec({
+  bridgeTimeoutMs: 30_000,
+});
+```
+
+```ts
+type PedelecOptions = {
+  bridgeTimeoutMs?: number;
+};
+```
+
+### `bridgeTimeoutMs`
+
+SDK request 等待 Extension bridge response 的最長時間。
+
+- 預設：`30_000` ms。
+- 小於 `1` 的值會被 clamp 為 `1`。
+- 適用於 `listProviders()`、`getSettings()`、`createSession()` 與 low-level `request<T>()` 等 bridge request。
+- 和 tool 的 `timeoutMs` 不同。
+- 不限制 `sendText()` 的整體 turn 時間；`sendText()` 先等待 bridge request，再等待 active agent turn 結束。
+
+Timeout 會 reject `SDK_BRIDGE_TIMEOUT`，並在 `details` 附上 request metadata。
+
+```ts
+try {
+  await pedelec.listProviders();
+} catch (error) {
+  if ((error as { code?: string }).code === "SDK_BRIDGE_TIMEOUT") {
+    showConnectionHelp();
+  }
+}
+```
+
+在本機啟動特別慢時可提高數值，但過大的 timeout 也會讓斷線 UI 長時間像是卡住。應搭配 visible loading state 與分層 troubleshooting。
+
+## 建議 lifetime
+
+一個 browser page lifecycle 共用一個 client。
+
+```ts
+let pedelec: Pedelec | null = null;
+
+export function getPedelec() {
+  pedelec ??= new Pedelec();
+  return pedelec;
+}
+```
+
+同一 client 可以建立並追蹤多個 `PedelecSession`。共用 client 能避免不必要的 Extension ports，也讓 SDK 集中路由 session events。
+
+不要把 client 當成跨 page singleton。Page refresh 會建立新的 JavaScript environment，因此一定會有新的 client 與 Extension port。
+
+## Browser-only initialization
+
+### 一般 browser application
+
+```ts
+if (typeof window !== "undefined") {
+  const pedelec = new Pedelec();
+  startPedelecUI(pedelec);
+}
+```
+
+### Framework lifecycle
+
+在 framework browser lifecycle 建立 client，不要放入 server serialized state。
+
+```ts
+// 概念範例
+onBrowserMount(() => {
+  const pedelec = new Pedelec();
+  setPedelecClient(pedelec);
+});
+```
+
+SSR module 中不要這樣做：
+
+```ts
+// 不要在 server renderer 會 import 的 module 中建立。
+export const pedelec = new Pedelec();
+```
+
+這個 instance 在沒有 `window` 時就已建立，hydration 後仍然 unavailable。
+
+## Extension connection 行為
+
+Client 會產生唯一 `channelId` 並開啟 external runtime port。每個 request 都包含 channel ID 與唯一 request ID；其他 channel 的 session event 會被忽略。
+
+Port disconnect 時：
+
+- 所有 pending bridge request reject；
+- client 記錄 `EXTENSION_DISCONNECTED`；
+- 每個已註冊 session 收到 SDK-originated error callback；
+- client 不會自動開啟 replacement port。
+
+一般 recovery 是 disable active controls，請使用者檢查 Extension 後 reload page。只有在 Extension 已恢復，而且應用程式明確清理舊 session state 時，才考慮在同一 page 建立第二個 client。
+
+## Client 與 session 的責任
+
+| `Pedelec` client | `PedelecSession` |
+| --- | --- |
+| Extension transport | 單一 agent conversation/thread |
+| Provider 與 settings query | Turn lifecycle |
+| Create/resume request | Chat、status、tool、error callbacks |
+| Request timeout | `prepare()`、`sendText()`、`end()` |
+| 依 session ID 路由 event | Session status 與 handler registration |
+
+## Health checks
+
+沒有單一 method 能證明所有 layer 都健康：
+
+```ts
+const approval = await pedelec.getApprovalStatus();
+const providers = approval.installed
+  ? await pedelec.listProviders()
+  : [];
+```
+
+- `getApprovalStatus()` 主要檢查 browser-to-extension。
+- `listProviders()` 還需要 native host 與 Desktop Core。
+- 建立 session 會更深入驗證 provider configuration。
+- 傳送 turn 才真正驗證 provider execution。
+
+請採 progressive checks，不要只維護一個永久 `connected` boolean。
+
+## 多個 clients
+
+技術上可以建立多個 clients；每個都會開啟獨立 Extension port，只接收自己 channel 的 events。除非不同 application root 確實需要獨立 lifecycle，否則建議共用。
+
+同一 session 需要多個 view 時，通常共用 client 與 application store 更簡單。Session 同時被多條 SDK connection 路由時，`autoEndOnDisconnect` 要等最後一條 route 消失才會 end。
+
+下一頁：[Providers、Models 與 Settings](./providers-and-models/)。

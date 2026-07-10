@@ -1,0 +1,128 @@
+---
+title: 環境需求與瀏覽器支援
+description: 使用 SDK 前確認 browser、origin、Desktop Runtime、native host、provider 與 SSR 限制。
+sidebar:
+  order: 1
+---
+
+Pedelec 是 browser-to-local-runtime 整合。只安裝 npm package 還不夠；使用者的 browser 與電腦還必須具備 Extension、Desktop Runtime、Native Messaging registration，以及至少一個可用 provider。
+
+## 必要元件
+
+### 1. 支援的 browser page
+
+SDK 透過 `chrome.runtime.connect(extensionId)` 連線，因此必須在已安裝 Pedelec Chrome Extension、且允許 external connection 的一般 browser page 執行。
+
+目前 Extension 接受：
+
+- 使用 `https://` 的正式網站；
+- `http://localhost/...`；
+- `http://127.0.0.1/...`。
+
+只提供 plain HTTP 的正式網站不在允許範圍內。`file://`、opaque origin，以及任意區域網路 HTTP hostname 也不是目前支援的連線方式。
+
+:::note
+Origin 包含 scheme、host 與 port。例如 `http://localhost:3000` 和 `http://localhost:5173` 是兩個不同 origin，可能需要分別核准。
+:::
+
+### 2. Pedelec Chrome Extension
+
+Extension 必須安裝並啟用在開啟 Web App 的同一個 Chrome profile。
+
+`getApprovalStatus()` 無法連到 Extension 時會回傳 `installed: false`。這也可能代表既有 connection 已中斷，因此 UI 建議寫成「Pedelec Extension 目前無法使用」，不要在沒有其他證據時直接斷言「尚未安裝」。
+
+### 3. Pedelec Desktop App
+
+需要 Core Runtime 的操作發生時，Desktop App 必須正在執行。Session、provider process、settings 與 local runtime endpoint 都由它管理。
+
+Extension 可以正常回應，但 Desktop App 沒有啟動。這種情況下 approval status 仍可能顯示 installed，真正建立 session 或讀取 provider 時才會失敗。
+
+### 4. 已註冊的 Native Messaging host
+
+Desktop App 必須替 Chrome 註冊 Pedelec native host。Extension 透過它跨越 browser security boundary。
+
+Host 缺少或損壞時，常見錯誤包括 `NATIVE_HOST_UNAVAILABLE`、`NATIVE_CONNECTION_CLOSED` 或 Core runtime availability error。
+
+### 5. 至少一個可用 provider
+
+```ts
+const providers = await pedelec.listProviders();
+const available = providers.filter((provider) => provider.available);
+```
+
+CLI provider 一般需要：
+
+- 已安裝；
+- command 能被 Desktop App 的環境找到；
+- provider 需要登入時已完成 authentication；
+- 選擇的 model id 能被該 provider 版本接受。
+
+Ollama 的 `available` 只表示 Pedelec 找得到內附的 agent executable，不代表 Ollama server 正在執行或指定 model 已安裝。
+
+## JavaScript 與 package 條件
+
+SDK 是 ESM package，並包含 TypeScript declaration，適合現代 frontend bundler 與 browser-side TypeScript／JavaScript。
+
+```ts
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
+```
+
+不限定 framework。SolidJS、React、Vue、Astro client island 與 vanilla TypeScript 都能使用相同 API，只要 client initialization 發生在 browser。
+
+## 不支援的執行環境
+
+不要在以下環境建立 client：
+
+- Node.js script；
+- SSR server render；
+- server action 或 API route；
+- Web Worker 或 Service Worker；
+- 不屬於一般核准 page integration 的 browser extension background worker；
+- 沒有相容 Chrome runtime mock 的 test runner。
+
+Constructor 發現沒有 `window` 時，會建立一個之後以 `EXTENSION_UNAVAILABLE` 拒絕 transport call 的 client。Hydration 完成後，這個 instance 不會自動重新連線；應在 browser lifecycle 建立新的 client。
+
+```ts
+let pedelec: Pedelec | undefined;
+
+if (typeof window !== "undefined") {
+  pedelec = new Pedelec();
+}
+```
+
+Framework 中更建議使用 client lifecycle hook，例如 SolidJS `onMount()` 或 React `useEffect()`，不要只靠 module-level condition。
+
+## SSR-safe 使用方式
+
+只匯入型別可以安全留在 server code：
+
+```ts
+import type { PedelecSession, ProviderInfo } from "@kaoruisaac/pedelec";
+```
+
+Runtime module 通常也能被匯入，但 server render 期間呼叫 `new Pedelec()` 只會得到無法使用的 disconnected client。不要把 client 放進要序列化的 server state，請在 hydration 後建立。
+
+## Provider 與 model 相容性
+
+Pedelec 會將 model identifier 交給指定 provider，不會用一份統一的 Pedelec model catalog 驗證。請使用安裝在使用者電腦上的 provider 版本能接受的 identifier。
+
+Ollama 必須從以下其中一處取得 model：
+
+- `createSession({ provider: "ollama", model: "..." })`；
+- Desktop App 的 `defaultModels.ollama`。
+
+兩者都沒有時會收到 `MODEL_REQUIRED`。
+
+## Preflight checklist
+
+顯示主要 agent UI 前，請確認：
+
+1. 程式碼已在 browser hydration 後執行。
+2. `getApprovalStatus()` 沒有顯示 Extension unavailable。
+3. 目前 origin 可被核准。
+4. `listProviders()` 至少有一個 available provider。
+5. Desktop App 持續執行。
+6. 有提供 model 時，該 model 對選擇的 provider 有意義。
+7. UI 能處理 disconnect，不假設設定永遠有效。
+
+下一步請閱讀[安裝](./installation/)。

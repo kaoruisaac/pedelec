@@ -1,0 +1,146 @@
+---
+title: 網站核准與連線狀態
+description: 設計 Extension availability、per-origin approval、native runtime 與 provider readiness 的 connect flow。
+sidebar:
+  order: 4
+---
+
+Pedelec 不允許任意網站自動建立本機 agent session。Chrome Extension 會辨識 page origin，並在該 origin 第一次呼叫 `createSession()` 或 `resumeSession()` 前要求使用者核准。
+
+## 讀取 approval status
+
+```ts
+const status = await pedelec.getApprovalStatus();
+```
+
+```ts
+type ApprovalStatus = {
+  installed: boolean;
+  approved: boolean;
+  origin: string | null;
+};
+```
+
+### `installed`
+
+`true` 表示 SDK 已連到 Pedelec Extension，並收到有效的 approval-status response。
+
+`false` 表示目前 page 無法使用 Extension，可能原因包括：
+
+- 尚未安裝 Extension；
+- Extension 被停用或安裝在另一個 browser profile；
+- page origin 不符合 external connection 規則；
+- Extension service worker 或 SDK port 已中斷；
+- SDK 在 browser page 以外建立。
+
+因為多種原因都會得到同一結果，UI 建議顯示「Pedelec Extension 目前無法使用」，不要直接顯示「尚未安裝」。
+
+### `approved`
+
+`true` 表示目前 origin 已記錄在 Extension local storage 的核准清單。
+
+Approval 以 origin 為單位，origin 包含 scheme、hostname 與 port。開發 port 改變時可能需要重新核准。
+
+### `origin`
+
+目前 page 的 normalized origin，例如 `https://app.example.com` 或 `http://localhost:5173`。
+
+無法驗證 HTTP／HTTPS origin 時可能是 `null`。
+
+## 什麼操作會開啟 approval popup
+
+`getApprovalStatus()` 只讀取狀態，不會主動提出核准要求。
+
+尚未核准時，第一個建立或 resume session 的操作才會觸發：
+
+```ts
+await pedelec.createSession({ provider: "codex" });
+// 或
+await pedelec.resumeSession(savedSessionId);
+```
+
+Extension 會暫存 request、開啟 popup，等待使用者 approve 或 reject。核准後，原本等待的操作會自動繼續。
+
+Approval request 有 timeout。Popup 被關閉但沒有完成操作，也會被視為拒絕或未完成。
+
+## 建議的 connect button state machine
+
+Extension、runtime 與 provider readiness 應分開檢查。Approval status 無法證明 Desktop App 正在執行。
+
+| UI 狀態 | 條件 | 建議操作 |
+| --- | --- | --- |
+| Checking | Status request pending | Disable button 並顯示進度 |
+| Extension unavailable | `installed === false` | 引導安裝或啟用 Extension |
+| Ready to approve | 已安裝但 `approved === false` | Button 顯示「Connect Pedelec」 |
+| Connecting | `createSession()` pending | 保留 popup 操作提示 |
+| Runtime unavailable | Native/Core request 失敗 | 引導啟動或修復 Desktop App |
+| No provider | 沒有 `ProviderInfo.available === true` | 顯示 provider setup |
+| Connected | Session 建立成功 | 顯示 provider、model 與 session status |
+| Disconnected | Active SDK port 中斷 | Disable send，提供 reload/reconnect flow |
+
+```ts
+async function connectPedelec() {
+  setConnectionState("checking");
+
+  const approval = await pedelec.getApprovalStatus();
+  if (!approval.installed) {
+    setConnectionState("extension-unavailable");
+    return;
+  }
+
+  setConnectionState(approval.approved ? "connecting" : "awaiting-approval");
+
+  try {
+    const providers = await pedelec.listProviders();
+    const provider = providers.find((item) => item.available);
+    if (!provider) {
+      setConnectionState("no-provider");
+      return;
+    }
+
+    const session = await pedelec.createSession({
+      provider: provider.code,
+    });
+
+    registerSession(session);
+    setConnectionState("connected");
+  } catch (error) {
+    routeConnectionError(error);
+  }
+}
+```
+
+## Approval 相關錯誤
+
+| Code | 意義 | UI 處理 |
+| --- | --- | --- |
+| `CREATE_SESSION_NOT_APPROVED` | 無法驗證 origin，或另一個 origin 正在等待核准 | 說明 origin conflict，稍後重試 |
+| `APPROVAL_REJECTED` | 使用者拒絕或關閉 approval flow | 回到 ready-to-approve |
+| `APPROVAL_TIMEOUT` | 使用者未在時限內完成 | 提供 retry，提醒保持 popup 開啟 |
+| `OPEN_POPUP_FAILED` | Chrome 無法自動開啟 Extension popup | 請使用者手動點 Pedelec Extension icon |
+| `STORAGE_ERROR` | Extension 無法讀寫 approved origins | 檢查 Extension，持續發生時考慮重裝 |
+| `INVALID_ORIGIN` | Popup action 收到非 HTTP(S) origin | 使用支援的 page origin |
+
+## Connection 相關錯誤
+
+| Code | 層級 | 常見處理 |
+| --- | --- | --- |
+| `EXTENSION_UNAVAILABLE` | Page → Extension | 檢查安裝、browser profile 與 origin |
+| `EXTENSION_DISCONNECTED` | Page → Extension | 停止 send，重新建立 page/client connection |
+| `NATIVE_HOST_UNAVAILABLE` | Extension → native host | 啟動或修復 Desktop App installation |
+| `NATIVE_CONNECTION_CLOSED` | Extension → native host | 重啟 Desktop App，安全的 read 操作可重試 |
+| `CORE_RUNTIME_UNAVAILABLE` | Native host → Core | 啟動 Desktop App 並確認 runtime registration |
+| `IPC_UNAVAILABLE` | Local Core IPC | 重啟 Desktop App，查看 local runtime log |
+| `SDK_BRIDGE_TIMEOUT` | SDK request timeout | 不要連續重送 write；先檢查下游元件 |
+
+## 不要從單一訊號過度推論
+
+- `installed: true` 不代表 Desktop App 正在執行。
+- Origin 已核准不代表 provider 可用。
+- `ProviderInfo.available: true` 不代表任意 model id 都有效。
+- Ollama provider available 不代表 server 或 model 已準備好。
+- 已 disconnected 的 client 不會自動 reconnect。
+
+穩健的 connection screen 應顯示失敗層級與具體修復方式，而不是只有一個「連線失敗」。
+
+下一步閱讀[建立 Client](../sdk/client/)，了解 client lifetime 與 bridge timeout。

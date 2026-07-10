@@ -1,0 +1,381 @@
+---
+title: Types
+description: Pedelec SDK 所有 public TypeScript types 的完整分類 reference。
+sidebar:
+  order: 4
+---
+
+以下 types 都由 `@kaoruisaac/pedelec` export。
+
+```ts
+import type {
+  PedelecOptions,
+  ProviderCode,
+  ProviderInfo,
+  PedelecSessionStatus,
+  ToolArgsSchema,
+} from "@kaoruisaac/pedelec";
+```
+
+## Client 與 session input
+
+### `PedelecOptions`
+
+```ts
+type PedelecOptions = {
+  bridgeTimeoutMs?: number;
+};
+```
+
+### `ProviderCode`
+
+```ts
+type ProviderCode =
+  | "codex"
+  | "gemini"
+  | "opencode"
+  | "cursor"
+  | "claude"
+  | "ollama";
+```
+
+### `CreateSessionInput`
+
+```ts
+type CreateSessionInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> =
+  | {
+      provider: ProviderCode;
+      model?: string;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    }
+  | {
+      provider?: undefined;
+      model?: never;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    };
+```
+
+Union 在 TypeScript 阻止只有 `model` 沒有 `provider`。
+
+## Provider 與 settings
+
+### `ProviderInfo`
+
+```ts
+type ProviderInfo = {
+  name: string;
+  code: ProviderCode;
+  path: string | null;
+  available: boolean;
+  error: string | null;
+};
+```
+
+### `PedelecSettings`
+
+```ts
+type PedelecSettings = {
+  defaultProvider: ProviderCode | null;
+  defaultModels: Partial<Record<ProviderCode, string>>;
+};
+```
+
+### `ApprovalStatus`
+
+```ts
+type ApprovalStatus = {
+  installed: boolean;
+  approved: boolean;
+  origin: string | null;
+};
+```
+
+## Errors 與 status
+
+### `PedelecError`
+
+```ts
+type PedelecError = {
+  code: string;
+  message: string;
+  details?: unknown;
+};
+```
+
+不要假設 `details` 有一種 global shape；依 `code` narrow 並驗證後使用。
+
+### `PedelecSessionStatus`
+
+```ts
+type PedelecSessionStatus =
+  | "idle"
+  | "running"
+  | "waiting_tool_result"
+  | "ended"
+  | "error";
+```
+
+## JSON value types
+
+### `JsonPrimitive`
+
+```ts
+type JsonPrimitive = string | number | boolean | null;
+```
+
+### `JsonValue`
+
+```ts
+type JsonValue =
+  | JsonPrimitive
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+```
+
+Tool schema metadata 使用此型別。Runtime tool result 的 TS return type 可能更廣，但實際也應遵守 JSON-compatible constraint。
+
+## Tool definitions
+
+### `ToolSpecificHandler`
+
+```ts
+type ToolSpecificHandler<TArgs = unknown, TResult = unknown> = (
+  args: TArgs,
+  ctx: ToolCallContext,
+) => TResult | Promise<TResult>;
+```
+
+### `ToolDefinition`
+
+```ts
+type ToolDefinition<
+  TArgs = unknown,
+  TResult = unknown,
+  TName extends string = string,
+> = {
+  name: TName;
+  description: string;
+  argsSchema: ToolArgsSchema;
+  timeoutMs?: number;
+  handler?: ToolSpecificHandler<TArgs, TResult>;
+};
+```
+
+### `SkillsInput`
+
+```ts
+type SkillsInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  guidance: string;
+  tools: TTools;
+};
+```
+
+### `ToolNameOf`
+
+```ts
+type ToolNameOf<TTools extends readonly ToolDefinition[]> = Extract<
+  TTools[number]["name"],
+  string
+>;
+```
+
+### Serializable manifests
+
+```ts
+type SerializableToolManifest = {
+  name: string;
+  description: string;
+  argsSchema: ToolArgsSchema;
+  timeoutMs?: number;
+};
+
+type SerializableSkillsManifest = {
+  guidance: string;
+  tools: SerializableToolManifest[];
+};
+```
+
+Inline handler 不在 serialized manifest。
+
+## Tool schema metadata
+
+```ts
+type ToolArgsSchemaMeta<
+  TDefault extends JsonValue = JsonValue,
+> = {
+  description?: string;
+  default?: TDefault;
+  examples?: TDefault[];
+};
+```
+
+## Tool schema nodes
+
+### String
+
+```ts
+type ToolArgsStringSchema = ToolArgsSchemaMeta<string> & {
+  type: "string";
+  enum?: string[];
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+};
+```
+
+### Number
+
+```ts
+type ToolArgsNumberSchema = ToolArgsSchemaMeta<number> & {
+  type: "number";
+  enum?: number[];
+  minimum?: number;
+  maximum?: number;
+};
+```
+
+### Integer
+
+```ts
+type ToolArgsIntegerSchema = ToolArgsSchemaMeta<number> & {
+  type: "integer";
+  enum?: number[];
+  minimum?: number;
+  maximum?: number;
+};
+```
+
+### Boolean
+
+```ts
+type ToolArgsBooleanSchema = ToolArgsSchemaMeta<boolean> & {
+  type: "boolean";
+  enum?: boolean[];
+};
+```
+
+### Array
+
+```ts
+type ToolArgsArraySchema = ToolArgsSchemaMeta<JsonValue[]> & {
+  type: "array";
+  items: ToolArgsSchemaNode;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+};
+```
+
+### Object
+
+```ts
+type ToolArgsObjectSchema = ToolArgsSchemaMeta<
+  Record<string, JsonValue>
+> & {
+  type: "object";
+  properties?: Record<string, ToolArgsSchemaNode>;
+  required?: string[];
+};
+```
+
+### One-of
+
+```ts
+type ToolArgsOneOfSchema = ToolArgsSchemaMeta & {
+  oneOf: ToolArgsSchemaNode[];
+};
+```
+
+### Node 與 root aliases
+
+```ts
+type ToolArgsSchemaNode =
+  | ToolArgsStringSchema
+  | ToolArgsNumberSchema
+  | ToolArgsIntegerSchema
+  | ToolArgsBooleanSchema
+  | ToolArgsArraySchema
+  | ToolArgsObjectSchema
+  | ToolArgsOneOfSchema;
+
+type ToolArgsSchema = ToolArgsObjectSchema;
+```
+
+Root alias 在 compile time 強制 object schema。
+
+## Event contexts
+
+### `PedelecEventContext`
+
+```ts
+type PedelecEventContext = {
+  sessionId: string;
+  provider: string;
+  model?: string;
+  sessionCreatedAt: number;
+  eventReceivedAt?: number;
+  eventEmittedAt: number;
+  turnId?: string;
+  turnStartedAt?: number;
+  turnKind?: "user" | "prepare";
+  source: "core" | "sdk";
+};
+```
+
+### `ChatEventContext`
+
+```ts
+type ChatEventContext = PedelecEventContext & {
+  type: "chat_delta";
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+```
+
+### `ToolCallContext`
+
+```ts
+type ToolCallContext = PedelecEventContext & {
+  type: "tool_call";
+  toolRequestId: string;
+  tool: string;
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+```
+
+### `StatusEventContext`
+
+```ts
+type StatusEventContext = PedelecEventContext & {
+  type: "status_changed" | "sdk_status_changed";
+  status: PedelecSessionStatus;
+  previousStatus: PedelecSessionStatus;
+};
+```
+
+### `ErrorEventContext`
+
+```ts
+type ErrorEventContext = PedelecEventContext & {
+  type: "error" | "sdk_error";
+};
+```
+
+### `EndedEventContext`
+
+```ts
+type EndedEventContext = PedelecEventContext & {
+  type: "ended" | "sdk_ended";
+};
+```
+
+Base context optional field 只在 relevant event 存在。ID 要視為 opaque；timestamp 是 browser diagnostics，不是 security claim。

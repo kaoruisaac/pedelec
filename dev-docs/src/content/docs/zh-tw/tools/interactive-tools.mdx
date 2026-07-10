@@ -1,0 +1,213 @@
+---
+title: 互動式與長時間 Tools
+description: 讓 tool 等待使用者輸入，設計 modal promise、timeout、cancel 與 pending interaction cleanup。
+sidebar:
+  order: 5
+---
+
+Tool handler 可以回傳一個 promise，等待使用者完成 UI 操作後再 resolve。適合 confirmation、選擇 item、補充資訊或 application-owned workflow。
+
+## 從 tool 詢問使用者
+
+```ts
+const askUser = defineTool({
+  name: "ask_user",
+  description: "Ask the user a question and wait for a text answer.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      question: {
+        type: "string",
+        minLength: 1,
+        description: "Question to display to the user.",
+      },
+    },
+    required: ["question"],
+  },
+  timeoutMs: 120_000,
+});
+```
+
+開啟 modal 並回傳 promise：
+
+```ts
+session.onTool("ask_user", (args: { question: string }, ctx) => {
+  return new Promise((resolve) => {
+    openQuestionModal({
+      question: args.question,
+      toolRequestId: ctx.toolRequestId,
+      onSubmit(answer) {
+        closeQuestionModal();
+        resolve({ answer, cancelled: false });
+      },
+      onCancel() {
+        closeQuestionModal();
+        resolve({ answer: null, cancelled: true });
+      },
+    });
+  });
+});
+```
+
+Promise pending 期間 session 保持 `waiting_tool_result`。
+
+## Cancellation 優先 resolve
+
+User cancellation 通常是 expected domain outcome，不是 exception：
+
+```ts
+{
+  cancelled: true,
+  reason: "user_cancelled"
+}
+```
+
+或：
+
+```ts
+{
+  error: {
+    code: "USER_CANCELLED",
+    message: "The user cancelled the operation.",
+    retryable: false
+  }
+}
+```
+
+選一種 convention；agent 需要理解時，在 tool guidance 說明。
+
+只有 handler 本身 unexpected failure 才 throw。
+
+## Timeout behavior
+
+省略 `timeoutMs` 時 Core 目前預設等待 60 秒。Interactive tool 通常需要明確較長 timeout。
+
+```ts
+timeoutMs: 5 * 60_000
+```
+
+Timeout 不是 UX。UI 應顯示正在等待的操作，並提供 cancel button。
+
+Core 停止等待時，browser promise 不會自動 abort；late resolution 可能讓 result submission 失敗。Application 應自行 timer/cancellation，讓 modal 在 runtime deadline 前關閉並 resolve。
+
+```ts
+function waitForConfirmation(timeoutMs: number) {
+  return new Promise<{ confirmed: boolean; reason?: string }>((resolve) => {
+    const timeoutId = window.setTimeout(() => {
+      closeConfirmModal();
+      resolve({ confirmed: false, reason: "timeout" });
+    }, timeoutMs - 1_000);
+
+    openConfirmModal({
+      confirm() {
+        clearTimeout(timeoutId);
+        closeConfirmModal();
+        resolve({ confirmed: true });
+      },
+      cancel() {
+        clearTimeout(timeoutId);
+        closeConfirmModal();
+        resolve({ confirmed: false, reason: "user_cancelled" });
+      },
+    });
+  });
+}
+```
+
+保留 margin，讓 SDK 有時間在 Core timeout 前 submit result。
+
+## 避免多個 pending modals
+
+Runtime 通常同時只有一個 pending tool request，但 UI 仍應保護：
+
+```ts
+let activeInteraction: string | null = null;
+
+session.onTool("ask_user", async (args, ctx) => {
+  if (activeInteraction) {
+    return {
+      error: {
+        code: "INTERACTION_ALREADY_OPEN",
+        message: "Another user interaction is already pending.",
+      },
+    };
+  }
+
+  activeInteraction = ctx.toolRequestId;
+  try {
+    return await showQuestion(args);
+  } finally {
+    if (activeInteraction === ctx.toolRequestId) {
+      activeInteraction = null;
+    }
+  }
+});
+```
+
+## Component unmount 與 route change
+
+不要因 component 消失而留下永遠 unresolved 的 promise。保存 pending resolver，cleanup 時 settle。
+
+```ts
+type PendingInteraction = {
+  requestId: string;
+  resolve: (value: unknown) => void;
+};
+
+let pending: PendingInteraction | null = null;
+
+function cancelPendingForNavigation() {
+  const current = pending;
+  pending = null;
+  current?.resolve({
+    error: {
+      code: "UI_CONTEXT_CLOSED",
+      message: "The page changed before the interaction completed.",
+    },
+  });
+}
+```
+
+同時關閉 modal、清除 timer 與 listeners。
+
+## Long-running non-interactive work
+
+Export 或大型 frontend calculation：
+
+- 設 realistic timeout；
+- 顯示 progress；
+- 開始前驗證 request size；
+- 盡可能 application-level cancel；
+- 回傳 compact result，不要 large binary object；
+- 大型 output 留在 application，只回傳 ID 或 URL。
+
+```ts
+return {
+  exportId,
+  filename,
+  byteLength,
+};
+```
+
+不要透過 tool bridge 回傳 multi-megabyte `ArrayBuffer`。
+
+## Interaction 中 session end
+
+Session end 時關閉 modal 並 settle local state。SDK 會 reject pending session work，但不知道如何 dismiss 你的 component。
+
+```ts
+const offEnded = session.onEnded(() => {
+  cancelPendingForNavigation();
+});
+```
+
+## UX checklist
+
+- 顯示 agent 正在等哪個 action。
+- Approve/cancel choice 清楚。
+- 不允許 normal composer 開始另一 turn。
+- Timeout 符合真實 user behavior。
+- Submit、cancel、timeout、unmount、session end 每條路都 resolve。
+- Result 不洩漏 secrets。
+
+下一頁：[Tool Context 與 UI Lifecycle Safety](./ui-lifecycle-safety/)。

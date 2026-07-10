@@ -1,0 +1,148 @@
+---
+title: Origin Approval and Connection State
+description: Design the connect flow around extension availability, per-origin approval, native runtime state, and provider readiness.
+sidebar:
+  order: 4
+---
+
+Pedelec does not allow any web page to create local agent sessions automatically. The Chrome Extension identifies the page origin and requires user approval before the first `createSession()` or `resumeSession()` from that origin.
+
+## Read approval status
+
+```ts
+const status = await pedelec.getApprovalStatus();
+```
+
+```ts
+type ApprovalStatus = {
+  installed: boolean;
+  approved: boolean;
+  origin: string | null;
+};
+```
+
+### `installed`
+
+`true` means the SDK reached the Pedelec extension and received a valid approval-status response.
+
+`false` means the extension is currently unavailable to the page. Possible causes include:
+
+- the extension is not installed;
+- the extension is disabled or installed in another browser profile;
+- the page origin is not externally connectable;
+- the extension service worker or SDK port disconnected; or
+- the SDK was created outside a browser page.
+
+Because several causes map to the same result, label this state “Pedelec extension unavailable” rather than “not installed” unless you have additional evidence.
+
+### `approved`
+
+`true` means the current origin is already recorded as approved in extension-local storage.
+
+Approval is scoped to an origin, which includes scheme, hostname, and port. A development port change can require approval again.
+
+### `origin`
+
+The normalized origin of the current page, such as `https://app.example.com` or `http://localhost:5173`.
+
+It can be `null` when the page does not have a verifiable HTTP or HTTPS origin.
+
+## What triggers the approval popup
+
+`getApprovalStatus()` only reads status. It does not request approval.
+
+The first operation that creates or resumes a session triggers approval when needed:
+
+```ts
+await pedelec.createSession({ provider: "codex" });
+// or
+await pedelec.resumeSession(savedSessionId);
+```
+
+The extension queues the request, opens its popup, and waits for the user to approve or reject the site. After approval, the queued operation continues automatically.
+
+The approval request has a timeout. Closing the popup without completing approval is treated as a rejection or incomplete approval.
+
+## Recommended connect-button state machine
+
+Use separate checks for extension, runtime, and provider readiness. Approval status alone does not prove that the Desktop App is running.
+
+| UI state | Condition | Suggested action |
+| --- | --- | --- |
+| Checking | Status request is pending | Disable the button and show progress |
+| Extension unavailable | `installed === false` | Ask the user to install/enable the extension |
+| Ready to approve | Installed but `approved === false` | Button label: “Connect Pedelec” |
+| Connecting | `createSession()` is pending | Keep the popup instructions visible |
+| Runtime unavailable | Native/Core request fails | Ask the user to start or repair the Desktop App |
+| No provider | No `ProviderInfo.available` is true | Open provider setup guidance |
+| Connected | Session was created | Show provider, model, and session status |
+| Disconnected | An active SDK port disconnects | Disable send and offer a page reload/reconnect flow |
+
+Example:
+
+```ts
+async function connectPedelec() {
+  setConnectionState("checking");
+
+  const approval = await pedelec.getApprovalStatus();
+  if (!approval.installed) {
+    setConnectionState("extension-unavailable");
+    return;
+  }
+
+  setConnectionState(approval.approved ? "connecting" : "awaiting-approval");
+
+  try {
+    const providers = await pedelec.listProviders();
+    const provider = providers.find((item) => item.available);
+    if (!provider) {
+      setConnectionState("no-provider");
+      return;
+    }
+
+    const session = await pedelec.createSession({
+      provider: provider.code,
+    });
+
+    registerSession(session);
+    setConnectionState("connected");
+  } catch (error) {
+    routeConnectionError(error);
+  }
+}
+```
+
+## Approval-related errors
+
+| Code | Meaning | UI response |
+| --- | --- | --- |
+| `CREATE_SESSION_NOT_APPROVED` | The extension could not verify the origin, or another origin is already waiting | Explain the origin conflict; retry after the other request finishes |
+| `APPROVAL_REJECTED` | The user rejected or closed the approval flow | Return to the ready-to-approve state |
+| `APPROVAL_TIMEOUT` | Approval was not completed within the extension timeout | Offer retry and tell the user to keep the popup open |
+| `OPEN_POPUP_FAILED` | Chrome could not open the extension popup programmatically | Ask the user to click the Pedelec extension icon manually |
+| `STORAGE_ERROR` | Approved-origin storage could not be read or updated | Suggest checking extension state or reinstalling if persistent |
+| `INVALID_ORIGIN` | A popup action received a non-HTTP(S) origin | Use a supported page origin |
+
+## Connection-related errors
+
+| Code | Layer | Typical response |
+| --- | --- | --- |
+| `EXTENSION_UNAVAILABLE` | Page → extension | Check installation, browser profile, and supported origin |
+| `EXTENSION_DISCONNECTED` | Page → extension | Stop sending; recreate the page/client connection |
+| `NATIVE_HOST_UNAVAILABLE` | Extension → native host | Start/repair the Desktop App installation |
+| `NATIVE_CONNECTION_CLOSED` | Extension → native host | Ask the user to restart the Desktop App; retry a safe read operation |
+| `CORE_RUNTIME_UNAVAILABLE` | Native host → Core | Start the Desktop App and verify its runtime registration |
+| `IPC_UNAVAILABLE` | Local runtime IPC | Restart the Desktop App; inspect local runtime logs |
+| `SDK_BRIDGE_TIMEOUT` | SDK request timeout | Avoid immediate repeated writes; verify all downstream components |
+
+## Do not infer too much from one signal
+
+- `installed: true` does not mean the Desktop App is running.
+- An approved origin does not mean a provider is available.
+- `ProviderInfo.available: true` does not guarantee a particular model identifier is valid.
+- Ollama provider availability does not guarantee that its server or model is ready.
+- A client that disconnected does not reconnect automatically.
+
+A robust connection screen presents the failing layer and the corrective action rather than one generic “connection failed” message.
+
+Next, read [Creating the client](../sdk/client/) for client lifetime and bridge-timeout behavior.

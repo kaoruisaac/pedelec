@@ -1,0 +1,245 @@
+---
+title: Pedelec API
+description: Pedelec browser client 的 constructor 與 method reference。
+sidebar:
+  order: 1
+---
+
+`Pedelec` 是 browser client，擁有 Chrome Extension bridge，並建立或 resume `PedelecSession`。
+
+```ts
+import { Pedelec } from "@kaoruisaac/pedelec";
+```
+
+## Constructor
+
+```ts
+new Pedelec(options?: PedelecOptions)
+```
+
+```ts
+type PedelecOptions = {
+  bridgeTimeoutMs?: number;
+};
+```
+
+### Parameters
+
+| Parameter | Type | Default | 說明 |
+| --- | --- | --- | --- |
+| `options.bridgeTimeoutMs` | `number` | `30_000` | 等待 Extension bridge response 的最長時間；小於 1 會 clamp 成 1。 |
+
+Constructor 會立即嘗試連到 Pedelec Chrome Extension。只能在 hydration 後的 browser page 建立。
+
+```ts
+const pedelec = new Pedelec({
+  bridgeTimeoutMs: 30_000,
+});
+```
+
+## `createSession()`
+
+```ts
+createSession(): Promise<PedelecSession<string>>;
+
+createSession<const TTools extends readonly ToolDefinition[]>(
+  input: CreateSessionInput<TTools>,
+): Promise<PedelecSession<ToolNameOf<TTools>>>;
+```
+
+建立新 Core session，並讓目前 SDK channel subscribe。
+
+### Input
+
+```ts
+type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
+  | {
+      provider: ProviderCode;
+      model?: string;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    }
+  | {
+      provider?: undefined;
+      model?: never;
+      skills?: SkillsInput<TTools>;
+      autoEndOnDisconnect?: boolean;
+    };
+```
+
+### Resolution rules
+
+- 無 `provider`：使用 Desktop `defaultProvider`，確認 available，並使用 configured default model。
+- 只有 `provider`：使用該 provider 與其 Desktop default model（若有）。
+- `provider` + `model`：使用 explicit values。
+- 只有 `model`：invalid。
+- `autoEndOnDisconnect`：預設 `true`。
+
+### Returns
+
+註冊於此 client 的 `PedelecSession`。
+
+### 常見 errors
+
+- approval/transport errors；
+- `DEFAULT_PROVIDER_NOT_SET`；
+- `DEFAULT_PROVIDER_UNAVAILABLE`；
+- `INVALID_INPUT`；
+- Ollama 無 model 的 `MODEL_REQUIRED`；
+- provider/Core creation errors。
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: true,
+});
+```
+
+## `listProviders()`
+
+```ts
+listProviders(): Promise<ProviderInfo[]>
+```
+
+取得 Desktop Core 的 provider discovery result。
+
+```ts
+type ProviderInfo = {
+  name: string;
+  code: ProviderCode;
+  path: string | null;
+  available: boolean;
+  error: string | null;
+};
+```
+
+```ts
+const providers = await pedelec.listProviders();
+const ready = providers.filter((provider) => provider.available);
+```
+
+`available` 是 discovery/setup signal，不保證所有 model 或 remote service ready。
+
+常見 errors 為 Extension、native host、Core IPC 與 bridge timeout。
+
+## `getSettings()`
+
+```ts
+getSettings(): Promise<PedelecSettings>
+```
+
+讀取 SDK 可見的 Desktop defaults。
+
+```ts
+type PedelecSettings = {
+  defaultProvider: ProviderCode | null;
+  defaultModels: Partial<Record<ProviderCode, string>>;
+};
+```
+
+SDK 會驗證 response shape；不相容時 reject `SDK_PROTOCOL_ERROR`。
+
+```ts
+const settings = await pedelec.getSettings();
+console.log(settings.defaultProvider);
+```
+
+## `getApprovalStatus()`
+
+```ts
+getApprovalStatus(): Promise<ApprovalStatus>
+```
+
+```ts
+type ApprovalStatus = {
+  installed: boolean;
+  approved: boolean;
+  origin: string | null;
+};
+```
+
+讀取目前 origin 的 Extension approval state。
+
+特殊行為：Extension unavailable/disconnected 時 resolve，不 throw：
+
+```ts
+{
+  installed: false,
+  approved: false,
+  origin: location.origin
+}
+```
+
+Protocol/storage 等其他 error 仍可能 reject。
+
+這個 method 不會打開 approval popup；需要時由 `createSession()` 或 `resumeSession()` 觸發。
+
+## `resumeSession()`
+
+```ts
+resumeSession(sessionId: string): Promise<PedelecSession<string>>
+```
+
+讓此 SDK client subscribe 到既有 Core session。
+
+```ts
+const session = await pedelec.resumeSession(savedSessionId);
+```
+
+| Parameter | Type | 說明 |
+| --- | --- | --- |
+| `sessionId` | `string` | Non-empty Core session/thread identifier。 |
+
+回傳註冊於此 client 的 session handle。目前 bridge 只回傳 ID，因此新的 resumed handle 可能沒有 provider/model metadata。
+
+常見 errors：空 ID 的 `INVALID_INPUT`、approval errors、session-not-found/runtime errors、transport errors。
+
+Resume 後要重新註冊 chat、status、error、ended 與 tool handlers。
+
+## `request<T>()`
+
+```ts
+request<T>(
+  type: string,
+  payload?: Record<string, unknown>,
+): Promise<T>
+```
+
+Low-level bridge request API。
+
+```ts
+const result = await pedelec.request<{ sessionId: string }>(
+  "create_session",
+  {
+    input: {
+      provider: "codex",
+      autoEndOnDisconnect: true,
+    },
+  },
+);
+```
+
+:::caution
+優先使用 typed public methods。`request<T>()` 不驗證 generic `T` 是否符合 runtime response，low-level operation name/payload 也較容易誤用。
+:::
+
+此 method：
+
+- client 已保存 disconnect error 時立即 reject；
+- 套用 `bridgeTimeoutMs`；
+- 產生 request ID；
+- 經 Extension port post；
+- 將 failed bridge response normalize 成 `PedelecError`。
+
+`T` 只存在 compile time。
+
+## Client disconnection
+
+Extension port disconnect 時，pending requests reject，registered sessions 收到 SDK error event。Client 沒有 reconnect method；修復外部條件後，建立新的 browser client/page lifecycle。
+
+## Related references
+
+- [`PedelecSession`](./pedelec-session/)
+- [Tools API](./tools/)
+- [Types](./types/)
+- [Error Codes](./error-codes/)

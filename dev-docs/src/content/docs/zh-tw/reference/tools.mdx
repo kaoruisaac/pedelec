@@ -1,0 +1,191 @@
+---
+title: Tools API
+description: defineTool、ToolDefinition、SkillsInput、handler types、tool-name inference 與 serializable manifests reference。
+sidebar:
+  order: 3
+---
+
+## `defineTool()`
+
+```ts
+function defineTool<
+  TArgs = unknown,
+  TResult = unknown,
+  const TName extends string = string,
+>(
+  tool: ToolDefinition<TArgs, TResult, TName>,
+): ToolDefinition<TArgs, TResult, TName>
+```
+
+原樣回傳 definition，同時保留 TypeScript generics 與 literal `name` type。
+
+```ts
+const updateCounter = defineTool<
+  { delta: number },
+  { value: number }
+>({
+  name: "update_counter",
+  description: "Update the visible counter by delta.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      delta: { type: "integer" },
+    },
+    required: ["delta"],
+  },
+  handler: ({ delta }) => ({ value: counter.add(delta) }),
+});
+```
+
+`defineTool()` 本身不做 validation；session creation 會 normalize/validate tools。
+
+## `ToolDefinition`
+
+```ts
+type ToolDefinition<
+  TArgs = unknown,
+  TResult = unknown,
+  TName extends string = string,
+> = {
+  name: TName;
+  description: string;
+  argsSchema: ToolArgsSchema;
+  timeoutMs?: number;
+  handler?: ToolSpecificHandler<TArgs, TResult>;
+};
+```
+
+| Field | Required | 說明 |
+| --- | --- | --- |
+| `name` | Yes | Agent-facing name；letter 開頭，只能包含 letter、digit、`_`、`.`、`-`。 |
+| `description` | Yes | Non-empty 行為、side effect 與選擇條件說明。 |
+| `argsSchema` | Yes | Pedelec Tool Args Schema；root 必須 object。 |
+| `timeoutMs` | No | Positive integer runtime wait limit；Core 目前預設 60 秒。 |
+| `handler` | No | SDK 保存在 browser、不送到 Core 的 inline handler。 |
+
+同一 skills manifest 的 names 必須 unique。
+
+## `ToolSpecificHandler`
+
+```ts
+type ToolSpecificHandler<TArgs = unknown, TResult = unknown> = (
+  args: TArgs,
+  ctx: ToolCallContext,
+) => TResult | Promise<TResult>;
+```
+
+Handler 在 browser page context 執行。Type parameters 只有 compile-time，runtime args 仍要 validate。
+
+Return value 必須符合 bridge JSON data model。
+
+## `SkillsInput`
+
+```ts
+type SkillsInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  guidance: string;
+  tools: TTools;
+};
+```
+
+```ts
+const tools = [getCurrentPage, updateCounter] as const;
+
+const skills = {
+  guidance: "Read current state before making changes.",
+  tools,
+} satisfies SkillsInput<typeof tools>;
+```
+
+`guidance` 必須 string，`tools` 必須 array。
+
+## `ToolNameOf`
+
+```ts
+type ToolNameOf<TTools extends readonly ToolDefinition[]> = Extract<
+  TTools[number]["name"],
+  string
+>;
+```
+
+從 readonly definitions array 取出 tool name union。
+
+```ts
+const tools = [readPage, updateCounter] as const;
+type AppToolName = ToolNameOf<typeof tools>;
+// "get_current_page" | "update_counter"
+```
+
+`createSession()` 用它收窄 named `session.onTool()`。
+
+## `SerializableToolManifest`
+
+```ts
+type SerializableToolManifest = {
+  name: string;
+  description: string;
+  argsSchema: ToolArgsSchema;
+  timeoutMs?: number;
+};
+```
+
+送到 Core 的 tool shape，刻意不包含 `handler`。
+
+## `SerializableSkillsManifest`
+
+```ts
+type SerializableSkillsManifest = {
+  guidance: string;
+  tools: SerializableToolManifest[];
+};
+```
+
+經 normalize 後送進 bridge 的 skills payload。
+
+## Inline handler normalization
+
+`createSession()` 期間：
+
+1. 檢查 tool entries；
+2. 透過 JSON serialization clone `argsSchema`；
+3. 依 name 將 inline handlers 保存在 browser-side map；
+4. 將 serializable definitions 送到 Core。
+
+Duplicate tool name reject `INVALID_INPUT`。
+
+Legacy `input` shorthand 已不支援，請使用 `argsSchema`。
+
+## Handler resolution
+
+Incoming tool call 依序：
+
+1. session named handler；
+2. original definition inline handler；
+3. generic fallback；
+4. SDK-created `TOOL_HANDLER_NOT_FOUND` result。
+
+Handler exception 變成 `TOOL_HANDLER_ERROR` result；delivery failure emit `SUBMIT_TOOL_RESULT_FAILED`。
+
+## Tool Args Schema entry types
+
+Root alias：
+
+```ts
+type ToolArgsSchema = ToolArgsObjectSchema;
+```
+
+Node union：
+
+```ts
+type ToolArgsSchemaNode =
+  | ToolArgsStringSchema
+  | ToolArgsNumberSchema
+  | ToolArgsIntegerSchema
+  | ToolArgsBooleanSchema
+  | ToolArgsArraySchema
+  | ToolArgsObjectSchema
+  | ToolArgsOneOfSchema;
+```
+
+所有欄位見 [Types](./types/)，使用方式見 [Tool Args Schema](../tools/args-schema/)。

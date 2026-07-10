@@ -1,0 +1,143 @@
+---
+title: 安裝
+description: 安裝 SDK，並驗證 Extension、Desktop Runtime、native host 與 provider 的完整連線。
+sidebar:
+  order: 2
+---
+
+## 安裝 npm package
+
+在 Web App 專案加入 SDK：
+
+```bash
+npm install @kaoruisaac/pedelec
+```
+
+在 browser-side code 匯入：
+
+```ts
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
+```
+
+Package 使用 ESM 並附帶 TypeScript declaration。它不會一起安裝 Chrome Extension、Desktop App、provider CLI 或 Ollama model。
+
+## 安裝使用者端元件
+
+執行 Web App 的使用者需要一組相容的 Pedelec 元件：
+
+1. 安裝目標作業系統的 Pedelec Desktop App。
+2. 啟動 App，讓 Core Runtime 可用。
+3. 確認 App 已註冊 Chrome Native Messaging host。
+4. 在同一個 Chrome profile 安裝並啟用 Pedelec Chrome Extension。
+5. 安裝並登入至少一個 provider，或完成 Ollama 設定。
+
+請使用 Web App 所支援版本的官方 Pedelec release channel。SDK、Extension 與 Desktop Runtime 版本保持接近，可以減少 protocol mismatch。
+
+## 在 browser code 建立 client
+
+```ts
+import { Pedelec } from "@kaoruisaac/pedelec";
+
+export function createPedelecClient() {
+  if (typeof window === "undefined") {
+    throw new Error("Pedelec 只能在 browser 中初始化。 ");
+  }
+
+  return new Pedelec();
+}
+```
+
+同一個 page lifecycle 通常共用一個 client。Client 擁有一條 Extension port，並可管理多個 sessions。
+
+## 驗證 Extension
+
+```ts
+const pedelec = createPedelecClient();
+const approval = await pedelec.getApprovalStatus();
+
+if (!approval.installed) {
+  throw new Error("Pedelec Extension 目前無法使用。 ");
+}
+
+console.log("Current origin:", approval.origin);
+console.log("Already approved:", approval.approved);
+```
+
+`getApprovalStatus()` 會將 Extension unavailable 與 disconnected 轉成 `{ installed: false, approved: false, origin }`，而不是在這兩種情況直接 throw；其他錯誤仍可能 throw。
+
+## 驗證 Desktop Runtime 與 providers
+
+`listProviders()` 會走完整的 Extension 與 native bridge，因此很適合當 connectivity test：
+
+```ts
+const providers = await pedelec.listProviders();
+
+for (const provider of providers) {
+  console.table({
+    code: provider.code,
+    available: provider.available,
+    path: provider.path,
+    error: provider.error,
+  });
+}
+
+if (!providers.some((provider) => provider.available)) {
+  throw new Error("目前沒有可用的 Pedelec provider。 ");
+}
+```
+
+可以依失敗層級判讀：
+
+- `EXTENSION_UNAVAILABLE`：browser page 無法連到 Extension。
+- `NATIVE_HOST_UNAVAILABLE`：Extension 存在，但無法連到已註冊 native host。
+- `CORE_RUNTIME_UNAVAILABLE` 或 `IPC_UNAVAILABLE`：host 無法連到 Desktop Core。
+- `available: false`：Core 正常，但該 provider 尚未準備好。
+
+## Provider 設定注意事項
+
+### CLI providers
+
+Desktop App 必須能在自己的 environment 找到 executable。在已開啟 terminal 能執行的 command，不代表 graphical desktop app 繼承的環境也看得到。修改 `PATH` 後請重新啟動 Desktop App。
+
+Authentication 由各 provider 決定。建立 session 前，先完成 provider 一般的 login 或 credential setup。
+
+### Ollama
+
+Pedelec 的 Ollama provider 使用內附的 `pedelec-agent`，不是把 `ollama` CLI 當 provider process。仍需要：
+
+- 啟動 Ollama-compatible server；
+- 非預設位址時在 Desktop App 設定 base URL；
+- 安裝選擇的 model；
+- 明確指定 model，或設定 Ollama default model。
+
+## 在本 repo 本機開發 SDK
+
+尚未發布 package version，或同時修改 SDK 與應用程式時，可以用 path 安裝 `sdk/`：
+
+```bash
+npm install ../path/to/pedelec/sdk
+```
+
+先建置 SDK：
+
+```bash
+cd ../path/to/pedelec/sdk
+npm install
+npm run test
+npm run type-test
+npm run build
+```
+
+之後重新啟動 Web App dev server，讓 bundler 重新載入 package output。
+
+:::caution
+Local path dependency 只會替換 npm package，不會自動更新或安裝 Extension 與 Desktop Runtime。
+:::
+
+## 開發環境 origin
+
+請使用 `http://localhost:<port>` 或 `http://127.0.0.1:<port>`。Extension 不接受所有 plain-HTTP hostname。
+
+Approval 依 origin 儲存，因此更換 port 會形成不同 origin。開發時盡量固定 port。
+
+下一步完成[快速開始](./quick-start/)，建立真實 session、接收 assistant output 並正確結束 session。

@@ -1,0 +1,200 @@
+---
+title: Tool Calling Overview
+description: Let an agent read or change frontend state through explicitly declared browser-side tools.
+sidebar:
+  order: 1
+---
+
+Tool calling is how a Pedelec agent asks the web application for information or requests a controlled frontend action.
+
+A tool is appropriate when the agent needs something that text alone cannot provide, such as:
+
+- reading the current page URL, selected text, active document, or editor state;
+- changing a counter, canvas, scene, form, or application setting;
+- asking the user for confirmation or additional input;
+- exporting a document through an application-owned API; or
+- querying frontend-only data that is not available to the provider process.
+
+## The basic model
+
+The application declares a set of capabilities when creating a session:
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Use get_current_page when you need page identity.",
+    tools: [getCurrentPageTool],
+  },
+});
+```
+
+`skills` has two parts:
+
+```ts
+type SkillsInput<TTools extends readonly ToolDefinition[]> = {
+  guidance: string;
+  tools: TTools;
+};
+```
+
+### `guidance`
+
+High-level instructions that explain when or how the agent should use the available tools. Keep it operational and specific.
+
+Good guidance:
+
+```text
+Use get_selected_text before editing the user's selection. Never guess the selection.
+Ask for confirmation before destructive changes.
+```
+
+Weak guidance:
+
+```text
+Use tools when useful.
+```
+
+### `tools`
+
+A list of serializable tool definitions. Each definition includes a name, description, argument schema, optional timeout, and optionally a browser-side inline handler.
+
+## End-to-end flow
+
+```text
+Web App declares skills and tools
+  ↓
+Desktop Core generates agent-facing tool artifacts
+  ↓
+Agent decides to call a tool
+  ↓
+Core emits tool_call and waits
+  ↓
+SDK status becomes waiting_tool_result
+  ↓
+Browser handler reads/changes frontend state
+  ↓
+Handler returns a JSON-serializable result
+  ↓
+SDK submits the result automatically
+  ↓
+Agent continues the same turn
+```
+
+The application does not host `tools.md` or tool-spec files. Core generates the artifacts the agent needs inside the session sandbox.
+
+## A complete small tool
+
+```ts
+import { defineTool } from "@kaoruisaac/pedelec";
+
+const getCurrentPage = defineTool({
+  name: "get_current_page",
+  description: "Read the title, URL, and selected text of the current browser page.",
+  argsSchema: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  handler: (_args, ctx) => ({
+    title: document.title,
+    url: location.href,
+    selectedText: window.getSelection()?.toString() ?? "",
+    observedForTurn: ctx.turnId,
+  }),
+});
+
+const session = await pedelec.createSession({
+  provider: "codex",
+  skills: {
+    guidance: "Call get_current_page instead of guessing page state.",
+    tools: [getCurrentPage],
+  },
+});
+```
+
+The function in `handler` remains in the browser. Core receives the tool name, description, schema, and timeout—not executable frontend code.
+
+## Tool handlers run in page context
+
+A handler can access normal page capabilities available to your application:
+
+- DOM APIs;
+- framework stores/signals/state;
+- IndexedDB or local storage;
+- canvas/editor APIs;
+- authenticated application APIs; and
+- modals and user interactions.
+
+This power is why tools must be narrow. Do not expose a generic “execute JavaScript,” “fetch any URL,” or “change arbitrary state” tool when a small domain-specific tool will work.
+
+## Trust model
+
+Agent-generated tool arguments are untrusted input. The schema helps the agent produce the expected shape, but the handler must still validate business rules and authorization.
+
+```ts
+session.onTool("delete_document", async (args) => {
+  const { documentId } = args as { documentId?: unknown };
+
+  if (typeof documentId !== "string") {
+    return {
+      error: {
+        code: "INVALID_DOCUMENT_ID",
+        message: "documentId must be a string.",
+      },
+    };
+  }
+
+  if (!canDeleteDocument(documentId)) {
+    return {
+      error: {
+        code: "NOT_ALLOWED",
+        message: "The current user cannot delete this document.",
+      },
+    };
+  }
+
+  return deleteDocument(documentId);
+});
+```
+
+A tool should never bypass the permissions your UI normally enforces.
+
+## Results
+
+The handler return value is sent back to the agent automatically. Return plain JSON-compatible data:
+
+```ts
+return {
+  ok: true,
+  updatedCount: 4,
+  affectedIds: ["a", "b"],
+};
+```
+
+Avoid DOM nodes, functions, class instances with hidden state, `BigInt`, symbols, and cyclic objects.
+
+## Handler selection
+
+When a call arrives, the SDK uses this priority:
+
+1. a named handler registered with `session.onTool(name, handler)`;
+2. the inline `handler` in the matching `defineTool()`;
+3. the generic `session.onTool((tool, args, ctx) => ...)` fallback;
+4. an automatic `TOOL_HANDLER_NOT_FOUND` error result.
+
+This lets applications declare tools centrally but override behavior for a specific session or component.
+
+## Session status
+
+While Core waits for the result, `session.getStatus()` is `waiting_tool_result`. The session remains busy and cannot accept another `sendText()`.
+
+For an immediate tool this state may be brief. For an interactive tool it can remain visible while a modal waits for the user.
+
+## Tool calling is part of the same turn
+
+A tool call does not create a new user turn. `ctx.turnId` remains associated with the original `sendText()` call. After the result, the provider continues reasoning and may call another tool before completing.
+
+Do not assume one tool call per turn. Application code should support several sequential calls, while Core limits the currently pending request according to its runtime behavior.
+
+Continue with [Defining tools](./defining-tools/).

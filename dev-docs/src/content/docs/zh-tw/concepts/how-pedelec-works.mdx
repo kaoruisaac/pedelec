@@ -1,0 +1,142 @@
+---
+title: Pedelec 如何運作
+description: 理解 SDK、Extension、native host、Desktop Runtime、provider 與前端 tool 的完整資料流。
+sidebar:
+  order: 2
+---
+
+Pedelec 讓 browser page 能和 AI agent 協作，但不會把直接操作本機 process 的權限交給網頁。整條連線由數個職責明確的元件組成。
+
+## 元件與責任
+
+### Web App
+
+Web App 建立 `Pedelec` client 與 session、顯示訊息和狀態、接收使用者輸入，並實作要提供給 agent 的前端 tools。
+
+Web App 需要負責：
+
+- 決定何時建立、恢復或結束 session；
+- 顯示 provider 與連線狀態；
+- 將串流文字 delta 累積成完整訊息；
+- 在修改應用程式 state 前驗證 tool args；
+- 清理 event handler 與尚未完成的互動式 UI；
+- 判斷 callback 是否仍屬於目前 route、canvas、editor 或 UI instance。
+
+### TypeScript SDK
+
+`@kaoruisaac/pedelec` 提供 browser-facing API：
+
+- `Pedelec` 管理 Extension connection 與 request/response bridge；
+- `PedelecSession` 代表一個 agent session；
+- `defineTool()` 在建立可序列化 manifest 的同時保留實用的 TypeScript 型別；
+- event callback 將 chat、status、tool、error 與 ended event 整理成一致介面。
+
+SDK 必須在 browser page 建立，不是 Node.js client，也不是 server-side transport。
+
+### Chrome Extension
+
+Extension 接受允許來源的 SDK 外部連線，並負責：
+
+- 辨識發出要求的網站 origin；
+- 在第一次建立或恢復 session 前要求使用者核准 origin；
+- 將已核准 origin 儲存在 Extension local storage；
+- 透過 Chrome Native Messaging 轉送要求；
+- 將 runtime event 路由回正確的 SDK channel 與 session。
+
+當最後一個 SDK route 離開時，Extension 也會依 `autoEndOnDisconnect` 決定是否自動結束 page-scoped session。
+
+### Native Messaging host
+
+Native host 是 Chrome 核准的 Extension-to-desktop 橋接。Web page 不會直接連線到這個 executable。
+
+若 host 沒有註冊或無法啟動，需要 Desktop Runtime 的 SDK 操作會收到 `NATIVE_HOST_UNAVAILABLE` 等錯誤。
+
+### Desktop Runtime
+
+Pedelec Desktop App 擁有 Core Runtime，負責：
+
+- 建立與追蹤 session；
+- 保存 provider 與 model 設定；
+- 為 session 準備 sandbox；
+- 啟動或 resume provider process；
+- 將各 provider 輸出轉換成標準 event；
+- 產生 agent 需要的 tool artifacts；
+- agent 發出 tool call 時等待 Web App 回傳結果。
+
+一般 SDK 整合不需要知道 Core IPC protocol 或 provider-specific command line。
+
+### Provider
+
+Provider 是 session 使用的 agent backend，目前代碼包含 `codex`、`gemini`、`opencode`、`cursor`、`claude` 與 `ollama`。
+
+Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 command、加入 Desktop App 能看到的 `PATH`，並完成登入。Ollama session 會使用 Pedelec 內附的 agent executable，但仍需要可連線的 Ollama server 與已安裝的 model。
+
+## `createSession()` 的資料流
+
+典型的 explicit-provider session 會依序進行：
+
+1. Web App 呼叫 `pedelec.createSession({ provider, model, skills })`。
+2. SDK 驗證基本輸入並序列化 skills manifest。Inline handler function 只留在 browser，不會送到 Core。
+3. Extension 檢查 page origin 是否已核准；尚未核准時，request 會等待使用者在 popup 操作。
+4. Extension 在需要時建立 Native Messaging connection。
+5. Desktop Runtime 建立 session 與 sandbox，回傳 `sessionId`。
+6. Extension 訂閱該 session，並將目前 SDK route 綁定到它。
+7. SDK 回傳 `PedelecSession`。
+
+建立 session 不代表一定會立刻啟動長時間存活的 provider process。Desktop Runtime 會在 prepare 或收到 turn 時管理 provider execution。
+
+## `sendText()` 的資料流
+
+```text
+sendText(text)
+  ↓
+SDK 先將 session 標成 running
+  ↓
+Extension 轉送 send_text
+  ↓
+Desktop Runtime 啟動或 resume provider 工作
+  ↓
+Provider 輸出 assistant text 或提出 tool call
+  ↓
+SDK 觸發 onChat()、onStatus() 或 onTool()
+  ↓
+Runtime 發出 done / idle
+  ↓
+sendText() resolve
+```
+
+SDK 會替每個已接受的 turn 建立本機 `turnId`，方便 UI 將 callback 分組。它不是 provider session id，不應解析格式或依賴其中內容。
+
+同一個 session 同時只允許一個 active turn。第一個 `sendText()` 尚未完成時再次呼叫，會收到 `SESSION_BUSY`。
+
+## Tool call 的資料流
+
+1. Web App 在 `skills.tools` 宣告 tool。
+2. Core 在 session sandbox 內產生 agent-facing tool files。
+3. Agent 判斷需要 tool，發出 tool call。
+4. Core 發出標準化 tool event 並等待結果。
+5. SDK 將 session status 設為 `waiting_tool_result`。
+6. SDK 依序尋找 named handler、inline handler、generic fallback。
+7. Handler 在 browser page 執行，回傳 JSON-serializable result。
+8. SDK 經由 Extension 與 Desktop Runtime 提交結果。
+9. Agent 繼續工作，session 最後回到 `idle`、結束或進入 error。
+
+SDK 處理 transport，但操作的語意與安全仍由 Web App 負責。例如 `delete_layer` tool 仍應確認 layer 存在，而且 callback 對應的 editor generation 尚未過期。
+
+## 責任邊界
+
+| 項目 | 負責者 |
+| --- | --- |
+| 訊息與狀態 UI | Web App |
+| 驗證 agent 產生的 tool args | Web App |
+| Origin approval | Extension 與使用者 |
+| Browser-to-native transport | Extension 與 native host |
+| Session 與 provider lifecycle | Desktop Runtime |
+| Provider 登入與外部網路行為 | Provider 與使用者設定 |
+| 判斷晚到 callback 是否已過期 | Web App |
+
+## 不需要自行建立 localhost server
+
+SDK 不要求 Web App 開啟本機 port。Extension 使用 Native Messaging，native host 再透過 Pedelec 的 local Core IPC 和 Desktop Runtime 溝通。這些內部 transport 不屬於一般 SDK integration 應直接呼叫的介面。
+
+接著閱讀[環境需求與瀏覽器支援](../getting-started/requirements/)。

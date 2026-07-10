@@ -1,0 +1,195 @@
+---
+title: Tool Errors and Timeouts
+description: Handle missing handlers, thrown errors, submission failures, runtime timeouts, serialization problems, and safe retries.
+sidebar:
+  order: 7
+---
+
+Tool failures happen at several layers. Distinguish an expected application-domain result from an SDK handler failure, a serialization/transport failure, and a runtime timeout.
+
+## Expected domain errors
+
+Return a structured error when the tool ran correctly but the requested action cannot be completed:
+
+```ts
+return {
+  error: {
+    code: "NO_ACTIVE_SELECTION",
+    message: "Select text before using replace_selection.",
+    details: {
+      documentId: activeDocument.id,
+    },
+    retryable: true,
+  },
+};
+```
+
+This is a normal result. The SDK submits it to the agent and does not automatically call `session.onError()`.
+
+Use domain errors for:
+
+- missing resources;
+- invalid current UI state;
+- permission denial;
+- user cancellation;
+- version conflict; and
+- validation failure.
+
+## `TOOL_HANDLER_NOT_FOUND`
+
+When no named, inline, or generic handler exists, the SDK constructs an error result with:
+
+```text
+TOOL_HANDLER_NOT_FOUND
+```
+
+The result is submitted to the agent. It normally indicates an integration bug rather than a recoverable end-user problem.
+
+Check:
+
+- the tool appears in `skills.tools`;
+- the name is identical in the definition and registration;
+- a resumed page restored its handlers;
+- component cleanup did not run too early; and
+- the handler registration uses the same session object.
+
+## `TOOL_HANDLER_ERROR`
+
+If a selected handler throws or rejects, the SDK catches it and converts it into an error result with `TOOL_HANDLER_ERROR`.
+
+```ts
+session.onTool("save", async () => {
+  throw new Error("Database unavailable");
+});
+```
+
+The raw exception does not crash the SDK event listener. The agent receives the normalized failure.
+
+Use application logging inside the handler when stack traces or richer diagnostics are needed, because the serialized error result is intentionally compact.
+
+## `SUBMIT_TOOL_RESULT_FAILED`
+
+After obtaining a result, the SDK calls the bridge's `submit_tool_result`. If that request fails, the session emits an SDK error callback:
+
+```ts
+session.onError((error) => {
+  if (error.code === "SUBMIT_TOOL_RESULT_FAILED") {
+    showToolTransportFailure();
+  }
+});
+```
+
+Possible causes:
+
+- extension/native/Core disconnect;
+- session ended while the handler was pending;
+- Core already timed out the tool request;
+- result cannot be cloned/serialized; or
+- runtime rejected the request ID.
+
+The agent may remain unable to continue the turn. Do not blindly retry a side-effecting handler, because the side effect may already have happened even though result delivery failed.
+
+## Timeout
+
+Tool definition timeout:
+
+```ts
+timeoutMs: 60_000
+```
+
+When omitted, Core currently uses a 60-second default. The timeout controls how long the runtime waits for a result. It does not forcibly stop JavaScript in the page.
+
+If a handler resolves late:
+
+1. the application side effect may already be complete;
+2. Core may already have failed or continued the turn;
+3. result submission can fail; and
+4. the session may emit `SUBMIT_TOOL_RESULT_FAILED` or a runtime session error.
+
+Design handlers to settle before the deadline and implement application-side cancellation/cleanup.
+
+## Serialization failures
+
+Return plain JSON-compatible values. Problematic values include:
+
+```ts
+return document.body;       // DOM node
+return () => 1;             // function
+return { value: 1n };       // BigInt
+return cyclicObject;        // cycle
+return new Map();            // loses intended structure
+return new File(...);        // browser object, not a compact JSON result
+```
+
+Convert them:
+
+```ts
+return {
+  html: document.body.innerHTML,
+  entries: [...map.entries()],
+  size: file.size,
+  name: file.name,
+};
+```
+
+Be mindful of payload size. Large results increase bridge cost and can exceed local IPC/message limits. Return an application-owned ID for large artifacts.
+
+## Validation errors
+
+A tool schema improves agent output but does not make args trustworthy. Return a domain error rather than throwing for routine bad input:
+
+```ts
+function validateMoveArgs(raw: unknown) {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.shapeId !== "string") return null;
+  if (typeof value.x !== "number" || !Number.isFinite(value.x)) return null;
+  if (typeof value.y !== "number" || !Number.isFinite(value.y)) return null;
+  return { shapeId: value.shapeId, x: value.x, y: value.y };
+}
+
+session.onTool("move_shape", (raw) => {
+  const args = validateMoveArgs(raw);
+  if (!args) {
+    return {
+      error: {
+        code: "INVALID_TOOL_ARGS",
+        message: "shapeId, x, and y are required.",
+      },
+    };
+  }
+  return scene.move(args);
+});
+```
+
+## Retry policy
+
+| Failure | Safe to retry automatically? |
+| --- | --- |
+| Read-only tool transport failed before execution | Sometimes, after connection recovery |
+| Domain validation error | No; agent/user should change input |
+| User cancelled | No unless user explicitly requests again |
+| Handler threw before any side effect | Possibly, if operation is known idempotent |
+| Result submission failed after mutation | Usually no; reconcile state first |
+| Tool timeout | No automatic retry; the original handler may still complete |
+| Stale UI lifecycle | No; agent should read current state first |
+
+Include idempotency keys or expected-version fields in tools that can safely support retries.
+
+## Logging
+
+Log enough correlation data to diagnose without exposing secrets:
+
+```ts
+console.error("tool failed", {
+  sessionId: ctx.sessionId,
+  turnId: ctx.turnId,
+  toolRequestId: ctx.toolRequestId,
+  tool: ctx.tool,
+  code: error.code,
+});
+```
+
+Avoid logging full tool args when they can contain private page or user data.
+
+For precise types and signatures, continue to the [Tools API reference](../reference/tools/).

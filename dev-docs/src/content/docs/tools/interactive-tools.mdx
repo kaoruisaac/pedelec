@@ -1,0 +1,213 @@
+---
+title: Interactive and Long-Running Tools
+description: Pause a tool for user input, design modal promises, set timeouts, support cancellation, and clean up pending interactions.
+sidebar:
+  order: 5
+---
+
+A tool handler may return a promise that resolves after the user interacts with the UI. This is useful for confirmation, picking an item, entering missing information, or completing an application-owned workflow.
+
+## Ask the user from a tool
+
+```ts
+const askUser = defineTool({
+  name: "ask_user",
+  description: "Ask the user a question and wait for a text answer.",
+  argsSchema: {
+    type: "object",
+    properties: {
+      question: {
+        type: "string",
+        minLength: 1,
+        description: "Question to display to the user.",
+      },
+    },
+    required: ["question"],
+  },
+  timeoutMs: 120_000,
+});
+```
+
+Register a handler that opens a modal and returns its promise:
+
+```ts
+session.onTool("ask_user", (args: { question: string }, ctx) => {
+  return new Promise((resolve) => {
+    openQuestionModal({
+      question: args.question,
+      toolRequestId: ctx.toolRequestId,
+      onSubmit(answer) {
+        closeQuestionModal();
+        resolve({ answer, cancelled: false });
+      },
+      onCancel() {
+        closeQuestionModal();
+        resolve({ answer: null, cancelled: true });
+      },
+    });
+  });
+});
+```
+
+While the promise is pending, the session remains `waiting_tool_result`.
+
+## Prefer resolving cancellation
+
+User cancellation is usually an expected domain outcome, not an exception:
+
+```ts
+{
+  cancelled: true,
+  reason: "user_cancelled"
+}
+```
+
+or:
+
+```ts
+{
+  error: {
+    code: "USER_CANCELLED",
+    message: "The user cancelled the operation.",
+    retryable: false
+  }
+}
+```
+
+Choose one convention and describe it in tool guidance when the agent needs to interpret it.
+
+Throw only when the handler itself failed unexpectedly.
+
+## Timeout behavior
+
+If `timeoutMs` is omitted, Core currently waits up to its default of 60 seconds. Interactive tools often need a longer explicit timeout.
+
+```ts
+timeoutMs: 5 * 60_000
+```
+
+A timeout is not a user experience. Show the remaining action and give the user a cancel button.
+
+The browser promise is not automatically aborted when Core stops waiting. A late resolution may cause result submission to fail. Your application should implement its own timer or cancellation token so the modal closes and the handler resolves before the runtime deadline.
+
+```ts
+function waitForConfirmation(timeoutMs: number) {
+  return new Promise<{ confirmed: boolean; reason?: string }>((resolve) => {
+    const timeoutId = window.setTimeout(() => {
+      closeConfirmModal();
+      resolve({ confirmed: false, reason: "timeout" });
+    }, timeoutMs - 1_000);
+
+    openConfirmModal({
+      confirm() {
+        clearTimeout(timeoutId);
+        closeConfirmModal();
+        resolve({ confirmed: true });
+      },
+      cancel() {
+        clearTimeout(timeoutId);
+        closeConfirmModal();
+        resolve({ confirmed: false, reason: "user_cancelled" });
+      },
+    });
+  });
+}
+```
+
+Use a margin so result submission can happen before Core's timeout.
+
+## Prevent multiple pending modals
+
+A session/runtime may normally have one pending tool request, but application code should still protect its UI:
+
+```ts
+let activeInteraction: string | null = null;
+
+session.onTool("ask_user", async (args, ctx) => {
+  if (activeInteraction) {
+    return {
+      error: {
+        code: "INTERACTION_ALREADY_OPEN",
+        message: "Another user interaction is already pending.",
+      },
+    };
+  }
+
+  activeInteraction = ctx.toolRequestId;
+  try {
+    return await showQuestion(args);
+  } finally {
+    if (activeInteraction === ctx.toolRequestId) {
+      activeInteraction = null;
+    }
+  }
+});
+```
+
+## Component unmount and route change
+
+Never leave a tool promise unresolved because the component disappeared. Store a resolver for the pending interaction and settle it during cleanup.
+
+```ts
+type PendingInteraction = {
+  requestId: string;
+  resolve: (value: unknown) => void;
+};
+
+let pending: PendingInteraction | null = null;
+
+function cancelPendingForNavigation() {
+  const current = pending;
+  pending = null;
+  current?.resolve({
+    error: {
+      code: "UI_CONTEXT_CLOSED",
+      message: "The page changed before the interaction completed.",
+    },
+  });
+}
+```
+
+Also close the visible modal and clear timers/listeners.
+
+## Long-running non-interactive work
+
+For an export or large frontend calculation:
+
+- set a realistic timeout;
+- show progress in the application;
+- validate the request size before starting;
+- use application-level cancellation when possible;
+- return a compact result rather than a large binary object; and
+- store large output in the application, returning an ID or URL the agent can reference.
+
+```ts
+return {
+  exportId,
+  filename,
+  byteLength,
+};
+```
+
+Do not return a multi-megabyte `ArrayBuffer` through the tool bridge.
+
+## Session end during interaction
+
+If the session ends while a modal is open, close it and settle local state. The SDK rejects pending session work, but it cannot know how to dismiss your component.
+
+```ts
+const offEnded = session.onEnded(() => {
+  cancelPendingForNavigation();
+});
+```
+
+## UX checklist
+
+- Display which agent action is waiting.
+- Make approve/cancel choices explicit.
+- Do not allow the normal prompt composer to start another turn.
+- Set a timeout appropriate to real user behavior.
+- Resolve every path: submit, cancel, timeout, unmount, session end.
+- Avoid exposing secrets in the result.
+
+Continue with [Tool context and UI lifecycle safety](./ui-lifecycle-safety/).
