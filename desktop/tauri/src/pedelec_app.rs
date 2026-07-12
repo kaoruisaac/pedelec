@@ -37,6 +37,7 @@ pub fn run() {
             check_ollama_connection,
             list_ollama_models,
             list_providers,
+            refresh_providers,
             send_text,
             prepare_thread,
             submit_tool_result,
@@ -79,6 +80,7 @@ pub fn run() {
                     err.message
                 )))
             })?;
+            runtime_for_setup.lock().unwrap().refresh_providers();
             let _ipc_handle = start_core_ipc_server(runtime_for_setup.clone()).map_err(|err| {
                 tauri::Error::from(std::io::Error::other(format!(
                     "cannot start Core IPC server: {}",
@@ -216,6 +218,14 @@ fn update_settings(
 #[tauri::command]
 fn list_providers(state: State<'_, CoreRuntimeOwner>) -> Vec<ProviderInfo> {
     state.runtime().lock().unwrap().list_providers()
+}
+
+#[tauri::command]
+fn refresh_providers(state: State<'_, CoreRuntimeOwner>) -> Vec<ProviderInfo> {
+    let shared_runtime = state.runtime();
+    let mut runtime = shared_runtime.lock().unwrap();
+    runtime.refresh_providers();
+    runtime.list_providers()
 }
 
 #[tauri::command]

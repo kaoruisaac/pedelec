@@ -3,6 +3,7 @@ export type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude"
 export interface Provider {
   code: ProviderCode;
   name: string;
+  version?: string | null;
   available: boolean;
   error?: string | null;
   description?: string;

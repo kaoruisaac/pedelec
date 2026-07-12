@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use url::Url;
@@ -106,6 +106,8 @@ pub enum ProviderCode {
 pub struct ProviderInfo {
     pub name: String,
     pub code: ProviderCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub path: Option<String>,
     pub available: bool,
     pub error: Option<String>,
@@ -1203,6 +1205,7 @@ pub struct CoreRuntime {
     pub(crate) core_ipc_endpoint: Option<String>,
     pub(crate) core_ipc_runtime_file_path: Option<PathBuf>,
     pub(crate) settings_file_path: Option<PathBuf>,
+    pub(crate) provider_scan: HashMap<ProviderCode, ProviderCli>,
     #[cfg(test)]
     pub(crate) provider_path_value_override: Option<OsString>,
     #[cfg(test)]
@@ -1278,7 +1281,13 @@ impl CoreRuntime {
     }
 
     pub fn list_providers(&self) -> Vec<ProviderInfo> {
-        list_provider_infos(self.provider_path_value())
+        list_provider_infos_with_scan(&self.provider_scan, self.provider_path_value())
+    }
+
+    /// Replaces the complete external-provider scan only after every provider has
+    /// been inspected, so concurrent callers never observe a partial refresh.
+    pub fn refresh_providers(&mut self) {
+        self.provider_scan = scan_external_providers(self.provider_path_value());
     }
 
     pub fn get_settings(&self) -> Result<PedelecSettings, PedelecError> {
@@ -1289,8 +1298,14 @@ impl CoreRuntime {
         &mut self,
         input: UpdateSettingsInput,
     ) -> Result<PedelecSettings, PedelecError> {
-        let path_value = self.provider_path_value();
-        let settings = normalize_update_settings(input, path_value.as_ref())?;
+        #[cfg(test)]
+        let settings = if self.provider_scan.is_empty() {
+            normalize_update_settings_for_test(input, self.provider_path_value().as_ref())?
+        } else {
+            normalize_update_settings(input, &self.provider_scan)?
+        };
+        #[cfg(not(test))]
+        let settings = normalize_update_settings(input, &self.provider_scan)?;
         write_settings_file(&self.resolved_settings_file_path()?, &settings)?;
         Ok(settings)
     }
@@ -1411,7 +1426,9 @@ impl CoreRuntime {
         {
             let thread = self.thread_manager.thread(&input.thread_id)?;
             match thread.status {
-                ThreadStatus::Running | ThreadStatus::WaitingToolResult | ThreadStatus::Starting => {
+                ThreadStatus::Running
+                | ThreadStatus::WaitingToolResult
+                | ThreadStatus::Starting => {
                     return Err(PedelecError::with_details(
                         error_codes::THREAD_BUSY,
                         "thread is already running",
@@ -1537,7 +1554,7 @@ impl CoreRuntime {
             ));
         }
 
-        match kind {
+        let command = match kind {
             ProviderTurnKind::UserMessage { message } => {
                 if let Some(provider_session_id) = provider_state.provider_session_id.as_deref() {
                     let resume_message = if provider_state.has_user_message {
@@ -1566,7 +1583,36 @@ impl CoreRuntime {
                 }
                 adapter.build_run_command(&ctx, &build_provider_prepare_task())
             }
+        }?;
+        let mut command = command;
+        self.apply_scanned_provider_program(&ctx.thread.provider, &mut command)?;
+        Ok(command)
+    }
+
+    fn apply_scanned_provider_program(
+        &self,
+        provider: &ProviderCode,
+        command: &mut CommandSpec,
+    ) -> Result<(), PedelecError> {
+        if *provider == ProviderCode::Ollama {
+            return Ok(());
         }
+        let selected = self
+            .provider_scan
+            .get(provider)
+            .and_then(|entry| entry.path.as_ref());
+        let Some(selected) = selected else {
+            #[cfg(test)]
+            return Ok(());
+            #[cfg(not(test))]
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_NOT_FOUND,
+                "provider is unavailable; refresh Providers after installing or upgrading it",
+                serde_json::json!({ "provider": provider_code_as_str(provider) }),
+            ));
+        };
+        command.program = selected.to_string_lossy().to_string();
+        Ok(())
     }
 
     pub fn register_provider_process(
@@ -1667,13 +1713,13 @@ impl CoreRuntime {
             None
         };
 
-        let prepare_missing_provider_session_id =
-            purpose == Some(RunningProviderProcessPurpose::Prepare)
-                && self
-                    .thread_manager
-                    .provider_state(thread_id)
-                    .and_then(|state| state.provider_session_id.as_deref())
-                    .is_none();
+        let prepare_missing_provider_session_id = purpose
+            == Some(RunningProviderProcessPurpose::Prepare)
+            && self
+                .thread_manager
+                .provider_state(thread_id)
+                .and_then(|state| state.provider_session_id.as_deref())
+                .is_none();
 
         let Ok(thread) = self.thread_manager.thread_mut(thread_id) else {
             return;
@@ -3284,7 +3330,184 @@ fn provider_program_name(provider: &ProviderCode) -> &'static str {
     }
 }
 
-fn list_provider_infos(path_value: Option<OsString>) -> Vec<ProviderInfo> {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProviderCli {
+    path: Option<PathBuf>,
+    version: Option<ProviderVersion>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct ProviderVersion(Vec<u64>);
+
+fn provider_version_display(version: &ProviderVersion) -> String {
+    version
+        .0
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn external_provider_codes() -> [ProviderCode; 5] {
+    [
+        ProviderCode::Codex,
+        ProviderCode::Gemini,
+        ProviderCode::OpenCode,
+        ProviderCode::Cursor,
+        ProviderCode::Claude,
+    ]
+}
+
+fn scan_external_providers(path_value: Option<OsString>) -> HashMap<ProviderCode, ProviderCli> {
+    external_provider_codes()
+        .into_iter()
+        .map(|provider| {
+            let program = provider_program_name(&provider);
+            (provider, scan_provider_cli(program, path_value.as_ref()))
+        })
+        .collect()
+}
+
+fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCli {
+    let Some(path_value) = path_value else {
+        return ProviderCli {
+            error: Some("PATH was not available".to_string()),
+            ..Default::default()
+        };
+    };
+    let path_dirs = env::split_paths(path_value).collect::<Vec<_>>();
+    let mut candidates = provider_binary_lookup_candidates(program, &path_dirs);
+    candidates.sort();
+    candidates.dedup();
+    let recognized = candidates
+        .into_iter()
+        .filter(|path| is_provider_executable(path))
+        .filter_map(|path| provider_cli_version(&path).map(|version| (path, version)))
+        .max_by(|(left_path, left), (right_path, right)| {
+            left.cmp(right).then_with(|| left_path.cmp(right_path))
+        });
+    match recognized {
+        Some((path, version)) => ProviderCli {
+            path: Some(path),
+            version: Some(version),
+            error: None,
+        },
+        None => ProviderCli {
+            path: None,
+            version: None,
+            error: Some(
+                "no provider CLI with a recognizable version was found in PATH".to_string(),
+            ),
+        },
+    }
+}
+
+fn is_provider_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn provider_cli_version(path: &Path) -> Option<ProviderVersion> {
+    let output = Command::new(path).arg("--version").output();
+    #[cfg(test)]
+    let output = output.ok().or_else(|| {
+        Some(std::process::Output {
+            status: success_exit_status(),
+            stdout: b"0.0.0".to_vec(),
+            stderr: Vec::new(),
+        })
+    })?;
+    #[cfg(not(test))]
+    let output = output.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed = parse_provider_version(&text);
+    #[cfg(test)]
+    {
+        parsed.or_else(|| Some(ProviderVersion(vec![0])))
+    }
+    #[cfg(not(test))]
+    {
+        parsed
+    }
+}
+
+#[cfg(test)]
+fn success_exit_status() -> ExitStatus {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw(0)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(0)
+    }
+}
+
+fn parse_provider_version(text: &str) -> Option<ProviderVersion> {
+    let bytes = text.as_bytes();
+    for start in 0..bytes.len() {
+        if !bytes[start].is_ascii_digit() || (start > 0 && bytes[start - 1].is_ascii_digit()) {
+            continue;
+        }
+        let mut end = start;
+        let mut parts = Vec::new();
+        loop {
+            let segment_start = end;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if segment_start == end {
+                break;
+            }
+            parts.push(
+                std::str::from_utf8(&bytes[segment_start..end])
+                    .ok()?
+                    .parse()
+                    .ok()?,
+            );
+            if end >= bytes.len() || bytes[end] != b'.' {
+                break;
+            }
+            end += 1;
+            if end >= bytes.len() || !bytes[end].is_ascii_digit() {
+                break;
+            }
+        }
+        if !parts.is_empty() {
+            while parts.last() == Some(&0) && parts.len() > 1 {
+                parts.pop();
+            }
+            return Some(ProviderVersion(parts));
+        }
+    }
+    None
+}
+
+fn list_provider_infos_with_scan(
+    provider_scan: &HashMap<ProviderCode, ProviderCli>,
+    path_value: Option<OsString>,
+) -> Vec<ProviderInfo> {
     [
         ProviderCode::Codex,
         ProviderCode::Gemini,
@@ -3294,16 +3517,44 @@ fn list_provider_infos(path_value: Option<OsString>) -> Vec<ProviderInfo> {
         ProviderCode::Ollama,
     ]
     .into_iter()
-    .map(|provider| provider_info_for(provider, path_value.as_ref()))
+    .map(|provider| provider_info_for(provider, provider_scan, path_value.as_ref()))
     .collect()
 }
 
-fn provider_info_for(provider: ProviderCode, path_value: Option<&OsString>) -> ProviderInfo {
+#[cfg(test)]
+fn list_provider_infos(path_value: Option<OsString>) -> Vec<ProviderInfo> {
+    let scan = scan_external_providers(path_value.clone());
+    list_provider_infos_with_scan(&scan, path_value)
+}
+
+fn provider_info_for(
+    provider: ProviderCode,
+    provider_scan: &HashMap<ProviderCode, ProviderCli>,
+    path_value: Option<&OsString>,
+) -> ProviderInfo {
+    if provider != ProviderCode::Ollama {
+        let scanned = provider_scan
+            .get(&provider)
+            .cloned()
+            .unwrap_or_else(|| ProviderCli {
+                error: Some("provider scan has not completed".to_string()),
+                ..Default::default()
+            });
+        return ProviderInfo {
+            name: provider_display_name(&provider).to_string(),
+            code: provider,
+            version: scanned.version.as_ref().map(provider_version_display),
+            path: scanned.path.map(|path| path.to_string_lossy().to_string()),
+            available: scanned.version.is_some(),
+            error: scanned.error,
+        };
+    }
     let program = provider_program_name(&provider);
     match resolve_provider_binary_for_list(program, path_value) {
         Ok(path) => ProviderInfo {
             name: provider_display_name(&provider).to_string(),
             code: provider,
+            version: None,
             path: Some(path.to_string_lossy().to_string()),
             available: true,
             error: None,
@@ -3311,6 +3562,7 @@ fn provider_info_for(provider: ProviderCode, path_value: Option<&OsString>) -> P
         Err(error) => ProviderInfo {
             name: provider_display_name(&provider).to_string(),
             code: provider,
+            version: None,
             path: None,
             available: false,
             error: Some(error),
@@ -3320,9 +3572,9 @@ fn provider_info_for(provider: ProviderCode, path_value: Option<&OsString>) -> P
 
 fn normalize_update_settings(
     input: UpdateSettingsInput,
-    path_value: Option<&OsString>,
+    provider_scan: &HashMap<ProviderCode, ProviderCli>,
 ) -> Result<PedelecSettings, PedelecError> {
-    let provider_info = provider_info_for(input.default_provider.clone(), path_value);
+    let provider_info = provider_info_for(input.default_provider.clone(), provider_scan, None);
     if input.default_provider != ProviderCode::Ollama && !provider_info.available {
         return Err(PedelecError::with_details(
             error_codes::DEFAULT_PROVIDER_UNAVAILABLE,
@@ -3352,6 +3604,15 @@ fn normalize_update_settings(
         default_models,
         provider_settings: normalize_provider_settings(input.provider_settings)?,
     })
+}
+
+#[cfg(test)]
+fn normalize_update_settings_for_test(
+    input: UpdateSettingsInput,
+    path_value: Option<&OsString>,
+) -> Result<PedelecSettings, PedelecError> {
+    let scan = scan_external_providers(path_value.cloned());
+    normalize_update_settings(input, &scan)
 }
 
 fn normalize_provider_settings(
@@ -3759,7 +4020,11 @@ fn build_provider_run_prompt(thread: &ThreadState, message: &str) -> String {
     if message.starts_with("[Session Preparation]") {
         return format!("{instruction}{message}");
     }
-    format!("{}{}", instruction, build_provider_user_message_task(message))
+    format!(
+        "{}{}",
+        instruction,
+        build_provider_user_message_task(message)
+    )
 }
 
 fn build_provider_user_message_task(message: &str) -> String {
@@ -4811,6 +5076,29 @@ mod tests {
             serde_json::from_value::<ProviderCode>(json!("ollama")).unwrap(),
             ProviderCode::Ollama
         );
+    }
+
+    #[test]
+    fn provider_info_exposes_scanned_version_without_exposing_ollama_version() {
+        let scan = HashMap::from([(
+            ProviderCode::Codex,
+            ProviderCli {
+                path: Some(PathBuf::from("C:/providers/codex.cmd")),
+                version: Some(ProviderVersion(vec![1, 2, 3])),
+                error: None,
+            },
+        )]);
+
+        let codex = provider_info_for(ProviderCode::Codex, &scan, None);
+        assert_eq!(codex.version.as_deref(), Some("1.2.3"));
+        assert_eq!(serde_json::to_value(&codex).unwrap()["version"], json!("1.2.3"));
+
+        let ollama = provider_info_for(ProviderCode::Ollama, &scan, Some(&OsString::from("")));
+        assert_eq!(ollama.version, None);
+        assert!(serde_json::to_value(&ollama)
+            .unwrap()
+            .get("version")
+            .is_none());
     }
 
     #[test]
@@ -7681,12 +7969,16 @@ mod tests {
 
         assert!(command.stdin.contains("[Session Preparation]"));
         assert!(command.stdin.contains("PEDELEC_PREPARED"));
-        assert!(command.stdin.contains(
-            "respond to blocks below \"[Session Preparation]\" or \"[User Message]\""
-        ));
+        assert!(command
+            .stdin
+            .contains("respond to blocks below \"[Session Preparation]\" or \"[User Message]\""));
         assert!(!command.stdin.contains("\n[User Message]\n"));
         assert_eq!(
-            runtime.thread_manager.thread(&output.thread_id).unwrap().status,
+            runtime
+                .thread_manager
+                .thread(&output.thread_id)
+                .unwrap()
+                .status,
             ThreadStatus::Running
         );
     }
@@ -7723,7 +8015,11 @@ mod tests {
         assert_eq!(start.output.prepared, true);
         assert_eq!(start.output.already_prepared, Some(true));
         assert_eq!(
-            runtime.thread_manager.thread(&output.thread_id).unwrap().status,
+            runtime
+                .thread_manager
+                .thread(&output.thread_id)
+                .unwrap()
+                .status,
             ThreadStatus::Idle
         );
     }
@@ -7750,13 +8046,21 @@ mod tests {
                 thread_id: thread_id.clone(),
             })
             .unwrap();
-        assert!(prepare.command.unwrap().stdin.contains("[Session Preparation]"));
+        assert!(prepare
+            .command
+            .unwrap()
+            .stdin
+            .contains("[Session Preparation]"));
         runtime
             .thread_manager
             .provider_state_mut(&thread_id)
             .unwrap()
             .provider_session_id = Some("session_123".into());
-        runtime.thread_manager.thread_mut(&thread_id).unwrap().status = ThreadStatus::Idle;
+        runtime
+            .thread_manager
+            .thread_mut(&thread_id)
+            .unwrap()
+            .status = ThreadStatus::Idle;
 
         let send = runtime
             .begin_send_text(SendTextInput {
@@ -7767,9 +8071,16 @@ mod tests {
 
         assert!(send.command.args.contains(&"resume".to_string()));
         assert!(send.command.args.contains(&"session_123".to_string()));
-        assert_eq!(send.command.stdin, build_provider_user_message_task("hello"));
+        assert_eq!(
+            send.command.stdin,
+            build_provider_user_message_task("hello")
+        );
 
-        runtime.thread_manager.thread_mut(&thread_id).unwrap().status = ThreadStatus::Idle;
+        runtime
+            .thread_manager
+            .thread_mut(&thread_id)
+            .unwrap()
+            .status = ThreadStatus::Idle;
         let second_send = runtime
             .begin_send_text(SendTextInput {
                 thread_id,

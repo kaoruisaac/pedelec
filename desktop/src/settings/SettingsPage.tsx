@@ -159,6 +159,20 @@ function SettingsPage() {
     setProviders((current) => withOllamaConnectionStatus(current, connectionStatus));
   }
 
+  async function refreshProviders(): Promise<void> {
+    setLoading(true);
+    setError("");
+    try {
+      const nextProviders = await invoke<Provider[]>("refresh_providers");
+      const ollamaConnection = await checkOllamaConnection(draftSettings().providerSettings.ollama.baseUrl);
+      setProviders(withOllamaConnectionStatus(nextProviders, ollamaConnection));
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function canEditProvider(provider: Provider): boolean {
     if (loading() || saving()) return false;
     return provider.available || provider.code === "ollama";
@@ -175,7 +189,7 @@ function SettingsPage() {
           <h1>Settings</h1>
           <p>Choose the default provider and optional model used by SDK sessions.</p>
         </div>
-        <button type="button" class="settings-secondary-button" onClick={loadSettings} disabled={loading()}>
+        <button type="button" class="settings-secondary-button" onClick={refreshProviders} disabled={loading()}>
           Refresh
         </button>
       </header>
@@ -221,7 +235,9 @@ function SettingsPage() {
                   </label>
                   <span class="provider-main">
                     <strong>{provider.name}</strong>
-                    <span>{provider.code}</span>
+                    <Show when={provider.version}>
+                      <span>version: {provider.version}</span>
+                    </Show>
                     <span>default model: {providerDefaultModel(provider)}</span>
                   </span>
                   <span class="provider-status" data-status={providerStatusValue(provider)}>
