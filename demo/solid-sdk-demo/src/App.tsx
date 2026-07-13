@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type ToolArgsSchema } from "pedelec";
+import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type SandboxAsset, type ToolArgsSchema } from "pedelec";
 
 const MAX_EVENTS = 300;
 const MAX_ASSET_SIZE_BYTES = 100 * 1024 * 1024;
@@ -47,15 +47,6 @@ type DemoEvent = {
   createdAt: number;
 };
 
-type DemoUploadedAsset = {
-  id: string;
-  originalName: string;
-  path: string;
-  sizeBytes: number;
-  mimeType: string;
-  uploadedAt: number;
-};
-
 type DemoSessionState = {
   sessionId: string;
   provider: string;
@@ -68,7 +59,10 @@ type DemoSessionState = {
   createdAt: number;
   updatedAt: number;
   sending: boolean;
-  uploadedAssets: DemoUploadedAsset[];
+  assets: SandboxAsset[];
+  assetsLoading: boolean;
+  assetsLoaded: boolean;
+  assetsError: PedelecError | null;
   uploadingAsset: boolean;
   session: PedelecSession;
   dispose: () => void;
@@ -198,6 +192,11 @@ export default function App() {
     activeSessionId();
     setSelectedAsset(null);
     clearAssetFileInput();
+  });
+
+  createEffect(() => {
+    const session = activeSession();
+    if (session && !session.assetsLoaded && !session.assetsLoading) void refreshSessionAssets(session.sessionId);
   });
 
   async function loadProviders() {
@@ -340,25 +339,13 @@ export default function App() {
 
     try {
       const path = await state.session.uploadAsset(file);
-      const uploadedAsset: DemoUploadedAsset = {
-        id: newId("asset"),
-        originalName: file.name,
-        path,
-        sizeBytes: file.size,
-        mimeType: file.type || "application/octet-stream",
-        uploadedAt: Date.now(),
-      };
-      updateSession(state.sessionId, (current) => ({
-        ...current,
-        uploadedAssets: [uploadedAsset, ...current.uploadedAssets],
-        updatedAt: Date.now(),
-      }));
       appendSessionEvent(state.sessionId, "asset_upload_resolved", {
         filename: file.name,
         path,
         sizeBytes: file.size,
         mimeType: file.type || "application/octet-stream",
       });
+      await refreshSessionAssets(state.sessionId);
       setSelectedAsset(null);
       clearAssetFileInput();
     } catch (err) {
@@ -419,7 +406,10 @@ export default function App() {
       createdAt: now,
       updatedAt: now,
       sending: false,
-      uploadedAssets: [],
+      assets: [],
+      assetsLoading: false,
+      assetsLoaded: false,
+      assetsError: null,
       uploadingAsset: false,
       session,
       dispose,
@@ -433,6 +423,7 @@ export default function App() {
       model: state.model,
     });
     appendSessionEvent(session.sessionId, "session_selected", {});
+    void refreshSessionAssets(session.sessionId);
   }
 
   async function handleTool(sessionId: string, tool: string, args: unknown): Promise<unknown> {
@@ -591,11 +582,25 @@ export default function App() {
     appendSessionEvent(sessionId, "session_selected", {});
   }
 
+  async function refreshSessionAssets(sessionId: string): Promise<void> {
+    const state = sessions().find((session) => session.sessionId === sessionId);
+    if (!state) return;
+    updateSession(sessionId, (current) => ({ ...current, assetsLoading: true, assetsError: null, updatedAt: Date.now() }));
+    try {
+      const assets = await state.session.listAssets();
+      updateSession(sessionId, (current) => ({ ...current, assets, assetsLoaded: true, assetsLoading: false, updatedAt: Date.now() }));
+    } catch (err) {
+      const error = toPedelecError(err, "ASSET_LIST_FAILED", "Failed to refresh assets.");
+      updateSession(sessionId, (current) => ({ ...current, assetsError: error, assetsLoaded: true, assetsLoading: false, updatedAt: Date.now() }));
+      appendSessionEvent(sessionId, "asset_list_rejected", error);
+    }
+  }
+
   function clearAssetFileInput() {
     if (assetFileInput) assetFileInput.value = "";
   }
 
-  async function copyAssetPath(asset: DemoUploadedAsset) {
+  async function copyAssetPath(asset: SandboxAsset) {
     const sessionId = activeSessionId() || undefined;
     try {
       await navigator.clipboard.writeText(asset.path);
@@ -735,6 +740,7 @@ export default function App() {
               onFileChange={setSelectedAsset}
               onSubmit={uploadAsset}
               onCopyPath={copyAssetPath}
+              onRefresh={() => void refreshSessionAssets(activeSessionId())}
             />
           </Panel>
 
@@ -939,7 +945,8 @@ function AssetUploadBlock(props: {
   fileInputRef: (element: HTMLInputElement) => void;
   onFileChange: (file: File | null) => void;
   onSubmit: (event: SubmitEvent) => void;
-  onCopyPath: (asset: DemoUploadedAsset) => void;
+  onCopyPath: (asset: SandboxAsset) => void;
+  onRefresh: () => void;
 }) {
   return (
     <Show when={props.session} fallback={<EmptyText text="Create or resume a session before uploading assets." />}>
@@ -972,11 +979,21 @@ function AssetUploadBlock(props: {
               </button>
             </form>
             <p class="asset-hint">{hint()}</p>
+            <button type="button" disabled={session().assetsLoading} onClick={props.onRefresh}>
+              {session().assetsLoading ? "Refreshing..." : "Refresh Assets"}
+            </button>
             <div class="asset-list">
-              <Show when={session().uploadedAssets.length} fallback={<EmptyText text="No assets uploaded in this page session." />}>
-                <For each={session().uploadedAssets}>
-                  {(asset) => <UploadedAssetRow asset={asset} onCopy={() => props.onCopyPath(asset)} />}
-                </For>
+              <Show when={session().assetsError}>
+                {(error) => <p class="error">{error().message}</p>}
+              </Show>
+              <Show when={session().assetsLoading && !session().assetsLoaded} fallback={
+                <Show when={session().assets.length} fallback={<EmptyText text="No completed assets in this session." />}>
+                  <For each={session().assets}>
+                    {(asset) => <UploadedAssetRow asset={asset} onCopy={() => props.onCopyPath(asset)} />}
+                  </For>
+                </Show>
+              }>
+                <EmptyText text="Loading assets..." />
               </Show>
             </div>
           </div>
@@ -986,18 +1003,18 @@ function AssetUploadBlock(props: {
   );
 }
 
-function UploadedAssetRow(props: { asset: DemoUploadedAsset; onCopy: () => void }) {
+function UploadedAssetRow(props: { asset: SandboxAsset; onCopy: () => void }) {
   return (
     <article class="asset-row">
       <header>
-        <strong>{props.asset.originalName}</strong>
-        <time>{formatTime(props.asset.uploadedAt)}</time>
+        <strong>{props.asset.name}</strong>
+        <time>{formatTime(props.asset.modifiedAt)}</time>
       </header>
       <div class="asset-path">
         <code>{props.asset.path}</code>
         <button type="button" onClick={props.onCopy}>Copy</button>
       </div>
-      <small>{formatBytes(props.asset.sizeBytes)} · {props.asset.mimeType}</small>
+      <small>{formatBytes(props.asset.sizeBytes)} · Modified {formatTime(props.asset.modifiedAt)}</small>
     </article>
   );
 }

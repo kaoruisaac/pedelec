@@ -13,6 +13,36 @@ export type JsonPrimitive = string | number | boolean | null;
 
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
+export type SandboxAssetPath = `input/${string}`;
+
+export type SandboxAsset = {
+  name: string;
+  path: SandboxAssetPath;
+  sizeBytes: number;
+  modifiedAt: number;
+};
+
+function normalizeListAssetsResponse(response: unknown): SandboxAsset[] {
+  if (!response || typeof response !== "object" || Array.isArray(response)) return invalidListAssetsResponse(response);
+  const assets = (response as { assets?: unknown }).assets;
+  if (!Array.isArray(assets)) return invalidListAssetsResponse(response);
+  return assets.map((asset, index) => {
+    if (!asset || typeof asset !== "object" || Array.isArray(asset)) return invalidListAssetsResponse({ index, asset });
+    const { name, path, sizeBytes, modifiedAt } = asset as Record<string, unknown>;
+    const validName = typeof name === "string" && name.length > 0 && name !== "." && name !== ".." && !name.includes("/") && !name.includes("\\");
+    const validPath = typeof path === "string" && !path.includes("\\") && path === `input/${name}` && !path.split("/").includes("..");
+    const validNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+    if (!validName || !validPath || !validNumber(sizeBytes) || !validNumber(modifiedAt)) {
+      return invalidListAssetsResponse({ index, asset });
+    }
+    return { name, path: path as SandboxAssetPath, sizeBytes: sizeBytes as number, modifiedAt: modifiedAt as number };
+  });
+}
+
+function invalidListAssetsResponse(details: unknown): never {
+  throw makeError("SDK_PROTOCOL_ERROR", "list_assets response had an invalid shape", { response: details });
+}
+
 export type ToolArgsSchemaMeta<TDefault extends JsonValue = JsonValue> = {
   description?: string;
   default?: TDefault;
@@ -185,7 +215,6 @@ export type PedelecEventContext = {
   source: "core" | "sdk";
 };
 
-export type SandboxAssetPath = `input/${string}`;
 const MAX_ASSET_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 export type ChatEventContext = PedelecEventContext & {
@@ -1001,6 +1030,13 @@ export class PedelecSession<TToolName extends string = string> {
       return payload.path as SandboxAssetPath;
     }).finally(() => { this.uploadPromise = null; });
     return this.uploadPromise;
+  }
+
+  listAssets(): Promise<SandboxAsset[]> {
+    if (this.status === "ended") {
+      return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    }
+    return this.client.request("list_assets", { sessionId: this.sessionId }).then(normalizeListAssetsResponse);
   }
 
   onError(handler: ErrorHandler): () => void {

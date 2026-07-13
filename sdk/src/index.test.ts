@@ -1450,5 +1450,29 @@ describe("Pedelec SDK", () => {
       code: "SDK_BRIDGE_TIMEOUT",
     });
   });
+
+  it("lists assets without changing session state and validates the response", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const list = session.listAssets();
+    const request = pageWindow.lastSent();
+    expect(request).toMatchObject({ type: "list_assets", sessionId: "thread_1" });
+    respondOk(pageWindow, request, { assets: [{ name: "upl_file.txt", path: "input/upl_file.txt", sizeBytes: 4, modifiedAt: 1 }] });
+    await expect(list).resolves.toEqual([{ name: "upl_file.txt", path: "input/upl_file.txt", sizeBytes: 4, modifiedAt: 1 }]);
+    expect(session.getStatus()).toBe("idle");
+
+    const invalid = session.listAssets();
+    respondOk(pageWindow, pageWindow.lastSent(), { assets: [{ name: "../bad", path: "input/../bad", sizeBytes: 1, modifiedAt: 1 }] });
+    await expect(invalid).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR", message: "list_assets response had an invalid shape" });
+  });
+
+  it("rejects listAssets locally after session end", async () => {
+    const pedelec = new Pedelec();
+    const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId: createRequest.channelId, type: "ended", sessionId: "thread_1", seq: 1 });
+    const sent = pageWindow.port.sent.length;
+    await expect(session.listAssets()).rejects.toMatchObject({ code: "SESSION_ENDED", details: { sessionId: "thread_1" } });
+    expect(pageWindow.port.sent).toHaveLength(sent);
+  });
 });
 

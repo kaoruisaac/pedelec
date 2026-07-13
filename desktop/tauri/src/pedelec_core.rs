@@ -55,6 +55,27 @@ pub struct CreateAssetUploadOutput {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListAssetsInput {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxAsset {
+    pub name: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub modified_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListAssetsOutput {
+    pub assets: Vec<SandboxAsset>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AssetUploadTicket {
     pub thread_id: String,
@@ -1357,6 +1378,100 @@ impl CoreRuntime {
             token,
             expires_at: expires_at.timestamp_millis(),
         })
+    }
+
+    pub fn list_assets(&self, input: ListAssetsInput) -> Result<ListAssetsOutput, PedelecError> {
+        if input.thread_id.trim().is_empty() {
+            return Err(PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "threadId is required",
+            ));
+        }
+        let thread = self.thread_manager.thread(&input.thread_id)?;
+        let input_path = thread.sandbox_path.join("input");
+        if !input_path.exists() {
+            return Ok(ListAssetsOutput { assets: Vec::new() });
+        }
+        let entries = fs::read_dir(&input_path).map_err(|err| {
+            PedelecError::with_details(
+                error_codes::ASSET_LIST_FAILED,
+                "failed to read sandbox assets",
+                serde_json::json!({ "error": err.to_string() }),
+            )
+        })?;
+        let mut assets = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|err| {
+                PedelecError::with_details(
+                    error_codes::ASSET_LIST_FAILED,
+                    "failed to read sandbox asset",
+                    serde_json::json!({ "error": err.to_string() }),
+                )
+            })?;
+            let file_type = entry.file_type().map_err(|err| {
+                PedelecError::with_details(
+                    error_codes::ASSET_LIST_FAILED,
+                    "failed to inspect sandbox asset",
+                    serde_json::json!({ "error": err.to_string() }),
+                )
+            })?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                PedelecError::new(
+                    error_codes::ASSET_LIST_FAILED,
+                    "sandbox asset filename cannot be encoded",
+                )
+            })?;
+            if name.starts_with(".pedelec-") {
+                continue;
+            }
+            let metadata = entry.metadata().map_err(|err| {
+                PedelecError::with_details(
+                    error_codes::ASSET_LIST_FAILED,
+                    "failed to read sandbox asset metadata",
+                    serde_json::json!({ "name": name, "error": err.to_string() }),
+                )
+            })?;
+            let modified_at = metadata
+                .modified()
+                .map_err(|err| {
+                    PedelecError::with_details(
+                        error_codes::ASSET_LIST_FAILED,
+                        "failed to read sandbox asset modified time",
+                        serde_json::json!({ "name": name, "error": err.to_string() }),
+                    )
+                })?
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| {
+                    PedelecError::with_details(
+                        error_codes::ASSET_LIST_FAILED,
+                        "sandbox asset modified time predates Unix epoch",
+                        serde_json::json!({ "name": name }),
+                    )
+                })?
+                .as_millis();
+            let modified_at = i64::try_from(modified_at).map_err(|_| {
+                PedelecError::with_details(
+                    error_codes::ASSET_LIST_FAILED,
+                    "sandbox asset modified time is out of range",
+                    serde_json::json!({ "name": name }),
+                )
+            })?;
+            assets.push(SandboxAsset {
+                path: format!("input/{name}"),
+                name,
+                size_bytes: metadata.len(),
+                modified_at,
+            });
+        }
+        assets.sort_by(|a, b| {
+            b.modified_at
+                .cmp(&a.modified_at)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(ListAssetsOutput { assets })
     }
 
     pub(crate) fn expire_asset_uploads(&mut self) {
@@ -3509,6 +3624,7 @@ pub mod error_codes {
     pub const ASSET_UPLOAD_UNAUTHORIZED: &str = "ASSET_UPLOAD_UNAUTHORIZED";
     pub const ASSET_UPLOAD_SIZE_MISMATCH: &str = "ASSET_UPLOAD_SIZE_MISMATCH";
     pub const ASSET_UPLOAD_FAILED: &str = "ASSET_UPLOAD_FAILED";
+    pub const ASSET_LIST_FAILED: &str = "ASSET_LIST_FAILED";
 }
 
 fn provider_code_as_str(provider: &ProviderCode) -> &'static str {
@@ -7847,6 +7963,49 @@ mod tests {
         assert!(store.get("thread_abc123").is_some());
         assert!(store.remove("thread_abc123").is_some());
         assert!(store.get("thread_abc123").is_none());
+    }
+
+    #[test]
+    fn list_assets_reads_only_completed_first_level_files_without_mutating_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_assets",
+            ProviderCode::Codex,
+            None,
+            None,
+        );
+        let input = temp.path().join("sandbox/thread_assets/input");
+        fs::create_dir_all(input.join("nested")).unwrap();
+        fs::write(input.join("upl-report.txt"), b"data").unwrap();
+        fs::write(input.join(".env"), b"key=value").unwrap();
+        fs::write(input.join(".pedelec-internal"), b"hidden").unwrap();
+        fs::write(input.join("nested/ignored.txt"), b"ignored").unwrap();
+
+        let status_before = runtime.thread_status("thread_assets");
+        let output = runtime
+            .list_assets(ListAssetsInput {
+                thread_id: "thread_assets".into(),
+            })
+            .unwrap();
+
+        assert_eq!(status_before, runtime.thread_status("thread_assets"));
+        assert_eq!(output.assets.len(), 2);
+        assert!(output
+            .assets
+            .iter()
+            .any(|asset| asset.name == "upl-report.txt"
+                && asset.path == "input/upl-report.txt"
+                && asset.size_bytes == 4
+                && asset.modified_at >= 0));
+        assert!(output
+            .assets
+            .iter()
+            .any(|asset| asset.name == ".env" && asset.path == "input/.env"));
+        assert!(output
+            .assets
+            .iter()
+            .all(|asset| !asset.path.contains(temp.path().to_string_lossy().as_ref())));
     }
 
     #[test]

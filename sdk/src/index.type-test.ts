@@ -7,6 +7,8 @@ import {
   type PedelecEventContext,
   type StatusEventContext,
   type ToolCallContext,
+  type SandboxAsset,
+  type SandboxAssetPath,
 } from "./index";
 
 async function typedOnToolNameFromCreateSession() {
@@ -114,9 +116,19 @@ async function noSkillsFallsBackToString() {
   });
 }
 
+async function listAssetsHasPublicTypes() {
+  const pedelec = new Pedelec();
+  const session = await pedelec.resumeSession("thread_1");
+  const assets = await session.listAssets();
+  assets satisfies SandboxAsset[];
+  const path: SandboxAssetPath = assets[0]!.path;
+  path satisfies `input/${string}`;
+}
+
 void typedOnToolNameFromCreateSession;
 void resumedSessionFallsBackToString;
 void noSkillsFallsBackToString;
+void listAssetsHasPublicTypes;
 
 const baseContext: PedelecEventContext = {
   sessionId: "thread_1",

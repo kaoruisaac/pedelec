@@ -21,6 +21,15 @@ await session.sendText(`Please process this file: ${path}`);
 
 The file body is sent directly to a loopback server listening on `127.0.0.1`; it does not travel through the extension, native-messaging host, or Core IPC. A successful upload only means the file is available in the sandbox—it does not guarantee that the selected provider or model can understand its format.
 
+## List completed assets
+
+```ts
+const path = await session.uploadAsset(file);
+const assets = await session.listAssets();
+```
+
+`listAssets()` is non-recursive and sorted by filesystem modification time, newest first. `name` is the actual sandbox filename (not necessarily the original browser `File.name`), `path` is a sandbox-relative `input/...` path, and `modifiedAt` is the filesystem modification time rather than a precise upload time. Absolute local paths are never returned. Listing is allowed while the agent runs, but ended sessions reject with `SESSION_ENDED`. Pagination, deletion, rename, download, and recursive listing are not supported.
+
 ## Optional preparation
 
 ```ts

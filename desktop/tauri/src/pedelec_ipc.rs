@@ -1,8 +1,8 @@
 use crate::pedelec_core::{
-    error_codes, CreateAssetUploadInput, CreateThreadInput, EndThreadInput, PedelecError,
-    PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput,
-    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput,
-    ToolSpecInput, UpdateSettingsInput,
+    error_codes, CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput,
+    PedelecError, PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose,
+    SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
+    ToolCallInput, ToolSpecInput, UpdateSettingsInput,
 };
 use encoding_rs::Encoding;
 use serde::{Deserialize, Serialize};
@@ -394,6 +394,13 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
         },
         "create_asset_upload" => match decode_payload::<CreateAssetUploadInput>(&request) {
             Ok(input) => match runtime.lock().unwrap().create_asset_upload(input) {
+                Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                Err(err) => error_response(&request.request_id, err),
+            },
+            Err(err) => error_response(&request.request_id, err),
+        },
+        "list_assets" => match decode_payload::<ListAssetsInput>(&request) {
+            Ok(input) => match runtime.lock().unwrap().list_assets(input) {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },

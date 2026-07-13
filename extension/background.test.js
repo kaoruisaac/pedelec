@@ -694,6 +694,18 @@ test("SDK prepare_session forwards prepare_thread", async () => {
   });
 });
 
+test("SDK list_assets forwards the session route and returns Core assets", async () => {
+  const { chrome, nativePort } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = await createSdkSession(background, nativePort);
+  sdkPort.emit({ type: "list_assets", channelId: "channel_1", requestId: "sdk_list", sessionId: "thread_sdk" });
+  await tick();
+  assert.deepEqual(nativePort.lastSent(), { requestId: nativePort.lastSent().requestId, type: "list_assets", threadId: "thread_sdk" });
+  respondNative(nativePort, nativePort.lastSent(), { assets: [{ name: "upl_a.txt", path: "input/upl_a.txt", sizeBytes: 1, modifiedAt: 1 }] });
+  await tick();
+  assert.deepEqual(sdkPort.lastSent(), { channelId: "channel_1", type: "response", requestId: "sdk_list", ok: true, result: { assets: [{ name: "upl_a.txt", path: "input/upl_a.txt", sizeBytes: 1, modifiedAt: 1 }] } });
+});
+
 test("unapproved external prepare_session opens approval without native host", async () => {
   const { chrome, nativePort, getConnectNativeCallCount, getOpenPopupCallCount } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });

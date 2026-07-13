@@ -169,7 +169,8 @@ fn native_message_to_core_request(
         | "prepare_thread"
         | "end_thread"
         | "subscribe_thread"
-        | "create_asset_upload" => Some(Value::Object(object)),
+        | "create_asset_upload"
+        | "list_assets" => Some(Value::Object(object)),
         "list_providers" | "get_settings" | "update_settings" => Some(Value::Object(object)),
         "submit_tool_result" => {
             if let Some(value) = object.remove("toolRequestId") {
@@ -420,6 +421,22 @@ mod tests {
                     "tools": []
                 }
             })
+        );
+    }
+
+    #[test]
+    fn native_list_assets_preserves_request_id_and_payload() {
+        let request = native_message_to_core_request(json!({
+            "type": "list_assets",
+            "requestId": "req_assets",
+            "threadId": "thread_assets"
+        }))
+        .unwrap();
+        assert_eq!(request.request_id, "req_assets");
+        assert_eq!(request.r#type, "list_assets");
+        assert_eq!(
+            request.payload,
+            Some(json!({ "threadId": "thread_assets" }))
         );
     }
 

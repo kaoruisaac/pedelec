@@ -16,6 +16,7 @@ A web application can use Pedelec to:
 - send user instructions and receive streamed assistant text;
 - expose narrowly scoped browser-side tools to the agent;
 - resume or end sessions; and
+- upload and list completed sandbox assets; and
 - show connection, approval, provider, and lifecycle state in the UI.
 
 ## Why Pedelec exists
@@ -125,6 +126,15 @@ await session.sendText("Please help me analyze the current page state");
 ```
 
 `sendText()` resolves after the current agent response completes. If the session is already handling a previous prompt, the new `sendText()` call is rejected to prevent multiple concurrent requests from running in the same session.
+
+## Listing uploaded assets
+
+```ts
+const path = await session.uploadAsset(file);
+const assets = await session.listAssets();
+```
+
+`listAssets()` lists only the first level of `input/`, ordered by filesystem modification time (newest first). Each item's `name` is the actual sandbox filename and may differ from the original `File.name`; `modifiedAt` is a filesystem modification timestamp, not an exact upload time. `path` is an agent-sandbox-relative `input/...` path and never an absolute local path. It may be called while the agent is running. Ended sessions reject with `SESSION_ENDED`. Recursive listing, pagination, download, deletion, rename, and move are not supported.
 
 ---
 
