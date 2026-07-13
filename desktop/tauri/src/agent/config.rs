@@ -31,6 +31,7 @@ pub struct AgentConfig {
     pub max_tool_rounds: usize,
     pub max_list_files: usize,
     pub max_file_bytes: u64,
+    pub max_image_bytes: u64,
     pub pedelec_cli_timeout_ms: u64,
 }
 
@@ -96,6 +97,11 @@ pub(crate) fn resolve_config_with_settings_path(
         max_tool_rounds: get_usize(&file_env, "PEDELEC_AGENT_MAX_TOOL_ROUNDS", 100)?,
         max_list_files: get_usize(&file_env, "PEDELEC_AGENT_MAX_LIST_FILES", 200)?,
         max_file_bytes: get_u64(&file_env, "PEDELEC_AGENT_MAX_FILE_BYTES", 262_144)?,
+        max_image_bytes: positive_u64(
+            &file_env,
+            "PEDELEC_AGENT_MAX_IMAGE_BYTES",
+            20 * 1024 * 1024,
+        )?,
         pedelec_cli_timeout_ms: get_u64(&file_env, "PEDELEC_AGENT_PEDELEC_CLI_TIMEOUT_MS", 60_000)?,
     })
 }
@@ -276,6 +282,22 @@ fn get_usize(
     default: usize,
 ) -> Result<usize, AgentError> {
     Ok(get_u64(file_env, key, default as u64)? as usize)
+}
+
+fn positive_u64(
+    file_env: &HashMap<String, String>,
+    key: &str,
+    default: u64,
+) -> Result<u64, AgentError> {
+    let value = get_u64(file_env, key, default)?;
+    if value == 0 {
+        return Err(AgentError::with_details(
+            "CONFIG_ERROR",
+            "Config value must be a positive integer",
+            serde_json::json!({ "key": key }),
+        ));
+    }
+    Ok(value)
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {

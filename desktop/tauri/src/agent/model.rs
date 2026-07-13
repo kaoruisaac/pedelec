@@ -1,5 +1,6 @@
 use super::config::{AgentConfig, ModelProvider};
 use super::error::AgentError;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
@@ -11,6 +12,15 @@ pub struct ModelMessage {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ModelToolCall>>,
+    #[serde(skip)]
+    pub attachments: Vec<ModelAttachment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelAttachment {
+    Image { media_type: String, bytes: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,10 +95,11 @@ impl ModelAdapter for OllamaAdapter {
         messages: &[ModelMessage],
         tools: &Value,
     ) -> Result<ModelTurnOutput, AgentError> {
+        let serialized = messages.iter().map(ollama_message).collect::<Vec<_>>();
         let body = serde_json::json!({
             "model": self.model,
             "stream": false,
-            "messages": messages,
+            "messages": serialized,
             "tools": tools,
             "options": {
                 "num_ctx": 8192
@@ -130,6 +141,34 @@ impl ModelAdapter for OllamaAdapter {
         }
         parse_ollama_response(&text)
     }
+}
+
+fn ollama_message(message: &ModelMessage) -> Value {
+    // Ollama Cloud validates message content as a string. Send an empty string
+    // for messages such as assistant tool calls instead of serializing `null`.
+    let mut value = serde_json::json!({
+        "role": message.role,
+        "content": message.content.clone().unwrap_or_default(),
+    });
+    if let Some(tool_calls) = &message.tool_calls {
+        value["tool_calls"] = serde_json::json!(tool_calls);
+    }
+    if let Some(name) = &message.tool_name {
+        value["tool_name"] = Value::String(name.clone());
+    }
+    let images = message
+        .attachments
+        .iter()
+        .map(|attachment| match attachment {
+            ModelAttachment::Image { bytes, .. } => {
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            }
+        })
+        .collect::<Vec<_>>();
+    if !images.is_empty() {
+        value["images"] = serde_json::json!(images);
+    }
+    value
 }
 
 fn ollama_http_status_error(status: u16, body: &str) -> AgentError {
@@ -221,6 +260,50 @@ mod tests {
     }
 
     #[test]
+    fn serializes_image_only_on_the_message_that_carries_the_attachment() {
+        let tool_message = ModelMessage {
+            role: "tool".into(),
+            content: Some(r#"{"path":"image.png"}"#.into()),
+            tool_calls: None,
+            attachments: vec![],
+            tool_name: Some("fs.read_image".into()),
+        };
+        let image_message = ModelMessage {
+            role: "user".into(),
+            content: Some("The image returned by fs.read_image is attached.".into()),
+            tool_calls: None,
+            attachments: vec![ModelAttachment::Image {
+                media_type: "image/png".into(),
+                bytes: vec![0, 1, 2],
+            }],
+            tool_name: None,
+        };
+
+        let serialized_tool = ollama_message(&tool_message);
+        let serialized_image = ollama_message(&image_message);
+
+        assert_eq!(serialized_tool["content"], r#"{"path":"image.png"}"#);
+        assert!(serialized_tool.get("images").is_none());
+        assert!(serialized_tool.get("tool_calls").is_none());
+        assert_eq!(serialized_image["role"], "user");
+        assert_eq!(serialized_image["images"], serde_json::json!(["AAEC"]));
+    }
+
+    #[test]
+    fn serializes_missing_content_as_an_empty_string() {
+        let serialized = ollama_message(&ModelMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: None,
+            attachments: vec![],
+            tool_name: None,
+        });
+
+        assert_eq!(serialized["content"], "");
+        assert!(serialized.get("tool_calls").is_none());
+    }
+
+    #[test]
     fn ollama_adapter_posts_native_chat_with_authorization_header() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -248,6 +331,8 @@ mod tests {
                     role: "user".into(),
                     content: Some("hi".into()),
                     tool_calls: None,
+                    attachments: vec![],
+                    tool_name: None,
                 }],
                 &serde_json::json!([]),
             )
@@ -304,6 +389,7 @@ mod tests {
             max_tool_rounds: 8,
             max_list_files: 200,
             max_file_bytes: 1024,
+            max_image_bytes: 20 * 1024 * 1024,
             pedelec_cli_timeout_ms: 1000,
         }
     }

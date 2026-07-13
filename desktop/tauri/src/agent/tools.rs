@@ -1,5 +1,6 @@
 use super::config::AgentConfig;
 use super::error::AgentError;
+use super::model::ModelAttachment;
 use super::sandbox::Sandbox;
 use serde_json::Value;
 use std::env;
@@ -8,8 +9,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub fn tool_definitions() -> Value {
-    serde_json::json!([
+pub fn tool_definitions(vision: bool) -> Value {
+    let mut definitions = serde_json::json!([
         {
             "type": "function",
             "function": {
@@ -56,7 +57,20 @@ pub fn tool_definitions() -> Value {
                 }
             }
         },
-    ])
+    ]);
+    if vision {
+        definitions.as_array_mut().unwrap().extend(serde_json::json!([
+        {"type":"function","function":{"name":"fs.list_image_files","description":"List supported PNG, JPEG, and WebP images inside the sandbox.","parameters":{"type":"object","properties":{"dir":{"type":"string","default":"."},"maxDepth":{"type":"integer","default":3}},"additionalProperties":false}}},
+        {"type":"function","function":{"name":"fs.read_image","description":"Read one sandbox image so it can be viewed.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}}
+    ]).as_array().unwrap().iter().cloned());
+    }
+    definitions
+}
+
+#[derive(Debug)]
+pub struct ToolExecutionResult {
+    pub content: Value,
+    pub attachments: Vec<ModelAttachment>,
 }
 
 pub fn execute_tool(
@@ -65,7 +79,7 @@ pub fn execute_tool(
     _session_id: &str,
     sandbox: &Sandbox,
     config: &AgentConfig,
-) -> Result<Value, AgentError> {
+) -> Result<ToolExecutionResult, AgentError> {
     match tool {
         "fs.list_text_files" => {
             let dir = args.get("dir").and_then(Value::as_str).unwrap_or(".");
@@ -75,16 +89,51 @@ pub fn execute_tool(
                 .unwrap_or(3)
                 .min(16) as usize;
             let files = sandbox.list_text_files(dir, max_depth)?;
-            Ok(serde_json::json!({ "files": files }))
+            Ok(ToolExecutionResult {
+                content: serde_json::json!({ "files": files }),
+                attachments: vec![],
+            })
         }
         "fs.read_text_file" => {
             let path = args.get("path").and_then(Value::as_str).ok_or_else(|| {
                 AgentError::new("INVALID_ARGUMENT", "fs.read_text_file requires path")
             })?;
             let (text, truncated) = sandbox.read_text_file(path)?;
-            Ok(serde_json::json!({ "path": path, "text": text, "truncated": truncated }))
+            Ok(ToolExecutionResult {
+                content: serde_json::json!({ "path": path, "text": text, "truncated": truncated }),
+                attachments: vec![],
+            })
         }
-        "bash" => bash_tool(args, config),
+        "fs.list_image_files" => {
+            let dir = args.get("dir").and_then(Value::as_str).unwrap_or(".");
+            let depth = args
+                .get("maxDepth")
+                .and_then(Value::as_u64)
+                .unwrap_or(3)
+                .min(16) as usize;
+            let (files, truncated) = sandbox.list_image_files(dir, depth)?;
+            Ok(ToolExecutionResult {
+                content: serde_json::json!({"files":files,"truncated":truncated}),
+                attachments: vec![],
+            })
+        }
+        "fs.read_image" => {
+            let path = args.get("path").and_then(Value::as_str).ok_or_else(|| {
+                AgentError::new("INVALID_ARGUMENT", "fs.read_image requires path")
+            })?;
+            let (info, bytes) = sandbox.read_image(path)?;
+            Ok(ToolExecutionResult {
+                content: serde_json::to_value(&info).unwrap(),
+                attachments: vec![ModelAttachment::Image {
+                    media_type: info.media_type,
+                    bytes,
+                }],
+            })
+        }
+        "bash" => Ok(ToolExecutionResult {
+            content: bash_tool(args, config)?,
+            attachments: vec![],
+        }),
         _ => Err(AgentError::with_details(
             "INVALID_ARGUMENT",
             "Unknown tool",
@@ -358,6 +407,7 @@ mod tests {
             max_tool_rounds: 8,
             max_list_files: 200,
             max_file_bytes: 1024,
+            max_image_bytes: 20 * 1024 * 1024,
             pedelec_cli_timeout_ms: 1000,
         }
     }
@@ -366,7 +416,7 @@ mod tests {
     fn filesystem_tool_works_without_host_routing_config() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("README.md"), "hello").unwrap();
-        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
         let cfg = config(temp.path().to_path_buf());
 
         let result = execute_tool(
@@ -378,12 +428,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result["text"], "hello");
+        assert_eq!(result.content["text"], "hello");
     }
 
     #[test]
     fn tool_definitions_expose_bash_not_old_native_host_tools() {
-        let tools = tool_definitions().to_string();
+        let tools = tool_definitions(false).to_string();
 
         assert!(tools.contains("\"name\":\"bash\""));
         assert!(!tools.contains("pedelec_cli.tool_spec"));
@@ -395,7 +445,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let capture = temp.path().join("args.txt");
         let cli = fake_pedelec_cli(temp.path(), &capture);
-        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
         let mut cfg = config(temp.path().to_path_buf());
         cfg.pedelec_cli_path = Some(cli);
 
@@ -410,7 +460,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result["ok"], true);
+        assert_eq!(result.content["ok"], true);
         let args = std::fs::read_to_string(capture).unwrap();
         assert!(args.contains("tool-call"));
         assert!(args.contains("get_page"));
@@ -423,7 +473,7 @@ mod tests {
     #[test]
     fn bash_tool_rejects_non_pedelec_cli_commands() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
         let cfg = config(temp.path().to_path_buf());
 
         let err = execute_tool(
@@ -441,7 +491,7 @@ mod tests {
     #[test]
     fn bash_tool_rejects_unsupported_shell_syntax() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
         let cfg = config(temp.path().to_path_buf());
 
         let err = execute_tool(
@@ -487,7 +537,7 @@ mod tests {
     #[test]
     fn old_native_host_tool_is_unknown() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox = Sandbox::new(temp.path(), 1024, 200).unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
         let cfg = config(temp.path().to_path_buf());
 
         let err = execute_tool(

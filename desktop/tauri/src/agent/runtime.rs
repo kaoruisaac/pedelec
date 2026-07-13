@@ -2,7 +2,8 @@ use super::cli::parse_args;
 use super::config::{resolve_config, resolve_config_with_settings_path};
 use super::error::AgentError;
 use super::jsonl::{AgentEvent, JsonlWriter};
-use super::model::{adapter_for, ModelMessage, ModelToolCall};
+use super::model::{adapter_for, ModelAttachment, ModelMessage, ModelToolCall};
+use super::model_capabilities::supports_vision;
 use super::sandbox::Sandbox;
 use super::session::{
     append_transcript, create_session, create_session_at, load_session, load_session_at,
@@ -29,6 +30,7 @@ Do not invent file contents.\n\n\
 [Hard Rules]\n\
 When you're not entirely sure what the User wants you to do, read \"./skills/tools.md\" first.
 ";
+const VISION_PROMPT: &str = "\nYou can list supported images with fs.list_image_files and view one with fs.read_image. Never guess an image's content without reading it.\n";
 
 pub fn run() -> i32 {
     match run_inner(std::env::args().collect()) {
@@ -81,6 +83,7 @@ fn run_inner_with_session_root_and_prompt_with_settings_path(
     let sandbox = Sandbox::new(
         &config.sandbox,
         config.max_file_bytes,
+        config.max_image_bytes,
         config.max_list_files,
     )?;
     let mut session = match (cli.session_id.as_deref(), session_root) {
@@ -109,13 +112,18 @@ fn run_inner_with_session_root_and_prompt_with_settings_path(
     append_transcript(&session, &user_message)?;
     transcript.push(user_message);
 
+    let vision = supports_vision(&config);
     let adapter = adapter_for(&config)?;
-    let tools = tool_definitions();
-    let mut messages = build_model_messages(&transcript);
+    let tools = tool_definitions(vision);
+    let mut messages = build_model_messages(&transcript, vision);
     let mut final_text = None;
 
     for round in 0..=config.max_tool_rounds {
         let output = adapter.run_turn(&messages, &tools)?;
+        // Attachments are request-only: retain only their public metadata in history.
+        for message in &mut messages {
+            message.attachments.clear();
+        }
         if let Some(text) = output.text.clone() {
             final_text = Some(text.clone());
             let assistant = TranscriptMessage {
@@ -138,6 +146,7 @@ fn run_inner_with_session_root_and_prompt_with_settings_path(
         }
 
         messages.push(assistant_tool_call_message(&output.tool_calls));
+        let mut images_in_round = 0;
         for call in output.tool_calls {
             let tool = call.function.name;
             let args = call.function.arguments;
@@ -145,6 +154,35 @@ fn run_inner_with_session_root_and_prompt_with_settings_path(
                 tool: tool.clone(),
                 args: args.clone(),
             })?;
+            if tool == "fs.read_image" && !vision {
+                return Err(AgentError::new(
+                    "MODEL_VISION_UNSUPPORTED",
+                    "Image tools are unavailable for this model.",
+                ));
+            }
+            if tool == "fs.read_image" {
+                images_in_round += 1;
+                if images_in_round > 4 {
+                    let error = AgentError::new(
+                        "TOO_MANY_IMAGES_IN_ROUND",
+                        "At most 4 images may be read in one tool round.",
+                    );
+                    writer.emit(&AgentEvent::ToolResult {
+                        tool: tool.clone(),
+                        ok: false,
+                        result: None,
+                        error: Some(error.clone()),
+                    })?;
+                    messages.push(ModelMessage {
+                        role: "tool".into(),
+                        content: Some(serde_json::json!({"error":error}).to_string()),
+                        tool_calls: None,
+                        attachments: vec![],
+                        tool_name: Some(tool),
+                    });
+                    continue;
+                }
+            }
             match execute_tool(
                 &tool,
                 &args,
@@ -156,20 +194,26 @@ fn run_inner_with_session_root_and_prompt_with_settings_path(
                     writer.emit(&AgentEvent::ToolResult {
                         tool: tool.clone(),
                         ok: true,
-                        result: Some(result.clone()),
+                        result: Some(result.content.clone()),
                         error: None,
                     })?;
                     let tool_message = TranscriptMessage {
                         role: "tool".into(),
                         name: Some(tool.clone()),
-                        content: result.clone(),
+                        content: result.content.clone(),
                     };
                     append_transcript(&session, &tool_message)?;
+                    let attachments = result.attachments;
                     messages.push(ModelMessage {
                         role: "tool".into(),
-                        content: Some(result.to_string()),
+                        content: Some(result.content.to_string()),
                         tool_calls: None,
+                        attachments: vec![],
+                        tool_name: Some(tool.clone()),
                     });
+                    if tool == "fs.read_image" && !attachments.is_empty() {
+                        messages.push(image_attachment_message(&result.content, attachments));
+                    }
                 }
                 Err(error) => {
                     writer.emit(&AgentEvent::ToolResult {
@@ -188,6 +232,8 @@ fn run_inner_with_session_root_and_prompt_with_settings_path(
                         role: "tool".into(),
                         content: Some(tool_message.content.to_string()),
                         tool_calls: None,
+                        attachments: vec![],
+                        tool_name: Some(tool.clone()),
                     });
                 }
             }
@@ -205,11 +251,16 @@ fn run_inner_with_session_root_and_prompt_with_settings_path(
     Ok(())
 }
 
-fn build_model_messages(transcript: &[TranscriptMessage]) -> Vec<ModelMessage> {
+fn build_model_messages(transcript: &[TranscriptMessage], vision: bool) -> Vec<ModelMessage> {
     let mut messages = vec![ModelMessage {
         role: "system".into(),
-        content: Some(SYSTEM_PROMPT.into()),
+        content: Some(format!(
+            "{SYSTEM_PROMPT}{}",
+            if vision { VISION_PROMPT } else { "" }
+        )),
         tool_calls: None,
+        attachments: vec![],
+        tool_name: None,
     }];
     messages.extend(transcript.iter().map(transcript_message_to_model));
     messages
@@ -223,6 +274,8 @@ fn transcript_message_to_model(message: &TranscriptMessage) -> ModelMessage {
             value => value.to_string(),
         }),
         tool_calls: None,
+        attachments: vec![],
+        tool_name: message.name.clone(),
     }
 }
 
@@ -231,6 +284,21 @@ fn assistant_tool_call_message(calls: &[ModelToolCall]) -> ModelMessage {
         role: "assistant".into(),
         content: Some(String::new()),
         tool_calls: Some(calls.to_vec()),
+        attachments: vec![],
+        tool_name: None,
+    }
+}
+
+fn image_attachment_message(metadata: &Value, attachments: Vec<ModelAttachment>) -> ModelMessage {
+    ModelMessage {
+        role: "user".into(),
+        content: Some(format!(
+            "The image returned by fs.read_image is attached. Use it to answer the user's request. Metadata: {}",
+            metadata
+        )),
+        tool_calls: None,
+        attachments,
+        tool_name: None,
     }
 }
 
@@ -344,18 +412,84 @@ mod tests {
         assert!(transcript.contains("final answer"));
     }
 
+    #[test]
+    fn image_tool_round_sends_attachment_in_a_follow_up_user_message() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("image.png"), [0_u8, 1, 2]).unwrap();
+        let (base_url, handle) = fake_ollama_vision_server();
+        let env_file = temp.path().join(".env.local");
+        std::fs::write(&env_file, "PEDELEC_AGENT_MODEL=fake-vision\n").unwrap();
+        std::env::set_var("OLLAMA_API_KEY", "ollama_runtime_key");
+        let settings_path = temp.path().join("settings.json");
+        std::fs::write(
+            &settings_path,
+            format!(
+                r#"{{
+                    "providerSettings": {{
+                        "ollama": {{
+                            "baseUrl": "{base_url}",
+                            "timeoutMs": 120000
+                        }}
+                    }}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        run_inner_with_session_root_and_prompt_with_settings_path(
+            vec![
+                "pedelec-agent".into(),
+                "--sandbox".into(),
+                temp.path().to_string_lossy().to_string(),
+                "--env-file".into(),
+                env_file.to_string_lossy().to_string(),
+            ],
+            Some(&temp.path().join("agent-home")),
+            "inspect the image".into(),
+            Some(&settings_path),
+        )
+        .unwrap();
+
+        let requests = handle.join().unwrap();
+        let messages = requests[2]["messages"].as_array().unwrap();
+        let tool_index = messages
+            .iter()
+            .position(|message| {
+                message["role"] == "tool" && message["tool_name"] == "fs.read_image"
+            })
+            .unwrap();
+        let tool_message = &messages[tool_index];
+        let image_message = &messages[tool_index + 1];
+
+        assert!(tool_message["content"].is_string());
+        assert!(tool_message.get("images").is_none());
+        assert_eq!(image_message["role"], "user");
+        assert!(image_message["content"]
+            .as_str()
+            .unwrap()
+            .contains("fs.read_image"));
+        assert_eq!(image_message["images"], serde_json::json!(["AAEC"]));
+        assert!(image_message.get("tool_calls").is_none());
+    }
+
     fn fake_ollama_server() -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
-            for index in 0..2 {
+            for index in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut buffer = [0; 8192];
                 let bytes_read = stream.read(&mut buffer).unwrap();
                 let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                if index == 0 {
+                    assert!(request.starts_with("POST /api/show "));
+                    let body = r#"{"capabilities":["tools"]}"#;
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                    continue;
+                }
                 assert!(request.starts_with("POST /api/chat "));
                 assert!(request.contains("authorization: Bearer "));
-                let body = if index == 0 {
+                let body = if index == 1 {
                     r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"fs.read_text_file","arguments":{"path":"README.md"}}}]}}"#
                 } else {
                     r#"{"message":{"role":"assistant","content":"final answer"}}"#
@@ -368,6 +502,39 @@ mod tests {
                 )
                 .unwrap();
             }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn fake_ollama_vision_server() -> (String, thread::JoinHandle<Vec<Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0; 8192];
+                let bytes_read = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                let body_start = request.find("\r\n\r\n").unwrap() + 4;
+                let body: Value = serde_json::from_str(&request[body_start..]).unwrap();
+                requests.push(body);
+                let response = if index == 0 {
+                    r#"{"capabilities":["tools","vision"]}"#
+                } else if index == 1 {
+                    r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"fs.read_image","arguments":{"path":"image.png"}}}]}}"#
+                } else {
+                    r#"{"message":{"role":"assistant","content":"final answer"}}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )
+                .unwrap();
+            }
+            requests
         });
         (format!("http://{addr}"), handle)
     }

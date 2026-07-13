@@ -402,6 +402,7 @@ mod tests {
             max_tool_rounds: 8,
             max_list_files: 200,
             max_file_bytes: 1024,
+            max_image_bytes: 20 * 1024 * 1024,
             pedelec_cli_timeout_ms: 1000,
         }
     }

@@ -31,6 +31,7 @@ path = "src/bin/pedelec-agent.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 dirs = "6"
 encoding_rs = "0.8"
