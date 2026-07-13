@@ -12,6 +12,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use url::Url;
+use uuid::Uuid;
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_MAX_SKILL_SIZE_BYTES: u64 = 1024 * 1024;
@@ -23,6 +24,8 @@ const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 const THREAD_ID_BASE36_MIN_WIDTH: usize = 6;
 const THREAD_ID_BASE36_MAX_WIDTH: usize = 7;
 const THREAD_ID_MAX_COUNTER: u64 = 78_364_164_095;
+pub const MAX_ASSET_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
+const ASSET_UPLOAD_TICKET_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +34,46 @@ pub struct PedelecError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAssetUploadInput {
+    pub thread_id: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAssetUploadOutput {
+    pub upload_id: String,
+    pub upload_url: String,
+    pub token: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssetUploadTicket {
+    pub thread_id: String,
+    pub sandbox_path: PathBuf,
+    pub filename: String,
+    pub safe_filename: String,
+    pub expected_size_bytes: u64,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub state: AssetUploadState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetUploadState {
+    Pending,
+    Uploading,
+    Completed,
+    Failed,
+    Expired,
 }
 
 impl PedelecError {
@@ -1206,6 +1249,8 @@ pub struct CoreRuntime {
     pub(crate) core_ipc_runtime_file_path: Option<PathBuf>,
     pub(crate) settings_file_path: Option<PathBuf>,
     pub(crate) provider_scan: HashMap<ProviderCode, ProviderCli>,
+    pub(crate) asset_upload_port: Option<u16>,
+    pub(crate) asset_upload_tickets: HashMap<String, AssetUploadTicket>,
     #[cfg(test)]
     pub(crate) provider_path_value_override: Option<OsString>,
     #[cfg(test)]
@@ -1224,6 +1269,116 @@ impl CoreRuntime {
     ) {
         self.core_ipc_endpoint = Some(endpoint.into());
         self.core_ipc_runtime_file_path = Some(runtime_file_path.into());
+    }
+
+    pub fn set_asset_upload_port(&mut self, port: u16) {
+        self.asset_upload_port = Some(port);
+    }
+
+    pub fn create_asset_upload(
+        &mut self,
+        input: CreateAssetUploadInput,
+    ) -> Result<CreateAssetUploadOutput, PedelecError> {
+        if input.filename.trim().is_empty() || input.filename == "." || input.filename == ".." {
+            return Err(PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "filename is invalid",
+            ));
+        }
+        if input.size_bytes > MAX_ASSET_UPLOAD_BYTES {
+            return Err(PedelecError::new(
+                error_codes::ASSET_TOO_LARGE,
+                "asset exceeds the 100 MiB limit",
+            ));
+        }
+        let port = self.asset_upload_port.ok_or_else(|| {
+            PedelecError::new(
+                error_codes::ASSET_UPLOAD_SERVER_UNAVAILABLE,
+                "asset upload server is unavailable",
+            )
+        })?;
+        let thread = self.thread_manager.thread(&input.thread_id)?;
+        if thread.status == ThreadStatus::Ended {
+            return Err(PedelecError::new(
+                error_codes::THREAD_ENDED,
+                "thread has ended",
+            ));
+        }
+        if thread.status != ThreadStatus::Idle {
+            return Err(PedelecError::new(
+                error_codes::THREAD_BUSY,
+                "thread is busy",
+            ));
+        }
+        let sandbox_path = thread.sandbox_path.clone();
+        self.expire_asset_uploads();
+        if self.asset_upload_tickets.values().any(|ticket| {
+            ticket.thread_id == input.thread_id
+                && matches!(
+                    ticket.state,
+                    AssetUploadState::Pending | AssetUploadState::Uploading
+                )
+        }) {
+            return Err(PedelecError::new(
+                error_codes::THREAD_BUSY,
+                "an asset upload is already in progress",
+            ));
+        }
+        // Keep sandbox asset names readable while using the separate 256-bit token
+        // for authorization. The collision check covers all tickets in this runtime.
+        let upload_id = loop {
+            let candidate = format!("upl_{}", &Uuid::new_v4().simple().to_string()[..8]);
+            if !self.asset_upload_tickets.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let token = (0..8)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect::<String>();
+        let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+        let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
+        let safe_filename = safe_asset_filename(&input.filename);
+        self.asset_upload_tickets.insert(
+            upload_id.clone(),
+            AssetUploadTicket {
+                thread_id: input.thread_id,
+                sandbox_path,
+                filename: input.filename,
+                safe_filename,
+                expected_size_bytes: input.size_bytes,
+                token_hash,
+                expires_at,
+                state: AssetUploadState::Pending,
+            },
+        );
+        Ok(CreateAssetUploadOutput {
+            upload_id: upload_id.clone(),
+            upload_url: format!("http://127.0.0.1:{port}/uploads/{upload_id}"),
+            token,
+            expires_at: expires_at.timestamp_millis(),
+        })
+    }
+
+    pub(crate) fn expire_asset_uploads(&mut self) {
+        let now = Utc::now();
+        for ticket in self.asset_upload_tickets.values_mut() {
+            if ticket.state == AssetUploadState::Pending && ticket.expires_at <= now {
+                ticket.state = AssetUploadState::Expired;
+            }
+        }
+    }
+
+    pub(crate) fn invalidate_asset_uploads_for_thread(&mut self, thread_id: &str) {
+        for ticket in self.asset_upload_tickets.values_mut() {
+            if ticket.thread_id == thread_id
+                && matches!(
+                    ticket.state,
+                    AssetUploadState::Pending | AssetUploadState::Uploading
+                )
+            {
+                ticket.state = AssetUploadState::Failed;
+            }
+        }
     }
 
     pub fn create_thread(
@@ -1354,6 +1509,19 @@ impl CoreRuntime {
     }
 
     pub fn begin_send_text(&mut self, input: SendTextInput) -> Result<SendTextStart, PedelecError> {
+        self.expire_asset_uploads();
+        if self.asset_upload_tickets.values().any(|ticket| {
+            ticket.thread_id == input.thread_id
+                && matches!(
+                    ticket.state,
+                    AssetUploadState::Pending | AssetUploadState::Uploading
+                )
+        }) {
+            return Err(PedelecError::new(
+                error_codes::THREAD_BUSY,
+                "an asset upload is in progress",
+            ));
+        }
         {
             let thread = self.thread_manager.thread(&input.thread_id)?;
             match thread.status {
@@ -1423,6 +1591,19 @@ impl CoreRuntime {
         &mut self,
         input: PrepareThreadInput,
     ) -> Result<PrepareThreadStart, PedelecError> {
+        self.expire_asset_uploads();
+        if self.asset_upload_tickets.values().any(|ticket| {
+            ticket.thread_id == input.thread_id
+                && matches!(
+                    ticket.state,
+                    AssetUploadState::Pending | AssetUploadState::Uploading
+                )
+        }) {
+            return Err(PedelecError::new(
+                error_codes::THREAD_BUSY,
+                "an asset upload is in progress",
+            ));
+        }
         {
             let thread = self.thread_manager.thread(&input.thread_id)?;
             match thread.status {
@@ -1883,6 +2064,7 @@ impl CoreRuntime {
     }
 
     pub fn end_thread(&mut self, input: EndThreadInput) -> Result<(), PedelecError> {
+        self.invalidate_asset_uploads_for_thread(&input.thread_id);
         let sandbox_path = {
             let thread = self.thread_manager.thread_mut(&input.thread_id)?;
             if thread.status != ThreadStatus::Ended {
@@ -3250,6 +3432,31 @@ impl EventBus {
     }
 }
 
+fn safe_asset_filename(filename: &str) -> String {
+    let mut value: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    value = value
+        .trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string();
+    if value.is_empty()
+        || matches!(
+            value.to_ascii_uppercase().as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "LPT1"
+        )
+    {
+        value = "upload".to_string();
+    }
+    value.chars().take(180).collect()
+}
+
 pub mod error_codes {
     pub const CORE_RUNTIME_UNAVAILABLE: &str = "CORE_RUNTIME_UNAVAILABLE";
     pub const THREAD_NOT_FOUND: &str = "THREAD_NOT_FOUND";
@@ -3295,6 +3502,13 @@ pub mod error_codes {
     pub const OLLAMA_UNAVAILABLE: &str = "OLLAMA_UNAVAILABLE";
     pub const OLLAMA_REQUEST_FAILED: &str = "OLLAMA_REQUEST_FAILED";
     pub const OLLAMA_RESPONSE_INVALID: &str = "OLLAMA_RESPONSE_INVALID";
+    pub const INVALID_INPUT: &str = "INVALID_INPUT";
+    pub const ASSET_TOO_LARGE: &str = "ASSET_TOO_LARGE";
+    pub const ASSET_UPLOAD_SERVER_UNAVAILABLE: &str = "ASSET_UPLOAD_SERVER_UNAVAILABLE";
+    pub const ASSET_UPLOAD_TICKET_EXPIRED: &str = "ASSET_UPLOAD_TICKET_EXPIRED";
+    pub const ASSET_UPLOAD_UNAUTHORIZED: &str = "ASSET_UPLOAD_UNAUTHORIZED";
+    pub const ASSET_UPLOAD_SIZE_MISMATCH: &str = "ASSET_UPLOAD_SIZE_MISMATCH";
+    pub const ASSET_UPLOAD_FAILED: &str = "ASSET_UPLOAD_FAILED";
 }
 
 fn provider_code_as_str(provider: &ProviderCode) -> &'static str {
@@ -5091,7 +5305,10 @@ mod tests {
 
         let codex = provider_info_for(ProviderCode::Codex, &scan, None);
         assert_eq!(codex.version.as_deref(), Some("1.2.3"));
-        assert_eq!(serde_json::to_value(&codex).unwrap()["version"], json!("1.2.3"));
+        assert_eq!(
+            serde_json::to_value(&codex).unwrap()["version"],
+            json!("1.2.3")
+        );
 
         let ollama = provider_info_for(ProviderCode::Ollama, &scan, Some(&OsString::from("")));
         assert_eq!(ollama.version, None);

@@ -342,6 +342,65 @@ label {
   font-size: 13px;
 }
 
+.asset-upload-block,
+.asset-list {
+  display: grid;
+  gap: 10px;
+}
+
+.asset-selection,
+.asset-hint {
+  margin: 0;
+  color: #687882;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.asset-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #d7e0e6;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fafbfc;
+}
+
+.asset-row header,
+.asset-path {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.asset-row header {
+  color: #53636e;
+  font-size: 12px;
+}
+
+.asset-row header strong {
+  min-width: 0;
+  color: #24343d;
+  overflow-wrap: anywhere;
+}
+
+.asset-path code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.asset-path button {
+  flex: 0 0 auto;
+}
+
+.asset-row small {
+  color: #687882;
+  overflow-wrap: anywhere;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -399,5 +458,10 @@ label {
   .status-grid,
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .asset-path {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

@@ -164,9 +164,12 @@ fn native_message_to_core_request(
     }
 
     let payload = match request_type.as_str() {
-        "create_thread" | "send_text" | "prepare_thread" | "end_thread" | "subscribe_thread" => {
-            Some(Value::Object(object))
-        }
+        "create_thread"
+        | "send_text"
+        | "prepare_thread"
+        | "end_thread"
+        | "subscribe_thread"
+        | "create_asset_upload" => Some(Value::Object(object)),
         "list_providers" | "get_settings" | "update_settings" => Some(Value::Object(object)),
         "submit_tool_result" => {
             if let Some(value) = object.remove("toolRequestId") {

@@ -1,8 +1,8 @@
 use crate::pedelec_core::{
-    error_codes, CreateThreadInput, EndThreadInput, PedelecError, PrepareThreadInput,
-    PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime,
-    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolSpecInput,
-    UpdateSettingsInput,
+    error_codes, CreateAssetUploadInput, CreateThreadInput, EndThreadInput, PedelecError,
+    PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput,
+    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput,
+    ToolSpecInput, UpdateSettingsInput,
 };
 use encoding_rs::Encoding;
 use serde::{Deserialize, Serialize};
@@ -392,6 +392,13 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
             },
             Err(err) => error_response(&request.request_id, err),
         },
+        "create_asset_upload" => match decode_payload::<CreateAssetUploadInput>(&request) {
+            Ok(input) => match runtime.lock().unwrap().create_asset_upload(input) {
+                Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                Err(err) => error_response(&request.request_id, err),
+            },
+            Err(err) => error_response(&request.request_id, err),
+        },
         "end_thread" => match decode_payload::<EndThreadInput>(&request) {
             Ok(input) => match runtime.lock().unwrap().end_thread(input) {
                 Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
@@ -550,22 +557,22 @@ fn start_provider_process_with_command(
     command_spec: crate::pedelec_core::CommandSpec,
     purpose: RunningProviderProcessPurpose,
 ) -> Result<(), PedelecError> {
-    let resolved_program =
-        match resolve_provider_program(&command_spec.program, &command_spec.env) {
-            Ok(resolved_program) => resolved_program,
-            Err(err) => {
-                let error = PedelecError::with_details(
-                    error_codes::PROVIDER_PROCESS_START_FAILED,
-                    "provider program could not be found",
-                    provider_start_error_details(&thread_id, &command_spec, None, Some(err)),
-                );
-                runtime
-                    .lock()
-                    .unwrap()
-                    .fail_provider_process_start(&thread_id, error.clone(), purpose);
-                return Err(error);
-            }
-        };
+    let resolved_program = match resolve_provider_program(&command_spec.program, &command_spec.env)
+    {
+        Ok(resolved_program) => resolved_program,
+        Err(err) => {
+            let error = PedelecError::with_details(
+                error_codes::PROVIDER_PROCESS_START_FAILED,
+                "provider program could not be found",
+                provider_start_error_details(&thread_id, &command_spec, None, Some(err)),
+            );
+            runtime
+                .lock()
+                .unwrap()
+                .fail_provider_process_start(&thread_id, error.clone(), purpose);
+            return Err(error);
+        }
+    };
 
     let mut command = build_provider_process_command(&command_spec, &resolved_program);
 
@@ -637,10 +644,12 @@ fn start_provider_process_with_command(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let child = Arc::new(Mutex::new(Some(child)));
-    runtime
-        .lock()
-        .unwrap()
-        .register_provider_process(&thread_id, process_id, Arc::clone(&child), purpose);
+    runtime.lock().unwrap().register_provider_process(
+        &thread_id,
+        process_id,
+        Arc::clone(&child),
+        purpose,
+    );
 
     if let Some(stdout) = stdout {
         spawn_provider_reader(

@@ -185,6 +185,9 @@ export type PedelecEventContext = {
   source: "core" | "sdk";
 };
 
+export type SandboxAssetPath = `input/${string}`;
+const MAX_ASSET_UPLOAD_BYTES = 100 * 1024 * 1024;
+
 export type ChatEventContext = PedelecEventContext & {
   type: "chat_delta";
   turnId: string;
@@ -819,6 +822,7 @@ export class PedelecSession<TToolName extends string = string> {
   private pendingSend: PendingSend | null = null;
   private pendingPrepare: PendingSend | null = null;
   private preparePromise: Promise<void> | null = null;
+  private uploadPromise: Promise<SandboxAssetPath> | null = null;
   private prepared = false;
   private activeTurn: ActiveTurn | null = null;
   private genericToolHandler: GenericToolHandler<TToolName> | null = null;
@@ -847,7 +851,7 @@ export class PedelecSession<TToolName extends string = string> {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
 
-    if (this.pendingSend) {
+    if (this.pendingSend || this.uploadPromise) {
       return Promise.reject(makeError("SESSION_BUSY", "session is already running", { sessionId: this.sessionId }));
     }
 
@@ -891,6 +895,9 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   async sendText(text: string): Promise<void> {
+    if (this.uploadPromise) {
+      return Promise.reject(makeError("SESSION_BUSY", "an asset upload is in progress", { sessionId: this.sessionId }));
+    }
     if (this.preparePromise) {
       try {
         await this.preparePromise;
@@ -968,6 +975,32 @@ export class PedelecSession<TToolName extends string = string> {
         this.genericToolHandler = null;
       }
     };
+  }
+
+  uploadAsset(file: File): Promise<SandboxAssetPath> {
+    if (this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    if (this.pendingSend || this.pendingPrepare || this.preparePromise || this.uploadPromise || this.status !== "idle") {
+      return Promise.reject(makeError("SESSION_BUSY", "session is busy", { sessionId: this.sessionId }));
+    }
+    if (typeof File === "undefined" || !(file instanceof File) || !file.name || file.size < 0) {
+      return Promise.reject(makeError("INVALID_INPUT", "uploadAsset requires a browser File with a filename"));
+    }
+    if (file.size > MAX_ASSET_UPLOAD_BYTES) return Promise.reject(makeError("ASSET_TOO_LARGE", "asset exceeds the 100 MiB limit"));
+    this.uploadPromise = this.client.request<{ uploadId: string; uploadUrl: string; token: string }>("create_asset_upload", {
+      sessionId: this.sessionId, filename: file.name, sizeBytes: file.size, mimeType: file.type,
+    }).then(async (ticket) => {
+      if (!ticket?.uploadUrl || !ticket.token) throw makeError("SDK_PROTOCOL_ERROR", "asset upload ticket was invalid");
+      let response: Response;
+      try {
+        response = await fetch(ticket.uploadUrl, { method: "PUT", headers: { Authorization: `Bearer ${ticket.token}`, "Content-Type": file.type || "application/octet-stream" }, body: file, credentials: "omit" });
+      } catch (error) { throw normalizeError(error, "ASSET_UPLOAD_FAILED", "asset upload failed"); }
+      let payload: any = null;
+      try { payload = await response.json(); } catch { /* normalized below */ }
+      if (!response.ok) throw normalizeError(payload?.error, "ASSET_UPLOAD_FAILED", "asset upload failed");
+      if (typeof payload?.path !== "string" || !payload.path.startsWith("input/") || payload.path.includes("..")) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response had an invalid path");
+      return payload.path as SandboxAssetPath;
+    }).finally(() => { this.uploadPromise = null; });
+    return this.uploadPromise;
   }
 
   onError(handler: ErrorHandler): () => void {

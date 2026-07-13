@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, For, Show, type JSX } from "sol
 import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type ToolArgsSchema } from "pedelec";
 
 const MAX_EVENTS = 300;
+const MAX_ASSET_SIZE_BYTES = 100 * 1024 * 1024;
 
 type ChatRole = "user" | "assistant" | "system";
 type SessionStatus = PedelecSessionStatus | "unknown";
@@ -46,6 +47,15 @@ type DemoEvent = {
   createdAt: number;
 };
 
+type DemoUploadedAsset = {
+  id: string;
+  originalName: string;
+  path: string;
+  sizeBytes: number;
+  mimeType: string;
+  uploadedAt: number;
+};
+
 type DemoSessionState = {
   sessionId: string;
   provider: string;
@@ -58,6 +68,8 @@ type DemoSessionState = {
   createdAt: number;
   updatedAt: number;
   sending: boolean;
+  uploadedAssets: DemoUploadedAsset[];
+  uploadingAsset: boolean;
   session: PedelecSession;
   dispose: () => void;
 };
@@ -134,11 +146,13 @@ export default function App() {
   const [model, setModel] = createSignal("");
   const [resumeId, setResumeId] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
+  const [selectedAsset, setSelectedAsset] = createSignal<File | null>(null);
   const [sessions, setSessions] = createSignal<DemoSessionState[]>([]);
   const [activeSessionId, setActiveSessionId] = createSignal("");
   const [globalEvents, setGlobalEvents] = createSignal<DemoEvent[]>([]);
   const [globalErrors, setGlobalErrors] = createSignal<DemoError[]>([]);
   const [askUser, setAskUser] = createSignal<AskUserState | null>(null);
+  let assetFileInput: HTMLInputElement | undefined;
 
   const activeSession = createMemo(() => sessions().find((session) => session.sessionId === activeSessionId()));
   const allErrors = createMemo(() => {
@@ -148,7 +162,19 @@ export default function App() {
   const activeEvents = createMemo(() => activeSession()?.events ?? globalEvents());
   const canSend = createMemo(() => {
     const session = activeSession();
-    return Boolean(session && prompt().trim() && !session.sending && session.status !== "ended");
+    return Boolean(session && prompt().trim() && session.status === "idle" && !session.sending && !session.uploadingAsset);
+  });
+  const canUploadAsset = createMemo(() => {
+    const session = activeSession();
+    const file = selectedAsset();
+    return Boolean(
+      session &&
+        file &&
+        file.size <= MAX_ASSET_SIZE_BYTES &&
+        session.status === "idle" &&
+        !session.uploadingAsset &&
+        !session.sending,
+    );
   });
   const canCreate = createMemo(() =>
     Boolean(client() && provider() && !providersLoading() && providers().length > 0),
@@ -163,8 +189,16 @@ export default function App() {
     setProviders([]);
     setProvidersLoading(false);
     setProvider("");
+    setSelectedAsset(null);
+    clearAssetFileInput();
     setConnection(initializeClient(setClient));
   }
+
+  createEffect(() => {
+    activeSessionId();
+    setSelectedAsset(null);
+    clearAssetFileInput();
+  });
 
   async function loadProviders() {
     const sdk = client();
@@ -274,6 +308,71 @@ export default function App() {
     }
   }
 
+  async function uploadAsset(event: SubmitEvent) {
+    event.preventDefault();
+    const state = activeSession();
+    const file = selectedAsset();
+    if (!state || !file) return;
+
+    if (file.size > MAX_ASSET_SIZE_BYTES) {
+      recordError(
+        toDemoError(
+          {
+            code: "ASSET_TOO_LARGE",
+            message: "File exceeds the 100 MiB limit.",
+            details: { filename: file.name, sizeBytes: file.size, maxSizeBytes: MAX_ASSET_SIZE_BYTES },
+          },
+          state.sessionId,
+        ),
+        state.sessionId,
+      );
+      return;
+    }
+
+    if (state.status !== "idle" || state.sending || state.uploadingAsset) return;
+
+    updateSession(state.sessionId, (current) => ({ ...current, uploadingAsset: true, updatedAt: Date.now() }));
+    appendSessionEvent(state.sessionId, "asset_upload_requested", {
+      filename: file.name,
+      sizeBytes: file.size,
+      mimeType: file.type,
+    });
+
+    try {
+      const path = await state.session.uploadAsset(file);
+      const uploadedAsset: DemoUploadedAsset = {
+        id: newId("asset"),
+        originalName: file.name,
+        path,
+        sizeBytes: file.size,
+        mimeType: file.type || "application/octet-stream",
+        uploadedAt: Date.now(),
+      };
+      updateSession(state.sessionId, (current) => ({
+        ...current,
+        uploadedAssets: [uploadedAsset, ...current.uploadedAssets],
+        updatedAt: Date.now(),
+      }));
+      appendSessionEvent(state.sessionId, "asset_upload_resolved", {
+        filename: file.name,
+        path,
+        sizeBytes: file.size,
+        mimeType: file.type || "application/octet-stream",
+      });
+      setSelectedAsset(null);
+      clearAssetFileInput();
+    } catch (err) {
+      recordError(toDemoError(err, state.sessionId), state.sessionId);
+      appendSessionEvent(state.sessionId, "asset_upload_rejected", {
+        filename: file.name,
+        sizeBytes: file.size,
+        mimeType: file.type || "application/octet-stream",
+      });
+    } finally {
+      updateSession(state.sessionId, (current) => ({ ...current, uploadingAsset: false, updatedAt: Date.now() }));
+    }
+  }
+
   function registerSession(session: PedelecSession, fallbackProvider: string, fallbackModel?: string) {
     const existing = sessions().find((item) => item.sessionId === session.sessionId);
     if (existing) {
@@ -320,6 +419,8 @@ export default function App() {
       createdAt: now,
       updatedAt: now,
       sending: false,
+      uploadedAssets: [],
+      uploadingAsset: false,
       session,
       dispose,
     };
@@ -490,6 +591,29 @@ export default function App() {
     appendSessionEvent(sessionId, "session_selected", {});
   }
 
+  function clearAssetFileInput() {
+    if (assetFileInput) assetFileInput.value = "";
+  }
+
+  async function copyAssetPath(asset: DemoUploadedAsset) {
+    const sessionId = activeSessionId() || undefined;
+    try {
+      await navigator.clipboard.writeText(asset.path);
+    } catch (err) {
+      recordError(
+        toDemoError(
+          {
+            code: "CLIPBOARD_WRITE_FAILED",
+            message: "Failed to copy asset path.",
+            details: toPedelecError(err, "CLIPBOARD_WRITE_FAILED", "Failed to copy asset path.").details,
+          },
+          sessionId,
+        ),
+        sessionId,
+      );
+    }
+  }
+
   function markExtensionError(err: unknown) {
     const error = toPedelecError(err, "SDK_ERROR", "SDK request failed");
     if (error.code.includes("EXTENSION")) {
@@ -602,6 +726,18 @@ export default function App() {
             </Show>
           </Panel>
 
+          <Panel title="Uploaded Assets">
+            <AssetUploadBlock
+              session={activeSession()}
+              selectedFile={selectedAsset()}
+              canUpload={canUploadAsset()}
+              fileInputRef={(element) => (assetFileInput = element)}
+              onFileChange={setSelectedAsset}
+              onSubmit={uploadAsset}
+              onCopyPath={copyAssetPath}
+            />
+          </Panel>
+
           <Panel title="Transcript">
             <div class="transcript">
               <Show when={activeSession()?.transcript.length} fallback={<EmptyText text="No messages yet." />}>
@@ -624,7 +760,7 @@ export default function App() {
             <textarea
               rows="4"
               value={prompt()}
-              disabled={!activeSession() || activeSession()?.status === "ended"}
+              disabled={!activeSession() || activeSession()?.status !== "idle" || activeSession()?.sending || activeSession()?.uploadingAsset}
               onInput={(event) => setPrompt(event.currentTarget.value)}
               placeholder="Send text to the active session"
             />
@@ -796,6 +932,76 @@ function EmptyText(props: { text: string }) {
   return <p class="empty">{props.text}</p>;
 }
 
+function AssetUploadBlock(props: {
+  session: DemoSessionState | undefined;
+  selectedFile: File | null;
+  canUpload: boolean;
+  fileInputRef: (element: HTMLInputElement) => void;
+  onFileChange: (file: File | null) => void;
+  onSubmit: (event: SubmitEvent) => void;
+  onCopyPath: (asset: DemoUploadedAsset) => void;
+}) {
+  return (
+    <Show when={props.session} fallback={<EmptyText text="Create or resume a session before uploading assets." />}>
+      {(session) => {
+        const fileInputDisabled = () => session().status !== "idle" || session().uploadingAsset || session().sending;
+        const hint = () => {
+          if (session().uploadingAsset) return "Uploading asset...";
+          if (session().status !== "idle") return "Assets can only be uploaded while the session is idle.";
+          if (props.selectedFile && props.selectedFile.size > MAX_ASSET_SIZE_BYTES) return "File exceeds the 100 MiB limit.";
+          return `Single files up to 100 MiB can be uploaded to this session's sandbox.`;
+        };
+
+        return (
+          <div class="asset-upload-block">
+            <form class="stack" onSubmit={props.onSubmit}>
+              <label>
+                Choose file
+                <input
+                  ref={props.fileInputRef}
+                  type="file"
+                  disabled={fileInputDisabled()}
+                  onChange={(event) => props.onFileChange(event.currentTarget.files?.[0] ?? null)}
+                />
+              </label>
+              <Show when={props.selectedFile}>
+                {(file) => <p class="asset-selection">{file().name} · {formatBytes(file().size)}</p>}
+              </Show>
+              <button type="submit" disabled={!props.canUpload}>
+                {session().uploadingAsset ? "Uploading..." : "Upload Asset"}
+              </button>
+            </form>
+            <p class="asset-hint">{hint()}</p>
+            <div class="asset-list">
+              <Show when={session().uploadedAssets.length} fallback={<EmptyText text="No assets uploaded in this page session." />}>
+                <For each={session().uploadedAssets}>
+                  {(asset) => <UploadedAssetRow asset={asset} onCopy={() => props.onCopyPath(asset)} />}
+                </For>
+              </Show>
+            </div>
+          </div>
+        );
+      }}
+    </Show>
+  );
+}
+
+function UploadedAssetRow(props: { asset: DemoUploadedAsset; onCopy: () => void }) {
+  return (
+    <article class="asset-row">
+      <header>
+        <strong>{props.asset.originalName}</strong>
+        <time>{formatTime(props.asset.uploadedAt)}</time>
+      </header>
+      <div class="asset-path">
+        <code>{props.asset.path}</code>
+        <button type="button" onClick={props.onCopy}>Copy</button>
+      </div>
+      <small>{formatBytes(props.asset.sizeBytes)} · {props.asset.mimeType}</small>
+    </article>
+  );
+}
+
 function makeMessage(sessionId: string, role: ChatRole, text: string): DemoChatMessage {
   const now = Date.now();
   return {
@@ -865,6 +1071,15 @@ function formatJson(value: unknown): string {
 
 function formatTime(value: number): string {
   return new Date(value).toLocaleTimeString();
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, units.length - 1);
+  const value = bytes / 1024 ** (index + 1);
+  return `${Number(value.toFixed(1))} ${units[index]}`;
 }
 
 function newId(prefix: string): string {

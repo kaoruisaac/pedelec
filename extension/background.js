@@ -1023,6 +1023,21 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
+      if (message.type === "create_asset_upload") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        const result = await sendNativeRequest("create_asset_upload", {
+          threadId: message.sessionId,
+          filename: message.filename,
+          sizeBytes: message.sizeBytes,
+          mimeType: message.mimeType,
+        });
+        postSdkResponse(port, channelId, requestId, true, result || {});
+        return;
+      }
+
       if (message.type === "prepare_session") {
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);

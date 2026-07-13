@@ -7,6 +7,20 @@ sidebar:
 
 A session processes one turn at a time. `prepare()` is an optional optimization; `sendText()` starts a user turn and resolves after that turn completes.
 
+## Upload a single asset
+
+Use `uploadAsset()` with one browser `File` while the session is idle. Files are limited to 100 MiB; the returned `input/...` value is a sandbox-relative path and is only valid for that session's lifetime.
+
+```ts
+const file = input.files?.[0];
+if (!file) return;
+
+const path = await session.uploadAsset(file);
+await session.sendText(`Please process this file: ${path}`);
+```
+
+The file body is sent directly to a loopback server listening on `127.0.0.1`; it does not travel through the extension, native-messaging host, or Core IPC. A successful upload only means the file is available in the sandbox—it does not guarantee that the selected provider or model can understand its format.
+
 ## Optional preparation
 
 ```ts

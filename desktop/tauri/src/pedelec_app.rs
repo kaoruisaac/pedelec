@@ -12,6 +12,7 @@ use crate::pedelec_paths::{
     pedelec_agent_binary_name, pedelec_native_host_binary_name, pedelec_tool_binary_name,
     prepend_pedelec_dir_to_process_path,
 };
+use crate::pedelec_upload::start_asset_upload_server;
 use std::path::PathBuf;
 use std::thread;
 use tauri::menu::{Menu, MenuItem};
@@ -81,6 +82,8 @@ pub fn run() {
                 )))
             })?;
             runtime_for_setup.lock().unwrap().refresh_providers();
+            // A failed data plane must not prevent the desktop/control plane from starting.
+            let _asset_upload_server = start_asset_upload_server(runtime_for_setup.clone());
             let _ipc_handle = start_core_ipc_server(runtime_for_setup.clone()).map_err(|err| {
                 tauri::Error::from(std::io::Error::other(format!(
                     "cannot start Core IPC server: {}",
