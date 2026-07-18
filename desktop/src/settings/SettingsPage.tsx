@@ -22,6 +22,7 @@ function SettingsPage() {
   const [draftSettings, setDraftSettings] = createSignal<Settings>(emptySettings);
   const [providers, setProviders] = createSignal<Provider[]>([]);
   const [loading, setLoading] = createSignal(true);
+  const [refreshingProviders, setRefreshingProviders] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal("");
   const [savedMessage, setSavedMessage] = createSignal("");
@@ -39,7 +40,7 @@ function SettingsPage() {
     const provider = savedProviderInfo();
     if (!settings().defaultProvider || !provider) return false;
     if (provider.code === "ollama") return false;
-    return provider.available === false;
+    return provider.scanned && provider.available === false;
   });
   const canSave = createMemo(() => {
     const provider = selectedProviderInfo();
@@ -73,6 +74,8 @@ function SettingsPage() {
       setError(formatError(err));
     } finally {
       setLoading(false);
+      // Yield once so the initial settings render is visible before CLI scans begin.
+      setTimeout(() => void refreshProviders(), 0);
     }
   }
 
@@ -160,7 +163,8 @@ function SettingsPage() {
   }
 
   async function refreshProviders(): Promise<void> {
-    setLoading(true);
+    if (refreshingProviders()) return;
+    setRefreshingProviders(true);
     setError("");
     try {
       const nextProviders = await invoke<Provider[]>("refresh_providers");
@@ -169,12 +173,12 @@ function SettingsPage() {
     } catch (err) {
       setError(formatError(err));
     } finally {
-      setLoading(false);
+      setRefreshingProviders(false);
     }
   }
 
   function canEditProvider(provider: Provider): boolean {
-    if (loading() || saving()) return false;
+    if (loading() || refreshingProviders() || saving()) return false;
     return provider.available || provider.code === "ollama";
   }
 
@@ -189,8 +193,8 @@ function SettingsPage() {
           <h1>Settings</h1>
           <p>Choose the default provider and optional model used by SDK sessions.</p>
         </div>
-        <button type="button" class="settings-secondary-button" onClick={refreshProviders} disabled={loading()}>
-          Refresh
+        <button type="button" class="settings-secondary-button" onClick={refreshProviders} disabled={loading() || refreshingProviders()}>
+          {refreshingProviders() ? "Refreshing..." : "Refresh"}
         </button>
       </header>
 
@@ -210,7 +214,7 @@ function SettingsPage() {
         <section class="settings-section">
           <div class="settings-section-heading">
             <h2>Default Provider</h2>
-            <span>{loading() ? "Loading..." : `${providers().length} providers`}</span>
+            <span>{loading() ? "Loading..." : refreshingProviders() ? "Refreshing providers..." : `${providers().length} providers`}</span>
           </div>
 
           <div class="provider-list">
@@ -304,6 +308,7 @@ function providerStatusValue(provider: Provider): string {
   if (provider.code === "ollama") {
     return provider.connectionStatus === "connected" ? "connected" : "disconnected";
   }
+  if (!provider.scanned) return "scanning";
   return provider.available ? "available" : "unavailable";
 }
 
@@ -311,6 +316,7 @@ function providerStatusLabel(provider: Provider): string {
   if (provider.code === "ollama") {
     return provider.connectionStatus === "connected" ? "Connected" : "Disconnected";
   }
+  if (!provider.scanned) return "Scanning...";
   return provider.available ? "Available" : "Unavailable";
 }
 

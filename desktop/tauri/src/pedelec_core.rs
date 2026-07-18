@@ -14,6 +14,9 @@ use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_MAX_SKILL_SIZE_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
@@ -26,6 +29,9 @@ const THREAD_ID_BASE36_MAX_WIDTH: usize = 7;
 const THREAD_ID_MAX_COUNTER: u64 = 78_364_164_095;
 pub const MAX_ASSET_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const ASSET_UPLOAD_TICKET_SECONDS: i64 = 5 * 60;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -170,6 +176,7 @@ pub enum ProviderCode {
 pub struct ProviderInfo {
     pub name: String,
     pub code: ProviderCode,
+    pub scanned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub path: Option<String>,
@@ -1270,6 +1277,7 @@ pub struct CoreRuntime {
     pub(crate) core_ipc_runtime_file_path: Option<PathBuf>,
     pub(crate) settings_file_path: Option<PathBuf>,
     pub(crate) provider_scan: HashMap<ProviderCode, ProviderCli>,
+    pub(crate) provider_refresh_in_progress: bool,
     pub(crate) asset_upload_port: Option<u16>,
     pub(crate) asset_upload_tickets: HashMap<String, AssetUploadTicket>,
     #[cfg(test)]
@@ -2439,6 +2447,25 @@ impl CoreRuntime {
     pub fn subscribe_all_threads(&mut self) -> mpsc::Receiver<ThreadEvent> {
         self.event_bus.subscribe_all()
     }
+}
+
+/// Scans provider CLIs without holding the shared runtime lock. The completed
+/// scan is installed atomically, so readers see either the prior complete scan
+/// or the new complete scan, never partial results.
+pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo> {
+    let path_value = {
+        let mut runtime = runtime.lock().unwrap();
+        if runtime.provider_refresh_in_progress {
+            return runtime.list_providers();
+        }
+        runtime.provider_refresh_in_progress = true;
+        runtime.provider_path_value()
+    };
+    let provider_scan = scan_external_providers(path_value);
+    let mut runtime = runtime.lock().unwrap();
+    runtime.provider_scan = provider_scan;
+    runtime.provider_refresh_in_progress = false;
+    runtime.list_providers()
 }
 
 #[derive(Debug)]
@@ -3750,7 +3777,7 @@ fn is_provider_executable(path: &Path) -> bool {
 }
 
 fn provider_cli_version(path: &Path) -> Option<ProviderVersion> {
-    let output = Command::new(path).arg("--version").output();
+    let output = provider_version_command(path).arg("--version").output();
     #[cfg(test)]
     let output = output.ok().or_else(|| {
         Some(std::process::Output {
@@ -3777,6 +3804,32 @@ fn provider_cli_version(path: &Path) -> Option<ProviderVersion> {
     #[cfg(not(test))]
     {
         parsed
+    }
+}
+
+fn provider_version_command(path: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        let is_script_wrapper = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat")
+            });
+        let mut command = if is_script_wrapper {
+            let mut command = Command::new("cmd.exe");
+            command.arg("/d").arg("/c").arg("call").arg(path);
+            command
+        } else {
+            Command::new(path)
+        };
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new(path)
     }
 }
 
@@ -3863,6 +3916,7 @@ fn provider_info_for(
     path_value: Option<&OsString>,
 ) -> ProviderInfo {
     if provider != ProviderCode::Ollama {
+        let scanned_complete = provider_scan.contains_key(&provider);
         let scanned = provider_scan
             .get(&provider)
             .cloned()
@@ -3873,6 +3927,7 @@ fn provider_info_for(
         return ProviderInfo {
             name: provider_display_name(&provider).to_string(),
             code: provider,
+            scanned: scanned_complete,
             version: scanned.version.as_ref().map(provider_version_display),
             path: scanned.path.map(|path| path.to_string_lossy().to_string()),
             available: scanned.version.is_some(),
@@ -3884,6 +3939,7 @@ fn provider_info_for(
         Ok(path) => ProviderInfo {
             name: provider_display_name(&provider).to_string(),
             code: provider,
+            scanned: true,
             version: None,
             path: Some(path.to_string_lossy().to_string()),
             available: true,
@@ -3892,6 +3948,7 @@ fn provider_info_for(
         Err(error) => ProviderInfo {
             name: provider_display_name(&provider).to_string(),
             code: provider,
+            scanned: true,
             version: None,
             path: None,
             available: false,
@@ -5420,6 +5477,7 @@ mod tests {
         )]);
 
         let codex = provider_info_for(ProviderCode::Codex, &scan, None);
+        assert!(codex.scanned);
         assert_eq!(codex.version.as_deref(), Some("1.2.3"));
         assert_eq!(
             serde_json::to_value(&codex).unwrap()["version"],
@@ -5432,6 +5490,24 @@ mod tests {
             .unwrap()
             .get("version")
             .is_none());
+
+        let gemini = provider_info_for(ProviderCode::Gemini, &scan, None);
+        assert!(!gemini.scanned);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_version_command_runs_script_wrappers_through_headless_cmd() {
+        let command = provider_version_command(Path::new("C:/providers/codex.cmd"));
+
+        assert_eq!(command.get_program(), "cmd.exe");
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            vec!["/d", "/c", "call", "C:/providers/codex.cmd"]
+        );
     }
 
     #[test]

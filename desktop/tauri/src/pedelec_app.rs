@@ -1,8 +1,9 @@
 use crate::pedelec_core::{
-    CheckOllamaConnectionInput, CheckOllamaConnectionOutput, CoreRuntimeOwner, CreateThreadInput,
-    CreateThreadOutput, EndThreadInput, ListOllamaModelsInput, OllamaModelOption, PedelecError,
-    PedelecSettings, PrepareThreadInput, PrepareThreadOutput, ProviderInfo, SendTextInput,
-    SendTextOutput, SharedCoreRuntime, SubmitToolResultInput, UpdateSettingsInput,
+    refresh_shared_providers, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
+    CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, ListOllamaModelsInput,
+    OllamaModelOption, PedelecError, PedelecSettings, PrepareThreadInput, PrepareThreadOutput,
+    ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput,
+    UpdateSettingsInput,
 };
 use crate::pedelec_ipc::{prepare_provider_process, start_core_ipc_server, start_provider_process};
 use crate::pedelec_native_registration::register_chrome_native_messaging_host;
@@ -81,7 +82,6 @@ pub fn run() {
                     err.message
                 )))
             })?;
-            runtime_for_setup.lock().unwrap().refresh_providers();
             // A failed data plane must not prevent the desktop/control plane from starting.
             let _asset_upload_server = start_asset_upload_server(runtime_for_setup.clone());
             let _ipc_handle = start_core_ipc_server(runtime_for_setup.clone()).map_err(|err| {
@@ -224,11 +224,16 @@ fn list_providers(state: State<'_, CoreRuntimeOwner>) -> Vec<ProviderInfo> {
 }
 
 #[tauri::command]
-fn refresh_providers(state: State<'_, CoreRuntimeOwner>) -> Vec<ProviderInfo> {
+async fn refresh_providers(
+    state: State<'_, CoreRuntimeOwner>,
+) -> Result<Vec<ProviderInfo>, PedelecError> {
     let shared_runtime = state.runtime();
-    let mut runtime = shared_runtime.lock().unwrap();
-    runtime.refresh_providers();
-    runtime.list_providers()
+    let fallback_runtime = shared_runtime.clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || refresh_shared_providers(&shared_runtime))
+            .await
+            .unwrap_or_else(|_| fallback_runtime.lock().unwrap().list_providers()),
+    )
 }
 
 #[tauri::command]
