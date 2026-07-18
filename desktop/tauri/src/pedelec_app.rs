@@ -11,7 +11,7 @@ use crate::pedelec_paths::{
     ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
     install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
     pedelec_agent_binary_name, pedelec_native_host_binary_name, pedelec_tool_binary_name,
-    prepend_pedelec_dir_to_process_path,
+    prepend_pedelec_dir_to_process_path, write_app_launch_config_for_current_exe,
 };
 use crate::pedelec_upload::start_asset_upload_server;
 use std::path::PathBuf;
@@ -24,12 +24,18 @@ use tauri::{App, Emitter, Manager, RunEvent, State};
 const MAIN_WINDOW_LABEL: &str = "main";
 
 pub fn run() {
+    let background_launch = is_background_launch(std::env::args_os());
     let runtime_owner = CoreRuntimeOwner::new();
     let runtime = runtime_owner.runtime();
     let runtime_for_setup = runtime.clone();
     let runtime_for_exit = runtime.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if should_show_window_for_second_instance(args) {
+                show_main_window(app);
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .manage(runtime_owner)
         .invoke_handler(tauri::generate_handler![
@@ -46,6 +52,19 @@ pub fn run() {
             end_thread
         ])
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            if background_launch {
+                let _ = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+
+            write_app_launch_config_for_current_exe().map_err(|err| {
+                tauri::Error::from(std::io::Error::other(format!(
+                    "cannot write desktop launch config: {}",
+                    err.message
+                )))
+            })?;
             let pedelec_tool_source = bundled_binary_path(app, pedelec_tool_binary_name())?;
             let pedelec_agent_source = bundled_binary_path(app, pedelec_agent_binary_name())?;
             let native_host_source = bundled_binary_path(app, pedelec_native_host_binary_name())?;
@@ -160,6 +179,10 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            if !background_launch {
+                show_main_window(app.handle());
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -191,9 +214,49 @@ fn bundled_binary_path(app: &App, binary_name: &str) -> Result<PathBuf, tauri::E
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+fn is_background_launch(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    args.into_iter().any(|arg| arg == "--background")
+}
+
+fn should_show_window_for_second_instance(args: Vec<String>) -> bool {
+    !args.iter().any(|arg| arg == "--background")
+}
+
+#[cfg(test)]
+mod launch_mode_tests {
+    use super::*;
+
+    #[test]
+    fn background_launch_requires_the_exact_argument() {
+        assert!(!is_background_launch([std::ffi::OsString::from(
+            "pedelec-app"
+        )]));
+        assert!(is_background_launch([
+            std::ffi::OsString::from("pedelec-app"),
+            std::ffi::OsString::from("--background"),
+        ]));
+        assert!(!is_background_launch([std::ffi::OsString::from(
+            "--background=true"
+        )]));
+    }
+
+    #[test]
+    fn second_background_instance_does_not_show_the_window() {
+        assert!(!should_show_window_for_second_instance(vec![
+            "--background".into()
+        ]));
+        assert!(should_show_window_for_second_instance(
+            vec!["--open".into()]
+        ));
     }
 }
 

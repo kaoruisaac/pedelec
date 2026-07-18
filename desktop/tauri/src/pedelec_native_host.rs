@@ -1,16 +1,22 @@
 use crate::pedelec_core::{error_codes, PedelecError};
 use crate::pedelec_ipc::{
-    connect_core_ipc, connect_core_ipc_with_runtime_path, read_bounded_json_line,
-    send_core_ipc_request, send_core_ipc_request_with_runtime_path, write_json_line,
-    CoreIpcRequest, CoreIpcResponse, MAX_CORE_IPC_MESSAGE_BYTES,
+    connect_core_ipc, connect_core_ipc_with_runtime_path, default_runtime_file_path,
+    read_bounded_json_line, send_core_ipc_request, send_core_ipc_request_with_runtime_path,
+    write_json_line, CoreIpcRequest, CoreIpcResponse, MAX_CORE_IPC_MESSAGE_BYTES,
 };
+use crate::pedelec_paths::{app_launch_config_path, read_app_launch_config};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
+
+const CORE_READY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+const CORE_READY_MAX_WAIT: Duration = Duration::from_secs(10);
 
 pub fn run() -> io::Result<()> {
     run_chrome_native_host(None)
@@ -217,16 +223,96 @@ fn send_core_request(
     request: &CoreIpcRequest,
     runtime_file_path: Option<&Path>,
 ) -> CoreIpcResponse {
-    match runtime_file_path {
+    let first_attempt = match runtime_file_path {
         Some(path) => send_core_ipc_request_with_runtime_path(request, path),
         None => send_core_ipc_request(request),
+    };
+    match first_attempt {
+        Ok(response) => response,
+        Err(err) if err.code == error_codes::CORE_RUNTIME_UNAVAILABLE => {
+            match ensure_core_runtime_available(runtime_file_path) {
+                Ok(()) => match runtime_file_path {
+                    Some(path) => send_core_ipc_request_with_runtime_path(request, path),
+                    None => send_core_ipc_request(request),
+                }
+                .unwrap_or_else(|err| core_error_response(request, err)),
+                Err(err) => core_error_response(request, err),
+            }
+        }
+        Err(err) => core_error_response(request, err),
     }
-    .unwrap_or_else(|err| CoreIpcResponse {
+}
+
+fn core_error_response(request: &CoreIpcRequest, err: PedelecError) -> CoreIpcResponse {
+    CoreIpcResponse {
         request_id: request.request_id.clone(),
         ok: false,
         result: None,
         error: Some(err),
-    })
+    }
+}
+
+fn ensure_core_runtime_available(runtime_file_path: Option<&Path>) -> Result<(), PedelecError> {
+    let runtime_file_path = match runtime_file_path {
+        Some(path) => path.to_path_buf(),
+        None => default_runtime_file_path()?,
+    };
+    if connect_core_ipc_with_runtime_path(&runtime_file_path).is_ok() {
+        return Ok(());
+    }
+
+    let launch_config_path = app_launch_config_path()?;
+    let launch_config = read_app_launch_config(&launch_config_path).map_err(|mut err| {
+        if let Some(Value::Object(details)) = err.details.as_mut() {
+            details.insert(
+                "launchConfigPath".to_string(),
+                Value::String(launch_config_path.to_string_lossy().to_string()),
+            );
+        }
+        err
+    })?;
+    let mut command = Command::new(&launch_config.executable_path);
+    command
+        .args(&launch_config.background_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    command.spawn().map_err(|err| {
+        PedelecError::with_details(
+            error_codes::CORE_RUNTIME_UNAVAILABLE,
+            "pedelec-app is not running",
+            serde_json::json!({
+                "stage": "spawn_desktop_app",
+                "launchConfigPath": launch_config_path,
+                "executablePath": launch_config.executable_path,
+                "reason": err.to_string(),
+            }),
+        )
+    })?;
+
+    let started_at = Instant::now();
+    loop {
+        thread::sleep(CORE_READY_RETRY_INTERVAL);
+        if connect_core_ipc_with_runtime_path(&runtime_file_path).is_ok() {
+            return Ok(());
+        }
+        if started_at.elapsed() >= CORE_READY_MAX_WAIT {
+            return Err(PedelecError::with_details(
+                error_codes::CORE_RUNTIME_UNAVAILABLE,
+                "pedelec-app is not running",
+                serde_json::json!({
+                    "stage": "wait_for_core_runtime",
+                    "timeoutMs": CORE_READY_MAX_WAIT.as_millis(),
+                    "retryIntervalMs": CORE_READY_RETRY_INTERVAL.as_millis(),
+                }),
+            ));
+        }
+    }
 }
 
 fn core_response_to_native_response(response: CoreIpcResponse) -> NativeProtocolResponse {
@@ -267,7 +353,17 @@ fn start_forward_subscription(
     let mut stream = match runtime_file_path {
         Some(path) => connect_core_ipc_with_runtime_path(path),
         None => connect_core_ipc(),
-    }?;
+    }
+    .or_else(|err| {
+        if err.code != error_codes::CORE_RUNTIME_UNAVAILABLE {
+            return Err(err);
+        }
+        ensure_core_runtime_available(runtime_file_path)?;
+        match runtime_file_path {
+            Some(path) => connect_core_ipc_with_runtime_path(path),
+            None => connect_core_ipc(),
+        }
+    })?;
 
     write_json_line(&mut stream, &request).map_err(core_subscription_error)?;
 

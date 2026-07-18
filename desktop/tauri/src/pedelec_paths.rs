@@ -1,8 +1,20 @@
 use crate::pedelec_core::{error_codes, PedelecError};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+pub const APP_LAUNCH_CONFIG_VERSION: u32 = 1;
+pub const BACKGROUND_LAUNCH_ARG: &str = "--background";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLaunchConfig {
+    pub version: u32,
+    pub executable_path: PathBuf,
+    pub background_args: Vec<String>,
+}
 
 pub fn pedelec_home_dir() -> Result<PathBuf, PedelecError> {
     dirs::home_dir()
@@ -13,6 +25,136 @@ pub fn pedelec_home_dir() -> Result<PathBuf, PedelecError> {
                 "cannot resolve user home directory",
             )
         })
+}
+
+pub fn app_launch_config_path() -> Result<PathBuf, PedelecError> {
+    Ok(pedelec_home_dir()?.join("app-launch.json"))
+}
+
+pub fn write_app_launch_config_for_current_exe() -> Result<PathBuf, PedelecError> {
+    let executable_path = env::current_exe().map_err(|err| {
+        launch_config_error(
+            "write_app_launch_config",
+            "cannot resolve desktop executable",
+            err.to_string(),
+        )
+    })?;
+    write_app_launch_config(
+        &app_launch_config_path()?,
+        &AppLaunchConfig {
+            version: APP_LAUNCH_CONFIG_VERSION,
+            executable_path,
+            background_args: vec![BACKGROUND_LAUNCH_ARG.to_string()],
+        },
+    )
+}
+
+pub fn write_app_launch_config(
+    path: &Path,
+    config: &AppLaunchConfig,
+) -> Result<PathBuf, PedelecError> {
+    let parent = path.parent().ok_or_else(|| {
+        launch_config_error(
+            "write_app_launch_config",
+            "launch config path has no parent",
+            path.display().to_string(),
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|err| {
+        launch_config_error(
+            "write_app_launch_config",
+            "cannot create launch config directory",
+            err.to_string(),
+        )
+    })?;
+    let payload = serde_json::to_vec_pretty(config).map_err(|err| {
+        launch_config_error(
+            "write_app_launch_config",
+            "cannot serialize launch config",
+            err.to_string(),
+        )
+    })?;
+    let temporary = parent.join(format!(
+        ".app-launch-{}-{}.tmp",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&temporary, payload).map_err(|err| {
+        launch_config_error(
+            "write_app_launch_config",
+            "cannot write temporary launch config",
+            err.to_string(),
+        )
+    })?;
+    fs::rename(&temporary, path).map_err(|err| {
+        let _ = fs::remove_file(&temporary);
+        launch_config_error(
+            "write_app_launch_config",
+            "cannot replace launch config",
+            err.to_string(),
+        )
+    })?;
+    Ok(path.to_path_buf())
+}
+
+pub fn read_app_launch_config(path: &Path) -> Result<AppLaunchConfig, PedelecError> {
+    let content = fs::read(path).map_err(|err| {
+        launch_config_error(
+            "load_app_launch_config",
+            "cannot read launch config",
+            err.to_string(),
+        )
+    })?;
+    let config: AppLaunchConfig = serde_json::from_slice(&content).map_err(|err| {
+        launch_config_error(
+            "load_app_launch_config",
+            "launch config is not valid JSON",
+            err.to_string(),
+        )
+    })?;
+    validate_app_launch_config(&config)?;
+    Ok(config)
+}
+
+pub fn validate_app_launch_config(config: &AppLaunchConfig) -> Result<(), PedelecError> {
+    if config.version != APP_LAUNCH_CONFIG_VERSION {
+        return Err(launch_config_error(
+            "validate_app_launch_config",
+            "unsupported launch config version",
+            config.version.to_string(),
+        ));
+    }
+    if !config.executable_path.is_absolute() || !config.executable_path.is_file() {
+        return Err(launch_config_error(
+            "validate_app_launch_config",
+            "desktop executable path is not an absolute existing file",
+            config.executable_path.display().to_string(),
+        ));
+    }
+    if config.background_args != vec![BACKGROUND_LAUNCH_ARG.to_string()] {
+        return Err(launch_config_error(
+            "validate_app_launch_config",
+            "background args are not supported",
+            format!("{:?}", config.background_args),
+        ));
+    }
+    Ok(())
+}
+
+fn launch_config_error(
+    stage: &str,
+    reason: impl Into<String>,
+    detail: impl Into<String>,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::CORE_RUNTIME_UNAVAILABLE,
+        "pedelec-app is not running",
+        serde_json::json!({
+            "stage": stage,
+            "reason": reason.into(),
+            "detail": detail.into(),
+        }),
+    )
 }
 
 pub fn pedelec_tool_binary_name() -> &'static str {
@@ -317,5 +459,53 @@ mod tests {
         let updated = path_value_with_pedelec_dir(None, &pedelec_dir).unwrap();
 
         assert_eq!(updated, OsString::from(pedelec_dir));
+    }
+
+    #[test]
+    fn app_launch_config_round_trips_through_atomic_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("pedelec-app");
+        fs::write(&executable, b"app").unwrap();
+        let path = temp.path().join(".pedelec").join("app-launch.json");
+        let config = AppLaunchConfig {
+            version: APP_LAUNCH_CONFIG_VERSION,
+            executable_path: executable,
+            background_args: vec![BACKGROUND_LAUNCH_ARG.into()],
+        };
+
+        write_app_launch_config(&path, &config).unwrap();
+
+        assert_eq!(read_app_launch_config(&path).unwrap(), config);
+        assert!(!path.parent().unwrap().join(".app-launch.tmp").exists());
+    }
+
+    #[test]
+    fn app_launch_config_rejects_invalid_version_relative_or_missing_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let invalid_version = AppLaunchConfig {
+            version: 2,
+            executable_path: temp.path().join("missing"),
+            background_args: vec![BACKGROUND_LAUNCH_ARG.into()],
+        };
+        assert!(validate_app_launch_config(&invalid_version).is_err());
+
+        let relative = AppLaunchConfig {
+            version: APP_LAUNCH_CONFIG_VERSION,
+            executable_path: PathBuf::from("pedelec-app"),
+            background_args: vec![BACKGROUND_LAUNCH_ARG.into()],
+        };
+        assert!(validate_app_launch_config(&relative).is_err());
+    }
+
+    #[test]
+    fn corrupt_app_launch_config_has_a_diagnostic_stage() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("app-launch.json");
+        fs::write(&path, b"not json").unwrap();
+
+        let err = read_app_launch_config(&path).unwrap_err();
+
+        assert_eq!(err.code, error_codes::CORE_RUNTIME_UNAVAILABLE);
+        assert_eq!(err.details.unwrap()["stage"], "load_app_launch_config");
     }
 }

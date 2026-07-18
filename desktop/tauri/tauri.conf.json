@@ -15,6 +15,7 @@
       {
         "label": "main",
         "title": "Pedelec",
+        "visible": false,
         "width": 1100,
         "height": 760
       }

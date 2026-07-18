@@ -339,6 +339,7 @@ export default function App() {
     try {
       const client = new Pedelec();
       const approval = await client.getApprovalStatus();
+      if (generation !== lifecycleId) return;
       if (!approval.installed) {
         appendConversationMessage("error", "Pedelec Extension is unavailable. Open this page in Chrome with the extension installed.");
         setUiState("disconnected");
@@ -349,18 +350,8 @@ export default function App() {
         setMessage("Approve this site in the Pedelec Extension popup, then connect again.");
       }
 
-      const nextSession = await client.createSession({
-        ...createSessionSettingsInput(sessionSettings()),
-        skills: createShapeRainSkills(),
-      });
-      if (generation !== lifecycleId) {
-        await nextSession.end().catch(() => undefined);
-        return;
-      }
-
-      registerSession(nextSession, generation);
       setUiState("ready");
-      setMessage("Ready. Describe the shapes you want to drop.");
+      setMessage(approval.approved ? "Ready. Describe the shapes you want to drop." : "Approve this site in the Pedelec Extension popup, then send a prompt.");
     } catch (err) {
       if (generation !== lifecycleId) return;
       const friendly = friendlyPedelecError(err);
@@ -479,21 +470,15 @@ export default function App() {
 
   async function submitPrompt(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    const activeSession = session();
     const text = prompt().trim();
     if (!text) return;
-
-    if (!activeSession || sessionStatus() === "none") {
-      setUiState("disconnected");
-      setMessage("Pedelec is not connected yet. Connect Pedelec before sending a prompt.");
-      return;
-    }
 
     if (busy()) {
       setMessage("The model is still handling the previous request. Try again in a moment.");
       return;
     }
 
+    const generation = lifecycleId;
     setPrompt("");
     setUiState("submitting");
     setMessage("Pedelec is interpreting your request.");
@@ -501,8 +486,26 @@ export default function App() {
     setConversationOpen(true);
 
     try {
+      let activeSession = session();
+      if (!activeSession || sessionStatus() === "none") {
+        const client = new Pedelec();
+        const nextSession = await client.createSession({
+          ...createSessionSettingsInput(sessionSettings()),
+          skills: createShapeRainSkills(),
+        });
+        if (generation !== lifecycleId) {
+          await nextSession.end().catch(() => undefined);
+          return;
+        }
+
+        registerSession(nextSession, generation);
+        activeSession = nextSession;
+      }
+
+      if (generation !== lifecycleId) return;
       await activeSession.sendText(text);
     } catch (err) {
+      if (generation !== lifecycleId) return;
       const friendly = friendlyPedelecError(err);
       appendConversationMessage("error", friendly.message);
       setUiState(friendly.disconnected ? "disconnected" : "error");

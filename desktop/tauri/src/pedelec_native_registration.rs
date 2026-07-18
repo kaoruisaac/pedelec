@@ -5,7 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const CHROME_NATIVE_HOST_NAME: &str = "cc.isaaclin.pedelec";
-const CHROME_EXTENSION_ID: &str = "ogccgaminlphbkeghldidiiimajfdpag";
+// const CHROME_EXTENSION_ID: &str = "ogccgaminlphbkeghldidiiimajfdpag";
+const CHROME_EXTENSION_ID: &str = "ndajlhcpcjnifkefcihcmnijcjhbnkck";
 const DEV_CHROME_EXTENSION_ID_ENV: &str = "PEDELEC_DEV_CHROME_EXTENSION_ID";
 const MANIFEST_FILE_NAME: &str = "cc.isaaclin.pedelec.json";
 
