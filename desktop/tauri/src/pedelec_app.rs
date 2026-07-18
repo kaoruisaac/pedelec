@@ -12,6 +12,7 @@ use crate::pedelec_paths::{
     install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
     pedelec_agent_binary_name, pedelec_native_host_binary_name, pedelec_tool_binary_name,
     prepend_pedelec_dir_to_process_path, write_app_launch_config_for_current_exe,
+    BinaryInstallOutcome,
 };
 use crate::pedelec_upload::start_asset_upload_server;
 use std::path::PathBuf;
@@ -67,28 +68,34 @@ pub fn run() {
             })?;
             let pedelec_tool_source = bundled_binary_path(app, pedelec_tool_binary_name())?;
             let pedelec_agent_source = bundled_binary_path(app, pedelec_agent_binary_name())?;
-            let native_host_source = bundled_binary_path(app, pedelec_native_host_binary_name())?;
-            let _pedelec_tool_path =
-                install_pedelec_tool_from_path(&pedelec_tool_source).map_err(|err| {
+            let pedelec_tool_outcome = install_pedelec_tool_from_path(&pedelec_tool_source)
+                .map_err(|err| {
                     tauri::Error::from(std::io::Error::other(format!(
                         "cannot install pedelec-cli: {}",
                         err.message
                     )))
                 })?;
-            let _pedelec_agent_path = install_pedelec_agent_from_path(&pedelec_agent_source)
+            let pedelec_agent_outcome = install_pedelec_agent_from_path(&pedelec_agent_source)
                 .map_err(|err| {
                     tauri::Error::from(std::io::Error::other(format!(
                         "cannot install pedelec-agent: {}",
                         err.message
                     )))
                 })?;
-            let _native_host_path = install_pedelec_native_host_from_path(&native_host_source)
-                .map_err(|err| {
-                    tauri::Error::from(std::io::Error::other(format!(
-                        "cannot install pedelec-native-host: {}",
-                        err.message
-                    )))
-                })?;
+            let native_host_outcome = if native_messaging_plan(background_launch).install {
+                let native_host_source =
+                    bundled_binary_path(app, pedelec_native_host_binary_name())?;
+                Some(
+                    install_pedelec_native_host_from_path(&native_host_source).map_err(|err| {
+                        tauri::Error::from(std::io::Error::other(format!(
+                            "cannot install pedelec-native-host: {}",
+                            err.message
+                        )))
+                    })?,
+                )
+            } else {
+                None
+            };
             prepend_pedelec_dir_to_process_path().map_err(|err| {
                 tauri::Error::from(std::io::Error::other(format!(
                     "cannot update app PATH for pedelec-cli: {}",
@@ -119,34 +126,38 @@ pub fn run() {
             #[cfg(debug_assertions)]
             eprintln!(
                 "pedelec-cli installed at {}",
-                _pedelec_tool_path.to_string_lossy()
+                install_outcome_message(&pedelec_tool_outcome)
             );
             #[cfg(debug_assertions)]
             eprintln!(
                 "pedelec-agent installed at {}",
-                _pedelec_agent_path.to_string_lossy()
+                install_outcome_message(&pedelec_agent_outcome)
             );
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "pedelec-native-host installed at {}",
-                _native_host_path.to_string_lossy()
-            );
-            match register_chrome_native_messaging_host() {
-                Ok(_registration) => {
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "Chrome native messaging host {} registered (manifest: {}, binary: {})",
-                        _registration.host_name,
-                        _registration.manifest_path.to_string_lossy(),
-                        _registration.native_host_path.to_string_lossy()
-                    );
-                }
-                Err(_err) => {
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "Chrome native messaging auto-registration skipped: {}",
-                        _err.message
-                    );
+            if let Some(native_host_outcome) = &native_host_outcome {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "pedelec-native-host {}",
+                    install_outcome_message(native_host_outcome)
+                );
+            }
+            if native_messaging_plan(background_launch).register {
+                match register_chrome_native_messaging_host() {
+                    Ok(_registration) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "Chrome native messaging host {} registered (manifest: {}, binary: {})",
+                            _registration.host_name,
+                            _registration.manifest_path.to_string_lossy(),
+                            _registration.native_host_path.to_string_lossy()
+                        );
+                    }
+                    Err(_err) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "Chrome native messaging auto-registration skipped: {}",
+                            _err.message
+                        );
+                    }
                 }
             }
 
@@ -227,6 +238,23 @@ fn is_background_launch(args: impl IntoIterator<Item = std::ffi::OsString>) -> b
     args.into_iter().any(|arg| arg == "--background")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeMessagingPlan {
+    install: bool,
+    register: bool,
+}
+
+fn native_messaging_plan(background_launch: bool) -> NativeMessagingPlan {
+    NativeMessagingPlan {
+        install: !background_launch,
+        register: !background_launch,
+    }
+}
+
+fn install_outcome_message(outcome: &BinaryInstallOutcome) -> String {
+    format!("{:?} at {}", outcome.status, outcome.path.to_string_lossy())
+}
+
 fn should_show_window_for_second_instance(args: Vec<String>) -> bool {
     !args.iter().any(|arg| arg == "--background")
 }
@@ -257,6 +285,24 @@ mod launch_mode_tests {
         assert!(should_show_window_for_second_instance(
             vec!["--open".into()]
         ));
+    }
+
+    #[test]
+    fn background_launch_skips_only_native_messaging_initialization() {
+        assert_eq!(
+            native_messaging_plan(false),
+            NativeMessagingPlan {
+                install: true,
+                register: true,
+            }
+        );
+        assert_eq!(
+            native_messaging_plan(true),
+            NativeMessagingPlan {
+                install: false,
+                register: false,
+            }
+        );
     }
 }
 

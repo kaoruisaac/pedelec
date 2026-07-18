@@ -1,8 +1,10 @@
 use crate::pedelec_core::{error_codes, PedelecError};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 pub const APP_LAUNCH_CONFIG_VERSION: u32 = 1;
@@ -14,6 +16,25 @@ pub struct AppLaunchConfig {
     pub version: u32,
     pub executable_path: PathBuf,
     pub background_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryInstallStatus {
+    Installed,
+    Unchanged,
+    Deferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryInstallOutcome {
+    pub path: PathBuf,
+    pub status: BinaryInstallStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockedTargetPolicy {
+    Fail,
+    DeferOnWindowsExecutableLock,
 }
 
 pub fn pedelec_home_dir() -> Result<PathBuf, PedelecError> {
@@ -193,44 +214,52 @@ pub fn pedelec_native_host_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_native_host_binary_name()))
 }
 
-pub fn install_pedelec_tool_from_path(source: impl AsRef<Path>) -> Result<PathBuf, PedelecError> {
+pub fn install_pedelec_tool_from_path(
+    source: impl AsRef<Path>,
+) -> Result<BinaryInstallOutcome, PedelecError> {
     install_binary_from_paths(
         source,
         pedelec_tool_install_path()?,
         "pedelec-cli",
         "cannot install pedelec-cli binary",
+        LockedTargetPolicy::Fail,
     )
 }
 
 pub fn install_pedelec_tool_from_paths(
     source: impl AsRef<Path>,
     target: impl AsRef<Path>,
-) -> Result<PathBuf, PedelecError> {
+) -> Result<BinaryInstallOutcome, PedelecError> {
     install_binary_from_paths(
         source,
         target,
         "pedelec-cli",
         "cannot install pedelec-cli binary",
+        LockedTargetPolicy::Fail,
     )
 }
 
-pub fn install_pedelec_agent_from_path(source: impl AsRef<Path>) -> Result<PathBuf, PedelecError> {
+pub fn install_pedelec_agent_from_path(
+    source: impl AsRef<Path>,
+) -> Result<BinaryInstallOutcome, PedelecError> {
     install_binary_from_paths(
         source,
         pedelec_agent_install_path()?,
         "pedelec-agent",
         "cannot install pedelec-agent binary",
+        LockedTargetPolicy::Fail,
     )
 }
 
 pub fn install_pedelec_native_host_from_path(
     source: impl AsRef<Path>,
-) -> Result<PathBuf, PedelecError> {
+) -> Result<BinaryInstallOutcome, PedelecError> {
     install_binary_from_paths(
         source,
         pedelec_native_host_install_path()?,
         "pedelec-native-host",
         "cannot install pedelec-native-host binary",
+        LockedTargetPolicy::DeferOnWindowsExecutableLock,
     )
 }
 
@@ -239,7 +268,29 @@ fn install_binary_from_paths(
     target: impl AsRef<Path>,
     binary_label: &str,
     install_error_message: &str,
-) -> Result<PathBuf, PedelecError> {
+    locked_target_policy: LockedTargetPolicy,
+) -> Result<BinaryInstallOutcome, PedelecError> {
+    install_binary_from_paths_with_copy(
+        source,
+        target,
+        binary_label,
+        install_error_message,
+        locked_target_policy,
+        |source, target| fs::copy(source, target),
+    )
+}
+
+fn install_binary_from_paths_with_copy<F>(
+    source: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+    binary_label: &str,
+    install_error_message: &str,
+    locked_target_policy: LockedTargetPolicy,
+    copy: F,
+) -> Result<BinaryInstallOutcome, PedelecError>
+where
+    F: for<'a> FnOnce(&'a Path, &'a Path) -> io::Result<u64>,
+{
     let source = source.as_ref();
     let target = target.as_ref();
 
@@ -252,7 +303,10 @@ fn install_binary_from_paths(
     }
 
     if source == target {
-        return Ok(target.to_path_buf());
+        return Ok(BinaryInstallOutcome {
+            path: target.to_path_buf(),
+            status: BinaryInstallStatus::Unchanged,
+        });
     }
 
     if let Some(parent) = target.parent() {
@@ -268,17 +322,40 @@ fn install_binary_from_paths(
         })?;
     }
 
-    fs::copy(source, target).map_err(|err| {
-        PedelecError::with_details(
-            error_codes::IPC_UNAVAILABLE,
+    let target_existed = target.exists();
+    if target_existed
+        && files_have_same_content(source, target).map_err(|err| {
+            binary_install_error(install_error_message, source, target, "hash_binary", &err)
+        })?
+    {
+        return Ok(BinaryInstallOutcome {
+            path: target.to_path_buf(),
+            status: BinaryInstallStatus::Unchanged,
+        });
+    }
+
+    if let Err(err) = copy(source, target) {
+        if should_defer_locked_target(
+            locked_target_policy,
+            target_existed,
+            err.raw_os_error(),
+            cfg!(windows),
+        ) {
+            #[cfg(debug_assertions)]
+            eprintln!("pedelec-native-host update deferred because installed executable is in use");
+            return Ok(BinaryInstallOutcome {
+                path: target.to_path_buf(),
+                status: BinaryInstallStatus::Deferred,
+            });
+        }
+        return Err(binary_install_error(
             install_error_message,
-            serde_json::json!({
-                "source": source.to_string_lossy(),
-                "target": target.to_string_lossy(),
-                "error": err.to_string()
-            }),
-        )
-    })?;
+            source,
+            target,
+            "copy_binary",
+            &err,
+        ));
+    }
 
     #[cfg(unix)]
     {
@@ -308,7 +385,64 @@ fn install_binary_from_paths(
         })?;
     }
 
-    Ok(target.to_path_buf())
+    Ok(BinaryInstallOutcome {
+        path: target.to_path_buf(),
+        status: BinaryInstallStatus::Installed,
+    })
+}
+
+fn files_have_same_content(source: &Path, target: &Path) -> io::Result<bool> {
+    if fs::metadata(source)?.len() != fs::metadata(target)?.len() {
+        return Ok(false);
+    }
+    Ok(sha256_file(source)? == sha256_file(target)?)
+}
+
+fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
+    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn binary_install_error(
+    message: &str,
+    source: &Path,
+    target: &Path,
+    stage: &str,
+    err: &io::Error,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::IPC_UNAVAILABLE,
+        message,
+        serde_json::json!({
+            "stage": stage,
+            "source": source.to_string_lossy(),
+            "target": target.to_string_lossy(),
+            "error": err.to_string(),
+            "rawOsError": err.raw_os_error(),
+        }),
+    )
+}
+
+fn should_defer_locked_target(
+    policy: LockedTargetPolicy,
+    target_existed: bool,
+    raw_os_error: Option<i32>,
+    is_windows: bool,
+) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    policy == LockedTargetPolicy::DeferOnWindowsExecutableLock
+        && target_existed
+        && is_windows
+        && raw_os_error == Some(ERROR_SHARING_VIOLATION)
 }
 
 pub fn path_value_with_pedelec_dir(
@@ -405,6 +539,7 @@ fn paths_match(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::ffi::OsString;
 
     #[test]
@@ -419,8 +554,172 @@ mod tests {
 
         let installed = install_pedelec_tool_from_paths(&source, &target).unwrap();
 
-        assert_eq!(installed, target);
-        assert_eq!(fs::read(&installed).unwrap(), b"fake-tool");
+        assert_eq!(installed.path, target);
+        assert_eq!(installed.status, BinaryInstallStatus::Installed);
+        assert_eq!(fs::read(&installed.path).unwrap(), b"fake-tool");
+    }
+
+    #[test]
+    fn unchanged_binary_does_not_invoke_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, b"same-content").unwrap();
+        fs::write(&target, b"same-content").unwrap();
+        let calls = Cell::new(0);
+
+        let outcome = install_binary_from_paths_with_copy(
+            &source,
+            &target,
+            "test",
+            "cannot install test binary",
+            LockedTargetPolicy::Fail,
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Ok(0)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.status, BinaryInstallStatus::Unchanged);
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn different_binary_content_is_updated_for_size_or_hash_difference() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, b"new-content").unwrap();
+        fs::write(&target, b"old").unwrap();
+        let size_outcome = install_binary_from_paths(
+            &source,
+            &target,
+            "test",
+            "cannot install test binary",
+            LockedTargetPolicy::Fail,
+        )
+        .unwrap();
+        assert_eq!(size_outcome.status, BinaryInstallStatus::Installed);
+        assert_eq!(fs::read(&target).unwrap(), b"new-content");
+
+        fs::write(&source, b"abcdef").unwrap();
+        fs::write(&target, b"ghijkl").unwrap();
+        let hash_outcome = install_binary_from_paths(
+            &source,
+            &target,
+            "test",
+            "cannot install test binary",
+            LockedTargetPolicy::Fail,
+        )
+        .unwrap();
+        assert_eq!(hash_outcome.status, BinaryInstallStatus::Installed);
+        assert_eq!(fs::read(&target).unwrap(), b"abcdef");
+    }
+
+    #[test]
+    fn hash_failure_does_not_try_to_copy_over_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target-directory");
+        fs::create_dir(&target).unwrap();
+        fs::write(
+            &source,
+            vec![0_u8; fs::metadata(&target).unwrap().len() as usize],
+        )
+        .unwrap();
+        let calls = Cell::new(0);
+
+        let err = install_binary_from_paths_with_copy(
+            &source,
+            &target,
+            "test",
+            "cannot install test binary",
+            LockedTargetPolicy::Fail,
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Ok(0)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(calls.get(), 0);
+        assert!(target.is_dir());
+        assert_eq!(err.details.unwrap()["stage"], "hash_binary");
+    }
+
+    #[test]
+    fn only_windows_sharing_violation_for_native_host_may_be_deferred() {
+        assert!(should_defer_locked_target(
+            LockedTargetPolicy::DeferOnWindowsExecutableLock,
+            true,
+            Some(32),
+            true,
+        ));
+        assert!(!should_defer_locked_target(
+            LockedTargetPolicy::DeferOnWindowsExecutableLock,
+            true,
+            Some(5),
+            true,
+        ));
+        assert!(!should_defer_locked_target(
+            LockedTargetPolicy::DeferOnWindowsExecutableLock,
+            false,
+            Some(32),
+            true,
+        ));
+        assert!(!should_defer_locked_target(
+            LockedTargetPolicy::Fail,
+            true,
+            Some(32),
+            true,
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_host_sharing_violation_defers_without_rewriting_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, b"new-native-host").unwrap();
+        fs::write(&target, b"old-native-host").unwrap();
+
+        let outcome = install_binary_from_paths_with_copy(
+            &source,
+            &target,
+            "pedelec-native-host",
+            "cannot install pedelec-native-host binary",
+            LockedTargetPolicy::DeferOnWindowsExecutableLock,
+            |_, _| Err(io::Error::from_raw_os_error(32)),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.status, BinaryInstallStatus::Deferred);
+        assert_eq!(fs::read(&target).unwrap(), b"old-native-host");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_native_host_sharing_violation_remains_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, b"new-tool").unwrap();
+        fs::write(&target, b"old-tool").unwrap();
+
+        let err = install_binary_from_paths_with_copy(
+            &source,
+            &target,
+            "pedelec-cli",
+            "cannot install pedelec-cli binary",
+            LockedTargetPolicy::Fail,
+            |_, _| Err(io::Error::from_raw_os_error(32)),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.details.unwrap()["stage"], "copy_binary");
+        assert_eq!(fs::read(&target).unwrap(), b"old-tool");
     }
 
     #[test]
