@@ -340,8 +340,8 @@ session.onStatus((status) => {
 Pedelec 的 tool calling 流程是：
 
 1. Web App 在 `createSession` 提供 `skills: { guidance, tools }`。
-2. Desktop Runtime 驗證 manifest，並在 sandbox 產生 `skills/tools.md` 與 per-tool spec 檔案。
-3. Agent 需要前端資料或操作時，先讀 `tools.md`，用 `pedelec-cli tool-spec <tool>` 查規格，再執行 `pedelec-cli tool-call ...`。
+2. Desktop Runtime 驗證 manifest、在記憶體保存 ToolRegistry，並在首次 provider prompt 直接注入 guidance 與 tool index。
+3. Agent 需要前端資料或操作時，用 `pedelec-cli tool-spec <tool>` 取得完整 schema，再執行 `pedelec-cli tool-call ...`。
 4. Desktop Runtime 收到 tool call 後，透過 native host 與 extension 送回 SDK。
 5. SDK 觸發 `session.onTool()`。
 6. Web App 執行對應工具並 return result。

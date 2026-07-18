@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PEDELEC_EXTENSION_ID } from "./extension-id";
-import { Pedelec, defineTool, type ToolCallContext } from "./index";
+import { Pedelec, defineTool, type PedelecAvailability, type ToolCallContext } from "./index";
 
 type Listener<T> = (value: T) => void;
 
@@ -692,6 +692,84 @@ describe("Pedelec SDK", () => {
 
     emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 1 });
     await first;
+  });
+
+  it("checks availability without probing Desktop when the extension is unavailable", async () => {
+    delete (globalThis as any).chrome;
+    const availability = await new Pedelec().checkAvailability();
+
+    expect(availability).toEqual({
+      available: false,
+      extension: { available: false },
+      approval: { approved: false, origin: "https://app.example.test" },
+      desktop: { available: false, launchAttempted: false },
+    });
+  });
+
+  it("does not probe Desktop before the origin is approved", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.checkAvailability();
+    const approvalRequest = pageWindow.lastSent();
+    expect(approvalRequest).toMatchObject({ type: "get_approval_status" });
+    respondOk(pageWindow, approvalRequest, { installed: true, approved: false, origin: "https://app.example.test" });
+
+    await expect(promise).resolves.toMatchObject({
+      available: false,
+      extension: { available: true },
+      approval: { approved: false },
+      desktop: { available: false, launchAttempted: false },
+    });
+    expect(pageWindow.port.sent).toHaveLength(1);
+  });
+
+  it("probes Desktop after approval and resolves Desktop failures", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.checkAvailability();
+    const approvalRequest = pageWindow.lastSent();
+    respondOk(pageWindow, approvalRequest, { installed: true, approved: true, origin: "https://app.example.test" });
+    await nextTick();
+    const settingsRequest = pageWindow.lastSent();
+    expect(settingsRequest).toMatchObject({ type: "get_settings" });
+    respondError(pageWindow, settingsRequest, "NATIVE_HOST_UNAVAILABLE");
+
+    await expect(promise).resolves.toMatchObject({
+      available: false,
+      extension: { available: true },
+      approval: { approved: true },
+      desktop: { available: false, launchAttempted: true },
+      error: { code: "NATIVE_HOST_UNAVAILABLE" },
+    });
+    expect(pageWindow.port.sent.map((request) => request.type)).toEqual(["get_approval_status", "get_settings"]);
+  });
+
+  it("reports availability only when the settings probe succeeds", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.checkAvailability();
+    respondOk(pageWindow, pageWindow.lastSent(), { installed: true, approved: true, origin: "https://app.example.test" });
+    await nextTick();
+    respondSettings(pageWindow, pageWindow.lastSent());
+
+    await expect(promise).resolves.toEqual({
+      available: true,
+      extension: { available: true },
+      approval: { approved: true, origin: "https://app.example.test" },
+      desktop: { available: true, launchAttempted: true },
+    });
+  });
+
+  it("normalizes approval query failures without probing Desktop", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.checkAvailability();
+    respondError(pageWindow, pageWindow.lastSent(), "APPROVAL_STORAGE_ERROR");
+
+    await expect(promise).resolves.toMatchObject({
+      available: false,
+      extension: { available: true },
+      approval: { approved: false },
+      desktop: { available: false, launchAttempted: false },
+      error: { code: "APPROVAL_STORAGE_ERROR" },
+    });
+    expect(pageWindow.port.sent).toHaveLength(1);
   });
 
   it("prepare sends prepare_session and suppresses prepare chat output", async () => {

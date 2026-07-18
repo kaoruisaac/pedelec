@@ -178,6 +178,23 @@ Other errors, such as protocol/storage failures, may reject.
 
 Calling this method does not open the approval popup. `createSession()` or `resumeSession()` triggers approval when required.
 
+## `checkAvailability()`
+
+```ts
+checkAvailability(): Promise<PedelecAvailability>
+```
+
+Checks Extension reachability, current-origin approval, and (only after approval) Desktop readiness. It does not create or resume a session and never opens the approval popup.
+
+```ts
+const availability = await pedelec.checkAvailability();
+if (availability.available) {
+  // Extension, approval, and Desktop settings probe all succeeded.
+}
+```
+
+It resolves structured unavailable states for bridge, Native Host, Core, timeout, and settings-protocol failures. `launchAttempted: true` means `getSettings()` was called and may have invoked the existing auto-launch fallback; it does not prove Desktop was launched. A malformed settings response also makes the Desktop probe unavailable.
+
 ## `resumeSession()`
 
 ```ts

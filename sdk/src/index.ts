@@ -189,6 +189,22 @@ export type ApprovalStatus = {
   origin: string | null;
 };
 
+export type PedelecAvailability = {
+  available: boolean;
+  extension: {
+    available: boolean;
+  };
+  approval: {
+    approved: boolean;
+    origin: string | null;
+  };
+  desktop: {
+    available: boolean;
+    launchAttempted: boolean;
+  };
+  error?: PedelecError;
+};
+
 export type PedelecError = {
   code: string;
   message: string;
@@ -672,6 +688,61 @@ export class Pedelec {
       inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
+  }
+
+  async checkAvailability(): Promise<PedelecAvailability> {
+    const origin = getCurrentOrigin(this.pageWindow);
+    let approval: ApprovalStatus;
+
+    try {
+      approval = await this.getApprovalStatus();
+    } catch (err) {
+      const error = normalizeError(err, "SDK_TRANSPORT_ERROR", "Could not read Pedelec approval status.");
+      return {
+        available: false,
+        extension: { available: !isExtensionUnavailableError(error) },
+        approval: { approved: false, origin },
+        desktop: { available: false, launchAttempted: false },
+        error,
+      };
+    }
+
+    if (!approval.installed) {
+      return {
+        available: false,
+        extension: { available: false },
+        approval: { approved: false, origin: approval.origin ?? origin },
+        desktop: { available: false, launchAttempted: false },
+      };
+    }
+
+    if (!approval.approved) {
+      return {
+        available: false,
+        extension: { available: true },
+        approval: { approved: false, origin: approval.origin },
+        desktop: { available: false, launchAttempted: false },
+      };
+    }
+
+    try {
+      await this.getSettings();
+      return {
+        available: true,
+        extension: { available: true },
+        approval: { approved: true, origin: approval.origin },
+        desktop: { available: true, launchAttempted: true },
+      };
+    } catch (err) {
+      const error = normalizeError(err, "SDK_TRANSPORT_ERROR", "Could not reach Pedelec Desktop.");
+      return {
+        available: false,
+        extension: { available: true },
+        approval: { approved: true, origin: approval.origin },
+        desktop: { available: false, launchAttempted: true },
+        error,
+      };
+    }
   }
 
   private async resolveDefaultCreateSessionInput(
@@ -1438,6 +1509,10 @@ function createTurn(kind: ActiveTurn["kind"] = "user"): ActiveTurn {
 function getCurrentOrigin(pageWindow: Window | null): string | null {
   const origin = pageWindow?.location?.origin;
   return typeof origin === "string" && origin ? origin : null;
+}
+
+function isExtensionUnavailableError(error: PedelecError): boolean {
+  return error.code === "EXTENSION_UNAVAILABLE" || error.code === "EXTENSION_DISCONNECTED";
 }
 
 function normalizeError(err: unknown, fallbackCode: string, fallbackMessage: string): PedelecError {

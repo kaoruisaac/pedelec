@@ -64,7 +64,7 @@ A list of serializable tool definitions. Each definition includes a name, descri
 ```text
 Web App declares skills and tools
   ↓
-Desktop Core generates agent-facing tool artifacts
+Desktop Core validates the ToolRegistry and injects guidance plus a tool index into the first provider prompt
   ↓
 Agent decides to call a tool
   ↓
@@ -81,7 +81,9 @@ SDK submits the result automatically
 Agent continues the same turn
 ```
 
-The application does not host `tools.md` or tool-spec files. Core generates the artifacts the agent needs inside the session sandbox.
+The application does not host instruction files. Core keeps the ToolRegistry as the runtime source of truth and injects `skills.guidance` plus tool names and descriptions into the first provider prompt. The initial prompt omits complete argument schemas; the agent uses `pedelec-cli tool-spec <tool-name>` when it needs one, then `pedelec-cli tool-call <tool-name> '<json_args>'` to execute. Core may still generate per-tool spec artifacts in the sandbox, but the normal flow never requires reading `tools.md`.
+
+Treat `skills.guidance` as product-facing operating guidance. Do not compose it from untrusted page content, user input, or tool results.
 
 ## A complete small tool
 

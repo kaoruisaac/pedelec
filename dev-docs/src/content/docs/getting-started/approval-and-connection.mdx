@@ -47,6 +47,16 @@ The normalized origin of the current page, such as `https://app.example.com` or 
 
 It can be `null` when the page does not have a verifiable HTTP or HTTPS origin.
 
+## Check complete availability
+
+Use `checkAvailability()` for a readiness check that includes Desktop without creating a session:
+
+```ts
+const availability = await pedelec.checkAvailability();
+```
+
+It returns Extension, approval, Desktop, and an optional normalized error. An unapproved origin does not probe Desktop or open the popup. An approved origin uses `getSettings()` as its Desktop probe, which can use the existing auto-launch fallback. `launchAttempted` means that request was sent, not that Desktop was proven to launch; malformed settings also count as Desktop unavailable. “Extension unavailable” can also mean a disconnected bridge, not only a missing installation.
+
 ## What triggers the approval popup
 
 `getApprovalStatus()` only reads status. It does not request approval.

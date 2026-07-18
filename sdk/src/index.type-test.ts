@@ -9,6 +9,7 @@ import {
   type ToolCallContext,
   type SandboxAsset,
   type SandboxAssetPath,
+  type PedelecAvailability,
 } from "./index";
 
 async function typedOnToolNameFromCreateSession() {
@@ -125,10 +126,19 @@ async function listAssetsHasPublicTypes() {
   path satisfies `input/${string}`;
 }
 
+async function availabilityHasPublicType() {
+  const pedelec = new Pedelec();
+  const availability: PedelecAvailability = await pedelec.checkAvailability();
+  const promise: Promise<PedelecAvailability> = pedelec.checkAvailability();
+  void availability;
+  void promise;
+}
+
 void typedOnToolNameFromCreateSession;
 void resumedSessionFallsBackToString;
 void noSkillsFallsBackToString;
 void listAssetsHasPublicTypes;
+void availabilityHasPublicType;
 
 const baseContext: PedelecEventContext = {
   sessionId: "thread_1",

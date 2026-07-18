@@ -131,6 +131,14 @@ Port disconnect 時：
 
 ## Health checks
 
+完整環境 readiness 可使用 `checkAvailability()`：
+
+```ts
+const availability = await pedelec.checkAvailability();
+```
+
+它不建立/resume session，也不開啟 approval。未 approval 的 origin 不會 probe Desktop；已 approval 時以 `getSettings()` 檢查，並可能觸發既有 auto-launch。`launchAttempted` 僅表示 probe 已送出，不能確認 Desktop 已啟動；settings shape error 也會視為 unavailable。
+
 沒有單一 method 能證明所有 layer 都健康：
 
 ```ts

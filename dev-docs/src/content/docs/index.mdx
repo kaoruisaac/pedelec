@@ -335,8 +335,8 @@ Common statuses:
 Pedelec's tool calling flow is:
 
 1. The Web App provides `skills: { guidance, tools }` when creating a session.
-2. The Desktop Runtime validates the manifest and generates `skills/tools.md` plus per-tool spec files in the sandbox.
-3. When the agent needs frontend data or an action, it reads `tools.md`, uses `pedelec-cli tool-spec <tool>`, then executes `pedelec-cli tool-call ...` locally.
+2. The Desktop Runtime validates the manifest, stores its ToolRegistry in memory, and injects the guidance and tool index into the first provider prompt.
+3. When the agent needs frontend data or an action, it uses `pedelec-cli tool-spec <tool>` for the full schema, then executes `pedelec-cli tool-call ...` locally.
 4. After the Desktop Runtime receives the tool call, it sends it back to the SDK through the native host and extension.
 5. The SDK triggers `session.onTool()`.
 6. The Web App executes the corresponding tool and returns the result.

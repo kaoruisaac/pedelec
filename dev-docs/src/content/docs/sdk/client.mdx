@@ -131,6 +131,14 @@ The usual recovery is to disable active controls and ask the user to reload the 
 
 ## Health checks
 
+Use `checkAvailability()` when the UI needs readiness through Desktop before session creation:
+
+```ts
+const availability = await pedelec.checkAvailability();
+```
+
+It does not create/resume sessions or open approval. It skips Desktop probing for unapproved origins; for approved ones it uses `getSettings()`, which can trigger the established auto-launch fallback. `launchAttempted` means that probe was sent, not that Desktop definitely launched; settings-shape failures also make the probe unavailable.
+
 No single method proves that every layer is healthy:
 
 ```ts

@@ -14,15 +14,11 @@ export default defineConfig(({ command }) => ({
     solid(),
     command === "serve" ? pedelecDevExtensionIdPlugin() : null,
   ].filter(Boolean),
-  ...(command === "serve"
-    ? {
-        resolve: {
-          alias: {
-            "@kaoruisaac/pedelec": resolve(sdkSourceDir, "index.ts"),
-          },
-        },
-      }
-    : {}),
+  resolve: {
+    alias: {
+      "@kaoruisaac/pedelec": resolve(sdkSourceDir, "index.ts"),
+    },
+  },
   server: {
     host: "127.0.0.1",
     port: 5174,

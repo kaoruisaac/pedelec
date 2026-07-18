@@ -27,8 +27,7 @@ When you need file content, call fs.read_text_file.\n\
 When you need to discover available files, call fs.list_text_files.\n\
 Do not claim you modified files.\n\
 Do not invent file contents.\n\n\
-[Hard Rules]\n\
-When you're not entirely sure what the User wants you to do, read \"./skills/tools.md\" first.
+App tool instructions are provided by Core in the first prompt; do not look for an additional instruction file.
 ";
 const VISION_PROMPT: &str = "\nYou can list supported images with fs.list_image_files and view one with fs.read_image. Never guess an image's content without reading it.\n";
 
@@ -308,6 +307,14 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn system_prompt_uses_core_provided_app_tool_instructions() {
+        assert!(!SYSTEM_PROMPT.contains("tools.md"));
+        assert!(!SYSTEM_PROMPT.contains("[Hard Rules]"));
+        assert!(SYSTEM_PROMPT.contains("pedelec-cli"));
+        assert!(SYSTEM_PROMPT.contains("provided by Core"));
+    }
 
     #[test]
     fn exits_with_jsonl_for_missing_model() {

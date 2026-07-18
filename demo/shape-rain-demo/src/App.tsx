@@ -38,6 +38,7 @@ const DEFAULT_SESSION_SETTINGS: ShapeRainSessionSettings = { provider: "default"
 type ShapeToolResult = SpawnBasicShapesResult | SpawnClosedPolygonsResult;
 type ToolCallErrorResult = { error: { code: string; message: string; details?: unknown } };
 type ToolCallResult = ShapeToolResult | ToolCallErrorResult;
+type ShapeRainToolName = "spawn_basic_shapes" | "spawn_closed_polygons";
 
 type ChatRole = "assistant" | "user" | "error" | "system";
 
@@ -222,7 +223,7 @@ export default function App() {
   const [prompt, setPrompt] = createSignal("");
   const [renderMode, setRenderMode] = createSignal<RenderMode>("3d");
   const [uiState, setUiState] = createSignal<UiState>("connecting");
-  const [session, setSession] = createSignal<PedelecSession | null>(null);
+  const [session, setSession] = createSignal<PedelecSession<ShapeRainToolName> | null>(null);
   const [sessionStatus, setSessionStatus] = createSignal<PedelecSessionStatus | "none">("none");
   const [message, setMessage] = createSignal("Connecting to Pedelec...");
   const [sessionSettings, setSessionSettings] = createSignal<ShapeRainSessionSettings>(readStoredSessionSettings());
@@ -338,20 +339,38 @@ export default function App() {
 
     try {
       const client = new Pedelec();
-      const approval = await client.getApprovalStatus();
+      const availability = await client.checkAvailability();
       if (generation !== lifecycleId) return;
-      if (!approval.installed) {
-        appendConversationMessage("error", "Pedelec Extension is unavailable. Open this page in Chrome with the extension installed.");
+      if (!availability.extension.available) {
+        const friendly = availability.error ? friendlyPedelecError(availability.error) : null;
+        const message = friendly?.message ?? "Pedelec Extension is unavailable. Open this page in Chrome with the extension installed.";
+        appendConversationMessage("error", message);
         setUiState("disconnected");
-        setMessage("Pedelec Extension is unavailable. Open this page in Chrome with the extension installed.");
+        setMessage(message);
         return;
       }
-      if (!approval.approved) {
-        setMessage("Approve this site in the Pedelec Extension popup, then connect again.");
+      if (!availability.approval.approved) {
+        if (availability.error) {
+          const friendly = friendlyPedelecError(availability.error);
+          appendConversationMessage("error", friendly.message);
+          setUiState(friendly.disconnected ? "disconnected" : "error");
+          setMessage(friendly.message);
+          return;
+        }
+        setUiState("ready");
+        setMessage("Approve this site in the Pedelec Extension popup, then send a prompt.");
+        return;
       }
-
+      if (!availability.desktop.available) {
+        const friendly = availability.error ? friendlyPedelecError(availability.error) : null;
+        const message = friendly?.message ?? "Pedelec Desktop App is not reachable. Start the Desktop App and confirm Native Messaging is registered.";
+        appendConversationMessage("error", message);
+        setUiState(friendly?.disconnected ? "disconnected" : "error");
+        setMessage(message);
+        return;
+      }
       setUiState("ready");
-      setMessage(approval.approved ? "Ready. Describe the shapes you want to drop." : "Approve this site in the Pedelec Extension popup, then send a prompt.");
+      setMessage("Ready. Describe the shapes you want to drop.");
     } catch (err) {
       if (generation !== lifecycleId) return;
       const friendly = friendlyPedelecError(err);
@@ -361,7 +380,7 @@ export default function App() {
     }
   }
 
-  function registerSession(nextSession: PedelecSession, generation: number): void {
+  function registerSession(nextSession: PedelecSession<ShapeRainToolName>, generation: number): void {
     sessionDisposer?.();
     const disposeStatus = nextSession.onStatus((status, ctx) => {
       if (generation !== lifecycleId || !isActiveSessionContext(ctx)) return;
@@ -503,6 +522,7 @@ export default function App() {
       }
 
       if (generation !== lifecycleId) return;
+      if (!activeSession) return;
       await activeSession.sendText(text);
     } catch (err) {
       if (generation !== lifecycleId) return;

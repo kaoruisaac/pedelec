@@ -94,6 +94,20 @@ type ApprovalStatus = {
 };
 ```
 
+### `PedelecAvailability`
+
+```ts
+type PedelecAvailability = {
+  available: boolean;
+  extension: { available: boolean };
+  approval: { approved: boolean; origin: string | null };
+  desktop: { available: boolean; launchAttempted: boolean };
+  error?: PedelecError;
+};
+```
+
+`available` requires every layer. `launchAttempted` only means the SDK sent the `getSettings()` Desktop probe; it does not confirm a process launch. A settings protocol error is reported as Desktop unavailable.
+
 ## Errors and status
 
 ### `PedelecError`

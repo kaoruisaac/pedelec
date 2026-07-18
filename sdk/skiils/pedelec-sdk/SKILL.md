@@ -101,6 +101,8 @@ const providers = await pedelec.listProviders();
 
 Use these APIs for installation, approval, provider, and model UI.
 
+For UI that needs complete local readiness, call `checkAvailability()` first. It checks Extension and approval, then only for approved origins probes Desktop with `getSettings()`; it does not create a session or open approval. Treat `launchAttempted` only as “the settings probe was sent”, and remember invalid settings responses also report Desktop unavailable.
+
 A prior availability check is not a guarantee. Session creation and provider execution remain the final authority.
 
 ### 4. Define tools
