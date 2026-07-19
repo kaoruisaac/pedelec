@@ -4096,12 +4096,6 @@ pub fn validate_ollama_timeout(value: u64) -> Result<u64, PedelecError> {
 
 fn require_ollama_api_key(value: Option<String>) -> Result<String, PedelecError> {
     let trimmed = value.as_deref().map(str::trim).unwrap_or_default();
-    if trimmed.is_empty() {
-        return Err(PedelecError::new(
-            error_codes::OLLAMA_API_KEY_REQUIRED,
-            "Ollama API key is required. For local models, enter 'ollama'.",
-        ));
-    }
     Ok(trimmed.to_string())
 }
 
