@@ -7,6 +7,8 @@ sidebar:
 
 Tool failures happen at several layers. Distinguish an expected application-domain result from an SDK handler failure, a serialization/transport failure, and a runtime timeout.
 
+`TOOL_HANDLER_NOT_FOUND` is browser-side: the SDK could not find a handler and returns an error result to the agent. By contrast, `TOOL_NOT_FOUND` means Core's ToolRegistry cannot find the requested tool, `TOOL_ARGS_INVALID` means the agent supplied non-object or schema-invalid arguments, and `TOOL_TIMEOUT` means Core waited too long for a result. See [Error Codes](../reference/error-codes/) for recovery guidance.
+
 ## Expected domain errors
 
 Return a structured error when the tool ran correctly but the requested action cannot be completed:

@@ -99,6 +99,24 @@ The SDK does not trim or require non-empty text; applications should validate co
 
 Common errors: `SESSION_BUSY`, `SESSION_ENDED`, `SEND_TEXT_FAILED`, `SESSION_ERROR`, and transport/provider errors.
 
+## `uploadAsset()`
+
+```ts
+uploadAsset(file: File): Promise<SandboxAssetPath>
+```
+
+Uploads one browser `File` while the session is `idle`, with no prepare, send, or other upload in progress. A file is limited to 100 MiB. On success it returns an `input/...` sandbox-relative path, valid only for this session sandbox lifecycle. It does not expose the user's absolute local path or guarantee that the provider/model can understand the file format.
+
+The content is transferred through Desktop's internal `127.0.0.1` loopback upload server, rather than extension, Native Messaging, or Core IPC message bodies. See [Error Codes](./error-codes/) for request, upload-PUT, and ticket failures.
+
+## `listAssets()`
+
+```ts
+listAssets(): Promise<SandboxAsset[]>
+```
+
+Returns completed first-level `input/` assets, non-recursively, ordered by filesystem modification time newest first. It is allowed while a session runs; an ended session rejects with `SESSION_ENDED`. `name` is the actual sandbox name and can differ from `File.name`; `modifiedAt` is filesystem modification time, not an exact completion timestamp. Pagination, delete, rename, download, and recursive listing are not supported.
+
 ## `onChat()`
 
 ```ts

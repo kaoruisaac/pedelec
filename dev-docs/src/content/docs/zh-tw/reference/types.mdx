@@ -14,6 +14,8 @@ import type {
   ProviderInfo,
   PedelecSessionStatus,
   ToolArgsSchema,
+  SandboxAsset,
+  SandboxAssetPath,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -109,6 +111,21 @@ type PedelecAvailability = {
 `available` 需要所有 layer 都成功。`launchAttempted` 只表示 SDK 已送出 `getSettings()` probe，不代表已確認啟動 Desktop；settings protocol error 同樣會使 Desktop unavailable。
 
 ## Errors 與 status
+
+## Assets
+
+```ts
+type SandboxAssetPath = `input/${string}`;
+
+type SandboxAsset = {
+  name: string;
+  path: SandboxAssetPath;
+  sizeBytes: number;
+  modifiedAt: number;
+};
+```
+
+`modifiedAt` 是 sandbox filesystem modification time。`path` 是 sandbox-relative，不會揭露 browser 使用者的 absolute local path。
 
 ### `PedelecError`
 

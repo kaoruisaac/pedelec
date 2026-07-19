@@ -90,7 +90,7 @@ Interpret failures by layer:
 
 - `EXTENSION_UNAVAILABLE`: browser-side extension connection is missing.
 - `NATIVE_HOST_UNAVAILABLE`: extension exists but cannot reach the registered host.
-- `CORE_RUNTIME_UNAVAILABLE` or `IPC_UNAVAILABLE`: the host cannot reach the running desktop Core.
+- `CORE_RUNTIME_UNAVAILABLE` or `IPC_UNAVAILABLE`: the host could not reach Core. It may have attempted a background Desktop launch; open Desktop manually or repair the installation if it remains unavailable.
 - `available: false`: Core is working, but that provider is not ready.
 
 ## Provider setup notes
@@ -105,8 +105,9 @@ Authentication is provider-specific. Complete the provider's normal login or cre
 
 Pedelec's Ollama provider uses the bundled `pedelec-agent`, not the `ollama` CLI as the provider process. You still need to:
 
-- run an Ollama-compatible server;
+- run an Ollama-compatible server at the default `http://127.0.0.1:11434` endpoint or configure another local, remote, or Ollama Cloud endpoint;
 - configure its base URL in the Desktop App when it is not the default;
+- set the Ollama API key in Desktop Settings. The current agent requires a non-empty value: use `ollama` for a local server, or the service-issued key for an authenticated remote/Cloud endpoint;
 - install the chosen model; and
 - choose a model explicitly or set the Ollama default model.
 

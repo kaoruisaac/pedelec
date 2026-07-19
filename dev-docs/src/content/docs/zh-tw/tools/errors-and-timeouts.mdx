@@ -7,6 +7,8 @@ sidebar:
 
 Tool failure 可能發生在多個 layer。應區分 expected application-domain result、SDK handler failure、serialization/transport failure 與 runtime timeout。
 
+`TOOL_HANDLER_NOT_FOUND` 是 browser-side：SDK 找不到 handler，會將 error result 回給 agent。`TOOL_NOT_FOUND` 則表示 Core ToolRegistry 找不到 requested tool；`TOOL_ARGS_INVALID` 表示 agent args 不是 object 或不符合 schema；`TOOL_TIMEOUT` 表示 Core 等待 result 超時。Recovery 詳見 [Error Codes](../reference/error-codes/)。
+
 ## 預期內 domain errors
 
 Tool 正常執行，但 action 無法完成時回傳 structured error：

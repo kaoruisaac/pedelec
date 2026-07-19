@@ -97,6 +97,24 @@ SDK 不 trim，也不強制 non-empty；composer 應自行 validate。
 
 常見 errors：`SESSION_BUSY`、`SESSION_ENDED`、`SEND_TEXT_FAILED`、`SESSION_ERROR` 與 transport/provider error。
 
+## `uploadAsset()`
+
+```ts
+uploadAsset(file: File): Promise<SandboxAssetPath>
+```
+
+Session 為 `idle`，且沒有 prepare、send 或其他 upload 進行中時，可 upload 一個 browser `File`。單檔上限 100 MiB；成功時回傳 `input/...` sandbox-relative path，只在此 session sandbox lifecycle 內有效。不會回傳使用者 absolute local path，也不保證 provider/model 能理解檔案格式。
+
+內容經由 Desktop 內部的 `127.0.0.1` loopback upload server 傳輸，不經 Extension、Native Messaging 或 Core IPC message body。SDK request、loopback PUT 與 ticket 都可能失敗，請見 [Error Codes](./error-codes/)。
+
+## `listAssets()`
+
+```ts
+listAssets(): Promise<SandboxAsset[]>
+```
+
+回傳已完成 upload 的第一層 `input/` assets；不遞迴，依 filesystem modification time 由新到舊排序。Session running 時仍可呼叫，ended session 會 reject `SESSION_ENDED`。`name` 是實際 sandbox filename，可能不同於 `File.name`；`modifiedAt` 是 filesystem modification time，不是精確完成時間。目前不支援 pagination、delete、rename、download 或 recursive listing。
+
 ## `onChat()`
 
 ```ts

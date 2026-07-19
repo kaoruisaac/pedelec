@@ -50,13 +50,15 @@ Pedelec Desktop Runtime
   ↓ provider process
 Codex / Gemini / OpenCode / Cursor / Claude Code / Ollama
 ```
+
+The diagram is the control/event path. Asset file bodies follow a separate internal path: `Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/`. Use `session.uploadAsset()` only; do not depend on the internal URL, port, token, or ticket lifecycle.
 ## SDK Prerequisites
 
 The Pedelec SDK must run in a browser page environment and requires:
 
 1. The user has installed the Pedelec Chrome Extension.
-2. The user has started the Pedelec Desktop App.
-3. The Desktop App has registered the Chrome Native Messaging host.
+2. The user has opened the Pedelec Desktop App at least once after installation, completing binary setup, Native Messaging host registration, and launch-config creation.
+3. After that initialization, the native host can try to start Desktop in the background for a Core request; this may still fail and must be handled as an unavailable Desktop/installation issue.
 4. The target provider is available on the user's machine. CLI-backed providers use commands such as `codex`, `gemini`, `opencode`, `cursor`, or `claude`; the Ollama provider uses Pedelec's bundled `pedelec-agent`.
 
 The SDK is not suitable for direct use in Node.js, an SSR server, or a background worker; it needs extension runtime messaging from a Chrome page environment.
@@ -65,24 +67,16 @@ The SDK is not suitable for direct use in Node.js, an SSR server, or a backgroun
 
 ## Installing and Importing the SDK
 
-The SDK package is located in `sdk/`:
+Install the published package:
 
 ```bash
-cd sdk
-npm install
-npm run build
+npm install @kaoruisaac/pedelec
 ```
 
 Import it from the Web App:
 
 ```ts
 import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
-```
-
-If it has not been published to npm yet, install it from a local path first:
-
-```bash
-npm install ../path/to/pedelec/sdk
 ```
 
 ---
@@ -170,7 +164,7 @@ Currently supported provider codes in the SDK:
 | Claude Code | `claude` | `sonnet` |
 | Ollama | `ollama` | `qwen3-14b-32k:latest` |
 
-Ollama sessions are executed by the `pedelec-agent` binary bundled with the Desktop App, not by the `ollama` CLI. You still need to start the local Ollama server yourself and specify a model explicitly or configure `defaultModels.ollama` in Settings:
+Ollama sessions are executed by the `pedelec-agent` binary bundled with the Desktop App, not by the `ollama` CLI. It uses the configured Ollama-compatible endpoint (default `http://127.0.0.1:11434`); start a local server for that URL or configure a remote/Ollama Cloud endpoint. A non-empty API key is currently required by the agent: enter `ollama` for local Ollama, or the service-issued key for a remote endpoint. Also specify a model explicitly or configure `defaultModels.ollama` in Settings:
 
 ```ts
 const session = await pedelec.createSession({
@@ -258,7 +252,7 @@ type ProviderInfo = {
 ```
 
 `available: false` usually means that the provider CLI is not installed or is not in `PATH`.
-For Ollama, `available: true` only means Pedelec can find `pedelec-agent`; it does not mean the Ollama server is running or the selected model is installed.
+For Ollama, `available: true` only means Pedelec can find `pedelec-agent`; it does not mean its endpoint is reachable, its credentials work, or the selected model is installed.
 
 ---
 

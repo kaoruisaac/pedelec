@@ -7,6 +7,29 @@ sidebar:
 
 一個 session 同時只處理一個 turn。`prepare()` 是 optional optimization；`sendText()` 會啟動 user turn，並在 turn 完成後 resolve。
 
+## Upload 單一 asset
+
+Session 為 `idle`，且沒有 prepare、send 或其他 upload 進行中時，使用 `uploadAsset()` 傳送一個 browser `File`。單檔上限為 100 MiB；回傳的 `input/...` 是 sandbox-relative path，只在該 session lifetime 內有效。
+
+```ts
+const file = input.files?.[0];
+if (!file) return;
+
+const path = await session.uploadAsset(file);
+await session.sendText(`請處理這個檔案：${path}`);
+```
+
+File body 直接送往 `127.0.0.1` loopback server，不經過 Extension、Native Messaging host 或 Core IPC。Upload 成功只表示檔案位於 sandbox，不能保證 provider 或 model 能理解其格式。
+
+## 列出已完成的 assets
+
+```ts
+const path = await session.uploadAsset(file);
+const assets = await session.listAssets();
+```
+
+`listAssets()` 不遞迴，並以 filesystem modification time 由新到舊排序。`name` 是實際 sandbox filename，不一定等於原本的 browser `File.name`；`path` 是 sandbox-relative `input/...` path；`modifiedAt` 是 filesystem modification time，不是精確 upload completion time。絕對本機路徑不會回傳。Agent 執行時仍可 listing；ended session 會 reject `SESSION_ENDED`。目前不支援 pagination、delete、rename、download 或 recursive listing。
+
 ## Optional preparation
 
 ```ts

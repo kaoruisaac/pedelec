@@ -33,9 +33,9 @@ The extension must be installed and enabled in the same browser profile that ope
 
 ### 3. Pedelec Desktop App
 
-The desktop application must be running when an operation requires Core Runtime access. It owns sessions, provider processes, settings, and the local runtime endpoint.
+The desktop application owns sessions, provider processes, settings, and the local runtime endpoint. After the user has opened it once to complete installation, Native Host registration, and launch-config creation, the native host tries to start it in the background when a Core request arrives and it is not running.
 
-The extension may be reachable while the desktop application is not. In that case, approval status can still show the extension as installed, but provider or session operations fail when the native host cannot reach Core.
+This fallback is not guaranteed: a missing launch config, damaged installation, an unstartable executable, or a Core that does not become ready in time can still cause `CORE_RUNTIME_UNAVAILABLE`. The extension may be reachable while the desktop application is unavailable.
 
 ### 4. Registered Native Messaging host
 
@@ -59,7 +59,9 @@ CLI-backed providers normally require the provider command to be:
 - authenticated if the provider requires login; and
 - compatible with the selected model identifier.
 
-For Ollama, provider availability only confirms that Pedelec can find its bundled agent executable. It does not prove that the Ollama server is running or that the requested model exists.
+For Ollama, provider availability only confirms that Pedelec can find its bundled agent executable. It does not prove that the configured endpoint is reachable, authentication is valid, or the requested model exists.
+
+The default endpoint is `http://127.0.0.1:11434`; users must start a local Ollama server for that URL, or configure a remote/Ollama Cloud endpoint. Desktop Settings includes an API-key field. The current `pedelec-agent` requires a non-empty `OLLAMA_API_KEY`, so use `ollama` for a local server or a valid key for an authenticated endpoint.
 
 ## JavaScript and package requirements
 
@@ -123,7 +125,7 @@ Before showing the main agent UI, verify:
 2. `getApprovalStatus()` does not report the extension as unavailable.
 3. The current origin can be approved.
 4. `listProviders()` returns at least one available provider.
-5. The Desktop App remains running.
+5. The Desktop App was opened once after installation; handle a failed automatic launch by asking the user to open it or repair installation.
 6. The model field, when provided, is meaningful to the selected provider.
 7. The UI handles disconnects and does not assume setup remains valid forever.
 

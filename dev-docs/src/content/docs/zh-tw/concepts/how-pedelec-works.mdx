@@ -60,7 +60,7 @@ Pedelec Desktop App 擁有 Core Runtime，負責：
 - 為 session 準備 sandbox；
 - 啟動或 resume provider process；
 - 將各 provider 輸出轉換成標準 event；
-- 產生 agent 需要的 tool artifacts；
+- 將 tool guidance 與 tool index 注入初始 provider prompt；
 - agent 發出 tool call 時等待 Web App 回傳結果。
 
 一般 SDK 整合不需要知道 Core IPC protocol 或 provider-specific command line。
@@ -69,7 +69,7 @@ Pedelec Desktop App 擁有 Core Runtime，負責：
 
 Provider 是 session 使用的 agent backend，目前代碼包含 `codex`、`gemini`、`opencode`、`cursor`、`claude` 與 `ollama`。
 
-Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 command、加入 Desktop App 能看到的 `PATH`，並完成登入。Ollama session 會使用 Pedelec 內附的 agent executable，但仍需要可連線的 Ollama server 與已安裝的 model。
+Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 command、加入 Desktop App 能看到的 `PATH`，並完成登入。Ollama session 會使用 Pedelec 內附 agent executable、設定的 Ollama-compatible endpoint（default `http://127.0.0.1:11434`）、非空 API key（本機用 `ollama`）及已安裝的 model。
 
 ## `createSession()` 的資料流
 
@@ -112,8 +112,8 @@ SDK 會替每個已接受的 turn 建立本機 `turnId`，方便 UI 將 callback
 ## Tool call 的資料流
 
 1. Web App 在 `skills.tools` 宣告 tool。
-2. Core 在 session sandbox 內產生 agent-facing tool files。
-3. Agent 判斷需要 tool，發出 tool call。
+2. Core 在第一次 provider prompt 直接注入 `skills.guidance`、tool names、descriptions 與操作指示；初始 prompt 不含完整 argument schema。
+3. Agent 需要 schema 時執行 `pedelec-cli tool-spec <tool-name>`；呼叫 tool 時使用 `pedelec-cli tool-call <tool-name> '<json_args>'`。
 4. Core 發出標準化 tool event 並等待結果。
 5. SDK 將 session status 設為 `waiting_tool_result`。
 6. SDK 依序尋找 named handler、inline handler、generic fallback。
@@ -122,6 +122,24 @@ SDK 會替每個已接受的 turn 建立本機 `turnId`，方便 UI 將 callback
 9. Agent 繼續工作，session 最後回到 `idle`、結束或進入 error。
 
 SDK 處理 transport，但操作的語意與安全仍由 Web App 負責。例如 `delete_layer` tool 仍應確認 layer 存在，而且 callback 對應的 editor generation 尚未過期。
+
+ToolRegistry 是 runtime source of truth。Core 可能產生 per-tool spec artifacts 作為實作細節，但正常的 Web App integration 與 agent flow 不需要尋找或閱讀 `tools.md`。
+
+## Asset upload data path
+
+Session request、event 與 tool result 使用 control/event path：
+
+```text
+Web App → SDK → Chrome Extension → Native Host → Core IPC → Desktop Runtime
+```
+
+Asset body 使用獨立的內部 data path：
+
+```text
+Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/
+```
+
+SDK 透過 `session.uploadAsset()` 在內部取得並使用 upload ticket。Web App 不應自行建立 localhost server，也不應依賴 upload URL、port、token 或 ticket lifecycle；asset body 不會經過 Extension message body、Native Messaging payload 或 Core IPC message body。
 
 ## 責任邊界
 

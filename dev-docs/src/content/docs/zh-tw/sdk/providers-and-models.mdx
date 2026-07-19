@@ -153,8 +153,10 @@ Pedelec 沒有一份 universal valid-model list。String 會交給 provider adap
 Ollama 和 CLI provider 不同：
 
 - Pedelec 使用內附 `pedelec-agent` 連到 Ollama-compatible server。
+- Default Base URL 是 `http://127.0.0.1:11434`；使用本機 URL 時使用者要自行啟動 server，也可在 Desktop Settings 設定 remote 或 Ollama Cloud endpoint。
+- Desktop Settings 有 Ollama API key 欄位。Core 雖可傳空環境值，現行 `pedelec-agent` validation 仍要求非空 `OLLAMA_API_KEY`：本機 Ollama 填 `ollama`，遠端則填該服務的有效 key。
 - `ProviderInfo.available === true` 表示 agent executable 可用。
-- 不代表 server reachable。
+- 不代表 endpoint reachable 或 authentication 有效。
 - 不代表指定 model 已安裝。
 - 必須從 session input 或 `defaultModels.ollama` 取得 model。
 

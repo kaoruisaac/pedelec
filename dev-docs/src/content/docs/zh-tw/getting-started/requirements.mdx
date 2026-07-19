@@ -33,9 +33,9 @@ Extension 必須安裝並啟用在開啟 Web App 的同一個 Chrome profile。
 
 ### 3. Pedelec Desktop App
 
-需要 Core Runtime 的操作發生時，Desktop App 必須正在執行。Session、provider process、settings 與 local runtime endpoint 都由它管理。
+Desktop App 管理 session、provider process、settings 與 local runtime endpoint。使用者安裝後至少正常開啟一次，完成 binary 安裝、Native Messaging host registration 與 launch config 建立後，Native Host 在收到 Core request 而 App 尚未執行時，會嘗試 background 啟動 Desktop。
 
-Extension 可以正常回應，但 Desktop App 沒有啟動。這種情況下 approval status 仍可能顯示 installed，真正建立 session 或讀取 provider 時才會失敗。
+此 fallback 不保證成功：launch config 遺失、安裝損壞、executable 無法啟動，或 Core 未及時 ready，仍可能回傳 `CORE_RUNTIME_UNAVAILABLE`。Extension 可以正常回應但 Desktop unavailable。
 
 ### 4. 已註冊的 Native Messaging host
 
@@ -57,7 +57,9 @@ CLI provider 一般需要：
 - provider 需要登入時已完成 authentication；
 - 選擇的 model id 能被該 provider 版本接受。
 
-Ollama 的 `available` 只表示 Pedelec 找得到內附的 agent executable，不代表 Ollama server 正在執行或指定 model 已安裝。
+Ollama 的 `available` 只表示 Pedelec 找得到內附的 agent executable，不代表 endpoint 可連線、authentication 有效或指定 model 已安裝。
+
+Default endpoint 是 `http://127.0.0.1:11434`；使用此本機 URL 時使用者要自行啟動 Ollama server，也可設定 remote/Ollama Cloud endpoint。Desktop Settings 有 API key 欄位；現行 `pedelec-agent` 要求非空 `OLLAMA_API_KEY`，本機 server 填 `ollama`，需要 authentication 的 endpoint 填有效 key。
 
 ## JavaScript 與 package 條件
 
@@ -121,7 +123,7 @@ Ollama 必須從以下其中一處取得 model：
 2. `getApprovalStatus()` 沒有顯示 Extension unavailable。
 3. 目前 origin 可被核准。
 4. `listProviders()` 至少有一個 available provider。
-5. Desktop App 持續執行。
+5. 安裝後已至少開啟 Desktop App 一次；自動啟動失敗時引導使用者手動開啟或修復安裝。
 6. 有提供 model 時，該 model 對選擇的 provider 有意義。
 7. UI 能處理 disconnect，不假設設定永遠有效。
 

@@ -36,7 +36,7 @@ const providers = await pedelec.listProviders();
 const provider = providers.find((item) => item.available);
 
 if (!provider) {
-  throw new Error("Start Pedelec Desktop and configure an available provider.");
+  throw new Error("Pedelec Desktop could not start or connect; open it manually or repair installation, then configure a provider.");
 }
 ```
 

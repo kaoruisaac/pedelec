@@ -90,7 +90,7 @@ if (!providers.some((provider) => provider.available)) {
 
 - `EXTENSION_UNAVAILABLE`：browser page 無法連到 Extension。
 - `NATIVE_HOST_UNAVAILABLE`：Extension 存在，但無法連到已註冊 native host。
-- `CORE_RUNTIME_UNAVAILABLE` 或 `IPC_UNAVAILABLE`：host 無法連到 Desktop Core。
+- `CORE_RUNTIME_UNAVAILABLE` 或 `IPC_UNAVAILABLE`：host 無法連到 Core，可能已嘗試 background launch；若仍失敗請手動開啟 Desktop 或修復安裝。
 - `available: false`：Core 正常，但該 provider 尚未準備好。
 
 ## Provider 設定注意事項
@@ -105,8 +105,9 @@ Authentication 由各 provider 決定。建立 session 前，先完成 provider 
 
 Pedelec 的 Ollama provider 使用內附的 `pedelec-agent`，不是把 `ollama` CLI 當 provider process。仍需要：
 
-- 啟動 Ollama-compatible server；
+- 在 default `http://127.0.0.1:11434` 啟動 Ollama-compatible server，或設定其他 local、remote 或 Ollama Cloud endpoint；
 - 非預設位址時在 Desktop App 設定 base URL；
+- 在 Desktop Settings 設定 Ollama API key。現行 agent 要求非空值：本機 server 填 `ollama`，authenticated remote/Cloud endpoint 填該服務提供的有效 key；
 - 安裝選擇的 model；
 - 明確指定 model，或設定 Ollama default model。
 

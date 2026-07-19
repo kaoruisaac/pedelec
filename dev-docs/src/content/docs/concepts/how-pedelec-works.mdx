@@ -60,7 +60,7 @@ The Pedelec Desktop App owns the Core Runtime. It:
 - prepares a sandbox for a session;
 - launches or resumes the selected provider process;
 - converts provider output into normalized events;
-- generates tool artifacts for the agent; and
+- injects tool guidance and the tool index into the initial provider prompt; and
 - waits for tool results before continuing the agent turn.
 
 The browser application does not need to know the Core IPC protocol or provider-specific command-line details.
@@ -69,7 +69,7 @@ The browser application does not need to know the Core IPC protocol or provider-
 
 A provider is the agent backend selected for a session, such as `codex`, `gemini`, `opencode`, `cursor`, `claude`, or `ollama`.
 
-Provider availability depends on the user's machine. CLI-backed providers usually require the relevant command to be installed, present in `PATH`, and authenticated. Ollama sessions use Pedelec's bundled agent executable but still require a reachable Ollama server and an installed model.
+Provider availability depends on the user's machine. CLI-backed providers usually require the relevant command to be installed, present in `PATH`, and authenticated. Ollama sessions use Pedelec's bundled agent executable with the configured Ollama-compatible endpoint (default `http://127.0.0.1:11434`), a non-empty API key (`ollama` for local Ollama), and an installed model.
 
 ## What happens during `createSession()`
 
@@ -112,8 +112,8 @@ Only one active turn is allowed per session. A second `sendText()` while the fir
 ## What happens during a tool call
 
 1. The application included a tool definition in `skills.tools`.
-2. Core generated the agent-facing tool files in the session sandbox.
-3. The agent decides that it needs the tool and issues a tool call.
+2. Core injects `skills.guidance`, tool names, descriptions, and calling instructions into the first provider prompt. The initial prompt omits complete argument schemas.
+3. When it needs a schema, the agent runs `pedelec-cli tool-spec <tool-name>`; it calls a tool with `pedelec-cli tool-call <tool-name> '<json_args>'`.
 4. Core emits a normalized tool event and waits for a result.
 5. The SDK sets the session status to `waiting_tool_result`.
 6. The SDK selects a handler in this order: named handler, inline handler, generic fallback.
@@ -122,6 +122,24 @@ Only one active turn is allowed per session. A second `sendText()` while the fir
 9. The agent continues and the session eventually returns to `idle`, ends, or errors.
 
 The SDK handles the transport, but the application owns the semantics and safety of the operation. For example, a tool named `delete_layer` should still check that the requested layer exists and that the current editor generation is valid.
+
+ToolRegistry is the runtime source of truth. Core can generate per-tool spec artifacts as an implementation detail, but a normal Web App integration and agent flow never need to locate or read `tools.md`.
+
+## Asset upload data path
+
+Session requests, events, and tool results use the control/event path:
+
+```text
+Web App → SDK → Chrome Extension → Native Host → Core IPC → Desktop Runtime
+```
+
+Asset bodies use a separate internal data path:
+
+```text
+Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/
+```
+
+The SDK obtains and uses the upload ticket internally through `session.uploadAsset()`. Applications must not create a localhost server or depend on upload URLs, ports, tokens, or ticket lifecycles. Asset bodies do not pass through the Extension message body, Native Messaging payload, or Core IPC message body.
 
 ## Ownership boundaries
 

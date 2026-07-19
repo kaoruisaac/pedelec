@@ -52,7 +52,7 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | --- | --- | --- | --- |
 | `NATIVE_HOST_UNAVAILABLE` | Extension cannot connect to registered native host | Start/repair Desktop App installation and host registration | After repair |
 | `NATIVE_CONNECTION_CLOSED` | Native Messaging connection closed | Restart Desktop App and verify host | Read-only operation may retry after recovery |
-| `CORE_RUNTIME_UNAVAILABLE` | Native host cannot reach a valid running Core runtime | Start/restart Pedelec Desktop | After Core is running |
+| `CORE_RUNTIME_UNAVAILABLE` | Native host cannot reach a valid Core runtime after any background launch attempt | Open Desktop manually or repair its installation/launch configuration | After Core is ready |
 | `IPC_UNAVAILABLE` | Local Core IPC could not bind, connect, parse, or respond | Restart Desktop App; inspect local logs | After recovery |
 | `MESSAGE_TOO_LARGE` | Local IPC message exceeded its size limit | Reduce prompt/tool/result payload | Only with smaller data |
 | `SDK_BRIDGE_TIMEOUT` | Extension did not answer within `bridgeTimeoutMs` | Check all downstream layers; avoid repeated writes | After diagnosing connection |
@@ -67,6 +67,14 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `DEFAULT_PROVIDER_UNAVAILABLE` | Configured default is currently unavailable | Choose/install another provider | After configuration |
 | `MODEL_REQUIRED` | Provider, notably Ollama, requires a model | Pass `model` or configure provider default | After adding model |
 | `INVALID_INPUT` | SDK input is invalid | Fix application code/input shape | Not unchanged |
+| `OLLAMA_API_KEY_REQUIRED` | Ollama agent received no usable API key | Set `ollama` for local Ollama or a valid remote/Cloud key in Desktop Settings | After configuration |
+| `OLLAMA_AUTH_FAILED` | The configured endpoint rejected authentication | Correct the endpoint credentials | After configuration |
+| `OLLAMA_MODEL_NOT_FOUND` | The selected Ollama model was not found | Install/select a valid model | After configuration |
+| `OLLAMA_CLOUD_LIMIT_EXCEEDED` | Ollama Cloud limit was reached | Wait or change plan/endpoint | After service recovery |
+| `OLLAMA_BASE_URL_INVALID` | Configured Ollama base URL is invalid | Correct the URL in Desktop Settings | After configuration |
+| `OLLAMA_UNAVAILABLE` | Ollama endpoint cannot be reached | Start local Ollama or repair endpoint/network | After recovery |
+| `OLLAMA_REQUEST_FAILED` | Ollama request failed for another endpoint reason | Preserve message; inspect endpoint and logs | Depends on cause |
+| `OLLAMA_RESPONSE_INVALID` | Ollama endpoint returned an unusable response | Verify endpoint compatibility and report details | After endpoint fix |
 
 Provider-specific errors can describe authentication, executable startup, model support, server connectivity, or provider output parsing. Display the provider and preserve the original message.
 
@@ -89,7 +97,24 @@ Underlying structured errors are preserved when available, so fallback codes may
 | Code | Meaning | Where it appears | Response |
 | --- | --- | --- | --- |
 | `TOOL_HANDLER_NOT_FOUND` | No named, inline, or generic handler matched | Error result sent to agent | Restore/register handler; fix name/lifecycle |
+| `TOOL_NOT_FOUND` | Core ToolRegistry has no tool requested by the agent | Core/runtime error | Verify the tool manifest and agent request |
+| `TOOL_ARGS_INVALID` | Agent arguments are not an object or do not match the tool schema | Core/runtime error | Correct the tool call/schema |
+| `TOOL_TIMEOUT` | Core timed out while waiting for a tool result | Core/runtime error | Avoid automatic retry; reconcile possible side effects |
 | `TOOL_HANDLER_ERROR` | Handler threw or rejected | Error result sent to agent | Log unexpected exception; return domain errors for expected cases |
 | `SUBMIT_TOOL_RESULT_FAILED` | SDK could not deliver handler result | `session.onError()` SDK event | Reconcile side effects; inspect disconnect/timeout/serialization |
 
 A Core tool timeout can also lead to a session/runtime error or a later `SUBMIT_TOOL_RESULT_FAILED`. The browser handler is not forcibly cancelled.
+
+## Assets
+
+Asset failures can occur while creating the SDK request, during the loopback upload `PUT`, or while listing assets; they are not all emitted by the same stage of `uploadAsset()`.
+
+| Code | Meaning | Recommended response |
+| --- | --- | --- |
+| `ASSET_TOO_LARGE` | File exceeds the 100 MiB limit | Choose a smaller file |
+| `ASSET_UPLOAD_SERVER_UNAVAILABLE` | Desktop loopback upload server is unavailable | Check Desktop/Core availability and retry after recovery |
+| `ASSET_UPLOAD_TICKET_EXPIRED` | Internal upload ticket expired | Start a fresh upload |
+| `ASSET_UPLOAD_UNAUTHORIZED` | Upload ticket/token was rejected | Start a fresh upload; repair Desktop if persistent |
+| `ASSET_UPLOAD_SIZE_MISMATCH` | Uploaded byte count did not match the selected file | Retry with the unchanged file; inspect a persistent failure |
+| `ASSET_UPLOAD_FAILED` | Upload failed for another transport/runtime reason | Preserve details and retry only after diagnosis |
+| `ASSET_LIST_FAILED` | Completed assets could not be listed | Retry a read after Desktop/session recovery |

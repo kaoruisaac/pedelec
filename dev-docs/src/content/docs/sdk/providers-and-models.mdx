@@ -153,8 +153,10 @@ Do not present examples in documentation as a guaranteed model catalog.
 The Ollama provider differs from CLI-backed providers:
 
 - Pedelec uses its bundled `pedelec-agent` to communicate with an Ollama-compatible server.
+- The default base URL is `http://127.0.0.1:11434`; a local server must be started by the user. Desktop Settings can instead point at a remote or Ollama Cloud endpoint.
+- Desktop Settings has an Ollama API-key field. Although Core can pass an empty environment value, the current `pedelec-agent` validation requires a non-empty `OLLAMA_API_KEY`; use `ollama` locally or a valid endpoint key remotely.
 - `ProviderInfo.available === true` means that agent executable is available.
-- It does not guarantee that the server is reachable.
+- It does not guarantee that the endpoint is reachable or authentication succeeds.
 - It does not guarantee that the selected model is installed.
 - A model is required from explicit session input or `defaultModels.ollama`.
 

@@ -139,7 +139,7 @@ async function connectPedelec() {
 | `EXTENSION_DISCONNECTED` | Page → Extension | 停止 send，重新建立 page/client connection |
 | `NATIVE_HOST_UNAVAILABLE` | Extension → native host | 啟動或修復 Desktop App installation |
 | `NATIVE_CONNECTION_CLOSED` | Extension → native host | 重啟 Desktop App，安全的 read 操作可重試 |
-| `CORE_RUNTIME_UNAVAILABLE` | Native host → Core | 啟動 Desktop App 並確認 runtime registration |
+| `CORE_RUNTIME_UNAVAILABLE` | Native host → Core | Background launch 可能失敗；手動開啟 Desktop 或修復 installation/launch config |
 | `IPC_UNAVAILABLE` | Local Core IPC | 重啟 Desktop App，查看 local runtime log |
 | `SDK_BRIDGE_TIMEOUT` | SDK request timeout | 不要連續重送 write；先檢查下游元件 |
 
