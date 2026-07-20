@@ -41,7 +41,7 @@ pedelec-native-host
   ↓ Core IPC
 pedelec-app Desktop Runtime
   ↓ provider process
-Codex / Gemini / OpenCode / Cursor / Claude Code / Ollama via pedelec-agent
+Codex / Gemini / OpenCode / Cursor / Claude Code / Grok / Ollama via pedelec-agent
 ```
 
 Web App 不直接碰本機 process，也不需要自己開 localhost server。SDK 只負責和 extension 溝通；extension 負責把請求送到 native host；desktop app 是唯一的 CoreRuntime owner，真正負責建立 session、管理 provider process、轉發事件與處理 tool result。
@@ -99,7 +99,9 @@ sequenceDiagram
 | Background | 管理 SDK external channel、origin approval、連線 native host、把 core event 轉成 SDK event |
 | Native Host | Chrome Native Messaging 入口，轉送 request/event 到 Core IPC |
 | Desktop Runtime | 唯一的 session/runtime owner，管理 thread、skills、provider process 與 tool request |
-| Agent process | 實際執行 Codex/Gemini/OpenCode/Cursor/Claude Code/Ollama，並透過 `pedelec-cli` 呼叫前端工具 |
+| Agent process | 實際執行 Codex/Gemini/OpenCode/Cursor/Claude Code/Grok/Ollama，並透過 `pedelec-cli` 呼叫前端工具 |
+
+Grok 使用官方 `grok` CLI。請自行安裝並執行 `grok login`（或 Grok CLI 支援的其他認證方式）；Pedelec 不會保存 Grok credential。掃描到 CLI 與版本只代表 executable 可用，不代表已登入。
 
 ---
 

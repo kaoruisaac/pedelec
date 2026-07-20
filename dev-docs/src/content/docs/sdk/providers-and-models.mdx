@@ -16,6 +16,7 @@ type ProviderCode =
   | "opencode"
   | "cursor"
   | "claude"
+  | "grok"
   | "ollama";
 ```
 
@@ -147,6 +148,16 @@ Good UI patterns include:
 - surfacing provider errors rather than replacing them with a generic message.
 
 Do not present examples in documentation as a guaranteed model catalog.
+
+## Grok behavior
+
+Grok uses xAI's official `grok` CLI. Install it separately and authenticate before creating a session, for example with `grok login`. Pedelec does not store an xAI API key or perform login. `ProviderInfo.available === true` means the CLI was found and its version was read; it does not guarantee that the user is signed in or that a model is available.
+
+`provider: "grok"` accepts an optional model string. Omit it to use the Grok CLI default, or pass any model ID accepted by the installed CLI.
+
+```ts
+const session = await pedelec.createSession({ provider: "grok" });
+```
 
 ## Ollama behavior
 

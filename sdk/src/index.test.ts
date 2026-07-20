@@ -694,6 +694,26 @@ describe("Pedelec SDK", () => {
     await first;
   });
 
+  it("creates a grok session and accepts grok provider info", async () => {
+    const pedelec = new Pedelec();
+    const createPromise = pedelec.createSession({ provider: "grok", model: "grok-4" });
+    const createRequest = pageWindow.lastSent();
+    expect(createRequest).toMatchObject({
+      type: "create_session",
+      input: { provider: "grok", model: "grok-4", skills: undefined },
+    });
+    respondOk(pageWindow, createRequest, { sessionId: "thread_grok" });
+    await expect(createPromise).resolves.toMatchObject({ provider: "grok", model: "grok-4" });
+
+    const listPromise = pedelec.listProviders();
+    respondOk(pageWindow, pageWindow.lastSent(), [
+      { name: "Grok", code: "grok", path: "/bin/grok", available: true, error: null },
+    ]);
+    await expect(listPromise).resolves.toEqual([
+      { name: "Grok", code: "grok", path: "/bin/grok", available: true, error: null },
+    ]);
+  });
+
   it("checks availability without probing Desktop when the extension is unavailable", async () => {
     delete (globalThis as any).chrome;
     const availability = await new Pedelec().checkAvailability();

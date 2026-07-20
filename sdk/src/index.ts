@@ -7,7 +7,7 @@ export type PedelecOptions = {
   bridgeTimeoutMs?: number;
 };
 
-export type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama";
+export type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude" | "grok" | "ollama";
 
 export type JsonPrimitive = string | number | boolean | null;
 
@@ -1454,6 +1454,7 @@ function isSettings(value: unknown): value is PedelecSettings {
       settings.defaultProvider === "opencode" ||
       settings.defaultProvider === "cursor" ||
       settings.defaultProvider === "claude" ||
+      settings.defaultProvider === "grok" ||
       settings.defaultProvider === "ollama") &&
     Object.entries(defaultModels).every(
       ([provider, model]) => isProviderCode(provider) && typeof model === "string"
@@ -1478,6 +1479,7 @@ function isProviderCode(value: string): value is ProviderCode {
     value === "opencode" ||
     value === "cursor" ||
     value === "claude" ||
+    value === "grok" ||
     value === "ollama"
   );
 }

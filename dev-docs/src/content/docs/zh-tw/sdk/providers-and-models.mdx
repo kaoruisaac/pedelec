@@ -16,6 +16,7 @@ type ProviderCode =
   | "opencode"
   | "cursor"
   | "claude"
+  | "grok"
   | "ollama";
 ```
 
@@ -147,6 +148,16 @@ Pedelec 沒有一份 universal valid-model list。String 會交給 provider adap
 - 顯示 provider error，不要全部改成 generic message。
 
 文件中的 sample model 不應被當成保證支援清單。
+
+## Grok 行為
+
+Grok 使用 xAI 官方 `grok` CLI。請先自行安裝並完成認證，例如執行 `grok login`。Pedelec 不保存 xAI API key，也不處理登入。`ProviderInfo.available === true` 只表示 CLI 已被找到且可讀取版本，並不代表已登入或模型可用。
+
+`provider: "grok"` 的 model 為 optional string；省略時使用 Grok CLI 預設值，也可以傳入已安裝 CLI 接受的 model ID。
+
+```ts
+const session = await pedelec.createSession({ provider: "grok" });
+```
 
 ## Ollama 行為
 

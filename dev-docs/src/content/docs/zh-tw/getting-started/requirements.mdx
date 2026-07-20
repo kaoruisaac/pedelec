@@ -59,6 +59,8 @@ CLI provider 一般需要：
 
 Ollama 的 `available` 只表示 Pedelec 找得到內附的 agent executable，不代表 endpoint 可連線、authentication 有效或指定 model 已安裝。
 
+Grok 的 `available` 只表示找到官方 `grok` CLI 並讀到版本。請自行安裝並用 `grok login`（或 Grok CLI 支援的其他方式）完成認證；Pedelec 不保存 Grok credential，available 也不保證已登入。
+
 Default endpoint 是 `http://127.0.0.1:11434`；使用此本機 URL 時使用者要自行啟動 Ollama server，也可設定 remote/Ollama Cloud endpoint。Desktop Settings 有 API key 欄位；現行 `pedelec-agent` 要求非空 `OLLAMA_API_KEY`，本機 server 填 `ollama`，需要 authentication 的 endpoint 填有效 key。
 
 ## JavaScript 與 package 條件

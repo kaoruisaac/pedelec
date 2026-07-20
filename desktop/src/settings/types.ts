@@ -1,4 +1,4 @@
-export type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama";
+export type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude" | "grok" | "ollama";
 
 export interface Provider {
   code: ProviderCode;

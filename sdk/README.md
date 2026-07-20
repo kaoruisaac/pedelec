@@ -8,7 +8,7 @@
 - [GitHub repository](https://github.com/kaoruisaac/pedelec)
 
 
-Pedelec is a browser SDK and local bridge for applications that want to work with AI coding agents such as Codex, Gemini, OpenCode, Cursor, Claude Code, or an Ollama-backed agent.
+Pedelec is a browser SDK and local bridge for applications that want to work with AI coding agents such as Codex, Gemini, OpenCode, Cursor, Claude Code, Grok, or an Ollama-backed agent.
 
 A web application can use Pedelec to:
 
@@ -39,7 +39,7 @@ Pedelec native host
   ↓ local Core IPC
 Pedelec Desktop Runtime
   ↓ provider process
-Codex / Gemini / OpenCode / Cursor / Claude Code / Ollama
+Codex / Gemini / OpenCode / Cursor / Claude Code / Grok / Ollama
 ```
 ## SDK Prerequisites
 
@@ -48,7 +48,7 @@ The Pedelec SDK must run in a browser page environment and requires:
 1. The user has installed the Pedelec Chrome Extension.
 2. The user has started the Pedelec Desktop App.
 3. The Desktop App has registered the Chrome Native Messaging host.
-4. The target provider is available on the user's machine. CLI-backed providers use commands such as `codex`, `gemini`, `opencode`, `cursor`, or `claude`; the Ollama provider uses Pedelec's bundled `pedelec-agent`.
+4. The target provider is available on the user's machine. CLI-backed providers use commands such as `codex`, `gemini`, `opencode`, `cursor`, `claude`, or official `grok`; the Ollama provider uses Pedelec's bundled `pedelec-agent`. Grok users authenticate separately with `grok login`; Pedelec does not store Grok credentials, and availability does not guarantee login.
 
 The SDK is not suitable for direct use in Node.js, an SSR server, or a background worker; it needs extension runtime messaging from a Chrome page environment.
 

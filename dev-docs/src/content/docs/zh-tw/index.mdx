@@ -18,7 +18,7 @@ hero:
       variant: secondary
 ---
 
-Pedelec 是一套 browser SDK 與本機橋接架構，讓 Web App 可以和 Codex、Gemini、OpenCode、Cursor、Claude Code，或使用 Ollama 的 agent 協作。
+Pedelec 是一套 browser SDK 與本機橋接架構，讓 Web App 可以和 Codex、Gemini、OpenCode、Cursor、Claude Code、Grok，或使用 Ollama 的 agent 協作。
 
 Web App 可以透過 Pedelec：
 
@@ -48,7 +48,7 @@ Pedelec native host
   ↓ 本機 Core IPC
 Pedelec Desktop Runtime
   ↓ provider process
-Codex / Gemini / OpenCode / Cursor / Claude Code / Ollama
+Codex / Gemini / OpenCode / Cursor / Claude Code / Grok / Ollama
 ```
 
 上圖是 control/event path。Asset file body 使用另一條內部路徑：`Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/`。只使用 `session.uploadAsset()`，不要依賴內部 URL、port、token 或 ticket lifecycle。
@@ -64,7 +64,7 @@ Pedelec SDK 必須在瀏覽器頁面環境中執行，並且需要：
 1. 使用者已安裝 Pedelec Chrome Extension。
 2. 使用者安裝後已至少正常開啟一次 Pedelec Desktop App，完成 binary setup、Native Messaging host registration 與 launch config 建立。
 3. 完成初始化後，native host 可在 Core request 時嘗試 background 啟動 Desktop；此操作可能失敗，應視為 Desktop/installation unavailable 處理。
-4. 目標 provider 在使用者本機可用。CLI 型 provider 使用 `codex`、`gemini`、`opencode`、`cursor` 或 `claude`；Ollama provider 使用 Pedelec 隨附的 `pedelec-agent`。
+4. 目標 provider 在使用者本機可用。CLI 型 provider 使用 `codex`、`gemini`、`opencode`、`cursor`、`claude` 或官方 `grok`；Ollama provider 使用 Pedelec 隨附的 `pedelec-agent`。
 
 SDK 不適合直接在 Node.js、SSR server 或 background worker 裡使用；它需要 Chrome 頁面環境中的 extension runtime messaging。
 
@@ -167,6 +167,7 @@ const session = await pedelec.createSession({
 | OpenCode | `opencode` | `ollama/qwen2.5-coder:14b` |
 | Cursor | `cursor` | `gpt-5` |
 | Claude Code | `claude` | `sonnet` |
+| Grok | `grok` | optional Grok CLI model ID |
 | Ollama | `ollama` | `qwen3-14b-32k:latest` |
 
 Ollama session 由 Desktop App 隨附的 `pedelec-agent` 執行，不會直接啟動 `ollama` CLI。它使用設定的 Ollama-compatible endpoint（default `http://127.0.0.1:11434`）：使用本機 URL 時需自行啟動 server，也可設定 remote 或 Ollama Cloud endpoint。現行 agent 要求非空 API key；本機填 `ollama`，遠端填服務提供的 key。仍必須明確指定 model 或在 Settings 設定 `defaultModels.ollama`：
@@ -249,7 +250,7 @@ for (const provider of providers) {
 ```ts
 type ProviderInfo = {
   name: string;
-  code: "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama";
+  code: "codex" | "gemini" | "opencode" | "cursor" | "claude" | "grok" | "ollama";
   path: string | null;
   available: boolean;
   error: string | null;
@@ -276,8 +277,8 @@ console.log(settings.defaultModels.ollama);
 
 ```ts
 type PedelecSettings = {
-  defaultProvider: "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama" | null;
-  defaultModels: Partial<Record<"codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama", string>>;
+  defaultProvider: "codex" | "gemini" | "opencode" | "cursor" | "claude" | "grok" | "ollama" | null;
+  defaultModels: Partial<Record<"codex" | "gemini" | "opencode" | "cursor" | "claude" | "grok" | "ollama", string>>;
 };
 ```
 

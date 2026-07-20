@@ -61,6 +61,8 @@ CLI-backed providers normally require the provider command to be:
 
 For Ollama, provider availability only confirms that Pedelec can find its bundled agent executable. It does not prove that the configured endpoint is reachable, authentication is valid, or the requested model exists.
 
+For Grok, availability confirms that the official `grok` CLI was found and its version could be read. Install it and authenticate yourself with `grok login` (or another Grok CLI-supported method); Pedelec does not save Grok credentials, and availability does not prove that login has completed.
+
 The default endpoint is `http://127.0.0.1:11434`; users must start a local Ollama server for that URL, or configure a remote/Ollama Cloud endpoint. Desktop Settings includes an API-key field. The current `pedelec-agent` requires a non-empty `OLLAMA_API_KEY`, so use `ollama` for a local server or a valid key for an authenticated endpoint.
 
 ## JavaScript and package requirements

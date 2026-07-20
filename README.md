@@ -42,7 +42,7 @@ pedelec-native-host
   ↓ Core IPC
 pedelec-app Desktop Runtime
   ↓ provider process
-Codex / Gemini / OpenCode / Cursor / Claude Code / Ollama via pedelec-agent
+Codex / Gemini / OpenCode / Cursor / Claude Code / Grok / Ollama via pedelec-agent
 ```
 
 The Web App does not directly touch local processes and does not need to start its own localhost server. The SDK only communicates with the extension; the extension forwards requests to the native host; the desktop app is the only CoreRuntime owner and is responsible for creating sessions, managing provider processes, forwarding events, and handling tool results.
@@ -100,7 +100,9 @@ sequenceDiagram
 | Background | Manages SDK external channels, origin approval, native host connections, and converts core events into SDK events |
 | Native Host | Chrome Native Messaging entry point that forwards requests/events to Core IPC |
 | Desktop Runtime | The only session/runtime owner, managing threads, skills, provider processes, and tool requests |
-| Agent process | Actually runs Codex/Gemini/OpenCode/Cursor/Claude Code/Ollama and calls frontend tools through `pedelec-cli` |
+| Agent process | Actually runs Codex/Gemini/OpenCode/Cursor/Claude Code/Grok/Ollama and calls frontend tools through `pedelec-cli` |
+
+Grok uses the official `grok` CLI. Install it and authenticate it yourself with `grok login` (or another Grok CLI-supported method); Pedelec never stores Grok credentials. A detected CLI only means its executable and version were found, not that it is signed in.
 
 ---
 

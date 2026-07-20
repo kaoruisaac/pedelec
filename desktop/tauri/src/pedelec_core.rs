@@ -168,6 +168,7 @@ pub enum ProviderCode {
     OpenCode,
     Cursor,
     Claude,
+    Grok,
     Ollama,
 }
 
@@ -586,6 +587,10 @@ trait ProviderAdapter {
     ) -> Result<CommandSpec, PedelecError>;
     fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial>;
     fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial>;
+    fn reset_process_state(&mut self) {}
+    fn emitted_process_error(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -595,6 +600,7 @@ enum ProviderAdapterInstance {
     OpenCode(OpenCodeProviderAdapter),
     Cursor(CursorProviderAdapter),
     Claude(ClaudeProviderAdapter),
+    Grok(GrokProviderAdapter),
     Ollama(OllamaProviderAdapter),
 }
 
@@ -606,6 +612,7 @@ impl ProviderAdapterInstance {
             ProviderCode::OpenCode => Self::OpenCode(OpenCodeProviderAdapter::default()),
             ProviderCode::Cursor => Self::Cursor(CursorProviderAdapter::default()),
             ProviderCode::Claude => Self::Claude(ClaudeProviderAdapter::default()),
+            ProviderCode::Grok => Self::Grok(GrokProviderAdapter::default()),
             ProviderCode::Ollama => Self::Ollama(OllamaProviderAdapter::default()),
         }
     }
@@ -619,6 +626,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
             Self::OpenCode(adapter) => adapter.code(),
             Self::Cursor(adapter) => adapter.code(),
             Self::Claude(adapter) => adapter.code(),
+            Self::Grok(adapter) => adapter.code(),
             Self::Ollama(adapter) => adapter.code(),
         }
     }
@@ -630,6 +638,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
             Self::OpenCode(adapter) => adapter.capabilities(),
             Self::Cursor(adapter) => adapter.capabilities(),
             Self::Claude(adapter) => adapter.capabilities(),
+            Self::Grok(adapter) => adapter.capabilities(),
             Self::Ollama(adapter) => adapter.capabilities(),
         }
     }
@@ -645,6 +654,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
             Self::OpenCode(adapter) => adapter.build_run_command(ctx, message),
             Self::Cursor(adapter) => adapter.build_run_command(ctx, message),
             Self::Claude(adapter) => adapter.build_run_command(ctx, message),
+            Self::Grok(adapter) => adapter.build_run_command(ctx, message),
             Self::Ollama(adapter) => adapter.build_run_command(ctx, message),
         }
     }
@@ -669,6 +679,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
             Self::Claude(adapter) => {
                 adapter.build_resume_command(ctx, provider_session_id, message)
             }
+            Self::Grok(adapter) => adapter.build_resume_command(ctx, provider_session_id, message),
             Self::Ollama(adapter) => {
                 adapter.build_resume_command(ctx, provider_session_id, message)
             }
@@ -682,6 +693,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
             Self::OpenCode(adapter) => adapter.parse_stdout_event(chunk),
             Self::Cursor(adapter) => adapter.parse_stdout_event(chunk),
             Self::Claude(adapter) => adapter.parse_stdout_event(chunk),
+            Self::Grok(adapter) => adapter.parse_stdout_event(chunk),
             Self::Ollama(adapter) => adapter.parse_stdout_event(chunk),
         }
     }
@@ -693,7 +705,32 @@ impl ProviderAdapter for ProviderAdapterInstance {
             Self::OpenCode(adapter) => adapter.parse_stderr_event(chunk),
             Self::Cursor(adapter) => adapter.parse_stderr_event(chunk),
             Self::Claude(adapter) => adapter.parse_stderr_event(chunk),
+            Self::Grok(adapter) => adapter.parse_stderr_event(chunk),
             Self::Ollama(adapter) => adapter.parse_stderr_event(chunk),
+        }
+    }
+
+    fn reset_process_state(&mut self) {
+        match self {
+            Self::Codex(adapter) => adapter.reset_process_state(),
+            Self::Gemini(adapter) => adapter.reset_process_state(),
+            Self::OpenCode(adapter) => adapter.reset_process_state(),
+            Self::Cursor(adapter) => adapter.reset_process_state(),
+            Self::Claude(adapter) => adapter.reset_process_state(),
+            Self::Grok(adapter) => adapter.reset_process_state(),
+            Self::Ollama(adapter) => adapter.reset_process_state(),
+        }
+    }
+
+    fn emitted_process_error(&self) -> bool {
+        match self {
+            Self::Codex(adapter) => adapter.emitted_process_error(),
+            Self::Gemini(adapter) => adapter.emitted_process_error(),
+            Self::OpenCode(adapter) => adapter.emitted_process_error(),
+            Self::Cursor(adapter) => adapter.emitted_process_error(),
+            Self::Claude(adapter) => adapter.emitted_process_error(),
+            Self::Grok(adapter) => adapter.emitted_process_error(),
+            Self::Ollama(adapter) => adapter.emitted_process_error(),
         }
     }
 }
@@ -1163,6 +1200,131 @@ impl ProviderAdapter for ClaudeProviderAdapter {
 
     fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
         parse_claude_provider_chunk(&mut self.stderr_buffer, chunk)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct GrokProviderAdapter {
+    stdout_buffer: String,
+    stderr_buffer: String,
+    error_emitted_for_current_process: bool,
+}
+
+impl ProviderAdapter for GrokProviderAdapter {
+    fn code(&self) -> ProviderCode {
+        ProviderCode::Grok
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            supports_json_events: true,
+            supports_resume_by_session_id: true,
+            supports_user_supplied_session_id: false,
+            supports_provider_generated_session_id_parse: true,
+            supports_resume_last_session: false,
+        }
+    }
+
+    fn build_run_command(
+        &self,
+        ctx: &RunPromptProviderContext,
+        message: &str,
+    ) -> Result<CommandSpec, PedelecError> {
+        let mut args = vec![
+            "--output-format".to_string(),
+            "streaming-json".to_string(),
+            "--cwd".to_string(),
+            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            "--always-approve".to_string(),
+            "--no-auto-update".to_string(),
+        ];
+        add_model_args(&mut args, &ctx.thread.model, "--model");
+        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
+        args.push("-p".to_string());
+        args.push(prompt.clone());
+        Ok(CommandSpec {
+            program: "grok".to_string(),
+            args,
+            cwd: ctx.thread.sandbox_path.clone(),
+            env: build_provider_env(ctx)?,
+            prompt,
+            stdin: String::new(),
+        })
+    }
+
+    fn build_resume_command(
+        &self,
+        ctx: &RunPromptProviderContext,
+        provider_session_id: &str,
+        message: &str,
+    ) -> Result<CommandSpec, PedelecError> {
+        if provider_session_id.trim().is_empty() {
+            return Err(provider_unsupported_error(
+                &ctx.thread,
+                "grok resume requires a provider session id",
+            ));
+        }
+        let mut args = vec![
+            "--output-format".to_string(),
+            "streaming-json".to_string(),
+            "--cwd".to_string(),
+            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            "--always-approve".to_string(),
+            "--no-auto-update".to_string(),
+        ];
+        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.push("--resume".to_string());
+        args.push(provider_session_id.to_string());
+        let prompt = build_provider_resume_prompt(message);
+        args.push("-p".to_string());
+        args.push(prompt.clone());
+        Ok(CommandSpec {
+            program: "grok".to_string(),
+            args,
+            cwd: ctx.thread.sandbox_path.clone(),
+            env: build_provider_env(ctx)?,
+            prompt,
+            stdin: String::new(),
+        })
+    }
+
+    fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
+        let mut events = parse_grok_provider_chunk(&mut self.stdout_buffer, chunk);
+        if self.error_emitted_for_current_process {
+            events.retain(|event| !matches!(event, ThreadEventPartial::ProviderError { .. }));
+        }
+        if events
+            .iter()
+            .any(|event| matches!(event, ThreadEventPartial::ProviderError { .. }))
+        {
+            self.error_emitted_for_current_process = true;
+        }
+        events
+    }
+
+    fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
+        let events = parse_grok_stderr_chunk(
+            &mut self.stderr_buffer,
+            chunk,
+            self.error_emitted_for_current_process,
+        );
+        if events
+            .iter()
+            .any(|event| matches!(event, ThreadEventPartial::ProviderError { .. }))
+        {
+            self.error_emitted_for_current_process = true;
+        }
+        events
+    }
+
+    fn reset_process_state(&mut self) {
+        self.stdout_buffer.clear();
+        self.stderr_buffer.clear();
+        self.error_emitted_for_current_process = false;
+    }
+
+    fn emitted_process_error(&self) -> bool {
+        self.error_emitted_for_current_process
     }
 }
 
@@ -1983,6 +2145,9 @@ impl CoreRuntime {
         process_id: u32,
         command: &CommandSpec,
     ) {
+        if let Some(adapter) = self.thread_manager.provider_adapter_mut(thread_id) {
+            adapter.reset_process_state();
+        }
         self.event_bus
             .emit_provider_command_started(thread_id, process_id, command);
     }
@@ -2033,6 +2198,11 @@ impl CoreRuntime {
                 .and_then(|state| state.provider_session_id.as_deref())
                 .is_none();
 
+        let provider_error_already_emitted = self
+            .thread_manager
+            .provider_adapter_mut(thread_id)
+            .is_some_and(|adapter| adapter.emitted_process_error());
+
         let Ok(thread) = self.thread_manager.thread_mut(thread_id) else {
             return;
         };
@@ -2080,11 +2250,15 @@ impl CoreRuntime {
                 }),
             );
             if is_prepare {
-                self.event_bus.emit_error(thread_id, error);
+                if !provider_error_already_emitted {
+                    self.event_bus.emit_error(thread_id, error);
+                }
                 self.event_bus.emit_status_changed(thread_id, next_status);
             } else {
                 self.event_bus.emit_status_changed(thread_id, next_status);
-                self.event_bus.emit_error(thread_id, error);
+                if !provider_error_already_emitted {
+                    self.event_bus.emit_error(thread_id, error);
+                }
             }
         }
     }
@@ -3684,6 +3858,7 @@ fn provider_code_as_str(provider: &ProviderCode) -> &'static str {
         ProviderCode::OpenCode => "opencode",
         ProviderCode::Cursor => "cursor",
         ProviderCode::Claude => "claude",
+        ProviderCode::Grok => "grok",
         ProviderCode::Ollama => "ollama",
     }
 }
@@ -3695,6 +3870,7 @@ fn provider_display_name(provider: &ProviderCode) -> &'static str {
         ProviderCode::OpenCode => "OpenCode",
         ProviderCode::Cursor => "Cursor",
         ProviderCode::Claude => "Claude Code",
+        ProviderCode::Grok => "Grok",
         ProviderCode::Ollama => "Ollama",
     }
 }
@@ -3706,6 +3882,7 @@ fn provider_program_name(provider: &ProviderCode) -> &'static str {
         ProviderCode::OpenCode => "opencode",
         ProviderCode::Cursor => "agent",
         ProviderCode::Claude => "claude",
+        ProviderCode::Grok => "grok",
         ProviderCode::Ollama => "pedelec-agent",
     }
 }
@@ -3729,13 +3906,14 @@ fn provider_version_display(version: &ProviderVersion) -> String {
         .join(".")
 }
 
-fn external_provider_codes() -> [ProviderCode; 5] {
+fn external_provider_codes() -> [ProviderCode; 6] {
     [
         ProviderCode::Codex,
         ProviderCode::Gemini,
         ProviderCode::OpenCode,
         ProviderCode::Cursor,
         ProviderCode::Claude,
+        ProviderCode::Grok,
     ]
 }
 
@@ -3920,6 +4098,7 @@ fn list_provider_infos_with_scan(
         ProviderCode::OpenCode,
         ProviderCode::Cursor,
         ProviderCode::Claude,
+        ProviderCode::Grok,
         ProviderCode::Ollama,
     ]
     .into_iter()
@@ -4537,6 +4716,124 @@ fn parse_provider_chunk(
         buffer.clear();
     }
 
+    events
+}
+
+fn grok_provider_error(message: &str, details: Value) -> ThreadEventPartial {
+    ThreadEventPartial::ProviderError {
+        error: PedelecError::with_details(error_codes::PROVIDER_COMMAND_FAILED, message, details),
+    }
+}
+
+fn parse_grok_provider_chunk(buffer: &mut String, chunk: &str) -> Vec<ThreadEventPartial> {
+    buffer.push_str(chunk);
+    let mut events = Vec::new();
+    while let Some(newline_index) = buffer.find('\n') {
+        let mut line = buffer[..newline_index].to_string();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        buffer.drain(..=newline_index);
+        events.extend(parse_grok_provider_line(&line));
+    }
+    if buffer.len() > 64 * 1024 {
+        buffer.clear();
+        events.push(grok_provider_error(
+            "grok emitted an unterminated JSON event",
+            serde_json::json!({ "provider": "grok" }),
+        ));
+    }
+    events
+}
+
+fn parse_grok_provider_line(line: &str) -> Vec<ThreadEventPartial> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let value = match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => value,
+        Err(err) if trimmed.starts_with('{') || trimmed.starts_with('[') => {
+            return vec![grok_provider_error(
+                "grok emitted invalid JSON",
+                serde_json::json!({ "provider": "grok", "error": err.to_string() }),
+            )]
+        }
+        Err(_) => return Vec::new(),
+    };
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    match object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "text" => object
+            .get("data")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![ThreadEventPartial::AssistantMessage {
+                    text: text.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "end" => object
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| {
+                vec![ThreadEventPartial::ProviderSessionIdUpdated {
+                    provider_session_id: id.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "error" => object
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|message| !message.trim().is_empty())
+            .map(|message| {
+                vec![grok_provider_error(
+                    message,
+                    serde_json::json!({ "provider": "grok", "event": value }),
+                )]
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_grok_stderr_chunk(
+    buffer: &mut String,
+    chunk: &str,
+    error_already_emitted: bool,
+) -> Vec<ThreadEventPartial> {
+    buffer.push_str(chunk);
+    let mut events = Vec::new();
+    let mut emitted = error_already_emitted;
+    while let Some(newline_index) = buffer.find('\n') {
+        let mut line = buffer[..newline_index].to_string();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        buffer.drain(..=newline_index);
+        if !emitted {
+            if let Some(message) = line
+                .trim()
+                .strip_prefix("Error:")
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+            {
+                events.push(grok_provider_error(
+                    message,
+                    serde_json::json!({ "provider": "grok", "source": "stderr" }),
+                ));
+                emitted = true;
+            }
+        }
+    }
     events
 }
 
@@ -5466,6 +5763,10 @@ mod tests {
             json!("claude")
         );
         assert_eq!(
+            serde_json::to_value(ProviderCode::Grok).unwrap(),
+            json!("grok")
+        );
+        assert_eq!(
             serde_json::to_value(ProviderCode::Ollama).unwrap(),
             json!("ollama")
         );
@@ -5476,6 +5777,10 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ProviderCode>(json!("claude")).unwrap(),
             ProviderCode::Claude
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderCode>(json!("grok")).unwrap(),
+            ProviderCode::Grok
         );
         assert_eq!(
             serde_json::from_value::<ProviderCode>(json!("ollama")).unwrap(),
@@ -6228,6 +6533,78 @@ mod tests {
     }
 
     #[test]
+    fn grok_command_uses_prompt_argument_and_resume_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let prompt = "第一行\n請原樣重複：他說 \"hello world\"\n{\"path\":\"C:\\\\workspace\"} 🚲";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_grok",
+            ProviderCode::Grok,
+            None,
+            Some("grok-model".into()),
+        );
+        let start = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: "thread_grok".into(),
+                message: prompt.into(),
+            })
+            .unwrap();
+        assert_eq!(start.command.program, "grok");
+        assert_eq!(start.command.stdin, "");
+        assert_eq!(start.command.args.last(), Some(&start.command.prompt));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["-p", start.command.prompt.as_str()]));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["--cwd", start.command.cwd.to_string_lossy().as_ref()]));
+        assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
+        runtime
+            .thread_manager
+            .thread_mut("thread_grok")
+            .unwrap()
+            .status = ThreadStatus::Idle;
+        runtime.update_provider_session_id("thread_grok", "grok-session".into());
+        let resumed = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: "thread_grok".into(),
+                message: "continue".into(),
+            })
+            .unwrap();
+        assert!(resumed
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["--resume", "grok-session"]));
+        assert!(!resumed.command.args.iter().any(|arg| arg == "--session-id"));
+        assert_eq!(resumed.command.stdin, "");
+    }
+
+    #[test]
+    fn grok_parser_keeps_text_deltas_and_only_accepts_end_session_id() {
+        let mut adapter = GrokProviderAdapter::default();
+        assert!(adapter.parse_stdout_event(r#"{"type":"thought","data":"hidden"}
+{"type":"text","data":" "}
+{"type":"text","data":"\n\n"}
+{"type":"end","requestId":"not-a-session","sessionId":" grok-session "}
+"#).iter().any(|event| matches!(event, ThreadEventPartial::ProviderSessionIdUpdated { provider_session_id } if provider_session_id == "grok-session")));
+        let events = adapter.parse_stdout_event(
+            r#"{"type":"text","data":"visible"}
+"#,
+        );
+        assert_eq!(
+            events,
+            vec![ThreadEventPartial::AssistantMessage {
+                text: "visible".into()
+            }]
+        );
+    }
+
+    #[test]
     fn ollama_new_command_uses_pedelec_agent_model_sandbox_and_stdin_prompt() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
@@ -6520,6 +6897,19 @@ mod tests {
     }
 
     #[test]
+    fn list_providers_includes_grok_unavailable_without_panic() {
+        let providers = list_provider_infos(Some(OsString::from("")));
+        let grok = providers
+            .iter()
+            .find(|provider| provider.code == ProviderCode::Grok)
+            .unwrap();
+        assert_eq!(grok.name, "Grok");
+        assert!(!grok.available);
+        assert_eq!(grok.path, None);
+        assert!(grok.error.as_deref().unwrap().contains("PATH"));
+    }
+
+    #[test]
     fn list_providers_includes_ollama_using_pedelec_agent_binary() {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "pedelec-agent");
@@ -6551,6 +6941,7 @@ mod tests {
                 ProviderCode::OpenCode,
                 ProviderCode::Cursor,
                 ProviderCode::Claude,
+                ProviderCode::Grok,
                 ProviderCode::Ollama,
             ]
         );
