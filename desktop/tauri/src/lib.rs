@@ -6,4 +6,5 @@ pub mod pedelec_ipc;
 pub mod pedelec_native_host;
 pub mod pedelec_native_registration;
 pub mod pedelec_paths;
+pub mod provider_installer;
 pub mod pedelec_upload;

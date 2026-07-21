@@ -5,6 +5,7 @@ use crate::pedelec_core::{
     ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput,
     UpdateSettingsInput,
 };
+use crate::provider_installer::{open as open_installer, OpenProviderInstallerInput, OpenProviderInstallerOutput};
 use crate::pedelec_ipc::{prepare_provider_process, start_core_ipc_server, start_provider_process};
 use crate::pedelec_native_registration::register_chrome_native_messaging_host;
 use crate::pedelec_paths::{
@@ -47,6 +48,8 @@ pub fn run() {
             list_ollama_models,
             list_providers,
             refresh_providers,
+            open_provider_installer,
+            restart_app,
             send_text,
             prepare_thread,
             submit_tool_result,
@@ -331,6 +334,14 @@ fn update_settings(
 fn list_providers(state: State<'_, CoreRuntimeOwner>) -> Vec<ProviderInfo> {
     state.runtime().lock().unwrap().list_providers()
 }
+
+#[tauri::command]
+fn open_provider_installer(input: OpenProviderInstallerInput) -> Result<OpenProviderInstallerOutput, PedelecError> {
+    open_installer(input)
+}
+
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) { app.request_restart(); }
 
 #[tauri::command]
 async fn refresh_providers(

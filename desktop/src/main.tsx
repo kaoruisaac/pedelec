@@ -1,5 +1,6 @@
 import { render } from "solid-js/web";
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, onMount, Show } from "solid-js";
+import { getVersion } from "@tauri-apps/api/app";
 import { EventMonitorApp } from "./event-monitor/EventMonitorApp";
 import HomePage from "./home/HomePage";
 import SettingsPage from "./settings/SettingsPage";
@@ -18,6 +19,11 @@ const PAGES: Record<string, string> = {
 function AppShell() {
   const [page, setPage] = createSignal("home");
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
+  const [appVersion, setAppVersion] = createSignal<string | null>(null);
+
+  onMount(() => {
+    void getVersion().then(setAppVersion).catch(() => {});
+  });
 
   return (
     <PopUpProvider>
@@ -30,7 +36,12 @@ function AppShell() {
         <aside class="app-sidebar" aria-label="Main menu">
           <div class="app-sidebar-header">
             <Show when={!sidebarCollapsed()}>
-              <strong>Pedelec</strong>
+              <div class="app-sidebar-brand">
+                <strong class="app-sidebar-name">Pedelec</strong>
+                <Show when={appVersion()} keyed>
+                  {(version) => <span class="app-sidebar-version">v{version}</span>}
+                </Show>
+              </div>
             </Show>
             <button
               type="button"

@@ -80,15 +80,31 @@ pre {
   border-bottom: 1px solid #e5e9ef;
 }
 
-.app-sidebar-header strong {
+.app-sidebar-brand {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.app-sidebar-name {
   font-size: 15px;
+}
+
+.app-sidebar-version {
+  color: #6b7b8f;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1;
 }
 
 .app-sidebar-toggle,
 .app-nav-item,
 .settings-secondary-button,
 .settings-primary-button,
-.provider-edit-button {
+.provider-edit-button,
+.provider-restart-button {
   border: 1px solid #cdd6e0;
   background: #ffffff;
   color: #1f2933;
@@ -236,6 +252,22 @@ pre {
 .provider-error {
   overflow-wrap: anywhere;
 }
+
+.provider-install-link {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  width: fit-content;
+  background: transparent;
+  color: #174ea6;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.provider-install-link:disabled { color: #6b7b8f; cursor: wait; }
+
+.provider-restart-button { width: fit-content; margin-top: 4px; }
 
 .provider-main span,
 .provider-error {

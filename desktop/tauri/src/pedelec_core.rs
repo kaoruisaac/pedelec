@@ -1608,7 +1608,7 @@ impl CoreRuntime {
             return Some(path.clone());
         }
 
-        env::var_os("PATH")
+        Some(merged_provider_path(env::var_os("PATH")))
     }
 
     fn resolved_settings_file_path(&self) -> Result<PathBuf, PedelecError> {
@@ -3633,6 +3633,8 @@ pub mod error_codes {
     pub const PROVIDER_PROCESS_STOP_FAILED: &str = "PROVIDER_PROCESS_STOP_FAILED";
     pub const PROVIDER_STDIN_CLOSED: &str = "PROVIDER_STDIN_CLOSED";
     pub const PROVIDER_COMMAND_FAILED: &str = "PROVIDER_COMMAND_FAILED";
+    pub const PROVIDER_INSTALL_UNSUPPORTED: &str = "PROVIDER_INSTALL_UNSUPPORTED";
+    pub const PROVIDER_INSTALLER_LAUNCH_FAILED: &str = "PROVIDER_INSTALLER_LAUNCH_FAILED";
     pub const PROVIDER_PREPARE_UNSUPPORTED: &str = "PROVIDER_PREPARE_UNSUPPORTED";
     pub const PREPARE_SESSION_ID_MISSING: &str = "PREPARE_SESSION_ID_MISSING";
     pub const SKILL_URL_INVALID: &str = "SKILL_URL_INVALID";
@@ -3737,6 +3739,34 @@ fn external_provider_codes() -> [ProviderCode; 5] {
         ProviderCode::Cursor,
         ProviderCode::Claude,
     ]
+}
+
+/// GUI applications do not reliably inherit shell profile PATH updates. Merge the
+/// installer locations here instead of changing the user's global environment.
+fn merged_provider_path(current: Option<OsString>) -> OsString {
+    let mut paths = current.as_ref().map_or_else(Vec::new, |value| env::split_paths(value).collect());
+    #[cfg(windows)]
+    if let Ok(hkcu) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey("Environment")
+    {
+        if let Ok(value) = hkcu.get_value::<OsString, _>("Path") { paths.extend(env::split_paths(&value)); }
+    }
+    if let Some(home) = dirs::home_dir() {
+        #[cfg(windows)]
+        paths.extend([home.join("AppData/Local/Programs/OpenAI/Codex/bin"), home.join(".opencode/bin"), home.join("AppData/Roaming/npm")]);
+        #[cfg(not(windows))]
+        paths.extend([home.join(".local/bin"), home.join(".opencode/bin")]);
+    }
+    let mut normalized = Vec::new();
+    for path in paths {
+        if !path.exists() { continue; }
+        let duplicate = normalized.iter().any(|existing: &PathBuf| {
+            #[cfg(windows)] { existing.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy()) }
+            #[cfg(not(windows))] { existing == &path }
+        });
+        if !duplicate { normalized.push(path); }
+    }
+    env::join_paths(normalized).unwrap_or_default()
 }
 
 fn scan_external_providers(path_value: Option<OsString>) -> HashMap<ProviderCode, ProviderCli> {
@@ -5526,6 +5556,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/d", "/c", "call", "C:/providers/codex.cmd"]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn merged_provider_path_preserves_paths_usable_by_cmd_scripts() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().to_path_buf();
+        let merged = merged_provider_path(Some(env::join_paths([&original]).unwrap()));
+
+        assert!(env::split_paths(&merged).any(|path| path == original));
+        assert!(!env::split_paths(&merged)
+            .any(|path| path.to_string_lossy().starts_with(r"\\?\")));
     }
 
     #[test]

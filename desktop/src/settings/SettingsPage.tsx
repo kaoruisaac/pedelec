@@ -27,6 +27,9 @@ function SettingsPage() {
   const [error, setError] = createSignal("");
   const [savedMessage, setSavedMessage] = createSignal("");
   const [hasUnsavedChanges, setHasUnsavedChanges] = createSignal(false);
+  const [launchingInstaller, setLaunchingInstaller] = createSignal<ProviderCode | null>(null);
+  const [installerOpenedProviders, setInstallerOpenedProviders] = createSignal<Set<ProviderCode>>(new Set());
+  const [restarting, setRestarting] = createSignal(false);
 
   const { pop } = usePopUp();
 
@@ -186,6 +189,28 @@ function SettingsPage() {
     return draftSettings().defaultModels[provider.code] || "auto";
   }
 
+  function canInstallProvider(provider: Provider): boolean {
+    return provider.scanned && !provider.available && (provider.code === "codex" || provider.code === "opencode");
+  }
+
+  async function openProviderInstaller(provider: Provider): Promise<void> {
+    setError("");
+    setLaunchingInstaller(provider.code);
+    try {
+      await invoke("open_provider_installer", { input: { provider: provider.code } });
+      setInstallerOpenedProviders((current) => new Set(current).add(provider.code));
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLaunchingInstaller(null);
+    }
+  }
+
+  async function restartPedelec(): Promise<void> {
+    setRestarting(true);
+    try { await invoke("restart_app"); } catch (err) { setError(formatError(err)); setRestarting(false); }
+  }
+
   return (
     <main class="settings-page">
       <header class="settings-header">
@@ -242,7 +267,33 @@ function SettingsPage() {
                     <Show when={provider.version}>
                       <span>version: {provider.version}</span>
                     </Show>
-                    <span>default model: {providerDefaultModel(provider)}</span>
+                    <Show
+                      when={canInstallProvider(provider)}
+                      fallback={<span>default model: {providerDefaultModel(provider)}</span>}
+                    >
+                      <Show
+                        when={installerOpenedProviders().has(provider.code)}
+                        fallback={
+                          <button
+                            type="button"
+                            class="provider-install-link"
+                            disabled={loading() || refreshingProviders() || saving() || launchingInstaller() === provider.code}
+                            onClick={() => void openProviderInstaller(provider)}
+                          >
+                            {launchingInstaller() === provider.code ? `Opening install ${provider.code}...` : `install ${provider.code}`}
+                          </button>
+                        }
+                      >
+                        <span>
+                          {provider.code === "codex"
+                            ? "Installation opened in Terminal. Complete the installation and sign-in flow, then restart Pedelec."
+                            : "Installation opened in Terminal. Complete the installation, then restart Pedelec."}
+                        </span>
+                        <button type="button" class="provider-restart-button" disabled={restarting()} onClick={() => void restartPedelec()}>
+                          {restarting() ? "Restarting..." : "Restart Pedelec"}
+                        </button>
+                      </Show>
+                    </Show>
                   </span>
                   <span class="provider-status" data-status={providerStatusValue(provider)}>
                     {providerStatusLabel(provider)}
