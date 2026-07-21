@@ -9,16 +9,37 @@ const tauriDir = join(desktopDir, "tauri");
 const resourceDir = join(tauriDir, "binaries");
 const placeholderPath = join(resourceDir, ".placeholder");
 const helperTarget = process.env.PEDELEC_HELPER_TARGET || "";
-const helperNames = ["pedelec-cli", "pedelec-agent", "pedelec-native-host"];
+const helperBinaryNames = [
+  "pedelec-cli",
+  "pedelec-agent",
+  "pedelec-native-host",
+];
+
+function runCommand(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    stdio: "inherit",
+    ...options,
+  });
+
+  if (result.error) {
+    console.error(`Failed to start command: ${command} ${args.join(" ")}`);
+    console.error(result.error.message);
+    process.exit(1);
+  }
+
+  if (result.status !== 0) {
+    console.error(
+      `Command failed with exit code ${result.status}: ` +
+        `${command} ${args.join(" ")}`,
+    );
+    process.exit(result.status ?? 1);
+  }
+}
+
 const cargoArgs = [
   "build",
   "--release",
-  "--bin",
-  helperNames[0],
-  "--bin",
-  helperNames[1],
-  "--bin",
-  helperNames[2],
+  ...helperBinaryNames.flatMap((name) => ["--bin", name]),
 ];
 
 if (helperTarget) {
@@ -28,45 +49,24 @@ if (helperTarget) {
 await mkdir(resourceDir, { recursive: true });
 await writeFile(placeholderPath, "");
 
-const cargo = spawnSync(process.platform === "win32" ? "cargo.exe" : "cargo", cargoArgs, {
+runCommand(process.platform === "win32" ? "cargo.exe" : "cargo", cargoArgs, {
   cwd: tauriDir,
-  stdio: "inherit",
 });
-
-if (cargo.error) {
-  console.error(cargo.error.message);
-  process.exit(1);
-}
-
-if (cargo.status !== 0) {
-  process.exit(cargo.status ?? 1);
-}
 
 const exe = process.platform === "win32" ? ".exe" : "";
 const profileDir = helperTarget
   ? join(tauriDir, "target", helperTarget, "release")
   : join(tauriDir, "target", "release");
 
-for (const name of helperNames) {
-  await copyFile(join(profileDir, `${name}${exe}`), join(resourceDir, `${name}${exe}`));
-}
+for (const name of helperBinaryNames) {
+  const sourcePath = join(profileDir, `${name}${exe}`);
+  const destinationPath = join(resourceDir, `${name}${exe}`);
 
-if (process.platform === "darwin") {
-  for (const name of helperNames) {
-    const binaryPath = join(resourceDir, name);
-    const codesign = spawnSync("codesign", ["--force", "--sign", "-", binaryPath], {
-      stdio: "inherit",
-    });
+  await copyFile(sourcePath, destinationPath);
 
-    if (codesign.error) {
-      console.error(`Failed to run codesign for ${name}: ${codesign.error.message}`);
-      process.exit(1);
-    }
-
-    if (codesign.status !== 0) {
-      console.error(`codesign failed for ${name}`);
-      process.exit(codesign.status ?? 1);
-    }
+  if (process.platform === "darwin") {
+    runCommand("codesign", ["--force", "--sign", "-", destinationPath]);
+    runCommand("codesign", ["--verify", "--verbose=2", destinationPath]);
   }
 }
 
