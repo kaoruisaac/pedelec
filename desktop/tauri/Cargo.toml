@@ -7,6 +7,10 @@ edition = "2021"
 default-run = "pedelec-app"
 autobins = false
 
+[features]
+default = []
+helper-binaries = []
+
 [lib]
 name = "pedelec_lib"
 path = "src/lib.rs"
@@ -18,14 +22,17 @@ path = "src/bin/pedelec-app.rs"
 [[bin]]
 name = "pedelec-native-host"
 path = "src/bin/pedelec-native-host.rs"
+required-features = ["helper-binaries"]
 
 [[bin]]
 name = "pedelec-cli"
 path = "src/bin/pedelec-cli.rs"
+required-features = ["helper-binaries"]
 
 [[bin]]
 name = "pedelec-agent"
 path = "src/bin/pedelec-agent.rs"
+required-features = ["helper-binaries"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

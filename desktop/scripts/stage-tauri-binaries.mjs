@@ -39,6 +39,8 @@ function runCommand(command, args, options = {}) {
 const cargoArgs = [
   "build",
   "--release",
+  "--features",
+  "helper-binaries",
   ...helperBinaryNames.flatMap((name) => ["--bin", name]),
 ];
 
