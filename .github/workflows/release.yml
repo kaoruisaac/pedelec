@@ -152,6 +152,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           PEDELEC_HELPER_TARGET: ${{ matrix.helper_target }}
         with:
           projectPath: desktop
@@ -160,6 +162,8 @@ jobs:
           releaseName: "Pedelec ${{ inputs.tag_name || github.ref_name }}"
           releaseDraft: true
           prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
 

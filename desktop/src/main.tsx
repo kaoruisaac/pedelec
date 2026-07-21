@@ -1,6 +1,7 @@
 import { render } from "solid-js/web";
 import { createSignal, For, onMount, Show } from "solid-js";
 import { getVersion } from "@tauri-apps/api/app";
+import { updateStore } from "./updater/updateStore";
 import { EventMonitorApp } from "./event-monitor/EventMonitorApp";
 import HomePage from "./home/HomePage";
 import SettingsPage from "./settings/SettingsPage";
@@ -23,6 +24,7 @@ function AppShell() {
 
   onMount(() => {
     void getVersion().then(setAppVersion).catch(() => {});
+    void updateStore.checkForUpdate();
   });
 
   return (
@@ -40,6 +42,47 @@ function AppShell() {
                 <strong class="app-sidebar-name">Pedelec</strong>
                 <Show when={appVersion()} keyed>
                   {(version) => <span class="app-sidebar-version">v{version}</span>}
+                </Show>
+              </div>
+            </Show>
+            <Show when={updateStore.state().status !== "idle" && updateStore.state().status !== "checking"}>
+              <div class="app-sidebar-update">
+                <Show when={updateStore.state().status === "available"}>
+                  <button
+                    type="button"
+                    class="app-update-button"
+                    aria-label={`Update to v${updateStore.state().availableVersion}`}
+                    title={`Update to v${updateStore.state().availableVersion}`}
+                    onClick={() => void updateStore.installUpdate()}
+                  >
+                    <Show when={!sidebarCollapsed()} fallback="↑">
+                      Update to v{updateStore.state().availableVersion}
+                    </Show>
+                  </button>
+                </Show>
+                <Show when={updateStore.state().status === "downloading"}>
+                  <span class="app-update-status" aria-live="polite">
+                    <Show
+                      when={updateStore.state().progressPercent !== null}
+                      fallback="Downloading…"
+                    >
+                      Downloading {updateStore.state().progressPercent}%
+                    </Show>
+                  </span>
+                </Show>
+                <Show when={updateStore.state().status === "installing"}>
+                  <span class="app-update-status" aria-live="polite">Installing…</span>
+                </Show>
+                <Show when={updateStore.state().status === "failed"}>
+                  <button
+                    type="button"
+                    class="app-update-button app-update-retry"
+                    aria-label="Retry update"
+                    title="Update failed. Retry update"
+                    onClick={() => void updateStore.retryUpdate()}
+                  >
+                    <Show when={!sidebarCollapsed()} fallback="!"><span>Update failed · Retry</span></Show>
+                  </button>
                 </Show>
               </div>
             </Show>

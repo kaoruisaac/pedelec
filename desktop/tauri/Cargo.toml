@@ -1,6 +1,6 @@
 [package]
 name = "pedelec-app"
-version = "0.1.6"
+version = "0.1.7"
 description = "Pedelec"
 authors = ["Isaac Lin"]
 edition = "2021"
@@ -45,6 +45,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 uuid = { version = "1", features = ["v4", "v7", "std"] }
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2"
 
 [dev-dependencies]
 tempfile = "3"

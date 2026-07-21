@@ -5,7 +5,7 @@ import "./HomePage.css";
 
 const CHROME_WEB_STORE_URL =
   "https://chromewebstore.google.com/detail/pedelec/ogccgaminlphbkeghldidiiimajfdpag";
-const LIVE_DEMO_URL = "https://github.com/kaoruisaac/pedelec";
+const LIVE_DEMO_URL = "https://pedelec.cc/demos";
 
 function HomePage() {
   const handleOpenChromeWebStore = () => {

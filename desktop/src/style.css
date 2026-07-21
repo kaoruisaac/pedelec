@@ -71,11 +71,11 @@ pre {
 }
 
 .app-sidebar-header {
-  height: 56px;
-  padding: 0 12px;
-  display: flex;
+  min-height: 56px;
+  padding: 8px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   border-bottom: 1px solid #e5e9ef;
 }
@@ -97,6 +97,41 @@ pre {
   font-size: 11px;
   font-weight: 400;
   line-height: 1;
+}
+
+.app-sidebar-update {
+  grid-column: 1 / -1;
+  min-height: 16px;
+}
+
+.app-update-button,
+.app-update-status {
+  color: #2f6fed;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.app-update-button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 4px;
+  white-space: nowrap;
+}
+
+.app-update-button:hover,
+.app-update-button:focus-visible {
+  color: #1d4ed8;
+  text-decoration: underline;
+}
+
+.app-update-retry {
+  color: #b42318;
+}
+
+.app-update-status {
+  color: #6b7b8f;
+  white-space: nowrap;
 }
 
 .app-sidebar-toggle,
