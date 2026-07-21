@@ -4,6 +4,7 @@
 
 ## Documentation
 
+- [Pedelec Official](https://pedelec.cc)
 - [Pedelec documentation](https://kaoruisaac.github.io/pedelec/)
 - [GitHub repository](https://github.com/kaoruisaac/pedelec)
 

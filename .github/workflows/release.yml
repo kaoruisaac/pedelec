@@ -125,7 +125,7 @@ jobs:
             args: "--target aarch64-apple-darwin"
             helper_target: "aarch64-apple-darwin"
           - label: macos-x64
-            platform: macos-latest
+            platform: macos-15-intel
             args: "--target x86_64-apple-darwin"
             helper_target: "x86_64-apple-darwin"
 
@@ -199,4 +199,28 @@ jobs:
 
       - name: Publish SDK
         working-directory: sdk
-        run: npm publish
+        shell: bash
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          PACKAGE_SPEC="${PACKAGE_NAME}@${PACKAGE_VERSION}"
+
+          set +e
+          VIEW_OUTPUT=$(npm view "$PACKAGE_SPEC" version 2>&1)
+          VIEW_EXIT_CODE=$?
+          set -e
+
+          if [ "$VIEW_EXIT_CODE" -eq 0 ]; then
+            echo "$PACKAGE_SPEC is already published. Skipping npm publish."
+            exit 0
+          fi
+
+          if printf '%s' "$VIEW_OUTPUT" | grep -qE 'E404|404 Not Found|is not in this registry'; then
+            echo "$PACKAGE_SPEC is not published yet. Publishing..."
+            npm publish
+            exit 0
+          fi
+
+          echo "Failed to check whether $PACKAGE_SPEC is already published." >&2
+          printf '%s\n' "$VIEW_OUTPUT" >&2
+          exit "$VIEW_EXIT_CODE"

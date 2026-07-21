@@ -9,15 +9,16 @@ const tauriDir = join(desktopDir, "tauri");
 const resourceDir = join(tauriDir, "binaries");
 const placeholderPath = join(resourceDir, ".placeholder");
 const helperTarget = process.env.PEDELEC_HELPER_TARGET || "";
+const helperNames = ["pedelec-cli", "pedelec-agent", "pedelec-native-host"];
 const cargoArgs = [
   "build",
   "--release",
   "--bin",
-  "pedelec-cli",
+  helperNames[0],
   "--bin",
-  "pedelec-agent",
+  helperNames[1],
   "--bin",
-  "pedelec-native-host",
+  helperNames[2],
 ];
 
 if (helperTarget) {
@@ -46,8 +47,27 @@ const profileDir = helperTarget
   ? join(tauriDir, "target", helperTarget, "release")
   : join(tauriDir, "target", "release");
 
-for (const name of ["pedelec-cli", "pedelec-agent", "pedelec-native-host"]) {
+for (const name of helperNames) {
   await copyFile(join(profileDir, `${name}${exe}`), join(resourceDir, `${name}${exe}`));
+}
+
+if (process.platform === "darwin") {
+  for (const name of helperNames) {
+    const binaryPath = join(resourceDir, name);
+    const codesign = spawnSync("codesign", ["--force", "--sign", "-", binaryPath], {
+      stdio: "inherit",
+    });
+
+    if (codesign.error) {
+      console.error(`Failed to run codesign for ${name}: ${codesign.error.message}`);
+      process.exit(1);
+    }
+
+    if (codesign.status !== 0) {
+      console.error(`codesign failed for ${name}`);
+      process.exit(codesign.status ?? 1);
+    }
+  }
 }
 
 await rm(placeholderPath, { force: true });
