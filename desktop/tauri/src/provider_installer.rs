@@ -25,6 +25,8 @@ pub(crate) struct InstallerPlan {
 
 const FINISHED: &str =
     "Installation command finished. Return to Pedelec and click Restart Pedelec when ready.";
+const ANTIGRAVITY_FINISHED: &str =
+    "Antigravity installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const CODEX_FINISHED: &str = "Codex installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
 #[cfg(windows)]
@@ -102,7 +104,10 @@ fn open_linux_terminal(plan: &InstallerPlan) -> std::io::Result<()> {
 }
 
 pub(crate) fn installer_plan(provider: &ProviderCode) -> Result<InstallerPlan, PedelecError> {
-    if !matches!(provider, ProviderCode::Codex | ProviderCode::OpenCode) {
+    if !matches!(
+        provider,
+        ProviderCode::Codex | ProviderCode::Antigravity | ProviderCode::OpenCode
+    ) {
         return Err(unsupported(provider));
     }
     #[cfg(windows)]
@@ -123,6 +128,7 @@ pub(crate) fn installer_plan(provider: &ProviderCode) -> Result<InstallerPlan, P
 fn windows_plan(provider: &ProviderCode) -> InstallerPlan {
     let script = match provider {
         ProviderCode::Codex => windows_codex_script(),
+        ProviderCode::Antigravity => windows_antigravity_script(),
         ProviderCode::OpenCode => format!("$bash=Get-Command bash.exe -ErrorAction SilentlyContinue; $native=$false; if($bash){{$u=& $bash.Source -lc 'uname -s' 2>$null; if($u -match '^(MINGW|MSYS|CYGWIN)'){{$native=$true}}}}; if($native){{Write-Host 'Installing OpenCode with native Windows Bash and curl...'; & $bash.Source -lc 'curl -fsSL https://opencode.ai/install | bash'}} else {{$npm=Get-Command npm.cmd -ErrorAction SilentlyContinue; if(-not $npm){{$npm=Get-Command npm -ErrorAction SilentlyContinue}}; if($npm){{Write-Host 'Installing OpenCode with npm...'; & $npm.Source install -g opencode-ai}} else {{if($bash){{Write-Host 'WSL Bash was found, but it installs the Linux OpenCode binary and cannot be used for this Windows installation.'}}; Write-Host 'OpenCode installation requires Node.js/npm or a native Windows Bash (Git Bash, MSYS2, or Cygwin).'; Write-Host 'Install Node.js or Git Bash, then return to Pedelec and try again.'}}}}; Write-Host ''; Write-Host '{}'", FINISHED),
         _ => unreachable!(),
     };
@@ -138,10 +144,50 @@ fn windows_plan(provider: &ProviderCode) -> InstallerPlan {
         ],
         method: match provider {
             ProviderCode::Codex => "codex-windows-auto",
-            _ => "opencode-windows-auto",
+            ProviderCode::Antigravity => "antigravity-windows-auto",
+            ProviderCode::OpenCode => "opencode-windows-auto",
+            _ => unreachable!(),
         }
         .into(),
     }
+}
+
+#[cfg(windows)]
+fn windows_antigravity_script() -> String {
+    format!(
+        r#"
+$agyCommand = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
+Write-Host 'Installing Antigravity CLI...'
+try {{
+    $ErrorActionPreference = 'Stop'
+    irm https://antigravity.google/cli/install.ps1 | iex
+}} catch {{
+    Write-Host "The Antigravity installer failed: $($_.Exception.Message)"
+}}
+
+if (Test-Path -LiteralPath $agyCommand -PathType Leaf) {{
+    Write-Host 'Starting Antigravity sign-in and onboarding...'
+    try {{
+        & $agyCommand
+        $agyExitCode = $LASTEXITCODE
+        if ($agyExitCode -eq 0) {{
+            Write-Host 'Antigravity sign-in and onboarding flow completed.'
+        }} else {{
+            Write-Host "Antigravity is installed, but sign-in or onboarding was not completed (exit code $agyExitCode)."
+            Write-Host 'You can run agy again later.'
+        }}
+    }} catch {{
+        Write-Host "Antigravity is installed, but could not be started: $($_.Exception.Message)"
+        Write-Host 'You can run agy again later.'
+    }}
+    Write-Host '{}'
+}} else {{
+    Write-Host 'Antigravity installation failed: agy.exe was not found at the expected location.'
+    Write-Host 'Review the errors above, then install Antigravity manually and run agy in a new Terminal.'
+}}
+"#,
+        ANTIGRAVITY_FINISHED
+    )
 }
 
 #[cfg(windows)]
@@ -273,6 +319,26 @@ else
 fi
 exec "${{SHELL:-/bin/sh}}" -l"#, CODEX_FINISHED),
         ProviderCode::OpenCode => format!("curl -fsSL https://opencode.ai/install | bash\nprintf '\\n{}\\n'\nexec \"${{SHELL:-/bin/sh}}\" -l", FINISHED),
+        ProviderCode::Antigravity => format!(r#"if curl -fsSL https://antigravity.google/cli/install.sh | bash; then
+  agy_command="$HOME/.local/bin/agy"
+  if [ -x "$agy_command" ]; then
+    printf '%s\n' 'Starting Antigravity sign-in and onboarding...'
+    if "$agy_command"; then
+      printf '%s\n' 'Antigravity sign-in and onboarding flow completed.'
+    else
+      agy_exit_code=$?
+      printf '%s\n' "Antigravity is installed, but sign-in or onboarding was not completed (exit code $agy_exit_code)."
+      printf '%s\n' 'You can run agy again later.'
+    fi
+    printf '\n%s\n' '{}'
+  else
+    printf '%s\n' 'Antigravity installation failed: agy was not found at the expected location.'
+    printf '%s\n' 'Review the errors above, then install Antigravity manually and run agy in a new Terminal.'
+  fi
+else
+  printf '%s\n' 'Antigravity installation failed. Review the errors above, then try again.'
+fi
+exec "${{SHELL:-/bin/sh}}" -l"#, ANTIGRAVITY_FINISHED),
         _ => unreachable!(),
     };
     InstallerPlan {
@@ -280,7 +346,9 @@ exec "${{SHELL:-/bin/sh}}" -l"#, CODEX_FINISHED),
         args: vec!["-lc".into(), script],
         method: match provider {
             ProviderCode::Codex => "codex-shell",
-            _ => "opencode-shell",
+            ProviderCode::Antigravity => "antigravity-shell",
+            ProviderCode::OpenCode => "opencode-shell",
+            _ => unreachable!(),
         }
         .into(),
     }
@@ -308,7 +376,6 @@ mod tests {
     #[test]
     fn rejects_non_installable_providers() {
         for provider in [
-            ProviderCode::Antigravity,
             ProviderCode::Cursor,
             ProviderCode::Claude,
             ProviderCode::Ollama,
@@ -365,6 +432,20 @@ mod tests {
         assert!(opencode_script.contains("WSL Bash was found"));
         assert!(opencode_script.contains("install -g opencode-ai"));
         assert!(!opencode_script.contains("codex login"));
+
+        let antigravity = installer_plan(&ProviderCode::Antigravity).unwrap();
+        assert_eq!(antigravity.program, "powershell.exe");
+        assert_eq!(antigravity.method, "antigravity-windows-auto");
+        assert!(antigravity.args.contains(&"-NoExit".to_string()));
+        let antigravity_script = antigravity.args.last().unwrap();
+        assert!(antigravity_script.contains("https://antigravity.google/cli/install.ps1 | iex"));
+        assert!(antigravity_script.contains("$env:LOCALAPPDATA"));
+        assert!(antigravity_script.contains("agy\\bin\\agy.exe"));
+        assert!(antigravity_script.contains("Test-Path -LiteralPath $agyCommand -PathType Leaf"));
+        assert!(antigravity_script.contains("& $agyCommand"));
+        assert!(antigravity_script.contains(ANTIGRAVITY_FINISHED));
+        assert!(!antigravity_script.contains("codex login"));
+        assert!(!antigravity_script.contains("install -g opencode-ai"));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -388,5 +469,17 @@ mod tests {
         assert!(!opencode_script.contains("codex login"));
         assert!(!opencode_script.contains("CODEX_INSTALL_DIR"));
         assert!(opencode_script.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+
+        let antigravity = installer_plan(&ProviderCode::Antigravity).unwrap();
+        assert_eq!(antigravity.method, "antigravity-shell");
+        let antigravity_script = antigravity.args.last().unwrap();
+        assert!(antigravity_script.contains("https://antigravity.google/cli/install.sh | bash"));
+        assert!(antigravity_script.contains("$HOME/.local/bin/agy"));
+        assert!(antigravity_script.contains("[ -x \"$agy_command\" ]"));
+        assert!(antigravity_script.contains("\"$agy_command\""));
+        assert!(antigravity_script.contains(ANTIGRAVITY_FINISHED));
+        assert!(antigravity_script.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+        assert!(!antigravity_script.contains("codex login"));
+        assert!(!antigravity_script.contains("https://opencode.ai/install"));
     }
 }

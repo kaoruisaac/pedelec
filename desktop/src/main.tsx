@@ -9,6 +9,7 @@ import "./style.css";
 import "./event-monitor/event-monitor.css";
 import PopUpProvider from "./services/PopUpProvider";
 import { FaSolidChevronLeft, FaSolidChevronRight } from "solid-icons/fa";
+import { FiDownload } from "solid-icons/fi";
 
 const IS_DEV = import.meta.env.DEV;
 
@@ -57,7 +58,8 @@ function AppShell() {
                     onClick={() => void updateStore.installUpdate()}
                   >
                     <Show when={!sidebarCollapsed()} fallback="↑">
-                      Update to v{updateStore.state().availableVersion}
+                      <FiDownload style={{ "margin-right": "5px" }} />
+                      <span>Pelect needs update</span>
                     </Show>
                   </button>
                 </Show>

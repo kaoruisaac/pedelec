@@ -190,7 +190,7 @@ function SettingsPage() {
   }
 
   function canInstallProvider(provider: Provider): boolean {
-    return provider.scanned && !provider.available && (provider.code === "codex" || provider.code === "opencode");
+    return provider.scanned && !provider.available && (provider.code === "codex" || provider.code === "antigravity" || provider.code === "opencode");
   }
 
   async function openProviderInstaller(provider: Provider): Promise<void> {
@@ -287,7 +287,9 @@ function SettingsPage() {
                         <span>
                           {provider.code === "codex"
                             ? "Installation opened in Terminal. Complete the installation and sign-in flow, then restart Pedelec."
-                            : "Installation opened in Terminal. Complete the installation, then restart Pedelec."}
+                            : provider.code === "antigravity"
+                              ? "Installation opened in Terminal. Complete the Antigravity sign-in and onboarding flow, then restart Pedelec."
+                              : "Installation opened in Terminal. Complete the installation, then restart Pedelec."}
                         </span>
                         <button type="button" class="provider-restart-button" disabled={restarting()} onClick={() => void restartPedelec()}>
                           {restarting() ? "Restarting..." : "Restart Pedelec"}
