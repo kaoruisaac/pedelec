@@ -15,6 +15,7 @@ import './PopUpProvider.css';
 
 export type PopUpOptions = {
     background?: boolean;
+    closeOnBackground?: boolean;
 }
 
 type PopUpPosition = { x: number; y: number };
@@ -45,7 +46,8 @@ export class PopUp<P> {
         this.componentProps = componentProps;
         this.onPopUpRemove = onPopUpRemove;
         this.options = {
-            background: true
+            background: true,
+            closeOnBackground: true,
         };
         Object.assign(this.options, options);
     }
@@ -160,7 +162,7 @@ export class PopUp<P> {
         return (
             <div class="PopUpFrame" classList={{ active: active() }}>
                 <Show when={this.options.background}>
-                    <div class="PopUpBackground" onClick={() => this.close()} />
+                    <div class="PopUpBackground" onClick={() => this.options.closeOnBackground !== false && this.close()} />
                 </Show>
                 <div
                     class="PopUpContent"

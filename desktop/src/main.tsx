@@ -125,7 +125,7 @@ function AppShell() {
             <HomePage />
           </div>
           <div hidden={page() !== "settings"}>
-            <SettingsPage />
+            <SettingsPage onNavigateToSettings={() => setPage("settings")} />
           </div>
           <Show when={IS_DEV}>
             <div hidden={page() !== "monitor"}>

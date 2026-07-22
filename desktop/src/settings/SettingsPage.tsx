@@ -4,6 +4,8 @@ import { Provider, ProviderCode, ProviderSettings, Settings } from "./types";
 import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_TIMEOUT_MS } from "./constants";
 import { usePopUp } from "../services/PopUpProvider";
 import EditingProviderPopup from "./EditingProviderPopup";
+import MissingProviderPopup from "./MissingProviderPopup";
+import { findFirstAvailableCliProvider } from "./providerInitialization";
 
 const emptySettings: Settings = {
   defaultProvider: null,
@@ -17,7 +19,11 @@ const emptySettings: Settings = {
   },
 };
 
-function SettingsPage() {
+interface SettingsPageProps {
+  onNavigateToSettings: () => void;
+}
+
+function SettingsPage(props: SettingsPageProps) {
   const [settings, setSettings] = createSignal<Settings>(emptySettings);
   const [draftSettings, setDraftSettings] = createSignal<Settings>(emptySettings);
   const [providers, setProviders] = createSignal<Provider[]>([]);
@@ -30,6 +36,7 @@ function SettingsPage() {
   const [launchingInstaller, setLaunchingInstaller] = createSignal<ProviderCode | null>(null);
   const [installerOpenedProviders, setInstallerOpenedProviders] = createSignal<Set<ProviderCode>>(new Set());
   const [restarting, setRestarting] = createSignal(false);
+  const [missingProviderPopupShown, setMissingProviderPopupShown] = createSignal(false);
 
   const { pop } = usePopUp();
 
@@ -66,19 +73,35 @@ function SettingsPage() {
         invoke<Provider[]>("list_providers"),
       ]);
       const normalizedSettings = normalizeSettings(nextSettings);
+      setSettings(normalizedSettings);
+      setDraftSettings(cloneSettings(normalizedSettings));
+      setHasUnsavedChanges(false);
+
+      if (normalizedSettings.defaultProvider === null) {
+        setRefreshingProviders(true);
+        try {
+          const refreshedProviders = await fetchRefreshedProviders({ checkOllamaConnection: false });
+          await initializeDefaultProviderIfNeeded(normalizedSettings, refreshedProviders);
+        } finally {
+          setRefreshingProviders(false);
+        }
+        return;
+      }
+
       const ollamaConnection = await checkOllamaConnection(
         normalizedSettings.providerSettings.ollama.baseUrl,
       );
-      setSettings(normalizedSettings);
-      setDraftSettings(cloneSettings(normalizedSettings));
       setProviders(withOllamaConnectionStatus(nextProviders, ollamaConnection));
-      setHasUnsavedChanges(false);
+      setRefreshingProviders(true);
+      try {
+        await fetchRefreshedProviders({ checkOllamaConnection: true });
+      } finally {
+        setRefreshingProviders(false);
+      }
     } catch (err) {
       setError(formatError(err));
     } finally {
       setLoading(false);
-      // Yield once so the initial settings render is visible before CLI scans begin.
-      setTimeout(() => void refreshProviders(), 0);
     }
   }
 
@@ -170,14 +193,55 @@ function SettingsPage() {
     setRefreshingProviders(true);
     setError("");
     try {
-      const nextProviders = await invoke<Provider[]>("refresh_providers");
-      const ollamaConnection = await checkOllamaConnection(draftSettings().providerSettings.ollama.baseUrl);
-      setProviders(withOllamaConnectionStatus(nextProviders, ollamaConnection));
+      await fetchRefreshedProviders({ checkOllamaConnection: true });
     } catch (err) {
       setError(formatError(err));
     } finally {
       setRefreshingProviders(false);
     }
+  }
+
+  async function fetchRefreshedProviders(options: { checkOllamaConnection: boolean }): Promise<Provider[]> {
+    const nextProviders = await invoke<Provider[]>("refresh_providers");
+    const ollamaConnection = options.checkOllamaConnection
+      ? await checkOllamaConnection(draftSettings().providerSettings.ollama.baseUrl)
+      : "disconnected";
+    const providersWithConnectionStatus = withOllamaConnectionStatus(nextProviders, ollamaConnection);
+    setProviders(providersWithConnectionStatus);
+    return providersWithConnectionStatus;
+  }
+
+  async function initializeDefaultProviderIfNeeded(
+    initialSettings: Settings,
+    refreshedProviders: Provider[],
+  ): Promise<void> {
+    const provider = findFirstAvailableCliProvider(refreshedProviders);
+    if (!provider) {
+      if (!missingProviderPopupShown()) {
+        setMissingProviderPopupShown(true);
+        pop(MissingProviderPopup, { onGoToSettings: props.onNavigateToSettings }, {
+          background: true,
+          closeOnBackground: false,
+        });
+      }
+      return;
+    }
+
+    if (
+      settings().defaultProvider !== null ||
+      draftSettings().defaultProvider !== null ||
+      hasUnsavedChanges()
+    ) {
+      return;
+    }
+
+    const savedSettings = await invoke<Settings>("update_settings", {
+      input: cloneSettings({ ...initialSettings, defaultProvider: provider.code }),
+    });
+    const normalizedSettings = normalizeSettings(savedSettings);
+    setSettings(normalizedSettings);
+    setDraftSettings(cloneSettings(normalizedSettings));
+    setHasUnsavedChanges(false);
   }
 
   function canEditProvider(provider: Provider): boolean {
