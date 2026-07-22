@@ -1434,7 +1434,7 @@ mod tests {
                     "defaultProvider": "codex",
                     "defaultModels": {
                         "codex": " gpt-5 ",
-                        "gemini": "gemini-2.5-pro"
+                        "antigravity": "antigravity-2.5-pro"
                     },
                     "providerSettings": {
                         "ollama": {
@@ -1454,7 +1454,7 @@ mod tests {
                 "defaultProvider": "codex",
                 "defaultModels": {
                     "codex": "gpt-5",
-                    "gemini": "gemini-2.5-pro"
+                    "antigravity": "antigravity-2.5-pro"
                 },
                 "providerSettings": {
                     "ollama": {
@@ -1472,7 +1472,7 @@ mod tests {
                 default_provider: Some(ProviderCode::Codex),
                 default_models: HashMap::from([
                     (ProviderCode::Codex, "gpt-5".into()),
-                    (ProviderCode::Gemini, "gemini-2.5-pro".into()),
+                    (ProviderCode::Antigravity, "antigravity-2.5-pro".into()),
                 ]),
                 provider_settings: ProviderSettings {
                     ollama: OllamaProviderSettings {

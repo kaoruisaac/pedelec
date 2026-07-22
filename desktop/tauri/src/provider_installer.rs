@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn rejects_non_installable_providers() {
         for provider in [
-            ProviderCode::Gemini,
+            ProviderCode::Antigravity,
             ProviderCode::Cursor,
             ProviderCode::Claude,
             ProviderCode::Ollama,

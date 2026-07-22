@@ -18,7 +18,7 @@ hero:
       variant: secondary
 ---
 
-Pedelec 是一套 browser SDK 與本機橋接架構，讓 Web App 可以和 Codex、Gemini、OpenCode、Cursor、Claude Code，或使用 Ollama 的 agent 協作。
+Pedelec 是一套 browser SDK 與本機橋接架構，讓 Web App 可以和 Codex、Antigravity、OpenCode、Cursor、Claude Code，或使用 Ollama 的 agent 協作。
 
 Web App 可以透過 Pedelec：
 
@@ -48,7 +48,7 @@ Pedelec native host
   ↓ 本機 Core IPC
 Pedelec Desktop Runtime
   ↓ provider process
-Codex / Gemini / OpenCode / Cursor / Claude Code / Ollama
+Codex / Antigravity / OpenCode / Cursor / Claude Code / Ollama
 ```
 
 上圖是 control/event path。Asset file body 使用另一條內部路徑：`Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/`。只使用 `session.uploadAsset()`，不要依賴內部 URL、port、token 或 ticket lifecycle。
@@ -64,7 +64,7 @@ Pedelec SDK 必須在瀏覽器頁面環境中執行，並且需要：
 1. 使用者已安裝 Pedelec Chrome Extension。
 2. 使用者安裝後已至少正常開啟一次 Pedelec Desktop App，完成 binary setup、Native Messaging host registration 與 launch config 建立。
 3. 完成初始化後，native host 可在 Core request 時嘗試 background 啟動 Desktop；此操作可能失敗，應視為 Desktop/installation unavailable 處理。
-4. 目標 provider 在使用者本機可用。CLI 型 provider 使用 `codex`、`gemini`、`opencode`、`cursor` 或 `claude`；Ollama provider 使用 Pedelec 隨附的 `pedelec-agent`。
+4. 目標 provider 在使用者本機可用。CLI 型 provider 使用 `codex`、`agy`、`opencode`、`cursor` 或 `claude`；Ollama provider 使用 Pedelec 隨附的 `pedelec-agent`。
 
 SDK 不適合直接在 Node.js、SSR server 或 background worker 裡使用；它需要 Chrome 頁面環境中的 extension runtime messaging。
 
@@ -163,7 +163,7 @@ const session = await pedelec.createSession({
 | Provider | Code | model 範例 |
 | --- | --- | --- |
 | Codex | `codex` | `gpt-5` |
-| Gemini | `gemini` | provider 自己支援的 model id |
+| Antigravity | `antigravity` | provider 自己支援的 model id |
 | OpenCode | `opencode` | `ollama/qwen2.5-coder:14b` |
 | Cursor | `cursor` | `gpt-5` |
 | Claude Code | `claude` | `sonnet` |
@@ -249,7 +249,7 @@ for (const provider of providers) {
 ```ts
 type ProviderInfo = {
   name: string;
-  code: "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama";
+  code: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
   path: string | null;
   available: boolean;
   error: string | null;
@@ -268,7 +268,7 @@ const settings = await pedelec.getSettings();
 
 console.log(settings.defaultProvider);
 console.log(settings.defaultModels.codex);
-console.log(settings.defaultModels.gemini);
+console.log(settings.defaultModels.antigravity);
 console.log(settings.defaultModels.ollama);
 ```
 
@@ -276,8 +276,8 @@ console.log(settings.defaultModels.ollama);
 
 ```ts
 type PedelecSettings = {
-  defaultProvider: "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama" | null;
-  defaultModels: Partial<Record<"codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama", string>>;
+  defaultProvider: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama" | null;
+  defaultModels: Partial<Record<"codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama", string>>;
 };
 ```
 

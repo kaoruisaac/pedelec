@@ -52,11 +52,11 @@ It fails before session creation when:
 
 ```ts
 const session = await pedelec.createSession({
-  provider: "gemini",
+  provider: "antigravity",
 });
 ```
 
-The SDK still reads Desktop settings to find `defaultModels.gemini`. If no model is configured, the provider receives no explicit model.
+The SDK still reads Desktop settings to find `defaultModels.antigravity`. If no model is configured, the provider receives no explicit model.
 
 For a provider picker, call `listProviders()` first and prevent selection of unavailable entries. The runtime remains the source of truth because availability can change between discovery and creation.
 

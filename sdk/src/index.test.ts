@@ -499,7 +499,7 @@ describe("Pedelec SDK", () => {
     const codexPromise = pedelec.createSession({ provider: "codex" });
     respondOk(pageWindow, pageWindow.lastSent(), {
       defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5", gemini: "gemini-2.5-pro" },
+      defaultModels: { codex: "gpt-5", antigravity: "antigravity-2.5-pro" },
     });
     await nextTick();
     const codexCreate = pageWindow.lastSent();
@@ -510,19 +510,19 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, codexCreate, { sessionId: "thread_codex_default_model" });
     expect((await codexPromise).model).toBe("gpt-5");
 
-    const geminiPromise = pedelec.createSession({ provider: "gemini" });
+    const antigravityPromise = pedelec.createSession({ provider: "antigravity" });
     respondOk(pageWindow, pageWindow.lastSent(), {
       defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5", gemini: "gemini-2.5-pro" },
+      defaultModels: { codex: "gpt-5", antigravity: "antigravity-2.5-pro" },
     });
     await nextTick();
-    const geminiCreate = pageWindow.lastSent();
-    expect(geminiCreate).toMatchObject({
+    const antigravityCreate = pageWindow.lastSent();
+    expect(antigravityCreate).toMatchObject({
       type: "create_session",
-      input: { provider: "gemini", model: "gemini-2.5-pro", skills: undefined },
+      input: { provider: "antigravity", model: "antigravity-2.5-pro", skills: undefined },
     });
-    respondOk(pageWindow, geminiCreate, { sessionId: "thread_gemini_no_default_model" });
-    expect((await geminiPromise).model).toBe("gemini-2.5-pro");
+    respondOk(pageWindow, antigravityCreate, { sessionId: "thread_antigravity_no_default_model" });
+    expect((await antigravityPromise).model).toBe("antigravity-2.5-pro");
 
     const ollamaPromise = pedelec.createSession({ provider: "ollama" });
     respondOk(pageWindow, pageWindow.lastSent(), {
@@ -541,7 +541,7 @@ describe("Pedelec SDK", () => {
 
   it("omits model when the selected provider has no default model", async () => {
     const pedelec = new Pedelec();
-    const promise = pedelec.createSession({ provider: "gemini" });
+    const promise = pedelec.createSession({ provider: "antigravity" });
     respondOk(pageWindow, pageWindow.lastSent(), {
       defaultProvider: "codex",
       defaultModels: { codex: "gpt-5" },
@@ -551,10 +551,10 @@ describe("Pedelec SDK", () => {
     const createRequest = pageWindow.lastSent();
     expect(createRequest).toMatchObject({
       type: "create_session",
-      input: { provider: "gemini", skills: undefined },
+      input: { provider: "antigravity", skills: undefined },
     });
     expect(createRequest.input.model).toBeUndefined();
-    respondOk(pageWindow, createRequest, { sessionId: "thread_gemini_no_model" });
+    respondOk(pageWindow, createRequest, { sessionId: "thread_antigravity_no_model" });
     expect((await promise).model).toBeUndefined();
   });
 
@@ -965,7 +965,7 @@ describe("Pedelec SDK", () => {
   it("routes chat deltas to the matching session and drops duplicate seq", async () => {
     const pedelec = new Pedelec();
     const { session: first } = await createProviderSession(pedelec, pageWindow, "codex", "thread_1");
-    const { session: second, createRequest } = await createProviderSession(pedelec, pageWindow, "gemini", "thread_2");
+    const { session: second, createRequest } = await createProviderSession(pedelec, pageWindow, "antigravity", "thread_2");
     const channelId = createRequest.channelId;
     const firstText: string[] = [];
     const secondText: string[] = [];

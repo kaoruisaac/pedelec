@@ -8,6 +8,7 @@ import SettingsPage from "./settings/SettingsPage";
 import "./style.css";
 import "./event-monitor/event-monitor.css";
 import PopUpProvider from "./services/PopUpProvider";
+import { FaSolidChevronLeft, FaSolidChevronRight } from "solid-icons/fa";
 
 const IS_DEV = import.meta.env.DEV;
 
@@ -92,7 +93,7 @@ function AppShell() {
               aria-label={sidebarCollapsed() ? "Expand menu" : "Collapse menu"}
               onClick={() => setSidebarCollapsed((value) => !value)}
             >
-              {sidebarCollapsed() ? ">" : "<"}
+              {sidebarCollapsed() ? <FaSolidChevronRight size={14} /> : <FaSolidChevronLeft size={14} />}
             </button>
           </div>
           <nav class="app-nav">

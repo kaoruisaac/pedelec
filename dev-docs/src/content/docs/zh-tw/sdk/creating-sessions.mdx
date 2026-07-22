@@ -52,11 +52,11 @@ const session = await pedelec.createSession();
 
 ```ts
 const session = await pedelec.createSession({
-  provider: "gemini",
+  provider: "antigravity",
 });
 ```
 
-SDK 仍會讀 Desktop settings，取得 `defaultModels.gemini`。沒有設定時不傳 explicit model。
+SDK 仍會讀 Desktop settings，取得 `defaultModels.antigravity`。沒有設定時不傳 explicit model。
 
 Provider picker 建議先呼叫 `listProviders()`，避免選 unavailable entry；但 availability 可能在探測和建立之間改變，Runtime 仍是最終 source of truth。
 

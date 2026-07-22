@@ -164,7 +164,7 @@ pub enum ThreadStatus {
 #[serde(rename_all = "lowercase")]
 pub enum ProviderCode {
     Codex,
-    Gemini,
+    Antigravity,
     OpenCode,
     Cursor,
     Claude,
@@ -591,7 +591,7 @@ trait ProviderAdapter {
 #[derive(Debug, Clone)]
 enum ProviderAdapterInstance {
     Codex(CodexProviderAdapter),
-    Gemini(GeminiProviderAdapter),
+    Antigravity(AntigravityProviderAdapter),
     OpenCode(OpenCodeProviderAdapter),
     Cursor(CursorProviderAdapter),
     Claude(ClaudeProviderAdapter),
@@ -602,7 +602,7 @@ impl ProviderAdapterInstance {
     fn new(provider: ProviderCode) -> Self {
         match provider {
             ProviderCode::Codex => Self::Codex(CodexProviderAdapter::default()),
-            ProviderCode::Gemini => Self::Gemini(GeminiProviderAdapter::default()),
+            ProviderCode::Antigravity => Self::Antigravity(AntigravityProviderAdapter::default()),
             ProviderCode::OpenCode => Self::OpenCode(OpenCodeProviderAdapter::default()),
             ProviderCode::Cursor => Self::Cursor(CursorProviderAdapter::default()),
             ProviderCode::Claude => Self::Claude(ClaudeProviderAdapter::default()),
@@ -615,7 +615,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
     fn code(&self) -> ProviderCode {
         match self {
             Self::Codex(adapter) => adapter.code(),
-            Self::Gemini(adapter) => adapter.code(),
+            Self::Antigravity(adapter) => adapter.code(),
             Self::OpenCode(adapter) => adapter.code(),
             Self::Cursor(adapter) => adapter.code(),
             Self::Claude(adapter) => adapter.code(),
@@ -626,7 +626,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
     fn capabilities(&self) -> ProviderCapabilities {
         match self {
             Self::Codex(adapter) => adapter.capabilities(),
-            Self::Gemini(adapter) => adapter.capabilities(),
+            Self::Antigravity(adapter) => adapter.capabilities(),
             Self::OpenCode(adapter) => adapter.capabilities(),
             Self::Cursor(adapter) => adapter.capabilities(),
             Self::Claude(adapter) => adapter.capabilities(),
@@ -641,7 +641,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
     ) -> Result<CommandSpec, PedelecError> {
         match self {
             Self::Codex(adapter) => adapter.build_run_command(ctx, message),
-            Self::Gemini(adapter) => adapter.build_run_command(ctx, message),
+            Self::Antigravity(adapter) => adapter.build_run_command(ctx, message),
             Self::OpenCode(adapter) => adapter.build_run_command(ctx, message),
             Self::Cursor(adapter) => adapter.build_run_command(ctx, message),
             Self::Claude(adapter) => adapter.build_run_command(ctx, message),
@@ -657,7 +657,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
     ) -> Result<CommandSpec, PedelecError> {
         match self {
             Self::Codex(adapter) => adapter.build_resume_command(ctx, provider_session_id, message),
-            Self::Gemini(adapter) => {
+            Self::Antigravity(adapter) => {
                 adapter.build_resume_command(ctx, provider_session_id, message)
             }
             Self::OpenCode(adapter) => {
@@ -678,7 +678,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
     fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
         match self {
             Self::Codex(adapter) => adapter.parse_stdout_event(chunk),
-            Self::Gemini(adapter) => adapter.parse_stdout_event(chunk),
+            Self::Antigravity(adapter) => adapter.parse_stdout_event(chunk),
             Self::OpenCode(adapter) => adapter.parse_stdout_event(chunk),
             Self::Cursor(adapter) => adapter.parse_stdout_event(chunk),
             Self::Claude(adapter) => adapter.parse_stdout_event(chunk),
@@ -689,7 +689,7 @@ impl ProviderAdapter for ProviderAdapterInstance {
     fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
         match self {
             Self::Codex(adapter) => adapter.parse_stderr_event(chunk),
-            Self::Gemini(adapter) => adapter.parse_stderr_event(chunk),
+            Self::Antigravity(adapter) => adapter.parse_stderr_event(chunk),
             Self::OpenCode(adapter) => adapter.parse_stderr_event(chunk),
             Self::Cursor(adapter) => adapter.parse_stderr_event(chunk),
             Self::Claude(adapter) => adapter.parse_stderr_event(chunk),
@@ -801,14 +801,15 @@ impl ProviderAdapter for CodexProviderAdapter {
 }
 
 #[derive(Debug, Clone, Default)]
-struct GeminiProviderAdapter {
+struct AntigravityProviderAdapter {
     stdout_buffer: String,
     stderr_buffer: String,
+    received_agent_delta: bool,
 }
 
-impl ProviderAdapter for GeminiProviderAdapter {
+impl ProviderAdapter for AntigravityProviderAdapter {
     fn code(&self) -> ProviderCode {
-        ProviderCode::Gemini
+        ProviderCode::Antigravity
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -826,20 +827,24 @@ impl ProviderAdapter for GeminiProviderAdapter {
         ctx: &RunPromptProviderContext,
         message: &str,
     ) -> Result<CommandSpec, PedelecError> {
+        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         let mut args = vec![
-            "--skip-trust".to_string(),
+            "-p".to_string(),
+            prompt.clone(),
             "--output-format".to_string(),
             "stream-json".to_string(),
+            "--mode".to_string(),
+            "accept-edits".to_string(),
+            "--dangerously-skip-permissions".to_string(),
         ];
         add_model_args(&mut args, &ctx.thread.model, "--model");
-        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         Ok(CommandSpec {
-            program: "gemini".to_string(),
+            program: "agy".to_string(),
             args,
             cwd: ctx.thread.sandbox_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
-            stdin: prompt,
+            stdin: String::new(),
         })
     }
 
@@ -852,42 +857,46 @@ impl ProviderAdapter for GeminiProviderAdapter {
         if !self.capabilities().supports_resume_by_session_id {
             return Err(provider_unsupported_error(
                 &ctx.thread,
-                "gemini resume is not supported",
+                "antigravity resume is not supported",
             ));
         }
 
+        let prompt = build_provider_resume_prompt(message);
         let mut args = vec![
-            "--skip-trust".to_string(),
+            "--conversation".to_string(),
+            provider_session_id.to_string(),
+            "-p".to_string(),
+            prompt.clone(),
             "--output-format".to_string(),
             "stream-json".to_string(),
-            "--resume".to_string(),
-            provider_session_id.to_string(),
+            "--mode".to_string(),
+            "accept-edits".to_string(),
+            "--dangerously-skip-permissions".to_string(),
         ];
         add_model_args(&mut args, &ctx.thread.model, "--model");
-        let prompt = build_provider_resume_prompt(message);
         Ok(CommandSpec {
-            program: "gemini".to_string(),
+            program: "agy".to_string(),
             args,
             cwd: ctx.thread.sandbox_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
-            stdin: prompt,
+            stdin: String::new(),
         })
     }
 
     fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_provider_chunk(
+        parse_antigravity_provider_chunk(
             &mut self.stdout_buffer,
             chunk,
-            find_gemini_assistant_text_in_json,
+            &mut self.received_agent_delta,
         )
     }
 
     fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_provider_chunk(
+        parse_antigravity_provider_chunk(
             &mut self.stderr_buffer,
             chunk,
-            find_gemini_assistant_text_in_json,
+            &mut self.received_agent_delta,
         )
     }
 }
@@ -3682,7 +3691,7 @@ pub mod error_codes {
 fn provider_code_as_str(provider: &ProviderCode) -> &'static str {
     match provider {
         ProviderCode::Codex => "codex",
-        ProviderCode::Gemini => "gemini",
+        ProviderCode::Antigravity => "antigravity",
         ProviderCode::OpenCode => "opencode",
         ProviderCode::Cursor => "cursor",
         ProviderCode::Claude => "claude",
@@ -3693,7 +3702,7 @@ fn provider_code_as_str(provider: &ProviderCode) -> &'static str {
 fn provider_display_name(provider: &ProviderCode) -> &'static str {
     match provider {
         ProviderCode::Codex => "Codex",
-        ProviderCode::Gemini => "Gemini",
+        ProviderCode::Antigravity => "Antigravity",
         ProviderCode::OpenCode => "OpenCode",
         ProviderCode::Cursor => "Cursor",
         ProviderCode::Claude => "Claude Code",
@@ -3704,7 +3713,7 @@ fn provider_display_name(provider: &ProviderCode) -> &'static str {
 fn provider_program_name(provider: &ProviderCode) -> &'static str {
     match provider {
         ProviderCode::Codex => "codex",
-        ProviderCode::Gemini => "gemini",
+        ProviderCode::Antigravity => "agy",
         ProviderCode::OpenCode => "opencode",
         ProviderCode::Cursor => "agent",
         ProviderCode::Claude => "claude",
@@ -3734,7 +3743,7 @@ fn provider_version_display(version: &ProviderVersion) -> String {
 fn external_provider_codes() -> [ProviderCode; 5] {
     [
         ProviderCode::Codex,
-        ProviderCode::Gemini,
+        ProviderCode::Antigravity,
         ProviderCode::OpenCode,
         ProviderCode::Cursor,
         ProviderCode::Claude,
@@ -3753,7 +3762,7 @@ fn merged_provider_path(current: Option<OsString>) -> OsString {
     }
     if let Some(home) = dirs::home_dir() {
         #[cfg(windows)]
-        paths.extend([home.join("AppData/Local/Programs/OpenAI/Codex/bin"), home.join(".opencode/bin"), home.join("AppData/Roaming/npm")]);
+        paths.extend([home.join("AppData/Local/Programs/OpenAI/Codex/bin"), home.join("AppData/Local/agy/bin"), home.join(".opencode/bin"), home.join("AppData/Roaming/npm")]);
         #[cfg(not(windows))]
         paths.extend([home.join(".local/bin"), home.join(".opencode/bin")]);
     }
@@ -3946,7 +3955,7 @@ fn list_provider_infos_with_scan(
 ) -> Vec<ProviderInfo> {
     [
         ProviderCode::Codex,
-        ProviderCode::Gemini,
+        ProviderCode::Antigravity,
         ProviderCode::OpenCode,
         ProviderCode::Cursor,
         ProviderCode::Claude,
@@ -4570,6 +4579,109 @@ fn parse_provider_chunk(
     events
 }
 
+fn parse_antigravity_provider_chunk(
+    buffer: &mut String,
+    chunk: &str,
+    received_agent_delta: &mut bool,
+) -> Vec<ThreadEventPartial> {
+    buffer.push_str(chunk);
+    let mut events = Vec::new();
+    while let Some(newline_index) = buffer.find('\n') {
+        let mut line = buffer[..newline_index].to_string();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        buffer.drain(..=newline_index);
+        events.extend(parse_antigravity_provider_line(&line, received_agent_delta));
+    }
+    if buffer.len() > 64 * 1024 {
+        buffer.clear();
+        events.push(ThreadEventPartial::ProviderError {
+            error: PedelecError::new(
+                error_codes::PROVIDER_COMMAND_FAILED,
+                "antigravity emitted an unterminated JSON event",
+            ),
+        });
+    }
+    events
+}
+
+fn parse_antigravity_provider_line(
+    line: &str,
+    received_agent_delta: &mut bool,
+) -> Vec<ThreadEventPartial> {
+    if line.trim().is_empty() {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return Vec::new();
+    };
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    match object.get("event").and_then(Value::as_str) {
+        Some("init") => {
+            *received_agent_delta = false;
+            object
+                .get("conversation_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(|provider_session_id| ThreadEventPartial::ProviderSessionIdUpdated {
+                    provider_session_id: provider_session_id.to_string(),
+                })
+                .into_iter()
+                .collect()
+        }
+        Some("step_update") => {
+            let Some(step_update) = object.get("step_update").and_then(Value::as_object) else {
+                return Vec::new();
+            };
+            if step_update.get("step_type").and_then(Value::as_str) != Some("agent_response") {
+                return Vec::new();
+            }
+            let Some(text) = step_update.get("text_delta").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            if text.is_empty() {
+                return Vec::new();
+            }
+            *received_agent_delta = true;
+            vec![ThreadEventPartial::AssistantMessage { text: text.to_string() }]
+        }
+        Some("result") => {
+            let Some(result) = object.get("result").and_then(Value::as_object) else {
+                return Vec::new();
+            };
+            let status = result.get("status").and_then(Value::as_str).unwrap_or_default();
+            if status == "SUCCESS" {
+                if *received_agent_delta {
+                    return Vec::new();
+                }
+                return result
+                    .get("response")
+                    .and_then(Value::as_str)
+                    .filter(|response| !response.is_empty())
+                    .map(|text| ThreadEventPartial::AssistantMessage { text: text.to_string() })
+                    .into_iter()
+                    .collect();
+            }
+            vec![ThreadEventPartial::ProviderError {
+                error: PedelecError::with_details(
+                    error_codes::PROVIDER_COMMAND_FAILED,
+                    "antigravity returned an unsuccessful result",
+                    serde_json::json!({
+                        "status": status,
+                        "conversation_id": result.get("conversation_id"),
+                        "response": result.get("response"),
+                    }),
+                ),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn parse_opencode_provider_chunk(buffer: &mut String, chunk: &str) -> Vec<ThreadEventPartial> {
     buffer.push_str(chunk);
     let mut events: Vec<ThreadEventPartial> = Vec::new();
@@ -4993,25 +5105,6 @@ fn find_codex_assistant_text_in_json(value: &Value) -> Option<String> {
     find_string_for_keys(value, &["text", "content", "message"])
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn find_gemini_assistant_text_in_json(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            if map.get("role").and_then(Value::as_str).map(str::trim) == Some("assistant") {
-                if let Some(text) = find_string_for_keys(value, &["text", "content", "message"])
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-                {
-                    return Some(text);
-                }
-            }
-
-            map.values().find_map(find_gemini_assistant_text_in_json)
-        }
-        Value::Array(values) => values.iter().find_map(find_gemini_assistant_text_in_json),
-        _ => None,
-    }
 }
 
 fn find_opencode_assistant_text_in_json(value: &Value) -> Option<String> {
@@ -5480,9 +5573,10 @@ mod tests {
             json!("codex")
         );
         assert_eq!(
-            serde_json::to_value(ProviderCode::Gemini).unwrap(),
-            json!("gemini")
+            serde_json::to_value(ProviderCode::Antigravity).unwrap(),
+            json!("antigravity")
         );
+        assert!(serde_json::from_value::<ProviderCode>(json!("gemini")).is_err());
         assert_eq!(
             serde_json::to_value(ProviderCode::OpenCode).unwrap(),
             json!("opencode")
@@ -5539,8 +5633,8 @@ mod tests {
             .get("version")
             .is_none());
 
-        let gemini = provider_info_for(ProviderCode::Gemini, &scan, None);
-        assert!(!gemini.scanned);
+        let antigravity = provider_info_for(ProviderCode::Antigravity, &scan, None);
+        assert!(!antigravity.scanned);
     }
 
     #[cfg(windows)]
@@ -5665,36 +5759,38 @@ mod tests {
     }
 
     #[test]
-    fn gemini_new_command_writes_prompt_to_stdin_and_does_not_supply_session_id() {
+    fn antigravity_new_command_passes_prompt_as_an_argument() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
-            "thread_gemini_new",
-            ProviderCode::Gemini,
+            "thread_antigravity_new",
+            ProviderCode::Antigravity,
             None,
-            Some("gemini-2.5-pro".into()),
+            Some("antigravity-2.5-pro".into()),
         );
 
         let start = runtime
             .begin_send_text(SendTextInput {
-                thread_id: "thread_gemini_new".into(),
+                thread_id: "thread_antigravity_new".into(),
                 message: "hello".into(),
             })
             .unwrap();
 
-        assert_eq!(start.command.program, "gemini");
+        assert_eq!(start.command.program, "agy");
         assert!(start
             .command
             .args
             .windows(2)
-            .any(|args| args == ["--model", "gemini-2.5-pro"]));
+            .any(|args| args == ["--model", "antigravity-2.5-pro"]));
         assert!(start
             .command
             .args
             .windows(2)
             .any(|args| args == ["--output-format", "stream-json"]));
-        assert!(!start.command.args.iter().any(|arg| arg == "--prompt"));
-        assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
+        assert!(start.command.args.windows(2).any(|args| args[0] == "-p" && args[1] == start.command.prompt));
+        assert!(start.command.args.windows(2).any(|args| args == ["--mode", "accept-edits"]));
+        assert!(start.command.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(!start.command.args.iter().any(|arg| arg == "--conversation"));
         assert!(!start
             .command
             .args
@@ -5702,23 +5798,23 @@ mod tests {
             .any(|arg| arg == "User message: hello"));
         assert_provider_instruction_present(&start.command);
         assert!(start.command.prompt.ends_with("hello"));
-        assert!(start.command.stdin.ends_with("hello"));
+        assert!(start.command.stdin.is_empty());
     }
 
     #[test]
-    fn gemini_resume_writes_prompt_to_stdin_and_uses_explicit_session_id() {
+    fn antigravity_resume_passes_prompt_and_uses_explicit_conversation_id() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
-            "thread_gemini_resume",
-            ProviderCode::Gemini,
+            "thread_antigravity_resume",
+            ProviderCode::Antigravity,
             Some("123e4567-e89b-12d3-a456-426614174000".into()),
             None,
         );
 
         let start = runtime
             .begin_send_text(SendTextInput {
-                thread_id: "thread_gemini_resume".into(),
+                thread_id: "thread_antigravity_resume".into(),
                 message: "continue".into(),
             })
             .unwrap();
@@ -5727,32 +5823,31 @@ mod tests {
             .command
             .args
             .windows(2)
-            .any(|args| { args == ["--resume", "123e4567-e89b-12d3-a456-426614174000"] }));
+            .any(|args| { args == ["--conversation", "123e4567-e89b-12d3-a456-426614174000"] }));
         assert!(start
             .command
             .args
             .windows(2)
             .any(|args| args == ["--output-format", "stream-json"]));
         assert!(!start.command.args.iter().any(|arg| arg == "latest"));
-        assert!(!start.command.args.iter().any(|arg| arg == "--prompt"));
-        assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
+        assert!(start.command.args.windows(2).any(|args| args[0] == "-p" && args[1] == "continue"));
         assert!(!start
             .command
             .args
             .iter()
             .any(|arg| arg == "User message: continue"));
         assert_eq!(start.command.prompt, "continue");
-        assert_eq!(start.command.stdin, "continue");
+        assert!(start.command.stdin.is_empty());
         assert_provider_instruction_absent(&start.command);
     }
 
     #[test]
-    fn gemini_run_preserves_multiline_markdown_json_and_quotes_in_stdin() {
+    fn antigravity_run_preserves_multiline_markdown_json_and_quotes_in_prompt_argument() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
-            "thread_gemini_special",
-            ProviderCode::Gemini,
+            "thread_antigravity_special",
+            ProviderCode::Antigravity,
             None,
             None,
         );
@@ -5761,53 +5856,51 @@ mod tests {
 
         let start = runtime
             .begin_send_text(SendTextInput {
-                thread_id: "thread_gemini_special".into(),
+                thread_id: "thread_antigravity_special".into(),
                 message: message.into(),
             })
             .unwrap();
 
-        assert!(start.command.stdin.ends_with(message));
+        assert!(start.command.stdin.is_empty());
         assert!(start.command.prompt.ends_with(message));
         assert_provider_instruction_present(&start.command);
-        assert!(!start.command.args.iter().any(|arg| arg == "--prompt"));
-        assert!(!start.command.args.iter().any(|arg| arg == message));
+        assert!(start.command.args.windows(2).any(|args| args[0] == "-p" && args[1].ends_with(message)));
     }
 
     #[test]
-    fn gemini_resume_preserves_multiline_markdown_json_and_quotes_in_stdin() {
+    fn antigravity_resume_preserves_multiline_markdown_json_and_quotes_in_prompt_argument() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
-            "thread_gemini_resume_special",
-            ProviderCode::Gemini,
+            "thread_antigravity_resume_special",
+            ProviderCode::Antigravity,
             Some("123e4567-e89b-12d3-a456-426614174000".into()),
-            Some("gemini-2.5-pro".into()),
+            Some("antigravity-2.5-pro".into()),
         );
         let message =
             "line 1\n\n```json\n{\"quote\":\"hello \\\"world\\\"\",\"markdown\":\"**bold**\"}\n```";
 
         let start = runtime
             .begin_send_text(SendTextInput {
-                thread_id: "thread_gemini_resume_special".into(),
+                thread_id: "thread_antigravity_resume_special".into(),
                 message: message.into(),
             })
             .unwrap();
 
-        assert_eq!(start.command.stdin, message);
+        assert!(start.command.stdin.is_empty());
         assert_eq!(start.command.prompt, message);
         assert_provider_instruction_absent(&start.command);
         assert!(start
             .command
             .args
             .windows(2)
-            .any(|args| args == ["--resume", "123e4567-e89b-12d3-a456-426614174000"]));
+            .any(|args| args == ["--conversation", "123e4567-e89b-12d3-a456-426614174000"]));
         assert!(start
             .command
             .args
             .windows(2)
-            .any(|args| args == ["--model", "gemini-2.5-pro"]));
-        assert!(!start.command.args.iter().any(|arg| arg == "--prompt"));
-        assert!(!start.command.args.iter().any(|arg| arg == message));
+            .any(|args| args == ["--model", "antigravity-2.5-pro"]));
+        assert!(start.command.args.windows(2).any(|args| args[0] == "-p" && args[1] == message));
     }
 
     #[test]
@@ -6589,7 +6682,7 @@ mod tests {
             codes,
             vec![
                 ProviderCode::Codex,
-                ProviderCode::Gemini,
+                ProviderCode::Antigravity,
                 ProviderCode::OpenCode,
                 ProviderCode::Cursor,
                 ProviderCode::Claude,
@@ -6849,7 +6942,7 @@ mod tests {
                 default_provider: ProviderCode::Codex,
                 default_models: HashMap::from([
                     (ProviderCode::Codex, "  gpt-5  ".into()),
-                    (ProviderCode::Gemini, "   ".into()),
+                    (ProviderCode::Antigravity, "   ".into()),
                 ]),
                 provider_settings: ProviderSettingsInput::default(),
             })
@@ -6918,7 +7011,7 @@ mod tests {
                 default_provider: ProviderCode::Codex,
                 default_models: HashMap::from([
                     (ProviderCode::Codex, "gpt-5".into()),
-                    (ProviderCode::Gemini, "gemini-2.5-pro".into()),
+                    (ProviderCode::Antigravity, "antigravity-2.5-pro".into()),
                 ]),
                 provider_settings: ProviderSettingsInput::default(),
             })
@@ -6926,8 +7019,8 @@ mod tests {
 
         assert_eq!(saved.default_provider, Some(ProviderCode::Codex));
         assert_eq!(
-            saved.default_models.get(&ProviderCode::Gemini),
-            Some(&"gemini-2.5-pro".to_string())
+            saved.default_models.get(&ProviderCode::Antigravity),
+            Some(&"antigravity-2.5-pro".to_string())
         );
     }
 
@@ -7322,28 +7415,28 @@ mod tests {
     }
 
     #[test]
-    fn gemini_assistant_message_parser_requires_assistant_role_in_same_object() {
+    fn antigravity_assistant_message_parser_accepts_only_agent_response_deltas() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
-            "thread_gemini_role",
-            ProviderCode::Gemini,
+            "thread_antigravity_role",
+            ProviderCode::Antigravity,
             None,
             None,
         );
-        let event_rx = runtime.event_bus.subscribe("thread_gemini_role");
+        let event_rx = runtime.event_bus.subscribe("thread_antigravity_role");
 
         runtime.emit_provider_stdout(
-            "thread_gemini_role",
-            r#"{"role":"assistant","text":"hello"}"#.to_string() + "\n",
+            "thread_antigravity_role",
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"hello"}}"#.to_string() + "\n",
         );
         runtime.emit_provider_stdout(
-            "thread_gemini_role",
-            r#"{"role":"user","text":"ignore user"}"#.to_string() + "\n",
+            "thread_antigravity_role",
+            r#"{"event":"step_update","step_update":{"step_type":"user_input","text_delta":"ignore user"}}"#.to_string() + "\n",
         );
         runtime.emit_provider_stdout(
-            "thread_gemini_role",
-            r#"{"text":"ignore missing role"}"#.to_string() + "\n",
+            "thread_antigravity_role",
+            r#"{"event":"step_update","step_update":{"step_type":"tool","text_delta":"ignore missing role"}}"#.to_string() + "\n",
         );
 
         let events = collect_available_core_events(&event_rx);
@@ -7356,30 +7449,30 @@ mod tests {
     }
 
     #[test]
-    fn gemini_assistant_message_parser_matches_nested_same_object_only() {
+    fn antigravity_assistant_message_parser_preserves_delta_whitespace() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
-            "thread_gemini_nested_role",
-            ProviderCode::Gemini,
+            "thread_antigravity_nested_role",
+            ProviderCode::Antigravity,
             None,
             None,
         );
-        let event_rx = runtime.event_bus.subscribe("thread_gemini_nested_role");
+        let event_rx = runtime.event_bus.subscribe("thread_antigravity_nested_role");
 
         runtime.emit_provider_stdout(
-            "thread_gemini_nested_role",
-            r#"{"candidates":[{"content":{"role":"assistant","parts":[{"text":"nested hello"}]}}]}"#
+            "thread_antigravity_nested_role",
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"  nested hello\n"}}"#
                 .to_string() + "\n",
         );
         runtime.emit_provider_stdout(
-            "thread_gemini_nested_role",
-            r#"{"items":[{"role":"assistant"},{"text":"sibling text"}]}"#.to_string() + "\n",
+            "thread_antigravity_nested_role",
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response"}}"#.to_string() + "\n",
         );
 
         let events = collect_available_core_events(&event_rx);
         assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "nested hello")
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "  nested hello\n")
         ));
         assert!(events.iter().all(|event| {
             !matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "sibling text")
@@ -8855,7 +8948,7 @@ mod tests {
     }
 
     fn assert_provider_instruction_present(command: &CommandSpec) {
-        for value in [&command.prompt, &command.stdin] {
+        for value in [&command.prompt] {
             assert!(value.contains("[Pedelec Runtime Rules]"));
             assert!(value.contains("[Pedelec App Tool Configuration]"));
             assert!(value.contains("pedelec-cli tool-spec get_app_state"));
@@ -8866,7 +8959,7 @@ mod tests {
     }
 
     fn assert_provider_instruction_absent(command: &CommandSpec) {
-        for value in [&command.prompt, &command.stdin] {
+        for value in [&command.prompt] {
             assert!(!value.contains("[Pedelec Runtime Rules]"));
             assert!(!value.contains("[Pedelec App Tool Configuration]"));
             assert!(!value.contains("./skills/pedelec-cli.md"));

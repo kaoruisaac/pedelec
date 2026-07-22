@@ -67,7 +67,7 @@ Pedelec Desktop App 擁有 Core Runtime，負責：
 
 ### Provider
 
-Provider 是 session 使用的 agent backend，目前代碼包含 `codex`、`gemini`、`opencode`、`cursor`、`claude` 與 `ollama`。
+Provider 是 session 使用的 agent backend，目前代碼包含 `codex`、`antigravity`、`opencode`、`cursor`、`claude` 與 `ollama`。
 
 Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 command、加入 Desktop App 能看到的 `PATH`，並完成登入。Ollama session 會使用 Pedelec 內附 agent executable、設定的 Ollama-compatible endpoint（default `http://127.0.0.1:11434`）、非空 API key（本機用 `ollama`）及已安裝的 model。
 

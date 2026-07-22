@@ -936,7 +936,7 @@ function normalizeSessionSettings(value: unknown): ShapeRainSessionSettings {
 }
 
 function isProviderCode(value: unknown): value is ProviderCode {
-  return value === "codex" || value === "gemini" || value === "opencode" || value === "cursor" || value === "claude" || value === "ollama";
+  return value === "codex" || value === "antigravity" || value === "opencode" || value === "cursor" || value === "claude" || value === "ollama";
 }
 
 function sessionSettingsLabel(settings: ShapeRainSessionSettings): string {

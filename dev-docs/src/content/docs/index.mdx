@@ -18,7 +18,7 @@ hero:
       variant: secondary
 ---
 
-Pedelec is a browser SDK and local bridge for applications that want to work with AI coding agents such as Codex, Gemini, OpenCode, Cursor, Claude Code, or an Ollama-backed agent.
+Pedelec is a browser SDK and local bridge for applications that want to work with AI coding agents such as Codex, Antigravity, OpenCode, Cursor, Claude Code, or an Ollama-backed agent.
 
 A web application can use Pedelec to:
 
@@ -48,7 +48,7 @@ Pedelec native host
   ↓ local Core IPC
 Pedelec Desktop Runtime
   ↓ provider process
-Codex / Gemini / OpenCode / Cursor / Claude Code / Ollama
+Codex / Antigravity / OpenCode / Cursor / Claude Code / Ollama
 ```
 
 The diagram is the control/event path. Asset file bodies follow a separate internal path: `Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/`. Use `session.uploadAsset()` only; do not depend on the internal URL, port, token, or ticket lifecycle.
@@ -59,7 +59,7 @@ The Pedelec SDK must run in a browser page environment and requires:
 1. The user has installed the Pedelec Chrome Extension.
 2. The user has opened the Pedelec Desktop App at least once after installation, completing binary setup, Native Messaging host registration, and launch-config creation.
 3. After that initialization, the native host can try to start Desktop in the background for a Core request; this may still fail and must be handled as an unavailable Desktop/installation issue.
-4. The target provider is available on the user's machine. CLI-backed providers use commands such as `codex`, `gemini`, `opencode`, `cursor`, or `claude`; the Ollama provider uses Pedelec's bundled `pedelec-agent`.
+4. The target provider is available on the user's machine. CLI-backed providers use commands such as `codex`, `agy`, `opencode`, `cursor`, or `claude`; the Ollama provider uses Pedelec's bundled `pedelec-agent`.
 
 The SDK is not suitable for direct use in Node.js, an SSR server, or a background worker; it needs extension runtime messaging from a Chrome page environment.
 
@@ -158,7 +158,7 @@ Currently supported provider codes in the SDK:
 | Provider | Code | Example model |
 | --- | --- | --- |
 | Codex | `codex` | `gpt-5` |
-| Gemini | `gemini` | Any model ID supported by the provider |
+| Antigravity | `antigravity` | Any model ID supported by the provider |
 | OpenCode | `opencode` | `ollama/qwen2.5-coder:14b` |
 | Cursor | `cursor` | `gpt-5` |
 | Claude Code | `claude` | `sonnet` |
@@ -244,7 +244,7 @@ Return format:
 ```ts
 type ProviderInfo = {
   name: string;
-  code: "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama";
+  code: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
   path: string | null;
   available: boolean;
   error: string | null;
@@ -263,7 +263,7 @@ const settings = await pedelec.getSettings();
 
 console.log(settings.defaultProvider);
 console.log(settings.defaultModels.codex);
-console.log(settings.defaultModels.gemini);
+console.log(settings.defaultModels.antigravity);
 console.log(settings.defaultModels.ollama);
 ```
 
@@ -271,8 +271,8 @@ Return format:
 
 ```ts
 type PedelecSettings = {
-  defaultProvider: "codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama" | null;
-  defaultModels: Partial<Record<"codex" | "gemini" | "opencode" | "cursor" | "claude" | "ollama", string>>;
+  defaultProvider: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama" | null;
+  defaultModels: Partial<Record<"codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama", string>>;
 };
 ```
 
