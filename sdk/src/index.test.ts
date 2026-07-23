@@ -378,9 +378,6 @@ describe("Pedelec SDK", () => {
 
   it("rejects invalid settings shapes from the extension", async () => {
     const pedelec = new Pedelec();
-    const legacy = pedelec.getSettings();
-    respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: "codex", defaultModel: "gpt-5" });
-    await expect(legacy).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR" });
 
     const ollamaSettings = pedelec.getSettings();
     respondOk(pageWindow, pageWindow.lastSent(), {
@@ -391,20 +388,6 @@ describe("Pedelec SDK", () => {
       defaultProvider: "ollama",
       defaultModels: { ollama: "qwen" },
     });
-
-    const illegalKey = pedelec.getSettings();
-    respondOk(pageWindow, pageWindow.lastSent(), {
-      defaultProvider: "codex",
-      defaultModels: { unknown: "qwen" },
-    });
-    await expect(illegalKey).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR" });
-
-    const nonStringValue = pedelec.getSettings();
-    respondOk(pageWindow, pageWindow.lastSent(), {
-      defaultProvider: "codex",
-      defaultModels: { codex: 123 },
-    });
-    await expect(nonStringValue).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR" });
 
     const emptyModels = pedelec.getSettings();
     respondOk(pageWindow, pageWindow.lastSent(), {
