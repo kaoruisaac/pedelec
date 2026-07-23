@@ -1,5 +1,5 @@
 import { render } from "solid-js/web";
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { getVersion } from "@tauri-apps/api/app";
 import { updateStore } from "./updater/updateStore";
 import { EventMonitorApp } from "./event-monitor/EventMonitorApp";
@@ -27,6 +27,15 @@ function AppShell() {
   onMount(() => {
     void getVersion().then(setAppVersion).catch(() => {});
     void updateStore.checkForUpdate();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.key.toLowerCase() === "m") {
+        setPage("monitor");
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
   });
 
   return (
@@ -127,11 +136,9 @@ function AppShell() {
           <div hidden={page() !== "settings"}>
             <SettingsPage onNavigateToSettings={() => setPage("settings")} />
           </div>
-          <Show when={IS_DEV}>
-            <div hidden={page() !== "monitor"}>
-              <EventMonitorApp />
-            </div>
-          </Show>
+          <div hidden={page() !== "monitor"}>
+            <EventMonitorApp />
+          </div>
         </section>
       </div>
     </PopUpProvider>
