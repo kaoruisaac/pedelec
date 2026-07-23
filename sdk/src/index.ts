@@ -541,9 +541,6 @@ export class Pedelec {
 
   async getSettings(): Promise<PedelecSettings> {
     const result = await this.request<PedelecSettings>("get_settings");
-    if (!isSettings(result)) {
-      throw makeError("SDK_PROTOCOL_ERROR", "get_settings response had invalid shape");
-    }
     return result;
   }
 
@@ -672,13 +669,9 @@ export class Pedelec {
       return this.resolveDefaultCreateSessionInput(normalizedSkills, autoEndOnDisconnect);
     }
 
-    if (!isProviderCode(provider)) {
-      throw makeError("INVALID_INPUT", "provider is not supported", { provider });
-    }
-
     let model = userModel;
     if (model === undefined) {
-      return this.resolveProviderOnlyCreateSessionInput(provider, normalizedSkills, autoEndOnDisconnect);
+      return this.resolveProviderOnlyCreateSessionInput(provider as ProviderCode, normalizedSkills, autoEndOnDisconnect);
     }
 
     return {
@@ -1438,29 +1431,6 @@ function isSessionEvent(message: PortMessage): message is SessionEvent {
   );
 }
 
-function isSettings(value: unknown): value is PedelecSettings {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return false;
-  const settings = value as Partial<PedelecSettings> & { defaultModel?: unknown };
-  const defaultModels = settings.defaultModels;
-  if (settings.defaultModel !== undefined) return false;
-  if (!defaultModels || typeof defaultModels !== "object" || Array.isArray(defaultModels)) {
-    return false;
-  }
-  return (
-    (settings.defaultProvider === null ||
-      settings.defaultProvider === "codex" ||
-      settings.defaultProvider === "antigravity" ||
-      settings.defaultProvider === "opencode" ||
-      settings.defaultProvider === "cursor" ||
-      settings.defaultProvider === "claude" ||
-      settings.defaultProvider === "ollama") &&
-    Object.entries(defaultModels).every(
-      ([provider, model]) => isProviderCode(provider) && typeof model === "string"
-    )
-  );
-}
-
 function isApprovalStatus(value: unknown): value is ApprovalStatus {
   if (!value || typeof value !== "object") return false;
   const status = value as Partial<ApprovalStatus>;
@@ -1468,17 +1438,6 @@ function isApprovalStatus(value: unknown): value is ApprovalStatus {
     typeof status.installed === "boolean" &&
     typeof status.approved === "boolean" &&
     (status.origin === null || typeof status.origin === "string")
-  );
-}
-
-function isProviderCode(value: string): value is ProviderCode {
-  return (
-    value === "codex" ||
-    value === "antigravity" ||
-    value === "opencode" ||
-    value === "cursor" ||
-    value === "claude" ||
-    value === "ollama"
   );
 }
 
