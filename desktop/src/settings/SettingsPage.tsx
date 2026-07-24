@@ -6,6 +6,7 @@ import { usePopUp } from "../services/PopUpProvider";
 import EditingProviderPopup from "./EditingProviderPopup";
 import MissingProviderPopup from "./MissingProviderPopup";
 import { findFirstAvailableCliProvider } from "./providerInitialization";
+import { OcTerminal2 } from "solid-icons/oc";
 
 const emptySettings: Settings = {
   defaultProvider: null,
@@ -34,6 +35,7 @@ function SettingsPage(props: SettingsPageProps) {
   const [savedMessage, setSavedMessage] = createSignal("");
   const [hasUnsavedChanges, setHasUnsavedChanges] = createSignal(false);
   const [launchingInstaller, setLaunchingInstaller] = createSignal<ProviderCode | null>(null);
+  const [launchingTerminal, setLaunchingTerminal] = createSignal<ProviderCode | null>(null);
   const [installerOpenedProviders, setInstallerOpenedProviders] = createSignal<Set<ProviderCode>>(new Set());
   const [restarting, setRestarting] = createSignal(false);
   const [missingProviderPopupShown, setMissingProviderPopupShown] = createSignal(false);
@@ -257,6 +259,24 @@ function SettingsPage(props: SettingsPageProps) {
     return provider.scanned && !provider.available && (provider.code === "codex" || provider.code === "antigravity" || provider.code === "opencode");
   }
 
+  function canOpenProviderTerminal(provider: Provider): boolean {
+    if (loading() || refreshingProviders() || saving() || launchingTerminal() !== null) return false;
+    return provider.code !== "ollama" && provider.scanned && provider.available;
+  }
+
+  async function openProviderTerminal(provider: Provider): Promise<void> {
+    if (!canOpenProviderTerminal(provider)) return;
+    setError("");
+    setLaunchingTerminal(provider.code);
+    try {
+      await invoke("open_provider_terminal", { input: { provider: provider.code } });
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLaunchingTerminal(null);
+    }
+  }
+
   async function openProviderInstaller(provider: Provider): Promise<void> {
     setError("");
     setLaunchingInstaller(provider.code);
@@ -326,8 +346,22 @@ function SettingsPage(props: SettingsPageProps) {
                       onChange={() => setDraftProvider(provider.code)}
                     />
                   </label>
-                  <span class="provider-main">
-                    <strong>{provider.name}</strong>
+                  <div class="provider-main">
+                    <div class="provider-name">
+                      <strong>{provider.name}</strong>
+                      <Show when={provider.code !== "ollama"}>
+                        <button
+                          type="button"
+                          class="provider-terminal-button"
+                          aria-label={`Open ${provider.name} CLI in Terminal`}
+                          title={`Open ${provider.name} CLI in Terminal`}
+                          disabled={!canOpenProviderTerminal(provider)}
+                          onClick={(event) => { event.stopPropagation(); void openProviderTerminal(provider); }}
+                        >
+                          <OcTerminal2 aria-hidden="true" />
+                        </button>
+                      </Show>
+                    </div>
                     <Show when={provider.version}>
                       <span>version: {provider.version}</span>
                     </Show>
@@ -360,7 +394,7 @@ function SettingsPage(props: SettingsPageProps) {
                         </button>
                       </Show>
                     </Show>
-                  </span>
+                  </div>
                   <span class="provider-status" data-status={providerStatusValue(provider)}>
                     {providerStatusLabel(provider)}
                   </span>

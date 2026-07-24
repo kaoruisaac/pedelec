@@ -5,7 +5,6 @@ use crate::pedelec_core::{
     ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput,
     UpdateSettingsInput,
 };
-use crate::provider_installer::{open as open_installer, OpenProviderInstallerInput, OpenProviderInstallerOutput};
 use crate::pedelec_ipc::{prepare_provider_process, start_core_ipc_server, start_provider_process};
 use crate::pedelec_native_registration::register_chrome_native_messaging_host;
 use crate::pedelec_paths::{
@@ -16,6 +15,12 @@ use crate::pedelec_paths::{
     BinaryInstallOutcome,
 };
 use crate::pedelec_upload::start_asset_upload_server;
+use crate::provider_installer::{
+    open as open_installer, OpenProviderInstallerInput, OpenProviderInstallerOutput,
+};
+use crate::provider_terminal::{
+    open as open_provider_terminal_window, OpenProviderTerminalInput, OpenProviderTerminalOutput,
+};
 use std::path::PathBuf;
 use std::thread;
 use tauri::menu::{Menu, MenuItem};
@@ -51,6 +56,7 @@ pub fn run() {
             list_providers,
             refresh_providers,
             open_provider_installer,
+            open_provider_terminal,
             restart_app,
             send_text,
             prepare_thread,
@@ -338,12 +344,29 @@ fn list_providers(state: State<'_, CoreRuntimeOwner>) -> Vec<ProviderInfo> {
 }
 
 #[tauri::command]
-fn open_provider_installer(input: OpenProviderInstallerInput) -> Result<OpenProviderInstallerOutput, PedelecError> {
+fn open_provider_installer(
+    input: OpenProviderInstallerInput,
+) -> Result<OpenProviderInstallerOutput, PedelecError> {
     open_installer(input)
 }
 
 #[tauri::command]
-fn restart_app(app: tauri::AppHandle) { app.request_restart(); }
+fn open_provider_terminal(
+    state: State<'_, CoreRuntimeOwner>,
+    input: OpenProviderTerminalInput,
+) -> Result<OpenProviderTerminalOutput, PedelecError> {
+    let executable = state
+        .runtime()
+        .lock()
+        .unwrap()
+        .provider_executable_path(&input.provider)?;
+    open_provider_terminal_window(input.provider, executable)
+}
+
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.request_restart();
+}
 
 #[tauri::command]
 async fn refresh_providers(

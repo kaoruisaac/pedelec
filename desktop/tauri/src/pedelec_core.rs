@@ -1571,6 +1571,43 @@ impl CoreRuntime {
         list_provider_infos_with_scan(&self.provider_scan, self.provider_path_value())
     }
 
+    /// Returns only the executable selected and version-validated by the latest
+    /// external provider scan. This intentionally does not resolve PATH again.
+    pub fn provider_executable_path(
+        &self,
+        provider: &ProviderCode,
+    ) -> Result<PathBuf, PedelecError> {
+        if *provider == ProviderCode::Ollama {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_TERMINAL_UNSUPPORTED,
+                "Ollama does not support opening a provider CLI Terminal.",
+                serde_json::json!({"provider": "ollama", "platform": std::env::consts::OS}),
+            ));
+        }
+        let Some(scan) = self.provider_scan.get(provider) else {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_TERMINAL_UNAVAILABLE,
+                "The provider scan has not completed.",
+                serde_json::json!({"provider": provider_code_as_str(provider), "platform": std::env::consts::OS}),
+            ));
+        };
+        let Some(path) = scan.path.clone().filter(|_| scan.version.is_some()) else {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_TERMINAL_UNAVAILABLE,
+                "The provider CLI is not available from the latest scan.",
+                serde_json::json!({"provider": provider_code_as_str(provider), "platform": std::env::consts::OS}),
+            ));
+        };
+        if !is_provider_executable(&path) {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_TERMINAL_UNAVAILABLE,
+                "The scanned provider executable is no longer available.",
+                serde_json::json!({"provider": provider_code_as_str(provider), "platform": std::env::consts::OS, "executablePath": path}),
+            ));
+        }
+        Ok(path)
+    }
+
     /// Replaces the complete external-provider scan only after every provider has
     /// been inspected, so concurrent callers never observe a partial refresh.
     pub fn refresh_providers(&mut self) {
@@ -3644,6 +3681,10 @@ pub mod error_codes {
     pub const PROVIDER_COMMAND_FAILED: &str = "PROVIDER_COMMAND_FAILED";
     pub const PROVIDER_INSTALL_UNSUPPORTED: &str = "PROVIDER_INSTALL_UNSUPPORTED";
     pub const PROVIDER_INSTALLER_LAUNCH_FAILED: &str = "PROVIDER_INSTALLER_LAUNCH_FAILED";
+    pub const PROVIDER_TERMINAL_UNSUPPORTED: &str = "PROVIDER_TERMINAL_UNSUPPORTED";
+    pub const PROVIDER_TERMINAL_UNAVAILABLE: &str = "PROVIDER_TERMINAL_UNAVAILABLE";
+    pub const PROVIDER_TERMINAL_WORKDIR_FAILED: &str = "PROVIDER_TERMINAL_WORKDIR_FAILED";
+    pub const PROVIDER_TERMINAL_LAUNCH_FAILED: &str = "PROVIDER_TERMINAL_LAUNCH_FAILED";
     pub const PROVIDER_PREPARE_UNSUPPORTED: &str = "PROVIDER_PREPARE_UNSUPPORTED";
     pub const PREPARE_SESSION_ID_MISSING: &str = "PREPARE_SESSION_ID_MISSING";
     pub const SKILL_URL_INVALID: &str = "SKILL_URL_INVALID";

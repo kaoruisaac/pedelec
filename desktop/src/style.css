@@ -281,7 +281,28 @@ pre {
   display: grid;
   gap: 2px;
 }
+.provider-main .provider-name {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
 
+.provider-terminal-button {
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #36506b;
+  cursor: pointer;
+}
+
+.provider-terminal-button:hover:not(:disabled) { background: #e9f0fb; color: #174ea6; }
+.provider-terminal-button:focus-visible { outline: 2px solid #2f6fed; outline-offset: 2px; }
+.provider-terminal-button:disabled { color: #9aa8b7; cursor: not-allowed; }
 .provider-main strong,
 .provider-main span,
 .provider-error {
