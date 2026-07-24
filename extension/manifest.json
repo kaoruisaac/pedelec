@@ -1,9 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Pedelec",
+  "name": "__MSG_extensionName__",
+  "description": "__MSG_extensionDescription__",
+  "default_locale": "en",
   "version": "0.1.12",
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_title": "__MSG_extensionName__"
   },
   "background": {
     "service_worker": "background.js"

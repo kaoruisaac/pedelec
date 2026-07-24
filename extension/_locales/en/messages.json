@@ -1,0 +1,15 @@
+{
+  "extensionName": { "message": "Pedelec" },
+  "extensionDescription": { "message": "Connect AI agents to websites through the Pedelec desktop app." },
+  "connectionConnected": { "message": "connected" },
+  "connectionDisconnected": { "message": "disconnected" },
+  "dismissProviderError": { "message": "Dismiss provider error" },
+  "approveSiteTitle": { "message": "Approve This Site" },
+  "approveSiteDescription": { "message": "Approving this origin allows this site to create local Pedelec agent sessions through the extension." },
+  "reject": { "message": "Reject" },
+  "approve": { "message": "Approve" },
+  "approvedSiteTitle": { "message": "Approved Site" },
+  "approvedSiteDescription": { "message": "This origin can create local Pedelec agent sessions through the extension." },
+  "revokeApproval": { "message": "Revoke Approval" },
+  "unknownProviderError": { "message": "Unknown provider error" }
+}

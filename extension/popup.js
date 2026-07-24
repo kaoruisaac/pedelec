@@ -13,8 +13,12 @@ const dismissProviderErrorButton = document.getElementById("dismiss-provider-err
 const port = chrome.runtime.connect({ name: "popup" });
 let currentApprovalState = null;
 
+PedelecI18n.applyDocumentTranslations(document);
+
 function render(state) {
-  connectionEl.textContent = state.connected ? "connected" : "disconnected";
+  connectionEl.textContent = state.connected
+    ? PedelecI18n.getMessageOrFallback("connectionConnected", "connected")
+    : PedelecI18n.getMessageOrFallback("connectionDisconnected", "disconnected");
   connectionEl.dataset.connected = String(Boolean(state.connected));
 }
 

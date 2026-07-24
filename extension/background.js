@@ -326,6 +326,15 @@ function createBackground(runtimeChrome, options = {}) {
     return event?.type === "error" && event?.source === "provider";
   }
 
+  function getUnknownProviderErrorMessage() {
+    try {
+      const message = runtimeChrome.i18n?.getMessage("unknownProviderError");
+      return typeof message === "string" && message.trim() ? message : "Unknown provider error";
+    } catch (_err) {
+      return "Unknown provider error";
+    }
+  }
+
   function providerErrorStateFromEvent(event) {
     if (typeof event?.provider !== "string" || !event.provider.trim()) return null;
 
@@ -340,7 +349,7 @@ function createBackground(runtimeChrome, options = {}) {
 
     return {
       provider: event.provider,
-      message: typeof message === "string" && message.trim() ? message : "Unknown provider error",
+      message: typeof message === "string" && message.trim() ? message : getUnknownProviderErrorMessage(),
     };
   }
 

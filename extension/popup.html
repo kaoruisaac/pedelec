@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <style>
@@ -205,8 +205,8 @@
   <body>
     <main>
       <header>
-        <h1>Pedelec</h1>
-        <span id="connection" class="pill" data-connected="false">disconnected</span>
+        <h1 data-i18n="extensionName">Pedelec</h1>
+        <span id="connection" class="pill" data-connected="false" data-i18n="connectionDisconnected">disconnected</span>
       </header>
       <section id="provider-error" class="provider-error" hidden>
         <div class="provider-error-header">
@@ -216,28 +216,30 @@
             class="provider-error-dismiss"
             type="button"
             aria-label="Dismiss provider error"
+            data-i18n-aria-label="dismissProviderError"
           >×</button>
         </div>
         <p id="provider-error-message"></p>
       </section>
       <section id="approval" class="approval" hidden>
-        <h2>Approve This Site</h2>
+        <h2 data-i18n="approveSiteTitle">Approve This Site</h2>
         <div id="origin" class="origin"></div>
-        <p>Approving this origin allows this site to create local Pedelec agent sessions through the extension.</p>
+        <p data-i18n="approveSiteDescription">Approving this origin allows this site to create local Pedelec agent sessions through the extension.</p>
         <div class="actions">
-          <button id="reject" type="button">Reject</button>
-          <button id="approve" type="button" class="primary">Approve</button>
+          <button id="reject" type="button" data-i18n="reject">Reject</button>
+          <button id="approve" type="button" class="primary" data-i18n="approve">Approve</button>
         </div>
       </section>
       <section id="revocation" class="approval" hidden>
-        <h2>Approved Site</h2>
+        <h2 data-i18n="approvedSiteTitle">Approved Site</h2>
         <div id="approved-origin" class="origin"></div>
-        <p>This origin can create local Pedelec agent sessions through the extension.</p>
+        <p data-i18n="approvedSiteDescription">This origin can create local Pedelec agent sessions through the extension.</p>
         <div class="actions">
-          <button id="revoke" type="button" class="danger">Revoke Approval</button>
+          <button id="revoke" type="button" class="danger" data-i18n="revokeApproval">Revoke Approval</button>
         </div>
       </section>
     </main>
+    <script src="i18n.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

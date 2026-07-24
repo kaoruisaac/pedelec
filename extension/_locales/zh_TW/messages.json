@@ -1,0 +1,15 @@
+{
+  "extensionName": { "message": "Pedelec" },
+  "extensionDescription": { "message": "透過 Pedelec 桌面應用程式，讓 AI Agent 與網站互動。" },
+  "connectionConnected": { "message": "已連線" },
+  "connectionDisconnected": { "message": "未連線" },
+  "dismissProviderError": { "message": "關閉 Provider 錯誤" },
+  "approveSiteTitle": { "message": "允許此網站" },
+  "approveSiteDescription": { "message": "允許此來源後，該網站便能透過此擴充功能建立本機 Pedelec Agent 工作階段。" },
+  "reject": { "message": "拒絕" },
+  "approve": { "message": "允許" },
+  "approvedSiteTitle": { "message": "已允許的網站" },
+  "approvedSiteDescription": { "message": "此來源可以透過擴充功能建立本機 Pedelec Agent 工作階段。" },
+  "revokeApproval": { "message": "撤銷允許" },
+  "unknownProviderError": { "message": "未知的 Provider 錯誤" }
+}
