@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_new_command_uses_agent_workspace_model_json_and_stdin_prompt() {
+    fn cursor_new_command_uses_cursor_agent_workspace_model_json_and_stdin_prompt() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
@@ -488,7 +488,7 @@ mod tests {
             .unwrap();
 
         let sandbox_path = temp.path().join("sandbox").join("thread_cursor_new");
-        assert_eq!(start.command.program, "agent");
+        assert_eq!(start.command.program, "cursor-agent");
         assert_eq!(
             start.command.args,
             vec![
@@ -531,6 +531,7 @@ mod tests {
             })
             .unwrap();
 
+        assert_eq!(start.command.program, "cursor-agent");
         assert!(start
             .command
             .args
@@ -1062,6 +1063,20 @@ mod tests {
         assert!(!cursor.available);
         assert_eq!(cursor.path, None);
         assert!(cursor.error.as_deref().unwrap().contains("PATH"));
+    }
+
+    #[test]
+    fn cursor_is_unavailable_when_path_only_contains_legacy_agent_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_path = test_provider_path(temp.path(), "agent");
+        let providers = list_provider_infos(Some(provider_path));
+        let cursor = providers
+            .iter()
+            .find(|provider| provider.code == ProviderCode::Cursor)
+            .unwrap();
+
+        assert!(!cursor.available);
+        assert_eq!(cursor.path, None);
     }
 
     #[test]
@@ -1747,21 +1762,37 @@ mod tests {
     #[test]
     fn provider_binary_lookup_candidates_include_windows_cursor_agent_names() {
         let dirs = vec![PathBuf::from("C:/bin")];
-        let candidates = provider_binary_lookup_candidates("agent", &dirs);
+        let candidates = provider_binary_lookup_candidates("cursor-agent", &dirs);
 
         #[cfg(windows)]
         assert_eq!(
             candidates,
             vec![
-                PathBuf::from("C:/bin/agent"),
-                PathBuf::from("C:/bin/agent.exe"),
-                PathBuf::from("C:/bin/agent.cmd"),
-                PathBuf::from("C:/bin/agent.bat"),
+                PathBuf::from("C:/bin/cursor-agent"),
+                PathBuf::from("C:/bin/cursor-agent.exe"),
+                PathBuf::from("C:/bin/cursor-agent.cmd"),
+                PathBuf::from("C:/bin/cursor-agent.bat"),
             ]
         );
 
         #[cfg(not(windows))]
-        assert_eq!(candidates, vec![PathBuf::from("C:/bin").join("agent")]);
+        assert_eq!(
+            candidates,
+            vec![PathBuf::from("C:/bin").join("cursor-agent")]
+        );
+    }
+
+    #[test]
+    fn cursor_binary_lookup_candidates_do_not_include_legacy_agent_aliases() {
+        let dirs = vec![PathBuf::from("C:/bin")];
+        let candidates = provider_binary_lookup_candidates("cursor-agent", &dirs);
+
+        assert!(candidates.iter().all(|candidate| {
+            !matches!(
+                candidate.file_name().and_then(|name| name.to_str()),
+                Some("agent") | Some("agent.exe") | Some("agent.cmd") | Some("agent.bat")
+            )
+        }));
     }
 
     #[test]

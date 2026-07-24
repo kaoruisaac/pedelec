@@ -64,7 +64,7 @@ Pedelec SDK 必須在瀏覽器頁面環境中執行，並且需要：
 1. 使用者已安裝 Pedelec Chrome Extension。
 2. 使用者安裝後已至少正常開啟一次 Pedelec Desktop App，完成 binary setup、Native Messaging host registration 與 launch config 建立。
 3. 完成初始化後，native host 可在 Core request 時嘗試 background 啟動 Desktop；此操作可能失敗，應視為 Desktop/installation unavailable 處理。
-4. 目標 provider 在使用者本機可用。CLI 型 provider 使用 `codex`、`agy`、`opencode`、`cursor` 或 `claude`；Ollama provider 使用 Pedelec 隨附的 `pedelec-agent`。
+4. 目標 provider 在使用者本機可用。CLI 型 provider 使用 `codex`、`agy`、`opencode`、`cursor-agent` 或 `claude`；Ollama provider 使用 Pedelec 隨附的 `pedelec-agent`。
 
 SDK 不適合直接在 Node.js、SSR server 或 background worker 裡使用；它需要 Chrome 頁面環境中的 extension runtime messaging。
 

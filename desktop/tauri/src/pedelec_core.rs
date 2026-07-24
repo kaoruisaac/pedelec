@@ -1034,7 +1034,7 @@ impl ProviderAdapter for CursorProviderAdapter {
         add_model_args(&mut args, &ctx.thread.model, "--model");
         let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         Ok(CommandSpec {
-            program: "agent".to_string(),
+            program: "cursor-agent".to_string(),
             args,
             cwd: ctx.thread.sandbox_path.clone(),
             env: build_provider_env(ctx)?,
@@ -1069,7 +1069,7 @@ impl ProviderAdapter for CursorProviderAdapter {
         add_model_args(&mut args, &ctx.thread.model, "--model");
         let prompt = build_provider_resume_prompt(message);
         Ok(CommandSpec {
-            program: "agent".to_string(),
+            program: "cursor-agent".to_string(),
             args,
             cwd: ctx.thread.sandbox_path.clone(),
             env: build_provider_env(ctx)?,
@@ -3756,7 +3756,7 @@ fn provider_program_name(provider: &ProviderCode) -> &'static str {
         ProviderCode::Codex => "codex",
         ProviderCode::Antigravity => "agy",
         ProviderCode::OpenCode => "opencode",
-        ProviderCode::Cursor => "agent",
+        ProviderCode::Cursor => "cursor-agent",
         ProviderCode::Claude => "claude",
         ProviderCode::Ollama => "pedelec-agent",
     }

@@ -256,7 +256,7 @@ function SettingsPage(props: SettingsPageProps) {
   }
 
   function canInstallProvider(provider: Provider): boolean {
-    return provider.scanned && !provider.available && (provider.code === "codex" || provider.code === "antigravity" || provider.code === "opencode");
+    return provider.scanned && !provider.available && (provider.code === "codex" || provider.code === "antigravity" || provider.code === "opencode" || provider.code === "cursor");
   }
 
   function canOpenProviderTerminal(provider: Provider): boolean {
@@ -387,6 +387,8 @@ function SettingsPage(props: SettingsPageProps) {
                             ? "Installation opened in Terminal. Complete the installation and sign-in flow, then restart Pedelec."
                             : provider.code === "antigravity"
                               ? "Installation opened in Terminal. Complete the Antigravity sign-in and onboarding flow, then restart Pedelec."
+                              : provider.code === "cursor"
+                                ? "Installation opened in Terminal. Complete the installation and Cursor sign-in flow, then restart Pedelec."
                               : "Installation opened in Terminal. Complete the installation, then restart Pedelec."}
                         </span>
                         <button type="button" class="provider-restart-button" disabled={restarting()} onClick={() => void restartPedelec()}>

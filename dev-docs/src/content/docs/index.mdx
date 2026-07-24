@@ -59,7 +59,7 @@ The Pedelec SDK must run in a browser page environment and requires:
 1. The user has installed the Pedelec Chrome Extension.
 2. The user has opened the Pedelec Desktop App at least once after installation, completing binary setup, Native Messaging host registration, and launch-config creation.
 3. After that initialization, the native host can try to start Desktop in the background for a Core request; this may still fail and must be handled as an unavailable Desktop/installation issue.
-4. The target provider is available on the user's machine. CLI-backed providers use commands such as `codex`, `agy`, `opencode`, `cursor`, or `claude`; the Ollama provider uses Pedelec's bundled `pedelec-agent`.
+4. The target provider is available on the user's machine. CLI-backed providers use commands such as `codex`, `agy`, `opencode`, `cursor-agent`, or `claude`; the Ollama provider uses Pedelec's bundled `pedelec-agent`.
 
 The SDK is not suitable for direct use in Node.js, an SSR server, or a background worker; it needs extension runtime messaging from a Chrome page environment.
 

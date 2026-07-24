@@ -176,7 +176,7 @@ const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupPro
                 <input
                     type="password"
                     value={editingApiKey()}
-                    placeholder={"若為本地模型則輸入: 'ollama'"}
+                    placeholder={"If it is a local server, type in: 'ollama'"}
                     onInput={(event) => setEditingApiKey(event.currentTarget.value)}
                     onBlur={() => loadOllamaModels()}
                 />

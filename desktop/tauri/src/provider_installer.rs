@@ -27,6 +27,8 @@ const FINISHED: &str =
     "Installation command finished. Return to Pedelec and click Restart Pedelec when ready.";
 const ANTIGRAVITY_FINISHED: &str =
     "Antigravity installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
+const CURSOR_FINISHED: &str =
+    "Cursor installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const CODEX_FINISHED: &str = "Codex installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
 #[cfg(windows)]
@@ -106,7 +108,10 @@ fn open_linux_terminal(plan: &InstallerPlan) -> std::io::Result<()> {
 pub(crate) fn installer_plan(provider: &ProviderCode) -> Result<InstallerPlan, PedelecError> {
     if !matches!(
         provider,
-        ProviderCode::Codex | ProviderCode::Antigravity | ProviderCode::OpenCode
+        ProviderCode::Codex
+            | ProviderCode::Antigravity
+            | ProviderCode::OpenCode
+            | ProviderCode::Cursor
     ) {
         return Err(unsupported(provider));
     }
@@ -129,6 +134,7 @@ fn windows_plan(provider: &ProviderCode) -> InstallerPlan {
     let script = match provider {
         ProviderCode::Codex => windows_codex_script(),
         ProviderCode::Antigravity => windows_antigravity_script(),
+        ProviderCode::Cursor => windows_cursor_script(),
         ProviderCode::OpenCode => format!("$bash=Get-Command bash.exe -ErrorAction SilentlyContinue; $native=$false; if($bash){{$u=& $bash.Source -lc 'uname -s' 2>$null; if($u -match '^(MINGW|MSYS|CYGWIN)'){{$native=$true}}}}; if($native){{Write-Host 'Installing OpenCode with native Windows Bash and curl...'; & $bash.Source -lc 'curl -fsSL https://opencode.ai/install | bash'}} else {{$npm=Get-Command npm.cmd -ErrorAction SilentlyContinue; if(-not $npm){{$npm=Get-Command npm -ErrorAction SilentlyContinue}}; if($npm){{Write-Host 'Installing OpenCode with npm...'; & $npm.Source install -g opencode-ai}} else {{if($bash){{Write-Host 'WSL Bash was found, but it installs the Linux OpenCode binary and cannot be used for this Windows installation.'}}; Write-Host 'OpenCode installation requires Node.js/npm or a native Windows Bash (Git Bash, MSYS2, or Cygwin).'; Write-Host 'Install Node.js or Git Bash, then return to Pedelec and try again.'}}}}; Write-Host ''; Write-Host '{}'", FINISHED),
         _ => unreachable!(),
     };
@@ -145,11 +151,66 @@ fn windows_plan(provider: &ProviderCode) -> InstallerPlan {
         method: match provider {
             ProviderCode::Codex => "codex-windows-auto",
             ProviderCode::Antigravity => "antigravity-windows-auto",
+            ProviderCode::Cursor => "cursor-windows-auto",
             ProviderCode::OpenCode => "opencode-windows-auto",
             _ => unreachable!(),
         }
         .into(),
     }
+}
+
+#[cfg(windows)]
+fn windows_cursor_script() -> String {
+    format!(
+        r#"
+$cursorInstallDir = Join-Path $env:LOCALAPPDATA 'cursor-agent'
+$cursorCommand = $null
+Write-Host 'Installing Cursor CLI...'
+try {{
+    $ErrorActionPreference = 'Stop'
+    irm 'https://cursor.com/install?win32=true' | iex
+}} catch {{
+    Write-Host "The Cursor installer failed: $($_.Exception.Message)"
+}}
+
+if (Test-Path -LiteralPath $cursorInstallDir -PathType Container) {{
+    foreach ($cursorCandidate in @(
+        'agent.exe', 'agent.cmd', 'agent.ps1',
+        'cursor-agent.exe', 'cursor-agent.cmd', 'cursor-agent.ps1'
+    )) {{
+        $candidatePath = Join-Path $cursorInstallDir $cursorCandidate
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {{
+            $cursorCommand = $candidatePath
+            break
+        }}
+    }}
+    if ($cursorCommand) {{
+        Write-Host 'Starting Cursor sign-in...'
+        try {{
+            & $cursorCommand login
+            $loginExitCode = $LASTEXITCODE
+            if ($loginExitCode -eq 0) {{
+                Write-Host 'Cursor sign-in completed.'
+            }} else {{
+                Write-Host "Cursor is installed, but sign-in was not completed (exit code $loginExitCode)."
+                Write-Host 'You can run agent login again later.'
+            }}
+        }} catch {{
+            Write-Host "Cursor is installed, but sign-in could not be started: $($_.Exception.Message)"
+            Write-Host 'You can run agent login again later.'
+        }}
+    }} else {{
+        Write-Host 'Cursor is installed, but this installer could not locate its launcher to start sign-in.'
+        Write-Host 'Open a new Terminal and run agent login.'
+    }}
+    Write-Host '{}'
+}} else {{
+    Write-Host 'Cursor installation failed: the Cursor CLI installation directory was not found.'
+    Write-Host 'Review the errors above, then try again.'
+}}
+"#,
+        CURSOR_FINISHED
+    )
 }
 
 #[cfg(windows)]
@@ -319,6 +380,26 @@ else
 fi
 exec "${{SHELL:-/bin/sh}}" -l"#, CODEX_FINISHED),
         ProviderCode::OpenCode => format!("curl -fsSL https://opencode.ai/install | bash\nprintf '\\n{}\\n'\nexec \"${{SHELL:-/bin/sh}}\" -l", FINISHED),
+        ProviderCode::Cursor => format!(r#"if curl -fsSL https://cursor.com/install | bash; then
+  cursor_command="${{CURSOR_INSTALL_DIR:-$HOME/.local/bin}}/cursor-agent"
+  if [ -x "$cursor_command" ]; then
+    printf '%s\n' 'Starting Cursor sign-in...'
+    if "$cursor_command" login; then
+      printf '%s\n' 'Cursor sign-in completed.'
+    else
+      login_exit_code=$?
+      printf '%s\n' "Cursor is installed, but sign-in was not completed (exit code $login_exit_code)."
+      printf '%s\n' 'You can run cursor-agent login again later.'
+    fi
+  else
+    printf '%s\n' 'Cursor is installed, but this installer could not locate its executable to start sign-in.'
+    printf '%s\n' 'Open a new Terminal and run cursor-agent login.'
+  fi
+  printf '\n%s\n' '{}'
+else
+  printf '%s\n' 'Cursor installation failed. Review the errors above, then try again.'
+fi
+exec "${{SHELL:-/bin/sh}}" -l"#, CURSOR_FINISHED),
         ProviderCode::Antigravity => format!(r#"if curl -fsSL https://antigravity.google/cli/install.sh | bash; then
   agy_command="$HOME/.local/bin/agy"
   if [ -x "$agy_command" ]; then
@@ -347,6 +428,7 @@ exec "${{SHELL:-/bin/sh}}" -l"#, ANTIGRAVITY_FINISHED),
         method: match provider {
             ProviderCode::Codex => "codex-shell",
             ProviderCode::Antigravity => "antigravity-shell",
+            ProviderCode::Cursor => "cursor-shell",
             ProviderCode::OpenCode => "opencode-shell",
             _ => unreachable!(),
         }
@@ -375,11 +457,7 @@ mod tests {
 
     #[test]
     fn rejects_non_installable_providers() {
-        for provider in [
-            ProviderCode::Cursor,
-            ProviderCode::Claude,
-            ProviderCode::Ollama,
-        ] {
+        for provider in [ProviderCode::Claude, ProviderCode::Ollama] {
             assert_eq!(
                 installer_plan(&provider).unwrap_err().code,
                 error_codes::PROVIDER_INSTALL_UNSUPPORTED
@@ -433,6 +511,25 @@ mod tests {
         assert!(opencode_script.contains("install -g opencode-ai"));
         assert!(!opencode_script.contains("codex login"));
 
+        let cursor = installer_plan(&ProviderCode::Cursor).unwrap();
+        assert_eq!(cursor.program, "powershell.exe");
+        assert_eq!(cursor.method, "cursor-windows-auto");
+        let cursor_script = cursor.args.last().unwrap();
+        assert!(cursor_script.contains("irm 'https://cursor.com/install?win32=true' | iex"));
+        assert!(cursor_script.contains("Join-Path $env:LOCALAPPDATA 'cursor-agent'"));
+        assert!(cursor_script.contains("'agent.exe', 'agent.cmd', 'agent.ps1'"));
+        assert!(
+            cursor_script.contains("'cursor-agent.exe', 'cursor-agent.cmd', 'cursor-agent.ps1'")
+        );
+        assert!(cursor_script.contains("& $cursorCommand login"));
+        assert!(cursor_script.contains("Starting Cursor sign-in"));
+        assert!(cursor_script.contains("sign-in was not completed"));
+        assert!(cursor_script.contains("could not locate its launcher to start sign-in"));
+        assert!(cursor_script.contains(CURSOR_FINISHED));
+        assert!(!cursor_script.contains("bash.exe"));
+        assert!(!cursor_script.contains("WSL Bash"));
+        assert!(!cursor_script.contains("curl -fsSL"));
+
         let antigravity = installer_plan(&ProviderCode::Antigravity).unwrap();
         assert_eq!(antigravity.program, "powershell.exe");
         assert_eq!(antigravity.method, "antigravity-windows-auto");
@@ -469,6 +566,20 @@ mod tests {
         assert!(!opencode_script.contains("codex login"));
         assert!(!opencode_script.contains("CODEX_INSTALL_DIR"));
         assert!(opencode_script.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+
+        let cursor = installer_plan(&ProviderCode::Cursor).unwrap();
+        assert_eq!(cursor.method, "cursor-shell");
+        let cursor_script = cursor.args.last().unwrap();
+        assert!(cursor_script.contains("https://cursor.com/install | bash"));
+        assert!(cursor_script.contains("${CURSOR_INSTALL_DIR:-$HOME/.local/bin}/cursor-agent"));
+        assert!(cursor_script.contains("if \"$cursor_command\" login; then"));
+        assert!(cursor_script.contains("Cursor sign-in completed."));
+        assert!(cursor_script.contains("sign-in was not completed"));
+        assert!(cursor_script.contains(CURSOR_FINISHED));
+        assert!(cursor_script.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+        assert!(!cursor_script.contains("codex login"));
+        assert!(!cursor_script.contains("/agent\""));
+        assert!(!cursor_script.contains(" run agent login"));
 
         let antigravity = installer_plan(&ProviderCode::Antigravity).unwrap();
         assert_eq!(antigravity.method, "antigravity-shell");
