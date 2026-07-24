@@ -1,4 +1,5 @@
 import { createStore, produce } from "solid-js/store";
+import type { ProviderCode } from "../settings/types";
 
 export const MAX_EVENTS_PER_THREAD = 300;
 
@@ -10,6 +11,8 @@ export interface MonitorEvent {
   status?: string;
   text?: string;
   providerSessionId?: string;
+  source?: "provider" | "core";
+  provider?: ProviderCode;
   [key: string]: unknown;
 }
 

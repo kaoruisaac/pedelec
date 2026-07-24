@@ -47,7 +47,9 @@ function createChromeMock() {
   let onConnectExternalListener = null;
   let openPopupCallCount = 0;
   let activeTabUrl = "https://active.example.test/page";
+  let activeTabId = 1;
   const storageData = {};
+  const sessionStorageData = {};
   const chrome = {
     runtime: {
       lastError: null,
@@ -75,6 +77,23 @@ function createChromeMock() {
           return Promise.resolve();
         },
       },
+      session: {
+        get: (key, callback) => {
+          const result = typeof key === "string" ? { [key]: sessionStorageData[key] } : { ...sessionStorageData };
+          callback?.(result);
+          return Promise.resolve(result);
+        },
+        set: (value, callback) => {
+          Object.assign(sessionStorageData, value);
+          callback?.();
+          return Promise.resolve();
+        },
+        remove: (key, callback) => {
+          delete sessionStorageData[key];
+          callback?.();
+          return Promise.resolve();
+        },
+      },
     },
     action: {
       openPopup: () => {
@@ -84,7 +103,7 @@ function createChromeMock() {
     },
     tabs: {
       query: (_queryInfo, callback) => {
-        const tabs = activeTabUrl ? [{ url: activeTabUrl }] : [];
+        const tabs = activeTabUrl ? [{ id: activeTabId, url: activeTabUrl }] : [];
         callback?.(tabs);
         return Promise.resolve(tabs);
       },
@@ -94,9 +113,14 @@ function createChromeMock() {
     chrome,
     nativePort,
     storageData,
+    sessionStorageData,
     getConnectNativeCallCount: () => connectNativeCallCount,
     getOpenPopupCallCount: () => openPopupCallCount,
     setActiveTabUrl: (url) => {
+      activeTabUrl = url;
+    },
+    setActiveTab: (id, url = activeTabUrl) => {
+      activeTabId = id;
       activeTabUrl = url;
     },
     emitRuntimeConnect: (port) => onConnectListener?.(port),
@@ -142,9 +166,36 @@ async function createSdkSession(background, nativePort, sessionId = "thread_sdk"
   return sdkPort;
 }
 
-function createExternalSdkPort(origin = "https://example.test") {
+async function createExternalSdkSession(background, nativePort, storageData, {
+  sessionId = "thread_sdk",
+  origin = "https://example.test",
+  tabId = 1,
+} = {}) {
+  storageData.approvedOrigins = [{ origin, approvedAt: 1 }];
+  const sdkPort = createExternalSdkPort(origin, tabId);
+  background.handleSdkExternalConnect(sdkPort);
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skills: undefined },
+  });
+  respondNative(nativePort, nativePort.lastSent(), { threadId: sessionId });
+  await tick();
+  respondNative(nativePort, nativePort.lastSent(), { subscribed: true });
+  await tick();
+  return sdkPort;
+}
+
+function createExternalSdkPort(origin = "https://example.test", tabId = 1) {
   const port = new MockPort("pedelec-sdk-external");
-  port.sender = { url: `${origin}/app` };
+  port.sender = { url: `${origin}/app`, tab: { id: tabId } };
+  return port;
+}
+
+function createPopupPort(tabId = 1) {
+  const port = new MockPort("popup");
+  port.sender = { tab: { id: tabId } };
   return port;
 }
 
@@ -775,6 +826,126 @@ test("routes SDK thread events without mutating popup state", async () => {
   assert.equal(background.getState().events.length, 0);
 });
 
+test("provider errors persist, open the popup, and continue to the SDK route", async () => {
+  const { chrome, nativePort, sessionStorageData, getOpenPopupCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = await createSdkSession(background, nativePort);
+
+  background.handleNativeMessage({
+    type: "thread_event",
+    event: {
+      type: "error", threadId: "thread_sdk", seq: 1, source: "provider", provider: "codex",
+      error: { code: "PROVIDER_COMMAND_FAILED", message: "Authentication failed" },
+    },
+  });
+  await tick();
+
+  assert.deepEqual(sessionStorageData.latestProviderError, {
+    provider: "codex",
+    message: "Authentication failed",
+  });
+  assert.equal(getOpenPopupCallCount(), 1);
+  assert.deepEqual(sdkPort.lastSent(), {
+    channelId: "channel_1", type: "error", sessionId: "thread_sdk", seq: 1,
+    source: "provider", provider: "codex",
+    error: { code: "PROVIDER_COMMAND_FAILED", message: "Authentication failed" },
+  });
+  assert.equal(background.getState().threadId, null);
+});
+
+test("provider error preserves the provider title and only retains the latest error", async () => {
+  const { chrome, sessionStorageData } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const popupPort = new MockPort("popup");
+  background.handlePopupConnect(popupPort);
+
+  for (const [provider, message] of [["CoDeX-custom", "First error"], ["cursor", "Second error"]]) {
+    background.handleNativeMessage({
+      type: "thread_event",
+      event: { type: "error", source: "provider", provider, error: { message } },
+    });
+  }
+  await tick();
+  await tick();
+
+  assert.deepEqual(sessionStorageData.latestProviderError, { provider: "cursor", message: "Second error" });
+  const providerStates = popupPort.sent.filter((message) => message.type === "provider_error_state");
+  assert.deepEqual(providerStates.at(-1), {
+    type: "provider_error_state",
+    providerError: { provider: "cursor", message: "Second error" },
+  });
+  assert.equal(providerStates.some((message) => message.providerError?.provider === "CoDeX-custom"), true);
+});
+
+test("core and legacy errors do not trigger the provider error popup", async () => {
+  const { chrome, nativePort, sessionStorageData, getOpenPopupCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = await createSdkSession(background, nativePort);
+
+  for (const event of [
+    { type: "error", threadId: "thread_sdk", seq: 1, source: "core", error: { message: "core" } },
+    { type: "error", threadId: "thread_sdk", seq: 2, error: { message: "legacy" } },
+    { type: "assistant_message", threadId: "thread_sdk", seq: 3, source: "provider", text: "not an error" },
+  ]) {
+    background.handleNativeMessage({ type: "thread_event", event });
+  }
+  await tick();
+
+  assert.equal(sessionStorageData.latestProviderError, undefined);
+  assert.equal(getOpenPopupCallCount(), 0);
+  assert.deepEqual(sdkPort.lastSent(), {
+    channelId: "channel_1", type: "chat_delta", sessionId: "thread_sdk", seq: 3, text: "not an error",
+  });
+});
+
+test("popup connect reads a stored provider error and dismiss removes it for every popup", async () => {
+  const { chrome, sessionStorageData } = createChromeMock();
+  sessionStorageData.latestProviderError = { provider: "cursor", message: "Login required" };
+  const background = createBackground(chrome, { disableReconnect: true });
+  const firstPopupPort = new MockPort("popup");
+  const secondPopupPort = new MockPort("popup");
+  background.handlePopupConnect(firstPopupPort);
+  background.handlePopupConnect(secondPopupPort);
+  await tick();
+
+  assert.deepEqual(firstPopupPort.sent.findLast((message) => message.type === "provider_error_state"), {
+    type: "provider_error_state",
+    providerError: { provider: "cursor", message: "Login required" },
+  });
+  firstPopupPort.emit({ type: "dismiss_provider_error" });
+  await tick();
+
+  assert.equal(sessionStorageData.latestProviderError, undefined);
+  for (const port of [firstPopupPort, secondPopupPort]) {
+    assert.deepEqual(port.sent.findLast((message) => message.type === "provider_error_state"), {
+      type: "provider_error_state",
+      providerError: null,
+    });
+    assert.equal(port.disconnectCallCount, 0);
+  }
+});
+
+test("provider error popup failure keeps the event dispatch and stored error intact", async () => {
+  const { chrome, nativePort, sessionStorageData } = createChromeMock();
+  chrome.action.openPopup = () => Promise.reject(new Error("blocked"));
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = await createSdkSession(background, nativePort);
+
+  background.handleNativeMessage({
+    type: "thread_event",
+    event: {
+      type: "error", threadId: "thread_sdk", seq: 1, source: "provider", provider: "codex",
+      error: "Login required",
+    },
+  });
+  await tick();
+  await tick();
+
+  assert.deepEqual(sessionStorageData.latestProviderError, { provider: "codex", message: "Login required" });
+  assert.equal(sdkPort.lastSent().type, "error");
+  assert.equal(background.getState().error, null);
+});
+
 test("SDK create_session lazy connects and keeps native host while active", async () => {
   const { chrome, nativePort, getConnectNativeCallCount } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
@@ -805,6 +976,41 @@ test("maps Core statuses to SDK statuses", () => {
       status: "waiting_tool_result",
     }
   );
+});
+
+test("maps provider error source and provider to SDK events", () => {
+  const { chrome } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+
+  assert.deepEqual(
+    background.sdkEventFromThreadEvent({
+      type: "error", seq: 4, threadId: "thread_sdk", source: "provider", provider: "cursor",
+      error: { code: "PROVIDER_COMMAND_FAILED", message: "provider command failed" },
+    }),
+    {
+      type: "error", sessionId: "thread_sdk", seq: 4, source: "provider", provider: "cursor",
+      error: { code: "PROVIDER_COMMAND_FAILED", message: "provider command failed" },
+    }
+  );
+});
+
+test("maps core errors without a provider and accepts legacy errors", () => {
+  const { chrome } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+
+  const core = background.sdkEventFromThreadEvent({
+    type: "error", seq: 5, threadId: "thread_sdk", source: "core",
+    error: { code: "INTERNAL_ERROR", message: "Pedelec internal operation failed" },
+  });
+  assert.deepEqual(core, {
+    type: "error", sessionId: "thread_sdk", seq: 5, source: "core",
+    error: { code: "INTERNAL_ERROR", message: "Pedelec internal operation failed" },
+  });
+  assert.equal(Object.hasOwn(core, "provider"), false);
+
+  assert.doesNotThrow(() => background.sdkEventFromThreadEvent({
+    type: "error", seq: 6, threadId: "thread_sdk", error: { code: "LEGACY", message: "legacy" },
+  }));
 });
 
 test("SDK port disconnect auto-ends default lifecycle session", async () => {

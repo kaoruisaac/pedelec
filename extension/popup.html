@@ -50,6 +50,56 @@
         background: #e7f6ec;
       }
 
+      .provider-error {
+        display: grid;
+        gap: 8px;
+        border: 1px solid #d92d20;
+        border-radius: 8px;
+        background: #fff1f0;
+        padding: 10px;
+      }
+
+      .provider-error[hidden] {
+        display: none;
+      }
+
+      .provider-error-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .provider-error-header strong {
+        overflow-wrap: anywhere;
+        font-size: 14px;
+      }
+
+      .provider-error-dismiss {
+        flex: none;
+        border: 0;
+        border-radius: 4px;
+        padding: 0 4px;
+        background: transparent;
+        color: #b42318;
+        font-size: 20px;
+        line-height: 1;
+      }
+
+      .provider-error-dismiss:hover,
+      .provider-error-dismiss:focus-visible {
+        background: #fdd9d6;
+      }
+
+      .provider-error p {
+        margin: 0;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+        color: #7a271a;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
       .approval {
         display: grid;
         gap: 10px;
@@ -125,6 +175,24 @@
           color: #b7c0ce;
         }
 
+        .provider-error {
+          border-color: #f97066;
+          background: #3a1d1b;
+        }
+
+        .provider-error-dismiss {
+          color: #fda29b;
+        }
+
+        .provider-error-dismiss:hover,
+        .provider-error-dismiss:focus-visible {
+          background: #592421;
+        }
+
+        .provider-error p {
+          color: #fdbab4;
+        }
+
         .origin,
         button {
           border-color: #3b4656;
@@ -140,6 +208,18 @@
         <h1>Pedelec</h1>
         <span id="connection" class="pill" data-connected="false">disconnected</span>
       </header>
+      <section id="provider-error" class="provider-error" hidden>
+        <div class="provider-error-header">
+          <strong id="provider-error-provider"></strong>
+          <button
+            id="dismiss-provider-error"
+            class="provider-error-dismiss"
+            type="button"
+            aria-label="Dismiss provider error"
+          >×</button>
+        </div>
+        <p id="provider-error-message"></p>
+      </section>
       <section id="approval" class="approval" hidden>
         <h2>Approve This Site</h2>
         <div id="origin" class="origin"></div>

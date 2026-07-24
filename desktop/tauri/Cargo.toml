@@ -1,6 +1,6 @@
 [package]
 name = "pedelec-app"
-version = "0.1.11"
+version = "0.1.12"
 description = "Pedelec"
 authors = ["Isaac Lin"]
 edition = "2021"

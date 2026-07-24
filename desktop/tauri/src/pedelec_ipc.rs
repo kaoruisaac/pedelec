@@ -658,23 +658,30 @@ fn start_provider_process_with_command(
         purpose,
     );
 
-    if let Some(stdout) = stdout {
+    let stdout_reader = stdout.map(|stdout| {
         spawn_provider_reader(
             Arc::clone(&runtime),
             thread_id.clone(),
             stdout,
             ProviderStream::Stdout,
-        );
-    }
-    if let Some(stderr) = stderr {
+        )
+    });
+    let stderr_reader = stderr.map(|stderr| {
         spawn_provider_reader(
             Arc::clone(&runtime),
             thread_id.clone(),
             stderr,
             ProviderStream::Stderr,
-        );
-    }
-    spawn_provider_waiter(runtime, thread_id, process_id, child);
+        )
+    });
+    spawn_provider_waiter(
+        runtime,
+        thread_id,
+        process_id,
+        child,
+        stdout_reader,
+        stderr_reader,
+    );
 
     Ok(())
 }
@@ -905,7 +912,8 @@ fn spawn_provider_reader<R>(
     thread_id: String,
     mut reader: R,
     stream: ProviderStream,
-) where
+) -> thread::JoinHandle<()>
+where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
@@ -940,7 +948,7 @@ fn spawn_provider_reader<R>(
                 }
             }
         }
-    });
+    })
 }
 
 struct ProviderOutputDecoder {
@@ -1045,6 +1053,8 @@ fn spawn_provider_waiter(
     thread_id: String,
     process_id: u32,
     child: Arc<Mutex<Option<std::process::Child>>>,
+    stdout_reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<()>>,
 ) {
     thread::spawn(move || {
         let child = {
@@ -1060,6 +1070,12 @@ fn spawn_provider_waiter(
 
         match child.wait() {
             Ok(status) => {
+                if let Some(reader) = stdout_reader {
+                    let _ = reader.join();
+                }
+                if let Some(reader) = stderr_reader {
+                    let _ = reader.join();
+                }
                 if let Ok(mut runtime) = runtime.lock() {
                     runtime.complete_provider_process(&thread_id, process_id, status);
                 }

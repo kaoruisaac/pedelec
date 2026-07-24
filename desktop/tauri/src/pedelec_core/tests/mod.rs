@@ -464,7 +464,9 @@ mod tests {
         );
         let events = collect_available_core_events(&event_rx);
         assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::Error { error, .. } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
+            |event| matches!(event, ThreadEvent::Error {
+                source: ThreadErrorSource::Provider { provider: ProviderCode::OpenCode }, error, ..
+            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
         ));
     }
 
@@ -629,7 +631,9 @@ mod tests {
         );
         let events = collect_available_core_events(&event_rx);
         assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::Error { error, .. } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
+            |event| matches!(event, ThreadEvent::Error {
+                source: ThreadErrorSource::Provider { provider: ProviderCode::Cursor }, error, ..
+            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
         ));
     }
 
@@ -783,7 +787,9 @@ mod tests {
         );
         let events = collect_available_core_events(&event_rx);
         assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::Error { error, .. } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
+            |event| matches!(event, ThreadEvent::Error {
+                source: ThreadErrorSource::Provider { provider: ProviderCode::Claude }, error, ..
+            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
         ));
     }
 
@@ -1017,7 +1023,9 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                ThreadEvent::Error { error, .. }
+                ThreadEvent::Error {
+                    source: ThreadErrorSource::Provider { provider: ProviderCode::Ollama }, error, ..
+                }
                     if error.code == "OLLAMA_UNAVAILABLE"
                         && error.message == "Ollama request failed"
                         && error.details.as_ref().and_then(|details| details.get("status")) == Some(&json!(500))
@@ -1026,7 +1034,9 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                ThreadEvent::Error { error, .. }
+                ThreadEvent::Error {
+                    source: ThreadErrorSource::Provider { provider: ProviderCode::Ollama }, error, ..
+                }
                     if error.code == error_codes::PROVIDER_COMMAND_FAILED
                         && error.message == "pedelec-agent emitted invalid JSON"
                         && error.details.as_ref().and_then(|details| details.get("line")) == Some(&json!("{not-json}"))
@@ -2250,6 +2260,31 @@ mod tests {
         assert!(command_value.get("process_id").is_none());
         assert!(command_value.get("stdin").is_none());
         assert!(command_value.get("env").is_none());
+
+        let provider_error = ThreadEvent::Error {
+            seq: 5,
+            thread_id: "thread_abc123".into(),
+            source: ThreadErrorSource::Provider {
+                provider: ProviderCode::Codex,
+            },
+            error: PedelecError::new("PROVIDER_COMMAND_FAILED", "provider command failed"),
+        };
+        let provider_error_value = serde_json::to_value(provider_error).unwrap();
+        assert_eq!(provider_error_value["type"], json!("error"));
+        assert_eq!(provider_error_value["threadId"], json!("thread_abc123"));
+        assert_eq!(provider_error_value["source"], json!("provider"));
+        assert_eq!(provider_error_value["provider"], json!("codex"));
+        assert!(provider_error_value["error"].get("source").is_none());
+
+        let core_error = ThreadEvent::Error {
+            seq: 6,
+            thread_id: "thread_abc123".into(),
+            source: ThreadErrorSource::Core,
+            error: PedelecError::new("INTERNAL_ERROR", "Pedelec internal operation failed"),
+        };
+        let core_error_value = serde_json::to_value(core_error).unwrap();
+        assert_eq!(core_error_value["source"], json!("core"));
+        assert!(core_error_value.get("provider").is_none());
     }
 
     #[test]
@@ -3336,6 +3371,84 @@ mod tests {
             ToolRegistry::from_tools_json_str(tools_json).unwrap(),
         );
         runtime
+    }
+
+    #[test]
+    fn all_providers_parse_root_error_without_assistant_message() {
+        let temp = tempfile::tempdir().unwrap();
+        for provider in [
+            ProviderCode::Codex,
+            ProviderCode::Antigravity,
+            ProviderCode::OpenCode,
+            ProviderCode::Cursor,
+            ProviderCode::Claude,
+            ProviderCode::Ollama,
+        ] {
+            let thread_id = format!("thread_root_error_{provider:?}");
+            let mut runtime = runtime_with_provider_thread(
+                temp.path(),
+                &thread_id,
+                provider.clone(),
+                None,
+                None,
+            );
+            let event_rx = runtime.event_bus.subscribe(&thread_id);
+            runtime.emit_provider_stdout(
+                &thread_id,
+                r#"{"type":"error","message":"some error"}"#.to_string() + "\n",
+            );
+            let events = collect_available_core_events(&event_rx);
+
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ThreadEvent::Error {
+                    source: ThreadErrorSource::Provider { provider: event_provider },
+                    error,
+                    ..
+                } if event_provider == &provider
+                    && error.code == error_codes::PROVIDER_COMMAND_FAILED
+                    && error.message == "some error"
+            )));
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                ThreadEvent::AssistantMessage { text, .. } if text == "some error"
+            )));
+        }
+    }
+
+    #[test]
+    fn root_provider_error_preserves_nested_and_root_fields() {
+        let nested = parse_root_provider_error(&json!({
+            "type": "error",
+            "error": { "code": "AUTH_FAILED", "message": "Token expired", "details": { "status": 401 } }
+        }))
+        .unwrap();
+        assert_eq!(nested.code, "AUTH_FAILED");
+        assert_eq!(nested.message, "Token expired");
+        assert_eq!(nested.details.unwrap()["status"], 401);
+
+        let root = parse_root_provider_error(&json!({
+            "type": "error",
+            "code": "RATE_LIMITED",
+            "message": "Try later",
+            "details": { "retryAfter": 10 }
+        }))
+        .unwrap();
+        assert_eq!(root.code, "RATE_LIMITED");
+        assert_eq!(root.message, "Try later");
+        assert_eq!(root.details.unwrap()["retryAfter"], 10);
+    }
+
+    #[test]
+    fn stderr_capture_keeps_utf8_tail_within_limit() {
+        let mut stderr = "prefix".repeat(MAX_PROVIDER_STDERR_BYTES / 6);
+        let mut truncated = false;
+        append_provider_stderr(&mut stderr, &mut truncated, "最後錯誤");
+
+        assert!(truncated);
+        assert!(stderr.len() <= MAX_PROVIDER_STDERR_BYTES);
+        assert!(stderr.ends_with("最後錯誤"));
+        assert!(std::str::from_utf8(stderr.as_bytes()).is_ok());
     }
 
     fn runtime_with_provider_thread(

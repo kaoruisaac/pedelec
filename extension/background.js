@@ -36,6 +36,7 @@ const MAX_EVENTS = 80;
 const SDK_INTERNAL_PORT_NAME = "pedelec-sdk-internal";
 const SDK_EXTERNAL_PORT_NAME = "pedelec-sdk-external";
 const APPROVED_ORIGINS_STORAGE_KEY = "approvedOrigins";
+const LATEST_PROVIDER_ERROR_STORAGE_KEY = "latestProviderError";
 const DEFAULT_APPROVAL_TIMEOUT_MS = 60000;
 
 function createBackground(runtimeChrome, options = {}) {
@@ -56,6 +57,7 @@ function createBackground(runtimeChrome, options = {}) {
   const sdkLifecycleBySession = new Map();
   const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
   let pendingApproval = null;
+  let providerErrorOperation = Promise.resolve();
 
   let state = {
     connected: false,
@@ -96,6 +98,17 @@ function createBackground(runtimeChrome, options = {}) {
 
   function broadcastState() {
     const message = { type: "state", state };
+    for (const port of popupPorts) {
+      try {
+        port.postMessage(message);
+      } catch (_err) {
+        popupPorts.delete(port);
+      }
+    }
+  }
+
+  function broadcastProviderErrorState(providerError) {
+    const message = { type: "provider_error_state", providerError };
     for (const port of popupPorts) {
       try {
         port.postMessage(message);
@@ -213,8 +226,7 @@ function createBackground(runtimeChrome, options = {}) {
     }
   }
 
-  function storageGet(key) {
-    const area = runtimeChrome.storage?.local;
+  function storageAreaGet(area, key) {
     if (!area?.get) return Promise.resolve({});
 
     return new Promise((resolve, reject) => {
@@ -238,8 +250,7 @@ function createBackground(runtimeChrome, options = {}) {
     });
   }
 
-  function storageSet(value) {
-    const area = runtimeChrome.storage?.local;
+  function storageAreaSet(area, value) {
     if (!area?.set) return Promise.resolve();
 
     return new Promise((resolve, reject) => {
@@ -260,6 +271,129 @@ function createBackground(runtimeChrome, options = {}) {
       } catch (err) {
         reject(normalizeError(err, "STORAGE_ERROR", "Extension storage failed."));
       }
+    });
+  }
+
+  function storageAreaRemove(area, key) {
+    if (!area?.remove) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        const error = runtimeChrome.runtime?.lastError;
+        if (error) reject(normalizeError(error, "STORAGE_ERROR", "Extension storage failed."));
+        else resolve();
+      };
+
+      try {
+        const maybePromise = area.remove(key, done);
+        if (maybePromise?.then) {
+          maybePromise.then(done, reject);
+        }
+      } catch (err) {
+        reject(normalizeError(err, "STORAGE_ERROR", "Extension storage failed."));
+      }
+    });
+  }
+
+  function storageGet(key) {
+    return storageAreaGet(runtimeChrome.storage?.local, key);
+  }
+
+  function storageSet(value) {
+    return storageAreaSet(runtimeChrome.storage?.local, value);
+  }
+
+  function hasSessionStorage() {
+    return Boolean(runtimeChrome.storage?.session);
+  }
+
+  function sessionStorageGet(key) {
+    return storageAreaGet(runtimeChrome.storage?.session, key);
+  }
+
+  function sessionStorageSet(value) {
+    return storageAreaSet(runtimeChrome.storage?.session, value);
+  }
+
+  function sessionStorageRemove(key) {
+    return storageAreaRemove(runtimeChrome.storage?.session, key);
+  }
+
+  function isProviderErrorEvent(event) {
+    return event?.type === "error" && event?.source === "provider";
+  }
+
+  function providerErrorStateFromEvent(event) {
+    if (typeof event?.provider !== "string" || !event.provider.trim()) return null;
+
+    let message = "";
+    if (typeof event.error?.message === "string" && event.error.message.trim()) {
+      message = event.error.message;
+    } else if (typeof event.error === "string" && event.error.trim()) {
+      message = event.error;
+    } else {
+      message = formatError(event.error);
+    }
+
+    return {
+      provider: event.provider,
+      message: typeof message === "string" && message.trim() ? message : "Unknown provider error",
+    };
+  }
+
+  function postPopupProviderErrorState(port) {
+    if (!hasSessionStorage()) return;
+    return enqueueProviderErrorOperation(async () => {
+      try {
+        const result = await sessionStorageGet(LATEST_PROVIDER_ERROR_STORAGE_KEY);
+        if (!popupPorts.has(port)) return;
+        port.postMessage({
+          type: "provider_error_state",
+          providerError: result?.[LATEST_PROVIDER_ERROR_STORAGE_KEY] || null,
+        });
+      } catch (_err) {
+        // Provider errors are an optional popup side effect.
+      }
+    });
+  }
+
+  async function openProviderErrorPopup() {
+    if (!runtimeChrome.action?.openPopup) return;
+    try {
+      await runtimeChrome.action.openPopup();
+    } catch (_err) {
+      // The error remains in session storage for the next manual popup open.
+    }
+  }
+
+  function enqueueProviderErrorOperation(operation) {
+    providerErrorOperation = providerErrorOperation
+      .catch(() => {})
+      .then(operation)
+      .catch(() => {});
+    return providerErrorOperation;
+  }
+
+  function handleProviderErrorPopupSideEffect(event) {
+    if (!isProviderErrorEvent(event) || !hasSessionStorage()) return;
+    const providerError = providerErrorStateFromEvent(event);
+    if (!providerError) return;
+
+    enqueueProviderErrorOperation(async () => {
+      await sessionStorageSet({ [LATEST_PROVIDER_ERROR_STORAGE_KEY]: providerError });
+      broadcastProviderErrorState(providerError);
+      await openProviderErrorPopup();
+    });
+  }
+
+  function dismissProviderError() {
+    if (!hasSessionStorage()) return Promise.resolve();
+    return enqueueProviderErrorOperation(async () => {
+      await sessionStorageRemove(LATEST_PROVIDER_ERROR_STORAGE_KEY);
+      broadcastProviderErrorState(null);
     });
   }
 
@@ -464,6 +598,7 @@ function createBackground(runtimeChrome, options = {}) {
     }
 
     if (message?.type === "thread_event") {
+      handleProviderErrorPopupSideEffect(message.event);
       applyThreadEvent(message.event);
       dispatchSdkThreadEvent(message.event);
       if (message.event?.type === "ended") {
@@ -901,7 +1036,9 @@ function createBackground(runtimeChrome, options = {}) {
       return { ...base, type: "done" };
     }
     if (event.type === "error") {
-      return { ...base, type: "error", error: normalizeError(event.error) };
+      const source = event.source === "provider" || event.source === "core" ? event.source : undefined;
+      const provider = source === "provider" && event.provider ? { provider: event.provider } : {};
+      return { ...base, type: "error", ...(source ? { source } : {}), ...provider, error: normalizeError(event.error) };
     }
     if (event.type === "ended") {
       return { ...base, type: "ended" };
@@ -1096,6 +1233,7 @@ function createBackground(runtimeChrome, options = {}) {
     popupPorts.add(port);
     port.postMessage({ type: "state", state });
     postPopupApprovalState(port);
+    postPopupProviderErrorState(port);
 
     port.onMessage.addListener(async (message) => {
       try {
@@ -1120,6 +1258,8 @@ function createBackground(runtimeChrome, options = {}) {
             code: "APPROVAL_REJECTED",
             message: "Pedelec approval was rejected.",
           });
+        } else if (message?.type === "dismiss_provider_error") {
+          await dismissProviderError();
         }
       } catch (err) {
         setState({ error: formatError(err) });

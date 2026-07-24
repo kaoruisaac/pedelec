@@ -29,6 +29,7 @@ const THREAD_ID_BASE36_MAX_WIDTH: usize = 7;
 const THREAD_ID_MAX_COUNTER: u64 = 78_364_164_095;
 pub const MAX_ASSET_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const ASSET_UPLOAD_TICKET_SECONDS: i64 = 5 * 60;
+const MAX_PROVIDER_STDERR_BYTES: usize = 64 * 1024;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -169,6 +170,15 @@ pub enum ProviderCode {
     Cursor,
     Claude,
     Ollama,
+}
+
+/// The responsibility domain for a thread error. The tagged representation
+/// prevents provider errors from being serialized without their provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "lowercase")]
+pub enum ThreadErrorSource {
+    Core,
+    Provider { provider: ProviderCode },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -372,6 +382,8 @@ pub enum ThreadEvent {
     Error {
         seq: u64,
         thread_id: String,
+        #[serde(flatten)]
+        source: ThreadErrorSource,
         error: PedelecError,
     },
     Ended {
@@ -550,6 +562,9 @@ pub(crate) struct RunningProviderProcess {
     process_id: u32,
     child: Arc<Mutex<Option<Child>>>,
     purpose: RunningProviderProcessPurpose,
+    stderr: String,
+    stderr_truncated: bool,
+    had_provider_error: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1993,6 +2008,9 @@ impl CoreRuntime {
                 process_id,
                 child,
                 purpose,
+                stderr: String::new(),
+                stderr_truncated: false,
+                had_provider_error: false,
             },
         );
     }
@@ -2015,11 +2033,11 @@ impl CoreRuntime {
             thread.updated_at = Utc::now();
         }
         if purpose == RunningProviderProcessPurpose::Prepare {
-            self.event_bus.emit_error(thread_id, error);
+            self.emit_thread_provider_error(thread_id, error);
             self.event_bus.emit_status_changed(thread_id, status);
         } else {
             self.event_bus.emit_status_changed(thread_id, status);
-            self.event_bus.emit_error(thread_id, error);
+            self.emit_thread_provider_error(thread_id, error);
         }
     }
 
@@ -2045,6 +2063,9 @@ impl CoreRuntime {
 
     pub fn emit_provider_stderr(&mut self, thread_id: &str, text: String) {
         self.event_bus.emit_raw_stderr(thread_id, text.clone());
+        if let Some(running) = self.running_processes.get_mut(thread_id) {
+            append_provider_stderr(&mut running.stderr, &mut running.stderr_truncated, &text);
+        }
         let events = self
             .thread_manager
             .provider_adapter_mut(thread_id)
@@ -2059,20 +2080,23 @@ impl CoreRuntime {
         process_id: u32,
         status: ExitStatus,
     ) {
-        let purpose = if self
+        let running = if self
             .running_processes
             .get(thread_id)
             .is_some_and(|running| running.process_id == process_id)
         {
-            self.running_processes
-                .remove(thread_id)
-                .map(|running| running.purpose)
+            self.running_processes.remove(thread_id)
         } else {
             None
         };
+        let Some(running) = running else {
+            return;
+        };
+        let purpose = running.purpose;
+        let had_provider_error = running.had_provider_error;
 
-        let prepare_missing_provider_session_id = purpose
-            == Some(RunningProviderProcessPurpose::Prepare)
+        let prepare_missing_provider_session_id = purpose == RunningProviderProcessPurpose::Prepare
+            && !had_provider_error
             && self
                 .thread_manager
                 .provider_state(thread_id)
@@ -2091,11 +2115,17 @@ impl CoreRuntime {
         }
 
         if status.success() {
+            let is_prepare = purpose == RunningProviderProcessPurpose::Prepare;
+            if had_provider_error && !is_prepare {
+                self.tool_request_broker.clear_thread(thread_id);
+                thread.updated_at = Utc::now();
+                return;
+            }
             thread.status = ThreadStatus::Idle;
             thread.updated_at = Utc::now();
             if prepare_missing_provider_session_id {
                 self.tool_request_broker.clear_thread(thread_id);
-                self.event_bus.emit_error(
+                self.emit_thread_provider_error(
                     thread_id,
                     PedelecError::with_details(
                         error_codes::PREPARE_SESSION_ID_MISSING,
@@ -2104,10 +2134,12 @@ impl CoreRuntime {
                     ),
                 );
             }
-            self.event_bus
-                .emit_status_changed(thread_id, ThreadStatus::Idle);
+            if !had_provider_error || is_prepare {
+                self.event_bus
+                    .emit_status_changed(thread_id, ThreadStatus::Idle);
+            }
         } else {
-            let is_prepare = purpose == Some(RunningProviderProcessPurpose::Prepare);
+            let is_prepare = purpose == RunningProviderProcessPurpose::Prepare;
             thread.status = if is_prepare {
                 ThreadStatus::Idle
             } else {
@@ -2115,22 +2147,37 @@ impl CoreRuntime {
             };
             thread.updated_at = Utc::now();
             self.tool_request_broker.clear_thread(thread_id);
+            if had_provider_error {
+                if is_prepare {
+                    self.event_bus.emit_status_changed(thread_id, ThreadStatus::Idle);
+                }
+                return;
+            }
             let next_status = thread.status.clone();
-            let error = PedelecError::with_details(
-                error_codes::PROVIDER_COMMAND_FAILED,
-                "provider command failed",
-                serde_json::json!({
-                    "threadId": thread_id,
-                    "processId": process_id,
-                    "exitCode": status.code()
-                }),
-            );
+            let stderr_message = running.stderr.trim().to_string();
+            let mut details = serde_json::json!({
+                "threadId": thread_id,
+                "processId": process_id,
+                "exitCode": status.code()
+            });
+            let message = if stderr_message.is_empty() {
+                "provider command failed"
+            } else {
+                if let Some(details) = details.as_object_mut() {
+                    details.insert("stderr".to_string(), Value::String(running.stderr));
+                    if running.stderr_truncated {
+                        details.insert("stderrTruncated".to_string(), Value::Bool(true));
+                    }
+                }
+                stderr_message.as_str()
+            };
+            let error = PedelecError::with_details(error_codes::PROVIDER_COMMAND_FAILED, message, details);
             if is_prepare {
-                self.event_bus.emit_error(thread_id, error);
+                self.emit_thread_provider_error(thread_id, error);
                 self.event_bus.emit_status_changed(thread_id, next_status);
             } else {
                 self.event_bus.emit_status_changed(thread_id, next_status);
-                self.event_bus.emit_error(thread_id, error);
+                self.emit_thread_provider_error(thread_id, error);
             }
         }
     }
@@ -2170,11 +2217,11 @@ impl CoreRuntime {
                     }),
                 );
                 if is_prepare {
-                    self.event_bus.emit_error(thread_id, error);
+                    self.emit_thread_provider_error(thread_id, error);
                     self.event_bus.emit_status_changed(thread_id, next_status);
                 } else {
                     self.event_bus.emit_status_changed(thread_id, next_status);
-                    self.event_bus.emit_error(thread_id, error);
+                    self.emit_thread_provider_error(thread_id, error);
                 }
             }
         }
@@ -2212,15 +2259,26 @@ impl CoreRuntime {
                     provider_session_id,
                 } => self.update_provider_session_id(thread_id, provider_session_id),
                 ThreadEventPartial::ProviderError { error } => {
+                    if let Some(running) = self.running_processes.get_mut(thread_id) {
+                        running.had_provider_error = true;
+                    }
                     if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
                         thread.status = ThreadStatus::Error;
                     }
                     self.event_bus
                         .emit_status_changed(thread_id, ThreadStatus::Error);
-                    self.event_bus.emit_error(thread_id, error);
+                    self.emit_thread_provider_error(thread_id, error);
                 }
             }
         }
+    }
+
+    fn emit_thread_provider_error(&mut self, thread_id: &str, error: PedelecError) {
+        let Ok(thread) = self.thread_manager.thread(thread_id) else {
+            return;
+        };
+        self.event_bus
+            .emit_provider_error(thread_id, thread.provider.clone(), error);
     }
 
     fn stop_running_process(&mut self, thread_id: &str) {
@@ -2501,6 +2559,20 @@ impl CoreRuntime {
     pub fn subscribe_all_threads(&mut self) -> mpsc::Receiver<ThreadEvent> {
         self.event_bus.subscribe_all()
     }
+}
+
+fn append_provider_stderr(stderr: &mut String, truncated: &mut bool, text: &str) {
+    stderr.push_str(text);
+    if stderr.len() <= MAX_PROVIDER_STDERR_BYTES {
+        return;
+    }
+
+    let mut drop_until = stderr.len() - MAX_PROVIDER_STDERR_BYTES;
+    while !stderr.is_char_boundary(drop_until) {
+        drop_until += 1;
+    }
+    stderr.drain(..drop_until);
+    *truncated = true;
 }
 
 /// Scans provider CLIs without holding the shared runtime lock. The completed
@@ -3576,13 +3648,31 @@ impl EventBus {
         );
     }
 
-    pub fn emit_error(&mut self, thread_id: &str, error: PedelecError) {
+    pub fn emit_provider_error(
+        &mut self,
+        thread_id: &str,
+        provider: ProviderCode,
+        error: PedelecError,
+    ) {
+        self.emit_error(
+            thread_id,
+            ThreadErrorSource::Provider { provider },
+            error,
+        );
+    }
+
+    pub fn emit_core_error(&mut self, thread_id: &str, error: PedelecError) {
+        self.emit_error(thread_id, ThreadErrorSource::Core, error);
+    }
+
+    fn emit_error(&mut self, thread_id: &str, source: ThreadErrorSource, error: PedelecError) {
         let seq = self.next_seq(thread_id);
         self.emit(
             thread_id,
             ThreadEvent::Error {
                 seq,
                 thread_id: thread_id.to_string(),
+                source,
                 error,
             },
         );
@@ -4658,6 +4748,9 @@ fn parse_antigravity_provider_line(
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
     };
+    if let Some(error) = parse_root_provider_error(&value) {
+        return vec![ThreadEventPartial::ProviderError { error }];
+    }
     let Some(object) = value.as_object() else {
         return Vec::new();
     };
@@ -4850,6 +4943,9 @@ fn parse_opencode_provider_line(line: &str) -> Vec<ThreadEventPartial> {
             }]
         }
     };
+    if let Some(error) = parse_root_provider_error(&value) {
+        return vec![ThreadEventPartial::ProviderError { error }];
+    }
 
     let mut events = Vec::new();
     if let Some(provider_session_id) = find_opencode_session_id_in_json(&value) {
@@ -4885,6 +4981,9 @@ fn parse_cursor_provider_line(line: &str) -> Vec<ThreadEventPartial> {
             }]
         }
     };
+    if let Some(error) = parse_root_provider_error(&value) {
+        return vec![ThreadEventPartial::ProviderError { error }];
+    }
 
     let mut events = Vec::new();
     if let Some(provider_session_id) = find_cursor_session_id_in_json(&value) {
@@ -4920,6 +5019,9 @@ fn parse_claude_provider_line(line: &str) -> Vec<ThreadEventPartial> {
             }]
         }
     };
+    if let Some(error) = parse_root_provider_error(&value) {
+        return vec![ThreadEventPartial::ProviderError { error }];
+    }
 
     let mut events = Vec::new();
     if let Some(provider_session_id) = find_claude_session_id_in_json(&value) {
@@ -4958,6 +5060,9 @@ fn parse_pedelec_agent_provider_line(line: &str) -> Vec<ThreadEventPartial> {
             }]
         }
     };
+    if let Some(error) = parse_root_provider_error(&value) {
+        return vec![ThreadEventPartial::ProviderError { error }];
+    }
 
     let Some(object) = value.as_object() else {
         return Vec::new();
@@ -4988,26 +5093,6 @@ fn parse_pedelec_agent_provider_line(line: &str) -> Vec<ThreadEventPartial> {
                 }]
             })
             .unwrap_or_default(),
-        "error" => {
-            let error = object.get("error").unwrap_or(&Value::Null);
-            let code = error
-                .get("code")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(error_codes::PROVIDER_COMMAND_FAILED);
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("pedelec-agent failed");
-            let details = error.get("details").cloned().unwrap_or(Value::Null);
-            let error = if details.is_null() {
-                PedelecError::new(code, message)
-            } else {
-                PedelecError::with_details(code, message, details)
-            };
-            vec![ThreadEventPartial::ProviderError { error }]
-        }
         "status" | "tool_call" | "tool_result" | "done" => Vec::new(),
         _ => Vec::new(),
     }
@@ -5025,6 +5110,9 @@ fn parse_provider_line(
     let mut events = Vec::new();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(error) = parse_root_provider_error(&value) {
+                return vec![ThreadEventPartial::ProviderError { error }];
+            }
             if let Some(provider_session_id) = find_provider_session_id_in_json(&value) {
                 events.push(ThreadEventPartial::ProviderSessionIdUpdated {
                     provider_session_id,
@@ -5043,6 +5131,41 @@ fn parse_provider_line(
         });
     }
     events
+}
+
+fn parse_root_provider_error(value: &Value) -> Option<PedelecError> {
+    let object = value.as_object()?;
+    let event_type = object.get("type")?.as_str()?.trim();
+    if !event_type.eq_ignore_ascii_case("error") {
+        return None;
+    }
+
+    let nested_error = object.get("error");
+    let nested_object = nested_error.and_then(Value::as_object);
+    let non_empty_string = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let code = non_empty_string(nested_object.and_then(|error| error.get("code")))
+        .or_else(|| non_empty_string(object.get("code")))
+        .unwrap_or_else(|| error_codes::PROVIDER_COMMAND_FAILED.to_string());
+    let message = non_empty_string(nested_object.and_then(|error| error.get("message")))
+        .or_else(|| non_empty_string(object.get("message")))
+        .or_else(|| non_empty_string(nested_error))
+        .unwrap_or_else(|| "provider returned an error".to_string());
+    let details = nested_object
+        .and_then(|error| error.get("details"))
+        .or_else(|| object.get("details"))
+        .filter(|details| !details.is_null())
+        .cloned();
+
+    Some(match details {
+        Some(details) => PedelecError::with_details(code, message, details),
+        None => PedelecError::new(code, message),
+    })
 }
 
 fn find_provider_session_id_in_json(value: &Value) -> Option<String> {

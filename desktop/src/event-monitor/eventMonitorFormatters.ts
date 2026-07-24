@@ -67,6 +67,14 @@ export function toolResultDetails(event: Record<string, unknown>): string {
 }
 
 export function errorTitle(event: unknown): string {
-  const e = event as { error?: { message?: string }; message?: string } | null | undefined;
-  return e?.error?.message || e?.message || "Error";
+  const e = event as {
+    source?: "provider" | "core";
+    provider?: string;
+    error?: { message?: string };
+    message?: string;
+  } | null | undefined;
+  const message = e?.error?.message || e?.message || "Error";
+  if (e?.source === "provider" && e.provider) return `[provider / ${e.provider}] ${message}`;
+  if (e?.source === "core") return `[core] ${message}`;
+  return message;
 }

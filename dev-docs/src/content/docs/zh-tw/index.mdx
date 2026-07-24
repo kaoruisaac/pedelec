@@ -329,6 +329,27 @@ session.onStatus((status) => {
 
 ---
 
+## Error Event 來源
+
+Error event 會在 event 頂層（不在 `error` object 內）附帶責任領域。`source` 為 `"provider"` 或 `"core"`。provider error 一定會包含 `provider`；目前合法的 provider code 為 `"codex"`、`"antigravity"`、`"opencode"`、`"cursor"`、`"claude"` 與 `"ollama"`。core error 不會包含 `provider`。
+
+```ts
+type ProviderErrorEvent = {
+  type: "error";
+  source: "provider";
+  provider: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
+  error: { code: string; message: string; details?: unknown };
+};
+
+type CoreErrorEvent = {
+  type: "error";
+  source: "core";
+  error: { code: string; message: string; details?: unknown };
+};
+```
+
+---
+
 ## Tool Calling：讓 Agent 操作 Web App
 
 Pedelec 的 tool calling 流程是：

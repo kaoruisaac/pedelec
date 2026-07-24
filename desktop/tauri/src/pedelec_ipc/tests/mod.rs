@@ -7,7 +7,8 @@ mod tests {
     use crate::pedelec_core::{
         CommandSpec, CoreRuntime, CreateThreadOutput, CreateThreadSkillsInput,
         CreateThreadToolInput, OllamaProviderSettings, PedelecSettings, ProviderAdapterState,
-        ProviderCode, ProviderSettings, SandboxManager, ThreadState, ThreadStatus, ToolRegistry,
+        ProviderCode, ProviderSettings, SandboxManager, ThreadErrorSource, ThreadState,
+        ThreadStatus, ToolRegistry,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1030,6 +1031,9 @@ mod tests {
         assert!(has_raw_stdout(&events));
         assert!(has_raw_stderr(&events));
         assert!(has_idle(&events));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::Error { .. })));
         assert_eq!(
             runtime.lock().unwrap().thread_status("thread_mock"),
             Some(ThreadStatus::Idle)
@@ -1067,6 +1071,19 @@ mod tests {
 
         let events = collect_events_until(&event_rx, has_provider_command_failed);
         assert!(has_provider_command_failed(&events));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ThreadEvent::Error {
+                source: ThreadErrorSource::Provider { provider: ProviderCode::Codex },
+                error,
+                ..
+            } if error.code == error_codes::PROVIDER_COMMAND_FAILED
+                && error.message == "mock provider stderr: codex"
+                && error.details.as_ref().is_some_and(|details| {
+                    details["exitCode"] == 7
+                        && details["stderr"].as_str().is_some_and(|stderr| stderr.contains("mock provider stderr: codex"))
+                })
+        )));
         assert_eq!(
             runtime.lock().unwrap().thread_status("thread_fail"),
             Some(ThreadStatus::Error)
@@ -1337,6 +1354,9 @@ exit 0
             matches!(
                 event,
                 ThreadEvent::Error {
+                    source: ThreadErrorSource::Provider {
+                        provider: ProviderCode::Codex
+                    },
                     error,
                     ..
                 } if error.code == error_codes::PROVIDER_COMMAND_FAILED

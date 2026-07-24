@@ -324,6 +324,27 @@ Common statuses:
 
 ---
 
+## Error Event Source
+
+Error events include their responsibility domain at the event top level, outside the `error` object. `source` is either `"provider"` or `"core"`. A provider error always includes `provider`; valid provider codes are `"codex"`, `"antigravity"`, `"opencode"`, `"cursor"`, `"claude"`, and `"ollama"`. Core errors do not include `provider`.
+
+```ts
+type ProviderErrorEvent = {
+  type: "error";
+  source: "provider";
+  provider: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
+  error: { code: string; message: string; details?: unknown };
+};
+
+type CoreErrorEvent = {
+  type: "error";
+  source: "core";
+  error: { code: string; message: string; details?: unknown };
+};
+```
+
+---
+
 ## Tool Calling: Letting the Agent Operate on the Web App
 
 Pedelec's tool calling flow is:
