@@ -148,7 +148,7 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Prepare Apple notarization API key
+      - name: Prepare Apple signing and notarization credentials
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -159,6 +159,8 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PRIVATE: ${{ secrets.APPLE_API_KEY_PRIVATE }}
         run: |
+          set -euo pipefail
+
           required_secrets=(
             APPLE_CERTIFICATE
             APPLE_CERTIFICATE_PASSWORD
@@ -174,13 +176,64 @@ jobs:
             fi
           done
 
+          certificate_path="$RUNNER_TEMP/apple-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/pedelec-signing.keychain-db"
           private_key_dir="$RUNNER_TEMP/private_keys"
           api_key_path="$private_key_dir/AuthKey_${APPLE_API_KEY}.p8"
+          keychain_password="$(openssl rand -base64 32)"
+          original_default_keychain="$(security default-keychain -d user | tr -d '\"')"
+
           mkdir -p "$private_key_dir"
           umask 077
+
+          # Persist cleanup targets before any credential operation can fail.
+          echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
+          echo "APPLE_CERTIFICATE_PATH=$certificate_path" >> "$GITHUB_ENV"
+          echo "APPLE_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          echo "APPLE_ORIGINAL_DEFAULT_KEYCHAIN=$original_default_keychain" >> "$GITHUB_ENV"
+
+          printf '%s' "$APPLE_CERTIFICATE" \
+            | openssl base64 -d -A \
+            > "$certificate_path"
+          [ -s "$certificate_path" ] || {
+            echo "Decoded Apple certificate is empty." >&2
+            exit 1
+          }
+
+          security create-keychain \
+            -p "$keychain_password" \
+            "$keychain_path"
+          security set-keychain-settings \
+            -lut 21600 \
+            "$keychain_path"
+          security unlock-keychain \
+            -p "$keychain_password" \
+            "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -d user -s "$keychain_path"
+
+          if ! security find-identity \
+            -v \
+            -p codesigning \
+            "$keychain_path" \
+            | grep -Fq "$APPLE_SIGNING_IDENTITY"; then
+            echo "APPLE_SIGNING_IDENTITY was not found in the imported keychain." >&2
+            security find-identity -v -p codesigning "$keychain_path" >&2 || true
+            exit 1
+          fi
+
           printf '%s' "$APPLE_API_KEY_PRIVATE" > "$api_key_path"
           chmod 600 "$api_key_path"
-          echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
 
       - name: Build and upload Windows Tauri bundles
         if: runner.os == 'Windows'
@@ -275,6 +328,30 @@ jobs:
 
           xcrun stapler validate "$dmg_path"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
+
+      - name: Clean up Apple signing credentials
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set +e
+
+          if [ -n "${APPLE_ORIGINAL_DEFAULT_KEYCHAIN:-}" ] \
+            && [ -e "$APPLE_ORIGINAL_DEFAULT_KEYCHAIN" ]; then
+            security default-keychain \
+              -d user \
+              -s "$APPLE_ORIGINAL_DEFAULT_KEYCHAIN"
+            security list-keychains \
+              -d user \
+              -s "$APPLE_ORIGINAL_DEFAULT_KEYCHAIN"
+          fi
+
+          if [ -n "${APPLE_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$APPLE_KEYCHAIN_PATH"
+          fi
+
+          rm -f \
+            "${APPLE_CERTIFICATE_PATH:-}" \
+            "${APPLE_API_KEY_PATH:-}"
 
   npm-publish:
     name: Publish SDK to npm
