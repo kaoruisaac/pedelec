@@ -124,10 +124,12 @@ jobs:
             platform: macos-latest
             args: "--target aarch64-apple-darwin"
             helper_target: "aarch64-apple-darwin"
+            release_arch: "aarch64"
           - label: macos-x64
             platform: macos-15-intel
             args: "--target x86_64-apple-darwin"
             helper_target: "x86_64-apple-darwin"
+            release_arch: "x86_64"
 
     runs-on: ${{ matrix.platform }}
 
@@ -193,7 +195,8 @@ jobs:
           echo "APPLE_ORIGINAL_DEFAULT_KEYCHAIN=$original_default_keychain" >> "$GITHUB_ENV"
 
           printf '%s' "$APPLE_CERTIFICATE" \
-            | openssl base64 -d -A \
+            | tr -d '\r\n' \
+            | /usr/bin/base64 -D \
             > "$certificate_path"
           [ -s "$certificate_path" ] || {
             echo "Decoded Apple certificate is empty." >&2
@@ -288,8 +291,27 @@ jobs:
         shell: bash
         env:
           HELPER_TARGET: ${{ matrix.helper_target }}
+          RELEASE_ARCH: ${{ matrix.release_arch }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          required_values=(
+            APPLE_API_KEY_PATH
+            APPLE_API_KEY
+            APPLE_API_ISSUER
+            TAG_NAME
+            RELEASE_ARCH
+          )
+          for value_name in "${required_values[@]}"; do
+            if [ -z "${!value_name:-}" ]; then
+              echo "Missing required value: ${value_name}" >&2
+              exit 1
+            fi
+          done
+
           bundle_root="desktop/tauri/target/$HELPER_TARGET/release/bundle"
           [ -d "$bundle_root" ] || { echo "Bundle directory not found: $bundle_root" >&2; exit 1; }
 
@@ -306,6 +328,7 @@ jobs:
           app_path="${apps[0]}"
           dmg_path="${dmgs[0]}"
 
+          echo "Verifying app bundle signature and notarization."
           codesign --verify --deep --strict --verbose=2 "$app_path"
           app_info=$(codesign -dv --verbose=4 "$app_path" 2>&1)
           grep -Fq 'Authority=Developer ID Application:' <<<"$app_info"
@@ -313,6 +336,7 @@ jobs:
           spctl --assess --type execute --verbose=4 "$app_path"
           xcrun stapler validate "$app_path"
 
+          echo "Verifying helper binary signatures."
           for helper_name in pedelec-cli pedelec-agent pedelec-native-host; do
             helpers=()
             while IFS= read -r -d '' helper; do
@@ -326,8 +350,35 @@ jobs:
             grep -Eq 'flags=.*\bruntime\b' <<<"$helper_info"
           done
 
+          echo "Verifying DMG signature."
+          codesign --verify --strict --verbose=2 "$dmg_path"
+          dmg_info=$(codesign -dv --verbose=4 "$dmg_path" 2>&1)
+          grep -Fq 'Authority=Developer ID Application:' <<<"$dmg_info"
+
+          echo "Submitting DMG for notarization."
+          xcrun notarytool submit "$dmg_path" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+
+          echo "Stapling DMG notarization ticket."
+          xcrun stapler staple "$dmg_path"
+
+          echo "Validating stapled DMG and Gatekeeper assessment."
           xcrun stapler validate "$dmg_path"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
+
+          version="${TAG_NAME#v}"
+          asset_name="Pedelec-${version}-darwin-${RELEASE_ARCH}-dmg.dmg"
+          asset_path="$RUNNER_TEMP/$asset_name"
+          cp "$dmg_path" "$asset_path"
+
+          echo "Replacing the draft release DMG asset with the stapled copy."
+          gh release upload "$TAG_NAME" \
+            "$asset_path" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
       - name: Clean up Apple signing credentials
         if: always() && runner.os == 'macOS'
