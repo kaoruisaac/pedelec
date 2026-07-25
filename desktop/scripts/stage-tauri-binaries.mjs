@@ -9,6 +9,7 @@ const tauriDir = join(desktopDir, "tauri");
 const resourceDir = join(tauriDir, "binaries");
 const placeholderPath = join(resourceDir, ".placeholder");
 const helperTarget = process.env.PEDELEC_HELPER_TARGET || "";
+const signingIdentity = process.env.APPLE_SIGNING_IDENTITY || "";
 const helperBinaryNames = [
   "pedelec-cli",
   "pedelec-agent",
@@ -67,8 +68,36 @@ for (const name of helperBinaryNames) {
   await copyFile(sourcePath, destinationPath);
 
   if (process.platform === "darwin") {
-    runCommand("codesign", ["--force", "--sign", "-", destinationPath]);
-    runCommand("codesign", ["--verify", "--verbose=2", destinationPath]);
+    if (signingIdentity) {
+      console.log("Signing helper binary with Developer ID signing.");
+      runCommand("codesign", [
+        "--force",
+        "--timestamp",
+        "--options",
+        "runtime",
+        "--sign",
+        signingIdentity,
+        destinationPath,
+      ]);
+      runCommand("codesign", ["--verify", "--strict", "--verbose=2", destinationPath]);
+
+      const signingInfo = spawnSync("codesign", ["-dv", "--verbose=4", destinationPath], {
+        encoding: "utf8",
+      });
+      const signingOutput = `${signingInfo.stdout}${signingInfo.stderr}`;
+      if (
+        signingInfo.status !== 0 ||
+        !signingOutput.includes("Authority=Developer ID Application:") ||
+        !/flags=.*\bruntime\b/.test(signingOutput)
+      ) {
+        console.error("Developer ID or Hardened Runtime verification failed for helper binary.");
+        process.exit(1);
+      }
+    } else {
+      console.log("Signing helper binary with ad-hoc fallback for local development.");
+      runCommand("codesign", ["--force", "--sign", "-", destinationPath]);
+      runCommand("codesign", ["--verify", "--verbose=2", destinationPath]);
+    }
   }
 }
 

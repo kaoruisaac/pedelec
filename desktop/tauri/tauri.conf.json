@@ -26,7 +26,7 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "macOS": {
-      "signingIdentity": "-"
+      "hardenedRuntime": true
     },
     "resources": [
       "binaries/*"

@@ -148,7 +148,42 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Build and upload Tauri bundles
+      - name: Prepare Apple notarization API key
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PRIVATE: ${{ secrets.APPLE_API_KEY_PRIVATE }}
+        run: |
+          required_secrets=(
+            APPLE_CERTIFICATE
+            APPLE_CERTIFICATE_PASSWORD
+            APPLE_SIGNING_IDENTITY
+            APPLE_API_ISSUER
+            APPLE_API_KEY
+            APPLE_API_KEY_PRIVATE
+          )
+          for secret_name in "${required_secrets[@]}"; do
+            if [ -z "${!secret_name}" ]; then
+              echo "Missing required secret: ${secret_name}" >&2
+              exit 1
+            fi
+          done
+
+          private_key_dir="$RUNNER_TEMP/private_keys"
+          api_key_path="$private_key_dir/AuthKey_${APPLE_API_KEY}.p8"
+          mkdir -p "$private_key_dir"
+          umask 077
+          printf '%s' "$APPLE_API_KEY_PRIVATE" > "$api_key_path"
+          chmod 600 "$api_key_path"
+          echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
+
+      - name: Build and upload Windows Tauri bundles
+        if: runner.os == 'Windows'
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -166,6 +201,80 @@ jobs:
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
+
+      - name: Build and upload macOS Tauri bundles
+        if: runner.os == 'macOS'
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PEDELEC_HELPER_TARGET: ${{ matrix.helper_target }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+        with:
+          projectPath: desktop
+          tauriScript: npm run tauri
+          tagName: ${{ inputs.tag_name || github.ref_name }}
+          releaseName: "Pedelec ${{ inputs.tag_name || github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}
+          assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
+
+      # tauri-action uploads first; this release remains a draft and a failed check
+      # prevents these assets from being treated as a successful release.
+      - name: Verify signed and notarized macOS bundles
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HELPER_TARGET: ${{ matrix.helper_target }}
+        run: |
+          set -euo pipefail
+          bundle_root="desktop/tauri/target/$HELPER_TARGET/release/bundle"
+          [ -d "$bundle_root" ] || { echo "Bundle directory not found: $bundle_root" >&2; exit 1; }
+
+          apps=()
+          while IFS= read -r -d '' app; do
+            apps+=("$app")
+          done < <(find "$bundle_root" -type d -name 'Pedelec.app' -print0)
+          dmgs=()
+          while IFS= read -r -d '' dmg; do
+            dmgs+=("$dmg")
+          done < <(find "$bundle_root" -type f -name '*.dmg' -print0)
+          [ "${#apps[@]}" -eq 1 ] || { echo "Expected exactly one Pedelec.app, found ${#apps[@]}" >&2; exit 1; }
+          [ "${#dmgs[@]}" -eq 1 ] || { echo "Expected exactly one DMG, found ${#dmgs[@]}" >&2; exit 1; }
+          app_path="${apps[0]}"
+          dmg_path="${dmgs[0]}"
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          app_info=$(codesign -dv --verbose=4 "$app_path" 2>&1)
+          grep -Fq 'Authority=Developer ID Application:' <<<"$app_info"
+          grep -Eq 'flags=.*\bruntime\b' <<<"$app_info"
+          spctl --assess --type execute --verbose=4 "$app_path"
+          xcrun stapler validate "$app_path"
+
+          for helper_name in pedelec-cli pedelec-agent pedelec-native-host; do
+            helpers=()
+            while IFS= read -r -d '' helper; do
+              helpers+=("$helper")
+            done < <(find "$app_path/Contents" -type f -name "$helper_name" -print0)
+            [ "${#helpers[@]}" -eq 1 ] || { echo "Expected exactly one $helper_name in app bundle, found ${#helpers[@]}" >&2; exit 1; }
+            helper_path="${helpers[0]}"
+            codesign --verify --strict --verbose=2 "$helper_path"
+            helper_info=$(codesign -dv --verbose=4 "$helper_path" 2>&1)
+            grep -Fq 'Authority=Developer ID Application:' <<<"$helper_info"
+            grep -Eq 'flags=.*\bruntime\b' <<<"$helper_info"
+          done
+
+          xcrun stapler validate "$dmg_path"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
 
   npm-publish:
     name: Publish SDK to npm
