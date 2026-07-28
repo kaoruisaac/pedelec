@@ -382,6 +382,7 @@ mod tests {
             ollama_base_url: base_url,
             ollama_timeout_ms: 120_000,
             ollama_api_key: api_key.into(),
+            tavily_api_key: None,
             sandbox: PathBuf::from("."),
             pedelec_cli_path: None,
             core_runtime_file: None,

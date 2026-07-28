@@ -2,6 +2,7 @@ use super::config::AgentConfig;
 use super::error::AgentError;
 use super::model::ModelAttachment;
 use super::sandbox::Sandbox;
+use super::tavily::TavilyRoundWrapper;
 use serde_json::Value;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub fn tool_definitions(vision: bool) -> Value {
+    tool_definitions_with_web_search(vision, false)
+}
+
+pub fn tool_definitions_with_web_search(vision: bool, web_search_enabled: bool) -> Value {
     let mut definitions = serde_json::json!([
         {
             "type": "function",
@@ -64,6 +69,16 @@ pub fn tool_definitions(vision: bool) -> Value {
         {"type":"function","function":{"name":"fs.read_image","description":"Read one sandbox image so it can be viewed.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}}
     ]).as_array().unwrap().iter().cloned());
     }
+    if web_search_enabled {
+        definitions.as_array_mut().unwrap().push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "web.search",
+                "description": "Search the public web for current, recent, or externally verifiable information. Use it only when web information would materially improve the answer.",
+                "parameters": {"type":"object","properties":{"query":{"type":"string","description":"A focused web search query."}},"required":["query"],"additionalProperties":false}
+            }
+        }));
+    }
     definitions
 }
 
@@ -76,9 +91,20 @@ pub struct ToolExecutionResult {
 pub fn execute_tool(
     tool: &str,
     args: &Value,
+    session_id: &str,
+    sandbox: &Sandbox,
+    config: &AgentConfig,
+) -> Result<ToolExecutionResult, AgentError> {
+    execute_tool_with_tavily(tool, args, session_id, sandbox, config, None)
+}
+
+pub fn execute_tool_with_tavily(
+    tool: &str,
+    args: &Value,
     _session_id: &str,
     sandbox: &Sandbox,
     config: &AgentConfig,
+    mut tavily: Option<&mut TavilyRoundWrapper<'_>>,
 ) -> Result<ToolExecutionResult, AgentError> {
     match tool {
         "fs.list_text_files" => {
@@ -134,6 +160,22 @@ pub fn execute_tool(
             content: bash_tool(args, config)?,
             attachments: vec![],
         }),
+        "web.search" => {
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AgentError::new("INVALID_ARGUMENT", "web.search requires query"))?;
+            let content = tavily
+                .as_deref_mut()
+                .ok_or_else(|| {
+                    AgentError::new("WEB_SEARCH_UNAVAILABLE", "Web search is not configured.")
+                })?
+                .search(query)?;
+            Ok(ToolExecutionResult {
+                content,
+                attachments: vec![],
+            })
+        }
         _ => Err(AgentError::with_details(
             "INVALID_ARGUMENT",
             "Unknown tool",
@@ -400,6 +442,7 @@ mod tests {
             ollama_base_url: "http://127.0.0.1:1".into(),
             ollama_timeout_ms: 1000,
             ollama_api_key: "ollama".into(),
+            tavily_api_key: None,
             sandbox,
             pedelec_cli_path: None,
             core_runtime_file: None,
@@ -438,6 +481,27 @@ mod tests {
         assert!(tools.contains("\"name\":\"bash\""));
         assert!(!tools.contains("pedelec_cli.tool_spec"));
         assert!(!tools.contains("pedelec_cli.tool_call"));
+    }
+
+    #[test]
+    fn web_search_definition_is_conditional_and_only_accepts_query() {
+        assert!(!tool_definitions_with_web_search(false, false)
+            .to_string()
+            .contains("web.search"));
+        let tools = tool_definitions_with_web_search(false, true);
+        let web = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == "web.search")
+            .unwrap();
+        assert_eq!(
+            web["function"]["parameters"]["required"],
+            serde_json::json!(["query"])
+        );
+        assert!(web["function"]["parameters"]["properties"]
+            .get("max_results")
+            .is_none());
     }
 
     #[test]

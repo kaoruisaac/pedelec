@@ -395,6 +395,7 @@ mod tests {
             ollama_base_url: "http://127.0.0.1:1".into(),
             ollama_timeout_ms: 1000,
             ollama_api_key: "ollama".into(),
+            tavily_api_key: None,
             sandbox,
             pedelec_cli_path: None,
             core_runtime_file: None,

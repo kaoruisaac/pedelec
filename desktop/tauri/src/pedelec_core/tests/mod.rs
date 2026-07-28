@@ -463,11 +463,11 @@ mod tests {
             Some(ThreadStatus::Error)
         );
         let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::Error {
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::Error {
                 source: ThreadErrorSource::Provider { provider: ProviderCode::OpenCode }, error, ..
-            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
-        ));
+            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)));
     }
 
     #[test]
@@ -630,11 +630,11 @@ mod tests {
             Some(ThreadStatus::Error)
         );
         let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::Error {
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::Error {
                 source: ThreadErrorSource::Provider { provider: ProviderCode::Cursor }, error, ..
-            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
-        ));
+            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)));
     }
 
     #[test]
@@ -786,11 +786,11 @@ mod tests {
             Some(ThreadStatus::Error)
         );
         let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::Error {
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::Error {
                 source: ThreadErrorSource::Provider { provider: ProviderCode::Claude }, error, ..
-            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)
-        ));
+            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)));
     }
 
     #[test]
@@ -1163,6 +1163,7 @@ mod tests {
                     base_url: "http://127.0.0.1:11434".into(),
                     timeout_ms: 120_000,
                     api_key: "ollama_xxx".into(),
+                    tavily_api_key: String::new(),
                 },
             },
         };
@@ -1180,7 +1181,8 @@ mod tests {
                     "ollama": {
                         "baseUrl": "http://127.0.0.1:11434",
                         "timeoutMs": 120000,
-                        "apiKey": "ollama_xxx"
+                        "apiKey": "ollama_xxx",
+                        "tavilyApiKey": ""
                     }
                 }
             })
@@ -1271,6 +1273,7 @@ mod tests {
                         base_url: Some(" https://ollama.example.test/ ".into()),
                         timeout_ms: Some(250_000),
                         api_key: Some(" ollama_cloud_key ".into()),
+                        tavily_api_key: None,
                     },
                 },
             })
@@ -1304,6 +1307,7 @@ mod tests {
                         base_url: Some("   ".into()),
                         timeout_ms: None,
                         api_key: Some("ollama".into()),
+                        tavily_api_key: None,
                     },
                 },
             })
@@ -1339,6 +1343,7 @@ mod tests {
                         base_url: Some("ftp://127.0.0.1:11434".into()),
                         timeout_ms: Some(120_000),
                         api_key: Some("ollama".into()),
+                        tavily_api_key: None,
                     },
                 },
             })
@@ -1354,6 +1359,7 @@ mod tests {
                         base_url: Some(DEFAULT_OLLAMA_BASE_URL.into()),
                         timeout_ms: Some(0),
                         api_key: Some("ollama".into()),
+                        tavily_api_key: None,
                     },
                 },
             })
@@ -1369,6 +1375,7 @@ mod tests {
                         base_url: Some(DEFAULT_OLLAMA_BASE_URL.into()),
                         timeout_ms: Some(120_000),
                         api_key: Some("   ".into()),
+                        tavily_api_key: None,
                     },
                 },
             })
@@ -3385,13 +3392,8 @@ mod tests {
             ProviderCode::Ollama,
         ] {
             let thread_id = format!("thread_root_error_{provider:?}");
-            let mut runtime = runtime_with_provider_thread(
-                temp.path(),
-                &thread_id,
-                provider.clone(),
-                None,
-                None,
-            );
+            let mut runtime =
+                runtime_with_provider_thread(temp.path(), &thread_id, provider.clone(), None, None);
             let event_rx = runtime.event_bus.subscribe(&thread_id);
             runtime.emit_provider_stdout(
                 &thread_id,

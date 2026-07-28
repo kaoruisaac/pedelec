@@ -102,6 +102,8 @@ Ollama API key 只從 process env 的 `OLLAMA_API_KEY` 讀取，不從 `.env.loc
 OLLAMA_API_KEY=ollama pedelec-agent --sandbox . --provider ollama --model qwen2.5-coder:7b
 ```
 
+`TAVILY_API_KEY` 為選填，且也只讀取 process env。Desktop App 使用者可在 **Settings > Ollama** 設定它；直接執行 agent 時可自行設定環境變數。有 key 時才會提供 `web.search`，固定使用 Tavily basic search、最多 5 筆結果及 `chunks_per_source: 1`。每個模型回合最多可搜尋 10 次，可能消耗 Tavily credits。
+
 使用 Ollama Cloud 時，`~/.pedelec/settings.json` 的 `providerSettings.ollama.baseUrl` 應為 `https://ollama.com`，不可包含 `/api`；`pedelec-agent` 會呼叫 `{baseUrl}/api/chat` 並送出 `Authorization: Bearer <OLLAMA_API_KEY>`。
 
 session 儲存位置不可透過 CLI 或環境變數覆寫，固定由 Pedelec home 推導。

@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { forwardPopUp } from "../services/PopUpProvider";
+import TavilyInfoDialog from "./TavilyInfoDialog";
 import { OllamaModelOption, Provider } from "./types";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_TIMEOUT_MS } from "./constants";
@@ -10,7 +11,8 @@ interface EditingProviderPopupProps {
     editingBaseUrl: string;
     editingTimeoutMs: string;
     editingApiKey: string;
-    onApply: ({ model, baseUrl, timeoutMs, apiKey }: { model: string; baseUrl?: string; timeoutMs?: number; apiKey?: string }) => void;
+    editingTavilyApiKey: string;
+    onApply: ({ model, baseUrl, timeoutMs, apiKey, tavilyApiKey }: { model: string; baseUrl?: string; timeoutMs?: number; apiKey?: string; tavilyApiKey?: string }) => void;
 }
 
 const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupProps) => {
@@ -18,10 +20,13 @@ const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupPro
     const [editingBaseUrl, setEditingBaseUrl] = createSignal(props.editingBaseUrl ?? "");
     const [editingTimeoutMs, setEditingTimeoutMs] = createSignal(props.editingTimeoutMs ?? "");
     const [editingApiKey, setEditingApiKey] = createSignal(props.editingApiKey ?? "");
+    const [editingTavilyApiKey, setEditingTavilyApiKey] = createSignal(props.editingTavilyApiKey ?? "");
     const [ollamaModelsLoading, setOllamaModelsLoading] = createSignal(false);
     const [ollamaModelsError, setOllamaModelsError] = createSignal("");
     const [ollamaModels, setOllamaModels] = createSignal<OllamaModelOption[]>([]);
     const [fieldError, setFieldError] = createSignal("");
+    const [showTavilyInfo, setShowTavilyInfo] = createSignal(false);
+    let learnMoreButton: HTMLButtonElement | undefined;
 
     const canApplyOllama = createMemo(() => {
         if (ollamaModelsLoading() || ollamaModelsError() || fieldError()) return false;
@@ -122,7 +127,7 @@ const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupPro
         setFieldError("Select an Ollama model from the latest model list.");
         return;
     }
-    props.onApply({ model, baseUrl: baseUrl.value, timeoutMs: timeout.value, apiKey: apiKey.value });
+    props.onApply({ model, baseUrl: baseUrl.value, timeoutMs: timeout.value, apiKey: apiKey.value, tavilyApiKey: editingTavilyApiKey().trim() });
     popup.close();
     }
 
@@ -130,7 +135,20 @@ const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupPro
         loadOllamaModels();
     });
 
+    function openTavilyInfo(): void {
+        setShowTavilyInfo(true);
+    }
+
+    function closeTavilyInfo(): void {
+        setShowTavilyInfo(false);
+        queueMicrotask(() => learnMoreButton?.focus());
+    }
+
     return (
+        <Show
+            when={!showTavilyInfo()}
+            fallback={<TavilyInfoDialog onClose={closeTavilyInfo} />}
+        >
         <form class="settings-modal" role="dialog" aria-modal="true" onSubmit={applyEditor}>
             <header class="settings-modal-header">
             <div>
@@ -194,6 +212,24 @@ const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupPro
                 />
                 </label>
                 <label class="settings-field">
+                <span class="settings-field-label">
+                    Tavily API Key <em>Optional</em>
+                    <button
+                        ref={learnMoreButton}
+                        type="button"
+                        class="settings-inline-link-button"
+                        onClick={openTavilyInfo}
+                    >
+                        Learn more
+                    </button>
+                </span>
+                <input
+                    type="password"
+                    value={editingTavilyApiKey()}
+                    onInput={(event) => setEditingTavilyApiKey(event.currentTarget.value)}
+                />
+                </label>
+                <label class="settings-field">
                 <span>
                     Default Model <em>Required</em>
                 </span>
@@ -237,6 +273,7 @@ const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupPro
             </button>
             </footer>
         </form>
+        </Show>
     )
 })
 

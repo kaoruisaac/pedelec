@@ -280,7 +280,8 @@ mod tests {
                     "ollama": {
                         "baseUrl": "http://127.0.0.1:11434",
                         "timeoutMs": 120000,
-                        "apiKey": ""
+                        "apiKey": "",
+                        "tavilyApiKey": ""
                     }
                 }
             })
@@ -320,7 +321,8 @@ mod tests {
                     "ollama": {
                         "baseUrl": "http://127.0.0.1:11434",
                         "timeoutMs": 120000,
-                        "apiKey": "ollama"
+                        "apiKey": "ollama",
+                        "tavilyApiKey": ""
                     }
                 }
             })

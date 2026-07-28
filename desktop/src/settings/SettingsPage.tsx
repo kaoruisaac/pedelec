@@ -16,6 +16,7 @@ const emptySettings: Settings = {
       baseUrl: DEFAULT_OLLAMA_BASE_URL,
       timeoutMs: DEFAULT_OLLAMA_TIMEOUT_MS,
       apiKey: "",
+      tavilyApiKey: "",
     },
   },
 };
@@ -160,9 +161,10 @@ function SettingsPage(props: SettingsPageProps) {
         provider,
         editingBaseUrl: providerSettings?.baseUrl,
         editingApiKey: providerSettings?.apiKey,
+        editingTavilyApiKey: providerSettings?.tavilyApiKey,
         editingModel: draftSettings().defaultModels[provider.code],
         editingTimeoutMs: String(draftSettings().providerSettings.ollama.timeoutMs),
-        onApply: ({ model, baseUrl, timeoutMs, apiKey }: { model: string; baseUrl?: string; timeoutMs?: number; apiKey?: string }) => {
+        onApply: ({ model, baseUrl, timeoutMs, apiKey, tavilyApiKey }: { model: string; baseUrl?: string; timeoutMs?: number; apiKey?: string; tavilyApiKey?: string }) => {
           markDraftChanged();
           setDraftSettings((current) => ({ ...current, defaultModels: { ...current.defaultModels, [provider.code]: model } }));
           if (provider.code === "ollama") {
@@ -175,6 +177,7 @@ function SettingsPage(props: SettingsPageProps) {
                   baseUrl: nextBaseUrl,
                   timeoutMs: timeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS,
                   apiKey: apiKey ?? "",
+                  tavilyApiKey: tavilyApiKey ?? "",
                 },
               },
             }));
@@ -494,6 +497,7 @@ function normalizeSettings(value: Settings | null | undefined): Settings {
         baseUrl: value?.providerSettings?.ollama?.baseUrl ?? DEFAULT_OLLAMA_BASE_URL,
         timeoutMs: value?.providerSettings?.ollama?.timeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS,
         apiKey: value?.providerSettings?.ollama?.apiKey ?? "",
+        tavilyApiKey: value?.providerSettings?.ollama?.tavilyApiKey ?? "",
       },
     },
   };

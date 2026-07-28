@@ -24,6 +24,7 @@ pub struct AgentConfig {
     pub ollama_base_url: String,
     pub ollama_timeout_ms: u64,
     pub ollama_api_key: String,
+    pub tavily_api_key: Option<String>,
     pub sandbox: PathBuf,
     pub pedelec_cli_path: Option<PathBuf>,
     pub core_runtime_file: Option<PathBuf>,
@@ -73,6 +74,7 @@ pub(crate) fn resolve_config_with_settings_path(
         .or_else(|| env_file_path(&file_env, "PEDELEC_AGENT_SANDBOX"))
         .unwrap_or_else(|| PathBuf::from("."));
     let ollama_api_key = normalize_ollama_api_key(env::var("OLLAMA_API_KEY").ok())?;
+    let tavily_api_key = normalize_tavily_api_key(env::var("TAVILY_API_KEY").ok());
 
     Ok(AgentConfig {
         provider,
@@ -81,6 +83,7 @@ pub(crate) fn resolve_config_with_settings_path(
         ollama_base_url: ollama_settings.base_url,
         ollama_timeout_ms: ollama_settings.timeout_ms,
         ollama_api_key,
+        tavily_api_key,
         sandbox,
         pedelec_cli_path: cli
             .pedelec_cli
@@ -217,6 +220,13 @@ fn normalize_ollama_api_key(value: Option<String>) -> Result<String, AgentError>
         ));
     }
     Ok(trimmed.to_string())
+}
+
+fn normalize_tavily_api_key(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 fn parse_provider(value: &str) -> Result<ModelProvider, AgentError> {
@@ -472,6 +482,16 @@ mod tests {
         assert_eq!(
             normalize_ollama_api_key(Some("  ollama  ".into())).unwrap(),
             "ollama"
+        );
+    }
+
+    #[test]
+    fn tavily_api_key_is_optional_and_trimmed() {
+        assert_eq!(normalize_tavily_api_key(None), None);
+        assert_eq!(normalize_tavily_api_key(Some("  \t".into())), None);
+        assert_eq!(
+            normalize_tavily_api_key(Some(" key ".into())),
+            Some("key".into())
         );
     }
 

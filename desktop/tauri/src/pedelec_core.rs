@@ -241,6 +241,8 @@ pub struct OllamaProviderSettings {
     pub timeout_ms: u64,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub tavily_api_key: String,
 }
 
 impl Default for OllamaProviderSettings {
@@ -249,6 +251,7 @@ impl Default for OllamaProviderSettings {
             base_url: DEFAULT_OLLAMA_BASE_URL.to_string(),
             timeout_ms: DEFAULT_OLLAMA_TIMEOUT_MS,
             api_key: String::new(),
+            tavily_api_key: String::new(),
         }
     }
 }
@@ -265,6 +268,7 @@ pub struct OllamaProviderSettingsInput {
     pub base_url: Option<String>,
     pub timeout_ms: Option<u64>,
     pub api_key: Option<String>,
+    pub tavily_api_key: Option<String>,
 }
 
 impl Default for ProviderSettingsInput {
@@ -274,6 +278,7 @@ impl Default for ProviderSettingsInput {
                 base_url: Some(DEFAULT_OLLAMA_BASE_URL.to_string()),
                 timeout_ms: Some(DEFAULT_OLLAMA_TIMEOUT_MS),
                 api_key: Some("ollama".to_string()),
+                tavily_api_key: Some(String::new()),
             },
         }
     }
@@ -1230,6 +1235,24 @@ impl ProviderAdapter for OllamaProviderAdapter {
             "OLLAMA_API_KEY".to_string(),
             require_ollama_api_key(Some(ctx.settings.provider_settings.ollama.api_key.clone()))?,
         ));
+        if !ctx
+            .settings
+            .provider_settings
+            .ollama
+            .tavily_api_key
+            .trim()
+            .is_empty()
+        {
+            env.push((
+                "TAVILY_API_KEY".to_string(),
+                ctx.settings
+                    .provider_settings
+                    .ollama
+                    .tavily_api_key
+                    .trim()
+                    .to_string(),
+            ));
+        }
         Ok(CommandSpec {
             program: "pedelec-agent".to_string(),
             args,
@@ -1270,6 +1293,24 @@ impl ProviderAdapter for OllamaProviderAdapter {
             "OLLAMA_API_KEY".to_string(),
             require_ollama_api_key(Some(ctx.settings.provider_settings.ollama.api_key.clone()))?,
         ));
+        if !ctx
+            .settings
+            .provider_settings
+            .ollama
+            .tavily_api_key
+            .trim()
+            .is_empty()
+        {
+            env.push((
+                "TAVILY_API_KEY".to_string(),
+                ctx.settings
+                    .provider_settings
+                    .ollama
+                    .tavily_api_key
+                    .trim()
+                    .to_string(),
+            ));
+        }
         Ok(CommandSpec {
             program: "pedelec-agent".to_string(),
             args,
@@ -2149,7 +2190,8 @@ impl CoreRuntime {
             self.tool_request_broker.clear_thread(thread_id);
             if had_provider_error {
                 if is_prepare {
-                    self.event_bus.emit_status_changed(thread_id, ThreadStatus::Idle);
+                    self.event_bus
+                        .emit_status_changed(thread_id, ThreadStatus::Idle);
                 }
                 return;
             }
@@ -2171,7 +2213,8 @@ impl CoreRuntime {
                 }
                 stderr_message.as_str()
             };
-            let error = PedelecError::with_details(error_codes::PROVIDER_COMMAND_FAILED, message, details);
+            let error =
+                PedelecError::with_details(error_codes::PROVIDER_COMMAND_FAILED, message, details);
             if is_prepare {
                 self.emit_thread_provider_error(thread_id, error);
                 self.event_bus.emit_status_changed(thread_id, next_status);
@@ -3654,11 +3697,7 @@ impl EventBus {
         provider: ProviderCode,
         error: PedelecError,
     ) {
-        self.emit_error(
-            thread_id,
-            ThreadErrorSource::Provider { provider },
-            error,
-        );
+        self.emit_error(thread_id, ThreadErrorSource::Provider { provider }, error);
     }
 
     pub fn emit_core_error(&mut self, thread_id: &str, error: PedelecError) {
@@ -3884,27 +3923,48 @@ fn external_provider_codes() -> [ProviderCode; 5] {
 /// GUI applications do not reliably inherit shell profile PATH updates. Merge the
 /// installer locations here instead of changing the user's global environment.
 fn merged_provider_path(current: Option<OsString>) -> OsString {
-    let mut paths = current.as_ref().map_or_else(Vec::new, |value| env::split_paths(value).collect());
+    let mut paths = current
+        .as_ref()
+        .map_or_else(Vec::new, |value| env::split_paths(value).collect());
     #[cfg(windows)]
-    if let Ok(hkcu) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-        .open_subkey("Environment")
+    if let Ok(hkcu) =
+        winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey("Environment")
     {
-        if let Ok(value) = hkcu.get_value::<OsString, _>("Path") { paths.extend(env::split_paths(&value)); }
+        if let Ok(value) = hkcu.get_value::<OsString, _>("Path") {
+            paths.extend(env::split_paths(&value));
+        }
     }
     if let Some(home) = dirs::home_dir() {
         #[cfg(windows)]
-        paths.extend([home.join("AppData/Local/Programs/OpenAI/Codex/bin"), home.join("AppData/Local/agy/bin"), home.join(".opencode/bin"), home.join("AppData/Roaming/npm")]);
+        paths.extend([
+            home.join("AppData/Local/Programs/OpenAI/Codex/bin"),
+            home.join("AppData/Local/agy/bin"),
+            home.join(".opencode/bin"),
+            home.join("AppData/Roaming/npm"),
+        ]);
         #[cfg(not(windows))]
         paths.extend([home.join(".local/bin"), home.join(".opencode/bin")]);
     }
     let mut normalized = Vec::new();
     for path in paths {
-        if !path.exists() { continue; }
+        if !path.exists() {
+            continue;
+        }
         let duplicate = normalized.iter().any(|existing: &PathBuf| {
-            #[cfg(windows)] { existing.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy()) }
-            #[cfg(not(windows))] { existing == &path }
+            #[cfg(windows)]
+            {
+                existing
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&path.to_string_lossy())
+            }
+            #[cfg(not(windows))]
+            {
+                existing == &path
+            }
         });
-        if !duplicate { normalized.push(path); }
+        if !duplicate {
+            normalized.push(path);
+        }
     }
     env::join_paths(normalized).unwrap_or_default()
 }
@@ -4212,7 +4272,12 @@ fn normalize_ollama_provider_settings(
             settings.timeout_ms.unwrap_or(DEFAULT_OLLAMA_TIMEOUT_MS),
         )?,
         api_key: require_ollama_api_key(settings.api_key)?,
+        tavily_api_key: normalize_optional_secret(settings.tavily_api_key),
     })
+}
+
+fn normalize_optional_secret(value: Option<String>) -> String {
+    value.unwrap_or_default().trim().to_string()
 }
 
 pub fn normalize_ollama_base_url(value: Option<String>) -> Result<String, PedelecError> {
@@ -4266,6 +4331,12 @@ pub fn validate_ollama_timeout(value: u64) -> Result<u64, PedelecError> {
 
 fn require_ollama_api_key(value: Option<String>) -> Result<String, PedelecError> {
     let trimmed = value.as_deref().map(str::trim).unwrap_or_default();
+    if trimmed.is_empty() {
+        return Err(PedelecError::new(
+            error_codes::OLLAMA_API_KEY_REQUIRED,
+            "Ollama API key is required. For local models, enter 'ollama'.",
+        ));
+    }
     Ok(trimmed.to_string())
 }
 
@@ -4762,9 +4833,11 @@ fn parse_antigravity_provider_line(
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
-                .map(|provider_session_id| ThreadEventPartial::ProviderSessionIdUpdated {
-                    provider_session_id: provider_session_id.to_string(),
-                })
+                .map(
+                    |provider_session_id| ThreadEventPartial::ProviderSessionIdUpdated {
+                        provider_session_id: provider_session_id.to_string(),
+                    },
+                )
                 .into_iter()
                 .collect()
         }
@@ -4782,13 +4855,18 @@ fn parse_antigravity_provider_line(
                 return Vec::new();
             }
             *received_agent_delta = true;
-            vec![ThreadEventPartial::AssistantMessage { text: text.to_string() }]
+            vec![ThreadEventPartial::AssistantMessage {
+                text: text.to_string(),
+            }]
         }
         Some("result") => {
             let Some(result) = object.get("result").and_then(Value::as_object) else {
                 return Vec::new();
             };
-            let status = result.get("status").and_then(Value::as_str).unwrap_or_default();
+            let status = result
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if status == "SUCCESS" {
                 if *received_agent_delta {
                     return Vec::new();
@@ -4797,7 +4875,9 @@ fn parse_antigravity_provider_line(
                     .get("response")
                     .and_then(Value::as_str)
                     .filter(|response| !response.is_empty())
-                    .map(|text| ThreadEventPartial::AssistantMessage { text: text.to_string() })
+                    .map(|text| ThreadEventPartial::AssistantMessage {
+                        text: text.to_string(),
+                    })
                     .into_iter()
                     .collect();
             }

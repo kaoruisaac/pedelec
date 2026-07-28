@@ -15,6 +15,7 @@ export interface OllamaProviderSettings {
   baseUrl: string;
   timeoutMs: number;
   apiKey: string;
+  tavilyApiKey: string;
 }
 
 export interface ProviderSettings {
