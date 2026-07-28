@@ -39,10 +39,10 @@ function runCommand(command, args, options = {}) {
 
 const cargoArgs = [
   "build",
+  "--manifest-path",
+  join(desktopDir, "Cargo.toml"),
   "--release",
-  "--features",
-  "helper-binaries",
-  ...helperBinaryNames.flatMap((name) => ["--bin", name]),
+  ...helperBinaryNames.flatMap((name) => ["--package", name]),
 ];
 
 if (helperTarget) {
@@ -53,13 +53,13 @@ await mkdir(resourceDir, { recursive: true });
 await writeFile(placeholderPath, "");
 
 runCommand(process.platform === "win32" ? "cargo.exe" : "cargo", cargoArgs, {
-  cwd: tauriDir,
+  cwd: desktopDir,
 });
 
 const exe = process.platform === "win32" ? ".exe" : "";
 const profileDir = helperTarget
-  ? join(tauriDir, "target", helperTarget, "release")
-  : join(tauriDir, "target", "release");
+  ? join(desktopDir, "target", helperTarget, "release")
+  : join(desktopDir, "target", "release");
 
 for (const name of helperBinaryNames) {
   const sourcePath = join(profileDir, `${name}${exe}`);

@@ -1,5 +1,5 @@
-use crate::pedelec_core::{error_codes, PedelecError};
-use crate::pedelec_paths::{pedelec_home_dir, pedelec_native_host_install_path};
+use pedelec_core::{error_codes, PedelecError};
+use crate::pedelec_binary_install::{pedelec_home_dir, pedelec_native_host_install_path};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -299,7 +299,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let missing_host = temp
             .path()
-            .join(crate::pedelec_paths::pedelec_native_host_binary_name());
+            .join(crate::pedelec_binary_install::pedelec_native_host_binary_name());
         let manifest_path = temp.path().join(MANIFEST_FILE_NAME);
 
         let err = register_chrome_native_messaging_host_with_paths(
@@ -318,7 +318,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let native_host = temp
             .path()
-            .join(crate::pedelec_paths::pedelec_native_host_binary_name());
+            .join(crate::pedelec_binary_install::pedelec_native_host_binary_name());
         let manifest_path = temp.path().join(MANIFEST_FILE_NAME);
         fs::write(&native_host, b"fake-native-host").unwrap();
 

@@ -1,0 +1,17 @@
+[package]
+name = "pedelec-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+pedelec-shared.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

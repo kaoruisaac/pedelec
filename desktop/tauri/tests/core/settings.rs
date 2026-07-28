@@ -1,4 +1,4 @@
-use pedelec_lib::pedelec_core::{PedelecSettings, ProviderCode};
+use pedelec_core::{PedelecSettings, ProviderCode};
 use serde_json::json;
 
 #[test]

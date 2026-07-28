@@ -1,0 +1,12 @@
+[package]
+name = "pedelec-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pedelec-core.workspace = true
+pedelec-ipc.workspace = true

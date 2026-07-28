@@ -84,7 +84,7 @@ pub struct ListAssetsOutput {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AssetUploadTicket {
+pub struct AssetUploadTicket {
     pub thread_id: String,
     pub sandbox_path: PathBuf,
     pub filename: String,
@@ -96,7 +96,7 @@ pub(crate) struct AssetUploadTicket {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AssetUploadState {
+pub enum AssetUploadState {
     Pending,
     Uploading,
     Completed,
@@ -1338,18 +1338,16 @@ pub struct CoreRuntime {
     pub tool_registry: ToolRegistryStore,
     pub tool_request_broker: ToolRequestBroker,
     pub event_bus: EventBus,
-    pub(crate) running_processes: HashMap<String, RunningProviderProcess>,
-    pub(crate) core_ipc_endpoint: Option<String>,
-    pub(crate) core_ipc_runtime_file_path: Option<PathBuf>,
-    pub(crate) settings_file_path: Option<PathBuf>,
-    pub(crate) provider_scan: HashMap<ProviderCode, ProviderCli>,
-    pub(crate) provider_refresh_in_progress: bool,
-    pub(crate) asset_upload_port: Option<u16>,
-    pub(crate) asset_upload_tickets: HashMap<String, AssetUploadTicket>,
-    #[cfg(test)]
-    pub(crate) provider_path_value_override: Option<OsString>,
-    #[cfg(test)]
-    pub(crate) test_provider_command: Option<CommandSpec>,
+    pub running_processes: HashMap<String, RunningProviderProcess>,
+    pub core_ipc_endpoint: Option<String>,
+    pub core_ipc_runtime_file_path: Option<PathBuf>,
+    pub settings_file_path: Option<PathBuf>,
+    pub provider_scan: HashMap<ProviderCode, ProviderCli>,
+    pub provider_refresh_in_progress: bool,
+    pub asset_upload_port: Option<u16>,
+    pub asset_upload_tickets: HashMap<String, AssetUploadTicket>,
+    pub provider_path_value_override: Option<OsString>,
+    pub test_provider_command: Option<CommandSpec>,
 }
 
 impl CoreRuntime {
@@ -1548,7 +1546,7 @@ impl CoreRuntime {
         Ok(ListAssetsOutput { assets })
     }
 
-    pub(crate) fn expire_asset_uploads(&mut self) {
+    pub fn expire_asset_uploads(&mut self) {
         let now = Utc::now();
         for ticket in self.asset_upload_tickets.values_mut() {
             if ticket.state == AssetUploadState::Pending && ticket.expires_at <= now {
@@ -1705,7 +1703,6 @@ impl CoreRuntime {
     }
 
     fn provider_path_value(&self) -> Option<OsString> {
-        #[cfg(test)]
         if let Some(path) = &self.provider_path_value_override {
             return Some(path.clone());
         }
@@ -1782,18 +1779,13 @@ impl CoreRuntime {
             }
         }
 
-        #[cfg(test)]
         let test_command = self.test_provider_command.clone();
 
-        #[cfg(test)]
         let command = if let Some(command) = test_command {
             command
         } else {
             self.build_send_text_command(&input)?
         };
-
-        #[cfg(not(test))]
-        let command = self.build_send_text_command(&input)?;
 
         let thread = self.thread_manager.thread_mut(&input.thread_id)?;
         thread.status = ThreadStatus::Running;
@@ -1875,18 +1867,13 @@ impl CoreRuntime {
             });
         }
 
-        #[cfg(test)]
         let test_command = self.test_provider_command.clone();
 
-        #[cfg(test)]
         let command = if let Some(command) = test_command {
             command
         } else {
             self.build_prepare_thread_command(&input)?
         };
-
-        #[cfg(not(test))]
-        let command = self.build_prepare_thread_command(&input)?;
 
         let thread = self.thread_manager.thread_mut(&input.thread_id)?;
         thread.status = ThreadStatus::Running;
@@ -2643,7 +2630,7 @@ pub struct CoreRuntimeOwner {
 }
 
 impl CoreRuntimeOwner {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             runtime: Arc::new(Mutex::new(CoreRuntime::new())),
         }
@@ -2697,7 +2684,7 @@ impl ThreadManager {
         self.threads.keys().cloned().collect()
     }
 
-    pub(crate) fn insert_thread(
+    pub fn insert_thread(
         &mut self,
         state: ThreadState,
         provider_state: ProviderAdapterState,
@@ -4490,7 +4477,9 @@ fn parse_ollama_models_response(text: &str) -> Result<Vec<OllamaModelOption>, Pe
 }
 
 fn default_settings_file_path() -> Result<PathBuf, PedelecError> {
-    crate::pedelec_paths::pedelec_home_dir().map(|home| home.join("settings.json"))
+    pedelec_shared::paths::pedelec_home_dir()
+        .map(|home| home.join("settings.json"))
+        .map_err(|err| PedelecError { code: err.code, message: err.message, details: err.details })
 }
 
 fn read_settings_file(path: &Path) -> Result<PedelecSettings, PedelecError> {
@@ -4650,7 +4639,8 @@ fn build_provider_env(
     }
     env.push((
         "PATH".to_string(),
-        crate::pedelec_paths::path_value_with_default_pedelec_dir()?
+        pedelec_shared::paths::path_value_with_default_pedelec_dir()
+            .map_err(|err| PedelecError { code: err.code, message: err.message, details: err.details })?
             .to_string_lossy()
             .to_string(),
     ));
@@ -4742,7 +4732,7 @@ fn build_provider_instruction(thread: &ThreadState, registry: &ToolRegistry) -> 
 }
 
 fn default_runtime_file_path_for_provider() -> PathBuf {
-    crate::pedelec_paths::pedelec_home_dir()
+    pedelec_shared::paths::pedelec_home_dir()
         .map(|home| home.join("runtime.json"))
         .unwrap_or_else(|_| PathBuf::from("runtime.json"))
 }
@@ -5804,5 +5794,5 @@ fn skill_download_error(
 }
 
 #[cfg(test)]
-#[path = "pedelec_core/tests/mod.rs"]
+#[path = "../../../tauri/src/pedelec_core/tests/mod.rs"]
 mod tests;

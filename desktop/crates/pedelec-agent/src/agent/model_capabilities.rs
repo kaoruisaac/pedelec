@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn supports_vision(config: &AgentConfig) -> bool {
     let key = format!("{}\u{1f}{}", config.ollama_base_url, config.model);
-    let home = match crate::pedelec_paths::pedelec_home_dir() {
+    let home = match pedelec_shared::paths::pedelec_home_dir() {
         Ok(p) => p,
         Err(_) => return query(config).unwrap_or(false),
     };

@@ -1,38 +1,19 @@
 [package]
 name = "pedelec-app"
-version = "0.1.14"
+version.workspace = true
 description = "Pedelec"
-authors = ["Isaac Lin"]
-edition = "2021"
+authors.workspace = true
+edition.workspace = true
 default-run = "pedelec-app"
 autobins = false
 
-[features]
-default = []
-helper-binaries = []
-
 [lib]
-name = "pedelec_lib"
+name = "pedelec_app_lib"
 path = "src/lib.rs"
 
 [[bin]]
 name = "pedelec-app"
 path = "src/bin/pedelec-app.rs"
-
-[[bin]]
-name = "pedelec-native-host"
-path = "src/bin/pedelec-native-host.rs"
-required-features = ["helper-binaries"]
-
-[[bin]]
-name = "pedelec-cli"
-path = "src/bin/pedelec-cli.rs"
-required-features = ["helper-binaries"]
-
-[[bin]]
-name = "pedelec-agent"
-path = "src/bin/pedelec-agent.rs"
-required-features = ["helper-binaries"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -52,11 +33,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 uuid = { version = "1", features = ["v4", "v7", "std"] }
+pedelec-core.workspace = true
+pedelec-ipc.workspace = true
+pedelec-shared.workspace = true
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2"
 
 [dev-dependencies]
 tempfile = "3"
+pedelec-core.workspace = true
+pedelec-ipc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }

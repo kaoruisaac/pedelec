@@ -1,4 +1,4 @@
-use pedelec_lib::pedelec_core::{validate_ollama_base_url, validate_ollama_timeout};
+use pedelec_core::{validate_ollama_base_url, validate_ollama_timeout};
 
 #[test]
 fn ollama_public_validation_accepts_a_valid_local_endpoint() {

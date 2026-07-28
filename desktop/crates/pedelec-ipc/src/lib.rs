@@ -1,4 +1,4 @@
-use crate::pedelec_core::{
+use pedelec_core::{
     error_codes, CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput,
     PedelecError, PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose,
     SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
@@ -528,7 +528,7 @@ where
 pub fn start_provider_process(
     runtime: SharedCoreRuntime,
     input: SendTextInput,
-) -> Result<crate::pedelec_core::SendTextOutput, PedelecError> {
+) -> Result<pedelec_core::SendTextOutput, PedelecError> {
     let thread_id = input.thread_id.clone();
     let start = runtime.lock().unwrap().begin_send_text(input)?;
     start_provider_process_with_command(
@@ -561,7 +561,7 @@ pub fn prepare_provider_process(
 fn start_provider_process_with_command(
     runtime: SharedCoreRuntime,
     thread_id: String,
-    command_spec: crate::pedelec_core::CommandSpec,
+    command_spec: pedelec_core::CommandSpec,
     purpose: RunningProviderProcessPurpose,
 ) -> Result<(), PedelecError> {
     let resolved_program = match resolve_provider_program(&command_spec.program, &command_spec.env)
@@ -807,7 +807,7 @@ fn provider_program_path_candidates(program_path: &Path) -> Vec<PathBuf> {
 }
 
 fn build_provider_process_command(
-    spec: &crate::pedelec_core::CommandSpec,
+    spec: &pedelec_core::CommandSpec,
     resolved_program: &ResolvedProviderProgram,
 ) -> Command {
     let mut command = match resolved_program {
@@ -862,7 +862,7 @@ fn has_path_separator(program: &str) -> bool {
 
 fn provider_start_error_details(
     thread_id: &str,
-    spec: &crate::pedelec_core::CommandSpec,
+    spec: &pedelec_core::CommandSpec,
     resolved_program: Option<&ResolvedProviderProgram>,
     resolve_error: Option<ProviderProgramResolveError>,
 ) -> Value {
@@ -1156,7 +1156,3 @@ fn core_unavailable_error(_err: io::Error) -> PedelecError {
         "pedelec-app is not running",
     )
 }
-
-#[cfg(test)]
-#[path = "pedelec_ipc/tests/mod.rs"]
-mod tests;

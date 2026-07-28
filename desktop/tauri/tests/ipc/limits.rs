@@ -1,4 +1,4 @@
-use pedelec_lib::pedelec_ipc::read_bounded_json_line;
+use pedelec_ipc::read_bounded_json_line;
 use std::io::{BufReader, Cursor};
 
 #[test]

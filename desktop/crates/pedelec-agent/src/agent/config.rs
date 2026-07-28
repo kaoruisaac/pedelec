@@ -1,6 +1,6 @@
 use super::cli::CliArgs;
 use super::error::AgentError;
-use crate::pedelec_core::{
+use pedelec_shared::ollama::{
     normalize_ollama_base_url, validate_ollama_base_url, validate_ollama_timeout,
     DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_TIMEOUT_MS,
 };
@@ -116,7 +116,7 @@ struct ResolvedOllamaSettings {
 }
 
 fn default_settings_file_path() -> Result<PathBuf, AgentError> {
-    crate::pedelec_paths::pedelec_home_dir()
+    pedelec_shared::paths::pedelec_home_dir()
         .map(|home| home.join("settings.json"))
         .map_err(|err| AgentError {
             code: err.code,
@@ -203,7 +203,7 @@ fn default_ollama_settings() -> ResolvedOllamaSettings {
     }
 }
 
-fn agent_config_error_from_pedelec(err: crate::pedelec_core::PedelecError) -> AgentError {
+fn agent_config_error_from_pedelec(err: pedelec_shared::error::PedelecError) -> AgentError {
     AgentError {
         code: err.code,
         message: err.message,

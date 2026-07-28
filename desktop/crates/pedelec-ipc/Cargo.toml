@@ -1,0 +1,20 @@
+[package]
+name = "pedelec-ipc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+dirs.workspace = true
+encoding_rs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pedelec-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true
+pedelec-cli = { path = "../pedelec-cli" }

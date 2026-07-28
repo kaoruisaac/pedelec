@@ -1,0 +1,26 @@
+[package]
+name = "pedelec-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+chrono.workspace = true
+dirs.workspace = true
+jsonschema.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+uuid.workspace = true
+pedelec-shared.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[dev-dependencies]
+tempfile.workspace = true

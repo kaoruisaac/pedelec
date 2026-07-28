@@ -1,5 +1,5 @@
 //! Loopback-only binary asset data plane.  The control plane only creates tickets.
-use crate::pedelec_core::{
+use pedelec_core::{
     error_codes, AssetUploadState, PedelecError, SharedCoreRuntime, MAX_ASSET_UPLOAD_BYTES,
 };
 use sha2::{Digest, Sha256};

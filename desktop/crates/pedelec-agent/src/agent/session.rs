@@ -1,7 +1,7 @@
 use super::config::AgentConfig;
 use super::error::AgentError;
 use super::jsonl::append_jsonl;
-use crate::pedelec_paths::pedelec_home_dir;
+use pedelec_shared::paths::pedelec_home_dir;
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,12 +58,16 @@ pub fn load_session(
 
 fn agent_home_dir() -> Result<PathBuf, AgentError> {
     pedelec_home_dir()
-        .map(|home| home.join("pedelec-agent"))
+        .map(|home| agent_home_dir_from_pedelec_home(&home))
         .map_err(|err| AgentError {
             code: err.code,
             message: err.message,
             details: err.details,
         })
+}
+
+fn agent_home_dir_from_pedelec_home(pedelec_home: &Path) -> PathBuf {
+    pedelec_home.join("agent")
 }
 
 pub(crate) fn create_session_at(
@@ -472,6 +476,51 @@ mod tests {
                 .contains(&first.metadata.session_id),
             true
         );
+    }
+
+    #[test]
+    fn production_session_root_uses_agent_directory_not_binary_path() {
+        let pedelec_home = PathBuf::from("/home/user/.pedelec");
+        let agent_home = agent_home_dir_from_pedelec_home(&pedelec_home);
+        let session_id = Uuid::now_v7().hyphenated().to_string();
+        let uuid = Uuid::parse_str(&session_id).unwrap();
+        let (year, month) = uuid_year_month(&uuid, &session_id).unwrap();
+
+        assert_eq!(agent_home, PathBuf::from("/home/user/.pedelec/agent"));
+        assert_ne!(agent_home, pedelec_home.join("pedelec-agent"));
+        assert_eq!(
+            session_dir_for_parts(&agent_home, year, month, &session_id),
+            pedelec_home
+                .join("agent")
+                .join("sessions")
+                .join(format!("{year:04}"))
+                .join(format!("{month:02}"))
+                .join(session_id)
+        );
+    }
+
+    #[test]
+    fn creates_session_without_touching_sibling_agent_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = temp.path().canonicalize().unwrap();
+        let cfg = config(sandbox.clone());
+        let pedelec_home = temp.path().join(".pedelec");
+        fs::create_dir_all(&pedelec_home).unwrap();
+        let binary_path = pedelec_home.join("pedelec-agent");
+        fs::write(&binary_path, b"installed-agent-binary").unwrap();
+
+        let session = create_session_at(
+            &agent_home_dir_from_pedelec_home(&pedelec_home),
+            &cfg,
+            &sandbox,
+        )
+        .unwrap();
+
+        assert!(session
+            .dir
+            .starts_with(pedelec_home.join("agent").join("sessions")));
+        assert_eq!(fs::read(&binary_path).unwrap(), b"installed-agent-binary");
+        assert!(binary_path.is_file());
     }
 
     #[test]

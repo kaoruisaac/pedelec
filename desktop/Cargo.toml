@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+  "tauri",
+  "crates/pedelec-shared",
+  "crates/pedelec-core",
+  "crates/pedelec-ipc",
+  "crates/pedelec-agent",
+  "crates/pedelec-cli",
+  "crates/pedelec-native-host",
+]
+
+[workspace.package]
+version = "0.1.14"
+edition = "2021"
+authors = ["Isaac Lin"]
+
+[workspace.dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+dirs = "6"
+encoding_rs = "0.8"
+jsonschema = { version = "0.46.5", default-features = false }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+url = "2"
+uuid = { version = "1", features = ["v4", "v7", "std"] }
+pedelec-shared = { path = "crates/pedelec-shared" }
+pedelec-core = { path = "crates/pedelec-core" }
+pedelec-ipc = { path = "crates/pedelec-ipc" }

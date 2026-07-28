@@ -1,4 +1,4 @@
-use pedelec_lib::pedelec_ipc::{CoreIpcRequest, CoreIpcResponse, RuntimeFile};
+use pedelec_ipc::{CoreIpcRequest, CoreIpcResponse, RuntimeFile};
 use serde_json::json;
 
 #[test]

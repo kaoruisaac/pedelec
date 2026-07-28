@@ -1,13 +1,13 @@
-use crate::pedelec_core::{
+use pedelec_core::{
     refresh_shared_providers, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
     CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, ListOllamaModelsInput,
     OllamaModelOption, PedelecError, PedelecSettings, PrepareThreadInput, PrepareThreadOutput,
     ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput,
     UpdateSettingsInput,
 };
-use crate::pedelec_ipc::{prepare_provider_process, start_core_ipc_server, start_provider_process};
+use pedelec_ipc::{prepare_provider_process, start_core_ipc_server, start_provider_process};
 use crate::pedelec_native_registration::register_chrome_native_messaging_host;
-use crate::pedelec_paths::{
+use crate::pedelec_binary_install::{
     ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
     install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
     pedelec_agent_binary_name, pedelec_native_host_binary_name, pedelec_tool_binary_name,

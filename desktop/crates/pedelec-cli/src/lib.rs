@@ -1,27 +1,22 @@
-use crate::pedelec_core::{error_codes, PedelecError, ToolCallInput, ToolSpecInput};
-use crate::pedelec_ipc::{
+use pedelec_core::{error_codes, PedelecError, ToolCallInput, ToolSpecInput};
+use pedelec_ipc::{
     send_core_ipc_request, send_core_ipc_request_with_runtime_path, CoreIpcRequest,
 };
 use serde::Serialize;
 use serde_json::Value;
-#[cfg(test)]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::{Mutex, MutexGuard};
 
-#[cfg(test)]
 static PEDELEC_THREAD_ID_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-#[cfg(test)]
-pub(crate) struct ThreadIdEnvGuard {
+pub struct ThreadIdEnvGuard {
     previous: Option<OsString>,
     _lock: MutexGuard<'static, ()>,
 }
 
-#[cfg(test)]
 impl ThreadIdEnvGuard {
-    pub(crate) fn set(value: Option<&str>) -> Self {
+    pub fn set(value: Option<&str>) -> Self {
         let lock = PEDELEC_THREAD_ID_ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("PEDELEC_THREAD_ID");
         match value {
@@ -35,7 +30,6 @@ impl ThreadIdEnvGuard {
     }
 }
 
-#[cfg(test)]
 impl Drop for ThreadIdEnvGuard {
     fn drop(&mut self) {
         match &self.previous {
@@ -46,12 +40,12 @@ impl Drop for ThreadIdEnvGuard {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ToolCliResponse {
-    pub(crate) ok: bool,
+pub struct ToolCliResponse {
+    pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) result: Option<Value>,
+    pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) error: Option<PedelecError>,
+    pub error: Option<PedelecError>,
 }
 
 pub fn run() {
@@ -66,7 +60,7 @@ fn run_tool_cli(args: Vec<String>) -> ToolCliResponse {
     run_tool_cli_with_runtime_file_path(args, runtime_file_path_from_env().as_deref())
 }
 
-pub(crate) fn run_tool_cli_with_runtime_file_path(
+pub fn run_tool_cli_with_runtime_file_path(
     args: Vec<String>,
     runtime_file_path: Option<&Path>,
 ) -> ToolCliResponse {

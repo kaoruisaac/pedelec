@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, "..");
 const tauriDir = join(desktopDir, "tauri");
-const targetDir = join(tauriDir, "target");
+const targetDir = join(desktopDir, "target");
 const releaseDir = join(targetDir, "release");
 const storeBundleDir = join(releaseDir, "bundle", "msix-store");
 const storeStageRoot = join(releaseDir, "msix-store");

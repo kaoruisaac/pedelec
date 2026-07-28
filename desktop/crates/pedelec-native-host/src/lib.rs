@@ -1,10 +1,10 @@
-use crate::pedelec_core::{error_codes, PedelecError};
-use crate::pedelec_ipc::{
+use pedelec_core::{error_codes, PedelecError};
+use pedelec_ipc::{
     connect_core_ipc, connect_core_ipc_with_runtime_path, default_runtime_file_path,
     read_bounded_json_line, send_core_ipc_request, send_core_ipc_request_with_runtime_path,
     write_json_line, CoreIpcRequest, CoreIpcResponse, MAX_CORE_IPC_MESSAGE_BYTES,
 };
-use crate::pedelec_paths::{app_launch_config_path, read_app_launch_config};
+use pedelec_shared::paths::{app_launch_config_path, read_app_launch_config};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -261,7 +261,7 @@ fn ensure_core_runtime_available(runtime_file_path: Option<&Path>) -> Result<(),
         return Ok(());
     }
 
-    let launch_config_path = app_launch_config_path()?;
+    let launch_config_path = app_launch_config_path().map_err(shared_error_to_core)?;
     let launch_config = read_app_launch_config(&launch_config_path).map_err(|mut err| {
         if let Some(Value::Object(details)) = err.details.as_mut() {
             details.insert(
@@ -270,7 +270,7 @@ fn ensure_core_runtime_available(runtime_file_path: Option<&Path>) -> Result<(),
             );
         }
         err
-    })?;
+    }).map_err(shared_error_to_core)?;
     let mut command = Command::new(&launch_config.executable_path);
     command
         .args(&launch_config.background_args)
@@ -313,6 +313,10 @@ fn ensure_core_runtime_available(runtime_file_path: Option<&Path>) -> Result<(),
             ));
         }
     }
+}
+
+fn shared_error_to_core(err: pedelec_shared::error::PedelecError) -> PedelecError {
+    PedelecError { code: err.code, message: err.message, details: err.details }
 }
 
 fn core_response_to_native_response(response: CoreIpcResponse) -> NativeProtocolResponse {
@@ -486,8 +490,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pedelec_core::{error_codes, CoreRuntime, ProviderCode, SharedCoreRuntime};
-    use crate::pedelec_ipc::start_core_ipc_server_with_runtime_path;
+    use pedelec_core::{error_codes, CoreRuntime, ProviderCode, SharedCoreRuntime};
+    use pedelec_ipc::start_core_ipc_server_with_runtime_path;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -850,7 +854,7 @@ mod tests {
     }
 
     fn insert_idle_thread(runtime: &SharedCoreRuntime, thread_id: &str) {
-        use crate::pedelec_core::{ProviderAdapterState, ThreadState, ThreadStatus};
+        use pedelec_core::{ProviderAdapterState, ThreadState, ThreadStatus};
         use std::path::PathBuf;
 
         let now = chrono::Utc::now();

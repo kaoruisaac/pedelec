@@ -9,7 +9,7 @@ MVP 不會修改、刪除、搬移檔案，也不會執行任意 shell command�
 在 repo 根目錄執行：
 
 ```bash
-cargo build --manifest-path desktop/tauri/Cargo.toml --features helper-binaries --bin pedelec-agent
+cargo build --manifest-path desktop/Cargo.toml -p pedelec-agent
 ```
 
 ## 基本用法
@@ -18,7 +18,7 @@ cargo build --manifest-path desktop/tauri/Cargo.toml --features helper-binaries 
 
 ```bash
 printf '%s' '請讀取 README.md 並整理重點' | \
-cargo run --manifest-path desktop/tauri/Cargo.toml --features helper-binaries --bin pedelec-agent -- \
+cargo run --manifest-path desktop/Cargo.toml -p pedelec-agent -- \
   --sandbox .
 ```
 
@@ -26,7 +26,7 @@ cargo run --manifest-path desktop/tauri/Cargo.toml --features helper-binaries --
 
 ```bash
 printf '%s' '請列出這個 sandbox 內有哪些文字檔' | \
-cargo run --manifest-path desktop/tauri/Cargo.toml --features helper-binaries --bin pedelec-agent -- \
+cargo run --manifest-path desktop/Cargo.toml -p pedelec-agent -- \
   run \
   --sandbox .
 ```
@@ -114,7 +114,7 @@ session 儲存位置不可透過 CLI 或環境變數覆寫，固定由 Pedelec h
 
 ```txt
 ~/.pedelec/
-  pedelec-agent/
+  agent/
     sessions/
       YYYY/
         MM/
@@ -177,7 +177,7 @@ printf '%s' '請呼叫 get_current_page 並整理目前頁面資訊' | \
 OLLAMA_API_KEY=ollama \
 pedelec-agent \
   --sandbox . \
-  --pedelec-cli ./desktop/tauri/target/debug/pedelec-cli \
+  --pedelec-cli ./desktop/target/debug/pedelec-cli \
   --core-runtime-file ~/.pedelec/runtime.json
 ```
 

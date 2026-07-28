@@ -1,4 +1,4 @@
-use pedelec_lib::pedelec_core::ToolRegistry;
+use pedelec_core::ToolRegistry;
 
 #[test]
 fn empty_tools_manifest_produces_an_empty_public_registry() {

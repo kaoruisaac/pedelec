@@ -1,4 +1,4 @@
-use crate::pedelec_core::{error_codes, PedelecError, ProviderCode};
+use pedelec_core::{error_codes, PedelecError, ProviderCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::process::Command;

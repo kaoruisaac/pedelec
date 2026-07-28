@@ -1,0 +1,16 @@
+[package]
+name = "pedelec-native-host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+pedelec-core.workspace = true
+pedelec-ipc.workspace = true
+pedelec-shared.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true

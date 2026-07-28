@@ -3,8 +3,8 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
-    use crate::pedelec_core::{
+    use pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
+    use pedelec_core::{
         CommandSpec, CoreRuntime, CreateThreadOutput, CreateThreadSkillsInput,
         CreateThreadToolInput, OllamaProviderSettings, PedelecSettings, ProviderAdapterState,
         ProviderCode, ProviderSettings, SandboxManager, ThreadErrorSource, ThreadState,

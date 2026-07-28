@@ -312,7 +312,7 @@ jobs:
             fi
           done
 
-          bundle_root="desktop/tauri/target/$HELPER_TARGET/release/bundle"
+          bundle_root="desktop/target/$HELPER_TARGET/release/bundle"
           [ -d "$bundle_root" ] || { echo "Bundle directory not found: $bundle_root" >&2; exit 1; }
 
           apps=()

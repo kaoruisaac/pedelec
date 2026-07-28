@@ -1,4 +1,4 @@
-use pedelec_lib::pedelec_core::SandboxManager;
+use pedelec_core::SandboxManager;
 
 #[test]
 fn sandbox_manager_public_contract_creates_and_removes_a_thread_sandbox() {
