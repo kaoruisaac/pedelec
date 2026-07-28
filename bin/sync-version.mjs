@@ -65,8 +65,8 @@ const jsonTargets = [
 const targets = [
   ...jsonTargets.map((target) => ({ ...target, type: "json" })),
   {
-    file: "desktop/tauri/Cargo.toml",
-    type: "toml",
+    file: "desktop/Cargo.toml",
+    type: "cargo-workspace",
   },
 ];
 
@@ -166,7 +166,7 @@ async function readVersionFiles() {
     if (target.type === "json") {
       files.push(readJsonTarget(target, absolutePath, content));
     } else {
-      files.push(readCargoTarget(target, absolutePath, content));
+      files.push(readCargoWorkspaceTarget(target, absolutePath, content));
     }
   }
 
@@ -197,17 +197,17 @@ function readJsonTarget(target, absolutePath, content) {
   };
 }
 
-function readCargoTarget(target, absolutePath, content) {
+function readCargoWorkspaceTarget(target, absolutePath, content) {
   return {
     ...target,
     absolutePath,
     content,
-    version: getCargoPackageVersion(content, target.file),
+    version: getCargoWorkspacePackageVersion(content, target.file),
     versionEntries: [
       {
         file: target.file,
-        field: "[package].version",
-        version: getCargoPackageVersion(content, target.file),
+        field: "[workspace.package].version",
+        version: getCargoWorkspacePackageVersion(content, target.file),
       },
     ],
   };
@@ -254,14 +254,14 @@ function getPackageLockRootVersionEntry(data) {
   };
 }
 
-function getCargoPackageVersion(content, file) {
-  return findCargoPackageVersionLine(content, file).version;
+function getCargoWorkspacePackageVersion(content, file) {
+  return findCargoWorkspacePackageVersionLine(content, file).version;
 }
 
-function updateCargoPackageVersion(content, version, file) {
+function updateCargoWorkspacePackageVersion(content, version, file) {
   const newline = content.includes("\r\n") ? "\r\n" : "\n";
   const lines = content.split(/\r?\n/);
-  const result = findCargoPackageVersionLine(content, file);
+  const result = findCargoWorkspacePackageVersionLine(content, file);
   lines[result.index] = result.line.replace(
     /^(\s*version\s*=\s*)"[^"]*"(.*)$/,
     `$1"${version}"$2`,
@@ -270,21 +270,21 @@ function updateCargoPackageVersion(content, version, file) {
   return lines.join(newline);
 }
 
-function findCargoPackageVersionLine(content, file) {
+function findCargoWorkspacePackageVersionLine(content, file) {
   const lines = content.split(/\r?\n/);
-  let inPackageSection = false;
+  let inWorkspacePackageSection = false;
 
   for (const [index, line] of lines.entries()) {
-    if (/^\s*\[package\]\s*$/.test(line)) {
-      inPackageSection = true;
+    if (/^\s*\[workspace\.package\]\s*$/.test(line)) {
+      inWorkspacePackageSection = true;
       continue;
     }
 
-    if (inPackageSection && /^\s*\[/.test(line)) {
+    if (inWorkspacePackageSection && /^\s*\[/.test(line)) {
       break;
     }
 
-    if (inPackageSection) {
+    if (inWorkspacePackageSection) {
       const match = line.match(/^\s*version\s*=\s*"([^"]*)"/);
       if (match) {
         return { index, line, version: match[1] };
@@ -292,7 +292,7 @@ function findCargoPackageVersionLine(content, file) {
     }
   }
 
-  throw new Error(`Missing [package] version in ${file}.`);
+  throw new Error(`Missing [workspace.package] version in ${file}.`);
 }
 
 function checkVersions(files, expectedVersion) {
@@ -320,7 +320,7 @@ function prepareUpdates(files, version) {
     const nextContent =
       file.type === "json"
         ? updateJsonContent(file, version)
-        : updateCargoPackageVersion(file.content, version, file.file);
+        : updateCargoWorkspacePackageVersion(file.content, version, file.file);
 
     return {
       file: file.file,

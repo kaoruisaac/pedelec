@@ -61,8 +61,8 @@ jobs:
           TAURI_VERSION=$(node -p "require('./desktop/tauri/tauri.conf.json').version")
           CARGO_VERSION=$(node - <<'NODE'
           const fs = require('fs');
-          const text = fs.readFileSync('./desktop/tauri/Cargo.toml', 'utf8');
-          const m = text.match(/^version\s*=\s*"([^"]+)"/m);
+          const text = fs.readFileSync('./desktop/Cargo.toml', 'utf8');
+          const m = text.match(/^\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m);
           console.log(m?.[1] ?? '');
           NODE
           )
