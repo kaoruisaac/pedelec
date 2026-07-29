@@ -1,6 +1,7 @@
 import { render } from "solid-js/web";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { updateStore } from "./updater/updateStore";
 import { EventMonitorApp } from "./event-monitor/EventMonitorApp";
 import HomePage from "./home/HomePage";
@@ -25,8 +26,32 @@ function AppShell() {
   const [appVersion, setAppVersion] = createSignal<string | null>(null);
 
   onMount(() => {
-    void getVersion().then(setAppVersion).catch(() => {});
-    void updateStore.checkForUpdate();
+    let disposed = false;
+    let unlistenFocus: (() => void) | undefined;
+    let pendingForegroundCheck = false;
+
+    void getVersion().then((version) => {
+      if (disposed) return;
+      setAppVersion(version);
+      if (pendingForegroundCheck) {
+        pendingForegroundCheck = false;
+        void updateStore.checkForUpdate("foreground", version);
+      }
+    }).catch(() => {});
+    void updateStore.checkForUpdate("init");
+
+    void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (!focused || disposed) return;
+      const version = appVersion();
+      if (version) {
+        void updateStore.checkForUpdate("foreground", version);
+      } else {
+        pendingForegroundCheck = true;
+      }
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenFocus = unlisten;
+    });
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.key.toLowerCase() === "m") {
@@ -35,7 +60,11 @@ function AppShell() {
     };
 
     window.addEventListener("keydown", handleKeyDown);
-    onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
+    onCleanup(() => {
+      disposed = true;
+      unlistenFocus?.();
+      window.removeEventListener("keydown", handleKeyDown);
+    });
   });
 
   return (

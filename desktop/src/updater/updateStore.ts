@@ -1,6 +1,11 @@
 import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { createSignal } from "solid-js";
+import {
+  hasForegroundCheckToday,
+  recordForegroundCheck,
+  type ForegroundCheckStorage,
+} from "./foregroundUpdatePolicy";
 
 export type UpdateStatus =
   | "idle"
@@ -28,6 +33,13 @@ export interface UpdaterAdapter {
   relaunch: () => Promise<void>;
 }
 
+export type UpdateCheckTrigger = "init" | "foreground" | "manual";
+
+export interface UpdateStoreOptions {
+  storage?: ForegroundCheckStorage;
+  now?: () => Date;
+}
+
 const tauriUpdater: UpdaterAdapter = { check, relaunch };
 
 const initialState: UpdateState = {
@@ -45,13 +57,34 @@ const initialState: UpdateState = {
 export function createUpdateStore(
   adapter: UpdaterAdapter = tauriUpdater,
   isDevelopment = import.meta.env.DEV,
+  options: UpdateStoreOptions = {},
 ) {
   const [state, setState] = createSignal<UpdateState>(initialState);
   let update: UpdateClient | null = null;
   let operationInFlight = false;
+  const storage = options.storage ?? (typeof localStorage === "undefined" ? undefined : localStorage);
+  const now = options.now ?? (() => new Date());
 
-  async function checkForUpdate() {
-    if (isDevelopment || operationInFlight || state().status === "checking") return;
+  async function checkForUpdate(trigger: UpdateCheckTrigger = "manual", installedVersion?: string) {
+    const currentStatus = state().status;
+    if (
+      isDevelopment ||
+      operationInFlight ||
+      currentStatus === "checking" ||
+      currentStatus === "available" ||
+      currentStatus === "downloading" ||
+      currentStatus === "installing" ||
+      (trigger === "foreground" && currentStatus === "failed")
+    ) return;
+
+    if (trigger === "foreground" && !installedVersion) return;
+    if (trigger === "foreground" && storage) {
+      try {
+        if (hasForegroundCheckToday(storage, installedVersion, now())) return;
+      } catch (error) {
+        console.debug("Could not read foreground update check record", error);
+      }
+    }
 
     setState({ ...initialState, status: "checking" });
     try {
@@ -61,6 +94,13 @@ export function createUpdateStore(
           ? { ...initialState, status: "available", availableVersion: update.version }
           : initialState,
       );
+      if (trigger === "foreground" && installedVersion && storage) {
+        try {
+          recordForegroundCheck(storage, installedVersion, now());
+        } catch (error) {
+          console.debug("Could not record foreground update check", error);
+        }
+      }
     } catch (error) {
       // A check failure is intentionally silent in the UI. It must never make
       // the desktop app unusable when offline or while a release is unavailable.
@@ -110,7 +150,7 @@ export function createUpdateStore(
   }
 
   async function retryUpdate() {
-    await checkForUpdate();
+    await checkForUpdate("manual");
     if (update) await installUpdate();
   }
 
