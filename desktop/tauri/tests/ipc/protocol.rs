@@ -6,6 +6,7 @@ fn public_ipc_wire_types_serialize_with_the_expected_shape() {
     let request = CoreIpcRequest {
         request_id: "request-1".into(),
         r#type: "listProviders".into(),
+        caller_origin: None,
         payload: Some(json!({})),
     };
     let response = CoreIpcResponse {
@@ -25,6 +26,17 @@ fn public_ipc_wire_types_serialize_with_the_expected_shape() {
     assert_eq!(
         serde_json::to_value(request).unwrap()["requestId"],
         "request-1"
+    );
+
+    let request: CoreIpcRequest = serde_json::from_value(json!({
+        "requestId": "request-origin",
+        "type": "ping",
+        "callerOrigin": "https://app.example.com"
+    }))
+    .unwrap();
+    assert_eq!(
+        request.caller_origin.as_deref(),
+        Some("https://app.example.com")
     );
     assert_eq!(
         serde_json::to_value(response).unwrap()["requestId"],

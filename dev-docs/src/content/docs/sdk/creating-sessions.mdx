@@ -146,6 +146,8 @@ localStorage.setItem("pedelec-session-id", session.sessionId);
 
 Use `false` when the application deliberately plans to resume after navigation or page reload.
 
+An SDK session is bound to its creating browser origin. The same origin can resume it after reload, in another tab, or through another SDK instance. Different schemes, hosts, subdomains, and ports cannot operate it. Treat `sessionId` as an identifier rather than a cross-origin bearer credential; the Extension determines the owner origin and applications cannot set it.
+
 The application then owns cleanup. If it never resumes or ends old IDs, desktop sessions can remain longer than intended.
 
 ## Returned session properties

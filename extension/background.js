@@ -626,7 +626,7 @@ function createBackground(runtimeChrome, options = {}) {
     });
   }
 
-  function sendNativeRequest(type, payload = {}) {
+  function sendNativeRequest(type, payload = {}, metadata = {}) {
     if (!connectNative()) {
       return Promise.reject({
         code: "NATIVE_HOST_UNAVAILABLE",
@@ -635,7 +635,7 @@ function createBackground(runtimeChrome, options = {}) {
     }
 
     const requestId = nextRequestId();
-    const message = { type, requestId, ...payload };
+    const message = { ...payload, type, requestId, ...metadata };
 
     return new Promise((resolve, reject) => {
       pendingRequests.set(requestId, { resolve, reject });
@@ -975,9 +975,10 @@ function createBackground(runtimeChrome, options = {}) {
   }
 
   async function autoEndSdkSession(sessionId) {
+    const lifecycle = sdkLifecycleBySession.get(sessionId);
     try {
       await withNativeOperation(async () => {
-        await sendNativeRequest("end_thread", { threadId: sessionId });
+        await sendSdkNativeRequest({ origin: lifecycle.origin }, "end_thread", { threadId: sessionId });
         removeActiveThread(sessionId);
         forgetSdkSession(sessionId);
       });
@@ -1059,6 +1060,13 @@ function createBackground(runtimeChrome, options = {}) {
     if (status === "waitingToolResult") return "waiting_tool_result";
     if (status === "starting" || status === "stopping") return "running";
     return status;
+  }
+
+  function sendSdkNativeRequest(context, type, payload = {}) {
+    if (!context?.origin || typeof context.origin !== "string") {
+      return Promise.reject({ code: "SDK_ORIGIN_UNAVAILABLE", message: "The SDK caller origin is unavailable." });
+    }
+    return sendNativeRequest(type, payload, { callerOrigin: context.origin });
   }
 
   function projectSdkSettings(value) {
@@ -1143,7 +1151,7 @@ function createBackground(runtimeChrome, options = {}) {
         }
         await withNativeOperation(async () => {
           const input = message.input || {};
-          const result = await sendNativeRequest("create_thread", {
+          const result = await sendSdkNativeRequest(context, "create_thread", {
             provider: input.provider,
             model: input.model,
             skills: input.skills,
@@ -1154,9 +1162,9 @@ function createBackground(runtimeChrome, options = {}) {
           }
 
           try {
-            await sendNativeRequest("subscribe_thread", { threadId: sessionId });
+            await sendSdkNativeRequest(context, "subscribe_thread", { threadId: sessionId });
           } catch (err) {
-            await sendNativeRequest("end_thread", { threadId: sessionId }).catch(() => {});
+            await sendSdkNativeRequest(context, "end_thread", { threadId: sessionId }).catch(() => {});
             throw err;
           }
 
@@ -1164,6 +1172,7 @@ function createBackground(runtimeChrome, options = {}) {
           addSdkSession(port, channelId, sessionId);
           sdkLifecycleBySession.set(sessionId, {
             autoEndOnDisconnect: input.autoEndOnDisconnect !== false,
+            origin: context.origin,
           });
           postSdkResponse(port, channelId, requestId, true, { sessionId });
         });
@@ -1200,7 +1209,7 @@ function createBackground(runtimeChrome, options = {}) {
           throw { code: "SDK_PROTOCOL_ERROR", message: "sessionId is required" };
         }
         await withNativeOperation(async () => {
-          await sendNativeRequest("subscribe_thread", { threadId: sessionId });
+          await sendSdkNativeRequest(context, "subscribe_thread", { threadId: sessionId });
           addActiveThread(sessionId);
           addSdkSession(port, channelId, sessionId);
           postSdkResponse(port, channelId, requestId, true, { sessionId });
@@ -1209,7 +1218,7 @@ function createBackground(runtimeChrome, options = {}) {
       }
 
       if (message.type === "send_text") {
-        await sendNativeRequest("send_text", {
+        await sendSdkNativeRequest(context, "send_text", {
           threadId: message.sessionId,
           message: message.text || "",
         });
@@ -1222,7 +1231,7 @@ function createBackground(runtimeChrome, options = {}) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
         }
-        const result = await sendNativeRequest("create_asset_upload", {
+        const result = await sendSdkNativeRequest(context, "create_asset_upload", {
           threadId: message.sessionId,
           filename: message.filename,
           sizeBytes: message.sizeBytes,
@@ -1237,7 +1246,7 @@ function createBackground(runtimeChrome, options = {}) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
         }
-        const result = await sendNativeRequest("list_assets", { threadId: message.sessionId });
+        const result = await sendSdkNativeRequest(context, "list_assets", { threadId: message.sessionId });
         postSdkResponse(port, channelId, requestId, true, result || { assets: [] });
         return;
       }
@@ -1247,7 +1256,7 @@ function createBackground(runtimeChrome, options = {}) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
         }
-        await sendNativeRequest("prepare_thread", {
+        await sendSdkNativeRequest(context, "prepare_thread", {
           threadId: message.sessionId,
         });
         postSdkResponse(port, channelId, requestId, true, {});
@@ -1255,7 +1264,7 @@ function createBackground(runtimeChrome, options = {}) {
       }
 
       if (message.type === "submit_tool_result") {
-        await sendNativeRequest("submit_tool_result", {
+        await sendSdkNativeRequest(context, "submit_tool_result", {
           threadId: message.sessionId,
           toolRequestId: message.toolRequestId,
           result: message.result,
@@ -1266,7 +1275,7 @@ function createBackground(runtimeChrome, options = {}) {
 
       if (message.type === "end_session") {
         await withNativeOperation(async () => {
-          await sendNativeRequest("end_thread", { threadId: message.sessionId });
+          await sendSdkNativeRequest(context, "end_thread", { threadId: message.sessionId });
           forgetSdkSession(message.sessionId);
           removeActiveThread(message.sessionId);
         });

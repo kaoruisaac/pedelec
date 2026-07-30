@@ -1,3 +1,18 @@
+use crate::pedelec_binary_install::{
+    ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
+    install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
+    pedelec_agent_binary_name, pedelec_native_host_binary_name, pedelec_tool_binary_name,
+    prepend_pedelec_dir_to_process_path, write_app_launch_config_for_current_exe,
+    BinaryInstallOutcome,
+};
+use crate::pedelec_native_registration::register_chrome_native_messaging_host;
+use crate::pedelec_upload::start_asset_upload_server;
+use crate::provider_installer::{
+    open as open_installer, OpenProviderInstallerInput, OpenProviderInstallerOutput,
+};
+use crate::provider_terminal::{
+    open as open_provider_terminal_window, OpenProviderTerminalInput, OpenProviderTerminalOutput,
+};
 use pedelec_core::{
     refresh_shared_providers, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
     CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, ListOllamaModelsInput,
@@ -6,21 +21,6 @@ use pedelec_core::{
     UpdateSettingsInput,
 };
 use pedelec_ipc::{prepare_provider_process, start_core_ipc_server, start_provider_process};
-use crate::pedelec_native_registration::register_chrome_native_messaging_host;
-use crate::pedelec_binary_install::{
-    ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
-    install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
-    pedelec_agent_binary_name, pedelec_native_host_binary_name, pedelec_tool_binary_name,
-    prepend_pedelec_dir_to_process_path, write_app_launch_config_for_current_exe,
-    BinaryInstallOutcome,
-};
-use crate::pedelec_upload::start_asset_upload_server;
-use crate::provider_installer::{
-    open as open_installer, OpenProviderInstallerInput, OpenProviderInstallerOutput,
-};
-use crate::provider_terminal::{
-    open as open_provider_terminal_window, OpenProviderTerminalInput, OpenProviderTerminalOutput,
-};
 use std::path::PathBuf;
 use std::thread;
 use tauri::menu::{Menu, MenuItem};
@@ -406,6 +406,11 @@ fn send_text(
     state: State<'_, CoreRuntimeOwner>,
     input: SendTextInput,
 ) -> Result<SendTextOutput, PedelecError> {
+    state
+        .runtime()
+        .lock()
+        .unwrap()
+        .authorize_thread_access(&input.thread_id, None)?;
     start_provider_process(state.runtime(), input)
 }
 
@@ -414,6 +419,11 @@ fn prepare_thread(
     state: State<'_, CoreRuntimeOwner>,
     input: PrepareThreadInput,
 ) -> Result<PrepareThreadOutput, PedelecError> {
+    state
+        .runtime()
+        .lock()
+        .unwrap()
+        .authorize_thread_access(&input.thread_id, None)?;
     prepare_provider_process(state.runtime(), input)
 }
 
@@ -422,6 +432,11 @@ fn submit_tool_result(
     state: State<'_, CoreRuntimeOwner>,
     input: SubmitToolResultInput,
 ) -> Result<(), PedelecError> {
+    state
+        .runtime()
+        .lock()
+        .unwrap()
+        .authorize_thread_access(&input.thread_id, None)?;
     state.runtime().lock().unwrap().submit_tool_result(input)
 }
 
@@ -430,6 +445,11 @@ fn end_thread(
     state: State<'_, CoreRuntimeOwner>,
     input: EndThreadInput,
 ) -> Result<(), PedelecError> {
+    state
+        .runtime()
+        .lock()
+        .unwrap()
+        .authorize_thread_access(&input.thread_id, None)?;
     state.runtime().lock().unwrap().end_thread(input)
 }
 

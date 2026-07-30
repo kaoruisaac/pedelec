@@ -239,6 +239,7 @@ mod tests {
             CoreIpcRequest {
                 request_id: "providers".into(),
                 r#type: "list_providers".into(),
+                caller_origin: None,
                 payload: Some(json!({})),
             },
             runtime,
@@ -266,6 +267,7 @@ mod tests {
             CoreIpcRequest {
                 request_id: "settings_get_initial".into(),
                 r#type: "get_settings".into(),
+                caller_origin: None,
                 payload: Some(json!({})),
             },
             Arc::clone(&runtime),
@@ -283,6 +285,7 @@ mod tests {
             CoreIpcRequest {
                 request_id: "settings_update".into(),
                 r#type: "update_settings".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "defaultProvider": "codex",
                     "defaultModels": {
@@ -319,6 +322,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "req_1".into(),
                 r#type: "missing".into(),
+                caller_origin: None,
                 payload: None,
             },
             temp.path().join("runtime.json"),
@@ -372,6 +376,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "sub_1".into(),
                 r#type: "subscribe_thread".into(),
+                caller_origin: None,
                 payload: Some(json!({ "threadId": "thread_sub" })),
             },
         )
@@ -413,6 +418,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "send_1".into(),
                 r#type: "send_text".into(),
+                caller_origin: None,
                 payload: Some(json!({ "threadId": "thread_busy", "message": "hello" })),
             },
             temp.path().join("runtime.json"),
@@ -436,6 +442,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "phase09_create".into(),
                 r#type: "create_thread".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "provider": "codex",
                     "skills": phase09_skills_manifest()
@@ -461,6 +468,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "phase09_send".into(),
                 r#type: "send_text".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "threadId": output.thread_id,
                     "message": "call update_counter with delta 2"
@@ -538,6 +546,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "phase09_submit".into(),
                 r#type: "submit_tool_result".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "threadId": output.thread_id,
                     "requestId": first_request_id,
@@ -598,6 +607,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "phase09_end".into(),
                 r#type: "end_thread".into(),
+                caller_origin: None,
                 payload: Some(json!({ "threadId": output.thread_id })),
             },
             &runtime_path,
@@ -694,6 +704,7 @@ mod tests {
                 &CoreIpcRequest {
                     request_id: "tool_1".into(),
                     r#type: "tool_call".into(),
+                    caller_origin: None,
                     payload: Some(json!({
                         "threadId": "thread_tool",
                         "toolName": "get_app_state",
@@ -719,6 +730,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "submit_1".into(),
                 r#type: "submit_tool_result".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "threadId": "thread_tool",
                     "requestId": request_id,
@@ -753,6 +765,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "tool_timeout".into(),
                 r#type: "tool_call".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "threadId": "thread_timeout",
                     "toolName": "get_app_state",
@@ -787,6 +800,7 @@ mod tests {
                 &CoreIpcRequest {
                     request_id: "tool_first".into(),
                     r#type: "tool_call".into(),
+                    caller_origin: None,
                     payload: Some(json!({
                         "threadId": "thread_pending",
                         "toolName": "get_app_state",
@@ -812,6 +826,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "tool_second".into(),
                 r#type: "tool_call".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "threadId": "thread_pending",
                     "toolName": "get_app_state",
@@ -830,6 +845,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "submit_pending".into(),
                 r#type: "submit_tool_result".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "threadId": "thread_pending",
                     "requestId": request_id,
@@ -860,6 +876,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "missing_tool".into(),
                 r#type: "tool_call".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "threadId": "thread_schema",
                     "toolName": "missing",
@@ -875,6 +892,7 @@ mod tests {
             &CoreIpcRequest {
                 request_id: "invalid_args".into(),
                 r#type: "tool_call".into(),
+                caller_origin: None,
                 payload: Some(json!({
                     "threadId": "thread_schema",
                     "toolName": "update_counter",
@@ -1336,6 +1354,7 @@ exit 0
             &CoreIpcRequest {
                 request_id: "sub".into(),
                 r#type: "subscribe_thread".into(),
+                caller_origin: None,
                 payload: Some(json!({ "threadId": thread_id })),
             },
         )

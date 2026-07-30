@@ -657,6 +657,8 @@ Do not blindly retry after `SUBMIT_TOOL_RESULT_FAILED`; the side effect may alre
 
 After `resumeSession(sessionId)`, restore before the next turn:
 
+SDK-created sessions can only be resumed or operated by their creating origin. Reloads, tabs, and SDK instances on that same origin are supported; a different scheme, host, subdomain, or port is not. `sessionId` is not a cross-origin bearer credential, and the Extension derives ownership from the browser rather than application input.
+
 - chat listener;
 - status listener;
 - error listener;

@@ -1,10 +1,10 @@
+use encoding_rs::Encoding;
 use pedelec_core::{
     error_codes, CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput,
     PedelecError, PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose,
     SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
     ToolCallInput, ToolSpecInput,
 };
-use encoding_rs::Encoding;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -43,6 +43,8 @@ pub struct CoreIpcRequest {
     pub request_id: String,
     pub r#type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<Value>,
 }
 
@@ -75,6 +77,7 @@ struct RawCoreIpcRequest {
     request_id: Option<String>,
     r#type: Option<String>,
     payload: Option<Value>,
+    caller_origin: Option<String>,
 }
 
 pub fn start_core_ipc_server(
@@ -350,6 +353,7 @@ fn parse_core_ipc_request(value: Value) -> Result<CoreIpcRequest, CoreIpcRespons
     Ok(CoreIpcRequest {
         request_id,
         r#type: request_type,
+        caller_origin: raw.caller_origin,
         payload: raw.payload,
     })
 }
@@ -357,7 +361,10 @@ fn parse_core_ipc_request(value: Value) -> Result<CoreIpcRequest, CoreIpcRespons
 fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) -> CoreIpcResponse {
     match request.r#type.as_str() {
         "create_thread" => match decode_payload::<CreateThreadInput>(&request) {
-            Ok(input) => match runtime.lock().unwrap().create_thread(input) {
+            Ok(input) => match match request.caller_origin.as_deref() {
+                Some(origin) => runtime.lock().unwrap().create_sdk_thread(input, origin),
+                None => runtime.lock().unwrap().create_thread(input),
+            } {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },
@@ -371,44 +378,59 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
             Ok(settings) => ok_response(&request.request_id, serde_json::json!(settings)),
             Err(err) => error_response(&request.request_id, err),
         },
-        "ping" => ok_response(&request.request_id, serde_json::json!({ "connected": true })),
+        "ping" => ok_response(
+            &request.request_id,
+            serde_json::json!({ "connected": true }),
+        ),
         "send_text" => match decode_payload::<SendTextInput>(&request) {
-            Ok(input) => match start_provider_process(runtime, input) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| start_provider_process(runtime, input))
+            {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },
             Err(err) => error_response(&request.request_id, err),
         },
         "prepare_thread" => match decode_payload::<PrepareThreadInput>(&request) {
-            Ok(input) => match prepare_provider_process(runtime, input) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| prepare_provider_process(runtime, input))
+            {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },
             Err(err) => error_response(&request.request_id, err),
         },
         "create_asset_upload" => match decode_payload::<CreateAssetUploadInput>(&request) {
-            Ok(input) => match runtime.lock().unwrap().create_asset_upload(input) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| runtime.lock().unwrap().create_asset_upload(input))
+            {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },
             Err(err) => error_response(&request.request_id, err),
         },
         "list_assets" => match decode_payload::<ListAssetsInput>(&request) {
-            Ok(input) => match runtime.lock().unwrap().list_assets(input) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| runtime.lock().unwrap().list_assets(input))
+            {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },
             Err(err) => error_response(&request.request_id, err),
         },
         "end_thread" => match decode_payload::<EndThreadInput>(&request) {
-            Ok(input) => match runtime.lock().unwrap().end_thread(input) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| runtime.lock().unwrap().end_thread(input))
+            {
                 Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
                 Err(err) => error_response(&request.request_id, err),
             },
             Err(err) => error_response(&request.request_id, err),
         },
         "submit_tool_result" => match decode_payload::<SubmitToolResultInput>(&request) {
-            Ok(input) => match runtime.lock().unwrap().submit_tool_result(input) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| runtime.lock().unwrap().submit_tool_result(input))
+            {
                 Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
                 Err(err) => error_response(&request.request_id, err),
             },
@@ -443,6 +465,9 @@ fn handle_subscribe_thread(
         Err(err) => return error_response(&request.request_id, err),
     };
 
+    if let Err(err) = authorize_thread_request(runtime, request, &input.thread_id) {
+        return error_response(&request.request_id, err);
+    }
     let event_rx = match runtime.lock().unwrap().subscribe_thread(input) {
         Ok(event_rx) => event_rx,
         Err(err) => return error_response(&request.request_id, err),
@@ -467,6 +492,17 @@ fn handle_subscribe_thread(
         &request.request_id,
         serde_json::json!({ "subscribed": true }),
     )
+}
+
+fn authorize_thread_request(
+    runtime: &SharedCoreRuntime,
+    request: &CoreIpcRequest,
+    thread_id: &str,
+) -> Result<(), PedelecError> {
+    runtime
+        .lock()
+        .unwrap()
+        .authorize_thread_access(thread_id, request.caller_origin.as_deref())
 }
 
 fn handle_tool_call_request(

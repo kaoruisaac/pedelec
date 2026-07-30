@@ -143,6 +143,8 @@ const assets = await session.listAssets();
 
 The first time an origin calls `createSession()` or `resumeSession()`, the extension asks the user to approve that origin in the popup. After approval, the same origin can create sessions directly.
 
+Sessions created through the SDK are bound to the creating origin. The same origin may resume them after reload, in another tab, or from another SDK instance; a different scheme, host, subdomain, or port cannot use the ID. A `sessionId` is an identifier, not a cross-origin bearer credential, and applications cannot supply or override its owner origin.
+
 You can query the current origin's approval status first to decide whether to show UI such as "Connect Pedelec":
 
 ```ts

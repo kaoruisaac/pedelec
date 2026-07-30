@@ -69,7 +69,7 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
                 continue;
             };
 
-            if !connection.mark_subscription(&thread_id) {
+            if !connection.mark_subscription(&thread_id, request.caller_origin.as_deref()) {
                 let mut stdout = stdout.lock().unwrap();
                 write_chrome_message(
                     &mut *stdout,
@@ -88,9 +88,11 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
             );
             match result {
                 Ok(true) => {}
-                Ok(false) => connection.remove_subscription(&thread_id),
+                Ok(false) => {
+                    connection.remove_subscription(&thread_id, request.caller_origin.as_deref())
+                }
                 Err(err) => {
-                    connection.remove_subscription(&thread_id);
+                    connection.remove_subscription(&thread_id, request.caller_origin.as_deref());
                     let mut stdout = stdout.lock().unwrap();
                     write_chrome_message(
                         &mut *stdout,
@@ -111,16 +113,28 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
 
 #[derive(Debug, Default)]
 struct NativeConnectionState {
-    subscriptions: HashSet<String>,
+    subscriptions: HashSet<NativeSubscriptionKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NativeSubscriptionKey {
+    thread_id: String,
+    caller_origin: Option<String>,
 }
 
 impl NativeConnectionState {
-    fn mark_subscription(&mut self, thread_id: &str) -> bool {
-        self.subscriptions.insert(thread_id.to_string())
+    fn mark_subscription(&mut self, thread_id: &str, caller_origin: Option<&str>) -> bool {
+        self.subscriptions.insert(NativeSubscriptionKey {
+            thread_id: thread_id.to_string(),
+            caller_origin: caller_origin.map(ToOwned::to_owned),
+        })
     }
 
-    fn remove_subscription(&mut self, thread_id: &str) {
-        self.subscriptions.remove(thread_id);
+    fn remove_subscription(&mut self, thread_id: &str, caller_origin: Option<&str>) {
+        self.subscriptions.remove(&NativeSubscriptionKey {
+            thread_id: thread_id.to_string(),
+            caller_origin: caller_origin.map(ToOwned::to_owned),
+        });
     }
 }
 
@@ -169,6 +183,7 @@ fn native_message_to_core_request(
         ));
     }
 
+    let caller_origin = take_string_field(&mut object, "callerOrigin");
     let payload = match request_type.as_str() {
         "create_thread"
         | "send_text"
@@ -201,6 +216,7 @@ fn native_message_to_core_request(
     Ok(CoreIpcRequest {
         request_id,
         r#type: request_type,
+        caller_origin,
         payload,
     })
 }
@@ -264,15 +280,17 @@ fn ensure_core_runtime_available(runtime_file_path: Option<&Path>) -> Result<(),
     }
 
     let launch_config_path = app_launch_config_path().map_err(shared_error_to_core)?;
-    let launch_config = read_app_launch_config(&launch_config_path).map_err(|mut err| {
-        if let Some(Value::Object(details)) = err.details.as_mut() {
-            details.insert(
-                "launchConfigPath".to_string(),
-                Value::String(launch_config_path.to_string_lossy().to_string()),
-            );
-        }
-        err
-    }).map_err(shared_error_to_core)?;
+    let launch_config = read_app_launch_config(&launch_config_path)
+        .map_err(|mut err| {
+            if let Some(Value::Object(details)) = err.details.as_mut() {
+                details.insert(
+                    "launchConfigPath".to_string(),
+                    Value::String(launch_config_path.to_string_lossy().to_string()),
+                );
+            }
+            err
+        })
+        .map_err(shared_error_to_core)?;
     let mut command = Command::new(&launch_config.executable_path);
     command
         .args(&launch_config.background_args)
@@ -318,7 +336,11 @@ fn ensure_core_runtime_available(runtime_file_path: Option<&Path>) -> Result<(),
 }
 
 fn shared_error_to_core(err: pedelec_shared::error::PedelecError) -> PedelecError {
-    PedelecError { code: err.code, message: err.message, details: err.details }
+    PedelecError {
+        code: err.code,
+        message: err.message,
+        details: err.details,
+    }
 }
 
 fn core_response_to_native_response(response: CoreIpcResponse) -> NativeProtocolResponse {
@@ -791,6 +813,7 @@ mod tests {
         let request = CoreIpcRequest {
             request_id: "req_missing_runtime".into(),
             r#type: "send_text".into(),
+            caller_origin: None,
             payload: Some(json!({
                 "threadId": "thread_1",
                 "message": "hello"
@@ -811,9 +834,10 @@ mod tests {
     fn duplicate_subscribe_thread_is_idempotent_in_connection_state() {
         let mut state = NativeConnectionState::default();
 
-        assert!(state.mark_subscription("thread_1"));
-        assert!(!state.mark_subscription("thread_1"));
-        assert!(state.mark_subscription("thread_2"));
+        assert!(state.mark_subscription("thread_1", Some("https://app.example.com")));
+        assert!(!state.mark_subscription("thread_1", Some("https://app.example.com")));
+        assert!(state.mark_subscription("thread_1", Some("https://other.example.com")));
+        assert!(state.mark_subscription("thread_2", None));
     }
 
     #[test]
@@ -855,6 +879,7 @@ mod tests {
                 process_id: None,
                 created_at: now,
                 updated_at: now,
+                sdk_origin: None,
             },
             ProviderAdapterState {
                 provider_session_id: None,

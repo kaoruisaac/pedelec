@@ -146,6 +146,8 @@ localStorage.setItem("pedelec-session-id", session.sessionId);
 
 需要 navigation 或 reload 後 resume 時使用 `false`。
 
+SDK 建立的 session 會綁定建立它的 browser origin。同一個 origin 可在 reload、不同 tab 或不同 SDK instance 中 resume；不同的 scheme、host、subdomain 或 port 都不能操作它。`sessionId` 是識別碼，不是跨 origin bearer credential；owner origin 由 Extension 判定，應用程式無法自行指定。
+
 此時 cleanup 由應用程式負責；若永遠不 resume 或 end 舊 ID，Desktop session 可能比 UI 預期存活更久。
 
 ## 回傳 session properties

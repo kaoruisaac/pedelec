@@ -1,7 +1,5 @@
 use pedelec_core::{error_codes, PedelecError, ToolCallInput, ToolSpecInput};
-use pedelec_ipc::{
-    send_core_ipc_request, send_core_ipc_request_with_runtime_path, CoreIpcRequest,
-};
+use pedelec_ipc::{send_core_ipc_request, send_core_ipc_request_with_runtime_path, CoreIpcRequest};
 use serde::Serialize;
 use serde_json::Value;
 use std::ffi::OsString;
@@ -69,6 +67,7 @@ pub fn run_tool_cli_with_runtime_file_path(
             let request = CoreIpcRequest {
                 request_id: next_cli_request_id(),
                 r#type: "tool_call".to_string(),
+                caller_origin: None,
                 payload: Some(serde_json::json!(input)),
             };
             send_cli_request(request, runtime_file_path)
@@ -77,6 +76,7 @@ pub fn run_tool_cli_with_runtime_file_path(
             let request = CoreIpcRequest {
                 request_id: next_cli_request_id(),
                 r#type: "tool_spec".to_string(),
+                caller_origin: None,
                 payload: Some(serde_json::json!(input)),
             };
             send_cli_request(request, runtime_file_path)

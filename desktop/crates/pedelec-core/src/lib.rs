@@ -138,6 +138,8 @@ pub struct ThreadState {
     pub process_id: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing)]
+    pub sdk_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1613,6 +1615,23 @@ impl CoreRuntime {
         &mut self,
         input: CreateThreadInput,
     ) -> Result<CreateThreadOutput, PedelecError> {
+        self.create_thread_with_sdk_origin(input, None)
+    }
+
+    pub fn create_sdk_thread(
+        &mut self,
+        input: CreateThreadInput,
+        caller_origin: &str,
+    ) -> Result<CreateThreadOutput, PedelecError> {
+        let origin = normalize_sdk_origin(caller_origin)?;
+        self.create_thread_with_sdk_origin(input, Some(origin))
+    }
+
+    fn create_thread_with_sdk_origin(
+        &mut self,
+        input: CreateThreadInput,
+        sdk_origin: Option<String>,
+    ) -> Result<CreateThreadOutput, PedelecError> {
         let thread_id = self.next_available_thread_id()?;
         let (sandbox_path, (skills, registry)) =
             self.sandbox_manager
@@ -1642,6 +1661,7 @@ impl CoreRuntime {
             process_id: None,
             created_at: now,
             updated_at: now,
+            sdk_origin,
         };
 
         self.thread_manager.insert_thread(
@@ -1662,12 +1682,36 @@ impl CoreRuntime {
         Ok(CreateThreadOutput { thread_id })
     }
 
+    pub fn authorize_thread_access(
+        &self,
+        thread_id: &str,
+        caller_origin: Option<&str>,
+    ) -> Result<(), PedelecError> {
+        let thread = self.thread_manager.thread(thread_id)?;
+        let Some(owner) = thread.sdk_origin.as_deref() else {
+            return Ok(());
+        };
+        let caller = caller_origin.and_then(|origin| normalize_sdk_origin(origin).ok());
+        if caller.as_deref() == Some(owner) {
+            Ok(())
+        } else {
+            Err(PedelecError::with_details(
+                error_codes::THREAD_ACCESS_DENIED,
+                "thread is not accessible to this caller",
+                serde_json::json!({ "threadId": thread_id }),
+            ))
+        }
+    }
+
     pub fn list_providers(&self) -> Vec<ProviderInfo> {
         list_provider_infos_with_scan(&self.provider_scan, self.provider_path_value())
     }
 
     pub fn list_sdk_providers(&self) -> Vec<SdkProviderInfo> {
-        self.list_providers().into_iter().map(SdkProviderInfo::from).collect()
+        self.list_providers()
+            .into_iter()
+            .map(SdkProviderInfo::from)
+            .collect()
     }
 
     /// Returns only the executable selected and version-validated by the latest
@@ -2733,11 +2777,7 @@ impl ThreadManager {
         self.threads.keys().cloned().collect()
     }
 
-    pub fn insert_thread(
-        &mut self,
-        state: ThreadState,
-        provider_state: ProviderAdapterState,
-    ) {
+    pub fn insert_thread(&mut self, state: ThreadState, provider_state: ProviderAdapterState) {
         let thread_id = state.thread_id.clone();
         let provider_adapter = ProviderAdapterInstance::new(state.provider.clone());
         self.threads.insert(thread_id.clone(), state);
@@ -3833,9 +3873,34 @@ fn safe_asset_filename(filename: &str) -> String {
     value.chars().take(180).collect()
 }
 
+pub fn normalize_sdk_origin(value: &str) -> Result<String, PedelecError> {
+    let url = Url::parse(value).map_err(|_| invalid_sdk_origin_error())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.cannot_be_a_base()
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid_sdk_origin_error());
+    }
+    let origin = url.origin().ascii_serialization();
+    if origin == "null" {
+        return Err(invalid_sdk_origin_error());
+    }
+    Ok(origin)
+}
+
+fn invalid_sdk_origin_error() -> PedelecError {
+    PedelecError::new(error_codes::THREAD_ACCESS_DENIED, "invalid caller origin")
+}
+
 pub mod error_codes {
     pub const CORE_RUNTIME_UNAVAILABLE: &str = "CORE_RUNTIME_UNAVAILABLE";
     pub const THREAD_NOT_FOUND: &str = "THREAD_NOT_FOUND";
+    pub const THREAD_ACCESS_DENIED: &str = "THREAD_ACCESS_DENIED";
     pub const THREAD_BUSY: &str = "THREAD_BUSY";
     pub const THREAD_ENDED: &str = "THREAD_ENDED";
     pub const PROVIDER_NOT_FOUND: &str = "PROVIDER_NOT_FOUND";
@@ -4528,7 +4593,11 @@ fn parse_ollama_models_response(text: &str) -> Result<Vec<OllamaModelOption>, Pe
 fn default_settings_file_path() -> Result<PathBuf, PedelecError> {
     pedelec_shared::paths::pedelec_home_dir()
         .map(|home| home.join("settings.json"))
-        .map_err(|err| PedelecError { code: err.code, message: err.message, details: err.details })
+        .map_err(|err| PedelecError {
+            code: err.code,
+            message: err.message,
+            details: err.details,
+        })
 }
 
 fn read_settings_file(path: &Path) -> Result<PedelecSettings, PedelecError> {
@@ -4689,7 +4758,11 @@ fn build_provider_env(
     env.push((
         "PATH".to_string(),
         pedelec_shared::paths::path_value_with_default_pedelec_dir()
-            .map_err(|err| PedelecError { code: err.code, message: err.message, details: err.details })?
+            .map_err(|err| PedelecError {
+                code: err.code,
+                message: err.message,
+                details: err.details,
+            })?
             .to_string_lossy()
             .to_string(),
     ));
