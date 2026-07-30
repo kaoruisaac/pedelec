@@ -2,7 +2,7 @@ use pedelec_core::{
     error_codes, CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput,
     PedelecError, PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose,
     SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
-    ToolCallInput, ToolSpecInput, UpdateSettingsInput,
+    ToolCallInput, ToolSpecInput,
 };
 use encoding_rs::Encoding;
 use serde::{Deserialize, Serialize};
@@ -365,19 +365,13 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
         },
         "list_providers" => ok_response(
             &request.request_id,
-            serde_json::json!(runtime.lock().unwrap().list_providers()),
+            serde_json::json!(runtime.lock().unwrap().list_sdk_providers()),
         ),
-        "get_settings" => match runtime.lock().unwrap().get_settings() {
+        "get_settings" => match runtime.lock().unwrap().get_sdk_settings() {
             Ok(settings) => ok_response(&request.request_id, serde_json::json!(settings)),
             Err(err) => error_response(&request.request_id, err),
         },
-        "update_settings" => match decode_payload::<UpdateSettingsInput>(&request) {
-            Ok(input) => match runtime.lock().unwrap().update_settings(input) {
-                Ok(settings) => ok_response(&request.request_id, serde_json::json!(settings)),
-                Err(err) => error_response(&request.request_id, err),
-            },
-            Err(err) => error_response(&request.request_id, err),
-        },
+        "ping" => ok_response(&request.request_id, serde_json::json!({ "connected": true })),
         "send_text" => match decode_payload::<SendTextInput>(&request) {
             Ok(input) => match start_provider_process(runtime, input) {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),

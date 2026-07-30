@@ -177,7 +177,9 @@ fn native_message_to_core_request(
         | "subscribe_thread"
         | "create_asset_upload"
         | "list_assets" => Some(Value::Object(object)),
-        "list_providers" | "get_settings" | "update_settings" => Some(Value::Object(object)),
+        "list_providers" | "get_settings" => Some(Value::Object(object)),
+        // The connectivity probe deliberately has no caller-controlled payload.
+        "ping" => Some(serde_json::json!({})),
         "submit_tool_result" => {
             if let Some(value) = object.remove("toolRequestId") {
                 object.insert("requestId".to_string(), value);
@@ -597,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn native_settings_requests_convert_to_core_payloads() {
+    fn native_settings_and_ping_requests_convert_to_core_payloads() {
         let get = native_message_to_core_request(json!({
             "type": "get_settings",
             "requestId": "req_get_settings"
@@ -606,35 +608,19 @@ mod tests {
         assert_eq!(get.r#type, "get_settings");
         assert_eq!(get.payload.unwrap(), json!({}));
 
-        let update = native_message_to_core_request(json!({
-            "type": "update_settings",
-            "requestId": "req_update_settings",
-            "defaultProvider": "codex",
-            "defaultModels": {
-                "codex": "gpt-5"
-            },
-            "providerSettings": {
-                "ollama": {
-                    "baseUrl": "http://127.0.0.1:11434",
-                    "timeoutMs": 120000
-                }
-            }
+        let ping = native_message_to_core_request(json!({
+            "type": "ping",
+            "requestId": "req_ping"
         }))
         .unwrap();
-        assert_eq!(update.r#type, "update_settings");
-        assert_eq!(
-            update.payload.unwrap(),
-            json!({
-                "defaultProvider": "codex",
-                "defaultModels": { "codex": "gpt-5" },
-                "providerSettings": {
-                    "ollama": {
-                        "baseUrl": "http://127.0.0.1:11434",
-                        "timeoutMs": 120000
-                    }
-                }
-            })
-        );
+        assert_eq!(ping.r#type, "ping");
+        assert_eq!(ping.payload.unwrap(), json!({}));
+
+        assert!(native_message_to_core_request(json!({
+            "type": "update_settings",
+            "requestId": "req_update_settings"
+        }))
+        .is_err());
     }
 
     #[test]

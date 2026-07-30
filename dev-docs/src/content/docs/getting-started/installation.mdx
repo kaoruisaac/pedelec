@@ -67,7 +67,7 @@ console.log("Already approved:", approval.approved);
 
 ## Verify the desktop runtime and providers
 
-`listProviders()` crosses the full extension and native bridge. It is therefore a useful connectivity test:
+Use the non-sensitive `getApprovalStatus().appConnected` for a Desktop connectivity test. `listProviders()` requires origin approval and is intended for provider selection:
 
 ```ts
 const providers = await pedelec.listProviders();
@@ -76,7 +76,6 @@ for (const provider of providers) {
   console.table({
     code: provider.code,
     available: provider.available,
-    path: provider.path,
     error: provider.error,
   });
 }

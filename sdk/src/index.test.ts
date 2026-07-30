@@ -236,11 +236,13 @@ describe("Pedelec SDK", () => {
       installed: true,
       approved: true,
       origin: "https://app.example.test",
+      appConnected: true,
     });
     await expect(promise).resolves.toEqual({
       installed: true,
       approved: true,
       origin: "https://app.example.test",
+      appConnected: true,
     });
   });
 
@@ -252,6 +254,7 @@ describe("Pedelec SDK", () => {
       installed: false,
       approved: false,
       origin: "https://app.example.test",
+      appConnected: false,
     });
   });
 
@@ -284,10 +287,10 @@ describe("Pedelec SDK", () => {
     });
 
     respondOk(pageWindow, listRequest, [
-      { name: "OpenCode", code: "opencode", path: null, available: false, error: "program was not found in PATH" },
+      { name: "OpenCode", code: "opencode", available: false, error: "program was not found in PATH" },
     ]);
     await expect(listPromise).resolves.toEqual([
-      { name: "OpenCode", code: "opencode", path: null, available: false, error: "program was not found in PATH" },
+      { name: "OpenCode", code: "opencode", available: false, error: "program was not found in PATH" },
     ]);
   });
 
@@ -316,11 +319,11 @@ describe("Pedelec SDK", () => {
     const listPromise = pedelec.listProviders();
     const listRequest = pageWindow.lastSent();
     respondOk(pageWindow, listRequest, [
-      { name: "Cursor", code: "cursor", path: null, available: false, error: "program was not found in PATH" },
+      { name: "Cursor", code: "cursor", available: false, error: "program was not found in PATH" },
     ]);
 
     await expect(listPromise).resolves.toEqual([
-      { name: "Cursor", code: "cursor", path: null, available: false, error: "program was not found in PATH" },
+      { name: "Cursor", code: "cursor", available: false, error: "program was not found in PATH" },
     ]);
   });
 
@@ -349,11 +352,11 @@ describe("Pedelec SDK", () => {
     const listPromise = pedelec.listProviders();
     const listRequest = pageWindow.lastSent();
     respondOk(pageWindow, listRequest, [
-      { name: "Claude Code", code: "claude", path: null, available: false, error: "program was not found in PATH" },
+      { name: "Claude Code", code: "claude", available: false, error: "program was not found in PATH" },
     ]);
 
     await expect(listPromise).resolves.toEqual([
-      { name: "Claude Code", code: "claude", path: null, available: false, error: "program was not found in PATH" },
+      { name: "Claude Code", code: "claude", available: false, error: "program was not found in PATH" },
     ]);
   });
 
@@ -369,6 +372,7 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, request, {
       defaultProvider: "codex",
       defaultModels: { codex: "gpt-5" },
+      providerSettings: { ollama: { apiKey: "secret", tavilyApiKey: "secret-too" } },
     });
     await expect(promise).resolves.toEqual({
       defaultProvider: "codex",
@@ -412,7 +416,7 @@ describe("Pedelec SDK", () => {
     const providersRequest = pageWindow.lastSent();
     expect(providersRequest).toMatchObject({ type: "list_providers" });
     respondOk(pageWindow, providersRequest, [
-      { name: "Codex", code: "codex", path: "/bin/codex", available: true, error: null },
+      { name: "Codex", code: "codex", available: true, error: null },
     ]);
     await nextTick();
 
@@ -461,7 +465,7 @@ describe("Pedelec SDK", () => {
     });
     await nextTick();
     respondOk(pageWindow, pageWindow.lastSent(), [
-      { name: "Ollama", code: "ollama", path: "/bin/pedelec-agent", available: true, error: null },
+      { name: "Ollama", code: "ollama", available: true, error: null },
     ]);
     await nextTick();
 
@@ -606,7 +610,7 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: "codex", defaultModels: {} });
     await nextTick();
     respondOk(pageWindow, pageWindow.lastSent(), [
-      { name: "Codex", code: "codex", path: null, available: false, error: "missing" },
+      { name: "Codex", code: "codex", available: false, error: "missing" },
     ]);
     await expect(unavailable).rejects.toMatchObject({ code: "DEFAULT_PROVIDER_UNAVAILABLE" });
   });
@@ -694,13 +698,13 @@ describe("Pedelec SDK", () => {
     const promise = pedelec.checkAvailability();
     const approvalRequest = pageWindow.lastSent();
     expect(approvalRequest).toMatchObject({ type: "get_approval_status" });
-    respondOk(pageWindow, approvalRequest, { installed: true, approved: false, origin: "https://app.example.test" });
+    respondOk(pageWindow, approvalRequest, { installed: true, approved: false, origin: "https://app.example.test", appConnected: true });
 
     await expect(promise).resolves.toMatchObject({
       available: false,
       extension: { available: true },
       approval: { approved: false },
-      desktop: { available: false, launchAttempted: false },
+      desktop: { available: true, launchAttempted: true },
     });
     expect(pageWindow.port.sent).toHaveLength(1);
   });
@@ -709,7 +713,7 @@ describe("Pedelec SDK", () => {
     const pedelec = new Pedelec();
     const promise = pedelec.checkAvailability();
     const approvalRequest = pageWindow.lastSent();
-    respondOk(pageWindow, approvalRequest, { installed: true, approved: true, origin: "https://app.example.test" });
+    respondOk(pageWindow, approvalRequest, { installed: true, approved: true, origin: "https://app.example.test", appConnected: false });
     await nextTick();
     const settingsRequest = pageWindow.lastSent();
     expect(settingsRequest).toMatchObject({ type: "get_settings" });
@@ -728,7 +732,7 @@ describe("Pedelec SDK", () => {
   it("reports availability only when the settings probe succeeds", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.checkAvailability();
-    respondOk(pageWindow, pageWindow.lastSent(), { installed: true, approved: true, origin: "https://app.example.test" });
+    respondOk(pageWindow, pageWindow.lastSent(), { installed: true, approved: true, origin: "https://app.example.test", appConnected: true });
     await nextTick();
     respondSettings(pageWindow, pageWindow.lastSent());
 

@@ -31,7 +31,6 @@ const providers = await pedelec.listProviders();
 type ProviderInfo = {
   name: string;
   code: ProviderCode;
-  path: string | null;
   available: boolean;
   error: string | null;
 };
@@ -52,7 +51,6 @@ for (const provider of providers) {
   console.log(
     provider.available ? "ready" : "unavailable",
     provider.name,
-    provider.path,
     provider.error,
   );
 }
@@ -72,6 +70,8 @@ type PedelecSettings = {
   defaultModels: Partial<Record<ProviderCode, string>>;
 };
 ```
+
+Both APIs require origin approval and can trigger the approval popup. Settings are defaults-only and never contain provider credentials; provider entries contain only `name`, `code`, `available`, and `error`.
 
 These are user-level Desktop App settings. The SDK exposes the default provider and optional per-provider model strings, not the Desktop App's entire internal settings object.
 

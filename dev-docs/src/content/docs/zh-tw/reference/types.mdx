@@ -71,7 +71,6 @@ Union 在 TypeScript 阻止只有 `model` 沒有 `provider`。
 type ProviderInfo = {
   name: string;
   code: ProviderCode;
-  path: string | null;
   available: boolean;
   error: string | null;
 };
@@ -93,6 +92,7 @@ type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
   origin: string | null;
+  appConnected: boolean;
 };
 ```
 
@@ -108,7 +108,9 @@ type PedelecAvailability = {
 };
 ```
 
-`available` 需要所有 layer 都成功。`launchAttempted` 只表示 SDK 已送出 `getSettings()` probe，不代表已確認啟動 Desktop；settings protocol error 同樣會使 Desktop unavailable。
+`PedelecSettings` 是只含預設值的公開 DTO，絕不包含 provider credentials。`ProviderInfo` 僅公開 `name`、`code`、`available`、`error`。
+
+`available` 需要所有 layer 都成功。`launchAttempted` 在非敏感 approval-status ping 送出後即可為 true，不代表已確認啟動 Desktop；`appConnected` 只表示該 ping 成功，不代表已 approval 或 provider ready。
 
 ## Errors 與 status
 

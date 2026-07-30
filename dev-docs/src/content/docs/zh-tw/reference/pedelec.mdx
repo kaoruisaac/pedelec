@@ -107,7 +107,6 @@ listProviders(): Promise<ProviderInfo[]>
 type ProviderInfo = {
   name: string;
   code: ProviderCode;
-  path: string | null;
   available: boolean;
   error: string | null;
 };
@@ -155,6 +154,7 @@ type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
   origin: string | null;
+  appConnected: boolean;
 };
 ```
 
@@ -180,7 +180,7 @@ Protocol/storage 等其他 error 仍可能 reject。
 checkAvailability(): Promise<PedelecAvailability>
 ```
 
-檢查 Extension、目前 origin 的 approval 與 Desktop readiness；不會建立或 resume session，也不會開啟 approval popup。已 approval 時以 `getSettings()` 驗證 Desktop，因此可沿用既有 auto-launch fallback。
+檢查 Extension、目前 origin 的 approval 與 Desktop readiness；不會建立或 resume session，也不會開啟 approval popup。`getApprovalStatus().appConnected` 是非敏感 Core ping 的連線結果，不代表 approval 或 provider ready。`getSettings()` 與 `listProviders()` 需要 origin approval 並可能開啟 popup，且僅分別公開 defaults 與 `name`/`code`/`available`/`error`。
 
 `launchAttempted: true` 只代表已送出 settings probe，不能證明 Desktop 已啟動；settings response shape 不合法也會被視為 Desktop unavailable。Extension unavailable 也可能只是 bridge 中斷。
 

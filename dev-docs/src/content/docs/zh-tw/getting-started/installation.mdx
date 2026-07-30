@@ -67,7 +67,7 @@ console.log("Already approved:", approval.approved);
 
 ## 驗證 Desktop Runtime 與 providers
 
-`listProviders()` 會走完整的 Extension 與 native bridge，因此很適合當 connectivity test：
+請以非敏感的 `getApprovalStatus().appConnected` 做 Desktop connectivity test。`listProviders()` 需要 origin approval，適合用於 provider 選擇：
 
 ```ts
 const providers = await pedelec.listProviders();
@@ -76,7 +76,6 @@ for (const provider of providers) {
   console.table({
     code: provider.code,
     available: provider.available,
-    path: provider.path,
     error: provider.error,
   });
 }

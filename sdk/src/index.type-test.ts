@@ -10,6 +10,8 @@ import {
   type SandboxAsset,
   type SandboxAssetPath,
   type PedelecAvailability,
+  type ApprovalStatus,
+  type ProviderInfo,
 } from "./index";
 
 async function typedOnToolNameFromCreateSession() {
@@ -134,11 +136,25 @@ async function availabilityHasPublicType() {
   void promise;
 }
 
+function publicSecurityTypesAreRestricted() {
+  const status: ApprovalStatus = {
+    installed: true,
+    approved: true,
+    origin: "https://app.example.test",
+    appConnected: true,
+  };
+  const provider = {} as ProviderInfo;
+  // @ts-expect-error SDK provider metadata must not expose executable paths
+  provider.path;
+  return status;
+}
+
 void typedOnToolNameFromCreateSession;
 void resumedSessionFallsBackToString;
 void noSkillsFallsBackToString;
 void listAssetsHasPublicTypes;
 void availabilityHasPublicType;
+void publicSecurityTypesAreRestricted;
 
 const baseContext: PedelecEventContext = {
   sessionId: "thread_1",

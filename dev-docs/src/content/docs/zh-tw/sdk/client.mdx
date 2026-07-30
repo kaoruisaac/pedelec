@@ -137,7 +137,7 @@ Port disconnect 時：
 const availability = await pedelec.checkAvailability();
 ```
 
-它不建立/resume session，也不開啟 approval。未 approval 的 origin 不會 probe Desktop；已 approval 時以 `getSettings()` 檢查，並可能觸發既有 auto-launch。`launchAttempted` 僅表示 probe 已送出，不能確認 Desktop 已啟動；settings shape error 也會視為 unavailable。
+它不建立/resume session，也不開啟 approval。`getApprovalStatus()` 會做非敏感 ping，因此未 approval origin 也可 probe Desktop 而不開 popup；已 approval 時還會以 `getSettings()` 檢查。`launchAttempted` 僅表示 ping 或 settings probe 已送出，不能確認 Desktop 已啟動。
 
 沒有單一 method 能證明所有 layer 都健康：
 
@@ -148,8 +148,8 @@ const providers = approval.installed
   : [];
 ```
 
-- `getApprovalStatus()` 主要檢查 browser-to-extension。
-- `listProviders()` 還需要 native host 與 Desktop Core。
+- `getApprovalStatus().appConnected` 是非敏感 Core connectivity 結果，不代表 approval 或 provider ready。
+- `getSettings()` 與 `listProviders()` 需要 origin approval 且可能開啟 popup，且只公開 defaults 與 `name`/`code`/`available`/`error`。
 - 建立 session 會更深入驗證 provider configuration。
 - 傳送 turn 才真正驗證 provider execution。
 

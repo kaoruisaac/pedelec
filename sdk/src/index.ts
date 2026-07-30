@@ -173,7 +173,6 @@ export type CreateSessionInput<
 export type ProviderInfo = {
   name: string;
   code: ProviderCode;
-  path: string | null;
   available: boolean;
   error: string | null;
 };
@@ -187,6 +186,7 @@ export type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
   origin: string | null;
+  appConnected: boolean;
 };
 
 export type PedelecAvailability = {
@@ -532,16 +532,11 @@ export class Pedelec {
   }
 
   async listProviders(): Promise<ProviderInfo[]> {
-    const result = await this.request<ProviderInfo[]>("list_providers");
-    if (!Array.isArray(result)) {
-      throw makeError("SDK_PROTOCOL_ERROR", "list_providers response was not an array");
-    }
-    return result;
+    return normalizeProviderInfoList(await this.request<unknown>("list_providers"));
   }
 
   async getSettings(): Promise<PedelecSettings> {
-    const result = await this.request<PedelecSettings>("get_settings");
-    return result;
+    return normalizePedelecSettings(await this.request<unknown>("get_settings"));
   }
 
   async getApprovalStatus(): Promise<ApprovalStatus> {
@@ -550,14 +545,12 @@ export class Pedelec {
         installed: false,
         approved: false,
         origin: getCurrentOrigin(this.pageWindow),
+        appConnected: false,
       };
     }
 
     try {
       const result = await this.request<ApprovalStatus>("get_approval_status");
-      if (!isApprovalStatus(result)) {
-        throw makeError("SDK_PROTOCOL_ERROR", "get_approval_status response had invalid shape");
-      }
       return result;
     } catch (err) {
       const error = normalizeError(err, "EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable.");
@@ -566,6 +559,7 @@ export class Pedelec {
           installed: false,
           approved: false,
           origin: getCurrentOrigin(this.pageWindow),
+          appConnected: false,
         };
       }
       throw error;
@@ -714,7 +708,7 @@ export class Pedelec {
         available: false,
         extension: { available: true },
         approval: { approved: false, origin: approval.origin },
-        desktop: { available: false, launchAttempted: false },
+        desktop: { available: approval.appConnected, launchAttempted: true },
       };
     }
 
@@ -1431,14 +1425,40 @@ function isSessionEvent(message: PortMessage): message is SessionEvent {
   );
 }
 
-function isApprovalStatus(value: unknown): value is ApprovalStatus {
-  if (!value || typeof value !== "object") return false;
-  const status = value as Partial<ApprovalStatus>;
-  return (
-    typeof status.installed === "boolean" &&
-    typeof status.approved === "boolean" &&
-    (status.origin === null || typeof status.origin === "string")
-  );
+function isProviderCode(value: unknown): value is ProviderCode {
+  return value === "codex" || value === "antigravity" || value === "opencode" ||
+    value === "cursor" || value === "claude" || value === "ollama";
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizePedelecSettings(value: unknown): PedelecSettings {
+  if (!isPlainObject(value) || (value.defaultProvider !== null && !isProviderCode(value.defaultProvider)) ||
+      !isPlainObject(value.defaultModels)) {
+    throw makeError("SDK_PROTOCOL_ERROR", "get_settings response had invalid shape");
+  }
+  const defaultModels: Partial<Record<ProviderCode, string>> = {};
+  for (const [code, model] of Object.entries(value.defaultModels)) {
+    if (!isProviderCode(code) || typeof model !== "string") {
+      throw makeError("SDK_PROTOCOL_ERROR", "get_settings response had invalid shape");
+    }
+    defaultModels[code] = model;
+  }
+  return { defaultProvider: value.defaultProvider, defaultModels };
+}
+
+function normalizeProviderInfoList(value: unknown): ProviderInfo[] {
+  if (!Array.isArray(value)) throw makeError("SDK_PROTOCOL_ERROR", "list_providers response was not an array");
+  return value.map((item) => {
+    if (!isPlainObject(item) || typeof item.name !== "string" || item.name.length === 0 ||
+        !isProviderCode(item.code) || typeof item.available !== "boolean" ||
+        (item.error !== null && typeof item.error !== "string")) {
+      throw makeError("SDK_PROTOCOL_ERROR", "list_providers response had invalid provider data");
+    }
+    return { name: item.name, code: item.code, available: item.available, error: item.error };
+  });
 }
 
 function makeError(code: string, message: string, details?: unknown): PedelecError {

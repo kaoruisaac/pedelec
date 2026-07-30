@@ -31,7 +31,6 @@ const providers = await pedelec.listProviders();
 type ProviderInfo = {
   name: string;
   code: ProviderCode;
-  path: string | null;
   available: boolean;
   error: string | null;
 };
@@ -52,7 +51,6 @@ for (const provider of providers) {
   console.log(
     provider.available ? "ready" : "unavailable",
     provider.name,
-    provider.path,
     provider.error,
   );
 }
@@ -72,6 +70,8 @@ type PedelecSettings = {
   defaultModels: Partial<Record<ProviderCode, string>>;
 };
 ```
+
+這兩個 API 都需要 origin approval，可能開啟 approval popup。Settings 僅含 defaults，絕不含 provider credentials；provider entry 僅含 `name`、`code`、`available`、`error`。
 
 這些是使用者層級的 Desktop App settings。SDK 只公開 default provider 與 optional per-provider model string，不公開 Desktop App 所有內部設定。
 

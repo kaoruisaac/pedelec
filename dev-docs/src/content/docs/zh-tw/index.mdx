@@ -240,7 +240,7 @@ const session = await pedelec.createSession({
 const providers = await pedelec.listProviders();
 
 for (const provider of providers) {
-  console.log(provider.code, provider.available, provider.path, provider.error);
+  console.log(provider.code, provider.available, provider.error);
 }
 ```
 
@@ -250,7 +250,6 @@ for (const provider of providers) {
 type ProviderInfo = {
   name: string;
   code: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
-  path: string | null;
   available: boolean;
   error: string | null;
 };
@@ -347,6 +346,8 @@ type CoreErrorEvent = {
   error: { code: string; message: string; details?: unknown };
 };
 ```
+
+`getSettings()` 與 `listProviders()` 需要 origin approval 且可能開啟 popup。Settings 絕不公開 provider credentials，而 provider entry 僅含上述欄位。請以 `getApprovalStatus().appConnected` 做非敏感 Desktop connectivity probe。
 
 ---
 

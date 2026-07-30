@@ -151,7 +151,11 @@ const status = await pedelec.getApprovalStatus();
 console.log(status.installed, status.approved, status.origin);
 ```
 
-For a complete Extension, approval, and Desktop readiness probe, use `checkAvailability()`. It never creates/resumes a session or opens approval. When approved it validates Desktop by calling `getSettings()`, which may invoke the existing Native Host auto-launch fallback.
+`getApprovalStatus()` includes `appConnected`, a non-sensitive Core `ping` result. It does not require approval or open the approval popup, but it may use the Native Host's existing Desktop auto-launch fallback. `appConnected` does not mean the origin is approved or a provider is ready.
+
+`getSettings()` and `listProviders()` require origin approval and may open the approval popup. Settings expose only defaults (never provider credentials); providers expose only `name`, `code`, `available`, and `error`. Use `getApprovalStatus().appConnected` rather than `listProviders()` as a connection probe.
+
+For a complete Extension, approval, and Desktop readiness probe, use `checkAvailability()`. It never creates/resumes a session or opens approval. Its status ping may attempt Desktop launch even for an unapproved origin.
 
 ```ts
 const availability = await pedelec.checkAvailability();

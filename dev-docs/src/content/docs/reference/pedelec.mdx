@@ -109,7 +109,6 @@ Returns provider discovery results from Desktop Core.
 type ProviderInfo = {
   name: string;
   code: ProviderCode;
-  path: string | null;
   available: boolean;
   error: string | null;
 };
@@ -159,6 +158,7 @@ type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
   origin: string | null;
+  appConnected: boolean;
 };
 ```
 
@@ -193,7 +193,9 @@ if (availability.available) {
 }
 ```
 
-It resolves structured unavailable states for bridge, Native Host, Core, timeout, and settings-protocol failures. `launchAttempted: true` means `getSettings()` was called and may have invoked the existing auto-launch fallback; it does not prove Desktop was launched. A malformed settings response also makes the Desktop probe unavailable.
+`getSettings()` and `listProviders()` require origin approval and can trigger its popup. They expose only public defaults and `name`/`code`/`available`/`error` respectively. `getApprovalStatus().appConnected` is the non-sensitive Core ping result for connectivity; it does not imply approval or provider readiness.
+
+It resolves structured unavailable states for bridge, Native Host, Core, timeout, and settings-protocol failures. `launchAttempted: true` means a status ping or settings probe was sent and may have invoked auto-launch; it does not prove Desktop was launched.
 
 ## `resumeSession()`
 

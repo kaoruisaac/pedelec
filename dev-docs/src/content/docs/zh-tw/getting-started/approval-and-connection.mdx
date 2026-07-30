@@ -18,6 +18,7 @@ type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
   origin: string | null;
+  appConnected: boolean;
 };
 ```
 
@@ -49,17 +50,21 @@ Approval 以 origin 為單位，origin 包含 scheme、hostname 與 port。開�
 
 ## 檢查完整可用性
 
+### `appConnected`
+
+此欄位來自專用且非敏感的 Core ping；它不代表 origin 已 approval 或 provider ready。它不會開啟 approval popup，但 ping 可能使用 Desktop auto-launch fallback。
+
 需要在建立 session 前檢查完整 readiness 時，使用 `checkAvailability()`：
 
 ```ts
 const availability = await pedelec.checkAvailability();
 ```
 
-它回傳 Extension、approval、Desktop 與可選的 normalized error。未 approval 時不 probe Desktop、也不開 popup；已 approval 時使用 `getSettings()` 作為 Desktop probe，可能觸發既有 auto-launch fallback。`launchAttempted` 只表示 request 已送出，並不確認 Desktop 已啟動；settings 格式錯誤也會被判定為 Desktop unavailable。Extension unavailable 也可能是 bridge 中斷，非必然未安裝。
+它回傳 Extension、approval、Desktop 與可選的 normalized error。未 approval 時不開 popup，但 approval-status ping 仍可能 probe Desktop；已 approval 時還會用 `getSettings()` 做 protocol probe。`launchAttempted` 只表示 ping 或 settings probe 已送出，並不確認 Desktop 已啟動。
 
 ## 什麼操作會開啟 approval popup
 
-`getApprovalStatus()` 只讀取狀態，不會主動提出核准要求。
+`getApprovalStatus()` 只讀取狀態並 ping Core，不會主動提出核准要求。`getSettings()` 與 `listProviders()` 是敏感 Desktop API，需 origin approval 且可能開啟 popup；前者只回傳 defaults，後者只回傳 `name`/`code`/`available`/`error`。請用 `appConnected`，不要再以 `listProviders()` 作為 connectivity probe。
 
 尚未核准時，第一個建立或 resume session 的操作才會觸發：
 

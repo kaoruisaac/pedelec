@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_core_ipc_gets_and_updates_persisted_settings() {
+    fn settings_core_ipc_returns_public_settings_and_rejects_updates() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime {
             settings_file_path: Some(temp.path().join("settings.json")),
@@ -275,15 +275,7 @@ mod tests {
             initial.result.unwrap(),
             json!({
                 "defaultProvider": null,
-                "defaultModels": {},
-                "providerSettings": {
-                    "ollama": {
-                        "baseUrl": "http://127.0.0.1:11434",
-                        "timeoutMs": 120000,
-                        "apiKey": "",
-                        "tavilyApiKey": ""
-                    }
-                }
+                "defaultModels": {}
             })
         );
 
@@ -308,41 +300,12 @@ mod tests {
             },
             Arc::clone(&runtime),
         );
-        assert!(updated.ok);
-        assert_eq!(
-            updated.result.unwrap(),
-            json!({
-                "defaultProvider": "codex",
-                "defaultModels": {
-                    "codex": "gpt-5",
-                    "antigravity": "antigravity-2.5-pro"
-                },
-                "providerSettings": {
-                    "ollama": {
-                        "baseUrl": "http://127.0.0.1:11434",
-                        "timeoutMs": 120000,
-                        "apiKey": "ollama",
-                        "tavilyApiKey": ""
-                    }
-                }
-            })
-        );
+        assert!(!updated.ok);
+        assert_eq!(updated.error.unwrap().code, error_codes::IPC_UNAVAILABLE);
 
         assert_eq!(
             runtime.lock().unwrap().get_settings().unwrap(),
-            PedelecSettings {
-                default_provider: Some(ProviderCode::Codex),
-                default_models: HashMap::from([
-                    (ProviderCode::Codex, "gpt-5".into()),
-                    (ProviderCode::Antigravity, "antigravity-2.5-pro".into()),
-                ]),
-                provider_settings: ProviderSettings {
-                    ollama: OllamaProviderSettings {
-                        api_key: "ollama".into(),
-                        ..OllamaProviderSettings::default()
-                    },
-                },
-            }
+            PedelecSettings::default()
         );
     }
 

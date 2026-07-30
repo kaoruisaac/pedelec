@@ -137,7 +137,7 @@ Use `checkAvailability()` when the UI needs readiness through Desktop before ses
 const availability = await pedelec.checkAvailability();
 ```
 
-It does not create/resume sessions or open approval. It skips Desktop probing for unapproved origins; for approved ones it uses `getSettings()`, which can trigger the established auto-launch fallback. `launchAttempted` means that probe was sent, not that Desktop definitely launched; settings-shape failures also make the probe unavailable.
+It does not create/resume sessions or open approval. `getApprovalStatus()` performs a non-sensitive ping, so even an unapproved origin can probe Desktop without opening a popup; approved origins additionally use `getSettings()`. `launchAttempted` means a ping or settings probe was sent, not that Desktop definitely launched.
 
 No single method proves that every layer is healthy:
 
@@ -148,8 +148,8 @@ const providers = approval.installed
   : [];
 ```
 
-- `getApprovalStatus()` primarily checks the browser-to-extension layer.
-- `listProviders()` also needs the native host and Desktop Core.
+- `getApprovalStatus().appConnected` is the non-sensitive Core connectivity result; it does not imply approval or provider readiness.
+- `getSettings()` and `listProviders()` require origin approval and can trigger its popup. They expose only public defaults and `name`/`code`/`available`/`error`.
 - Creating a session verifies the selected provider configuration more deeply.
 - Sending a turn verifies provider execution.
 

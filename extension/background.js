@@ -1061,6 +1061,38 @@ function createBackground(runtimeChrome, options = {}) {
     return status;
   }
 
+  function projectSdkSettings(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "get_settings response had invalid shape" };
+    }
+    const { defaultProvider, defaultModels } = value;
+    if ((defaultProvider !== null && typeof defaultProvider !== "string") ||
+        !defaultModels || typeof defaultModels !== "object" || Array.isArray(defaultModels)) {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "get_settings response had invalid shape" };
+    }
+    return { defaultProvider, defaultModels: { ...defaultModels } };
+  }
+
+  function projectSdkProviders(value) {
+    if (!Array.isArray(value)) {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "list_providers response was not an array" };
+    }
+    return value.map((provider) => {
+      if (!provider || typeof provider !== "object" || Array.isArray(provider) ||
+          typeof provider.name !== "string" || typeof provider.code !== "string" ||
+          typeof provider.available !== "boolean" ||
+          (provider.error !== null && typeof provider.error !== "string")) {
+        throw { code: "SDK_PROTOCOL_ERROR", message: "list_providers response had invalid provider data" };
+      }
+      return {
+        name: provider.name,
+        code: provider.code,
+        available: provider.available,
+        error: provider.error,
+      };
+    });
+  }
+
   function dispatchSdkThreadEvent(event) {
     const message = sdkEventFromThreadEvent(event);
     if (!message) return;
@@ -1088,10 +1120,18 @@ function createBackground(runtimeChrome, options = {}) {
       if (message.type === "get_approval_status") {
         const origin = context.origin || null;
         const approved = origin ? await isOriginApproved(origin) : false;
+        let appConnected = false;
+        try {
+          const ping = await withNativeOperation(() => sendNativeRequest("ping"));
+          appConnected = ping?.connected === true;
+        } catch (_) {
+          // Connection status is deliberately non-diagnostic for external sites.
+        }
         postSdkResponse(port, channelId, requestId, true, {
           installed: true,
           approved,
           origin,
+          appConnected,
         });
         return;
       }
@@ -1131,14 +1171,22 @@ function createBackground(runtimeChrome, options = {}) {
       }
 
       if (message.type === "list_providers") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
         const result = await withNativeOperation(() => sendNativeRequest("list_providers"));
-        postSdkResponse(port, channelId, requestId, true, result || []);
+        postSdkResponse(port, channelId, requestId, true, projectSdkProviders(result));
         return;
       }
 
       if (message.type === "get_settings") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
         const result = await withNativeOperation(() => sendNativeRequest("get_settings"));
-        postSdkResponse(port, channelId, requestId, true, result || {});
+        postSdkResponse(port, channelId, requestId, true, projectSdkSettings(result));
         return;
       }
 

@@ -18,6 +18,7 @@ type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
   origin: string | null;
+  appConnected: boolean;
 };
 ```
 
@@ -47,6 +48,10 @@ The normalized origin of the current page, such as `https://app.example.com` or 
 
 It can be `null` when the page does not have a verifiable HTTP or HTTPS origin.
 
+### `appConnected`
+
+This is the result of a dedicated non-sensitive Core ping. It does not imply origin approval or provider readiness. It never opens the approval popup, though the ping may use the Desktop auto-launch fallback.
+
 ## Check complete availability
 
 Use `checkAvailability()` for a readiness check that includes Desktop without creating a session:
@@ -55,11 +60,11 @@ Use `checkAvailability()` for a readiness check that includes Desktop without cr
 const availability = await pedelec.checkAvailability();
 ```
 
-It returns Extension, approval, Desktop, and an optional normalized error. An unapproved origin does not probe Desktop or open the popup. An approved origin uses `getSettings()` as its Desktop probe, which can use the existing auto-launch fallback. `launchAttempted` means that request was sent, not that Desktop was proven to launch; malformed settings also count as Desktop unavailable. “Extension unavailable” can also mean a disconnected bridge, not only a missing installation.
+It returns Extension, approval, Desktop, and an optional normalized error. An unapproved origin does not open the popup, but its approval-status ping can probe Desktop. An approved origin additionally uses `getSettings()` as a protocol probe. `launchAttempted` means a ping or settings probe was sent, not that Desktop was proven to launch.
 
 ## What triggers the approval popup
 
-`getApprovalStatus()` only reads status. It does not request approval.
+`getApprovalStatus()` only reads status and pings Core. It does not request approval. `getSettings()` and `listProviders()` are sensitive Desktop APIs: they require origin approval and can trigger the approval popup. They respectively expose only defaults, and only `name`/`code`/`available`/`error`; use `appConnected` rather than `listProviders()` for connectivity.
 
 The first operation that creates or resumes a session triggers approval when needed:
 

@@ -202,6 +202,47 @@ pub struct PedelecSettings {
     pub provider_settings: ProviderSettings,
 }
 
+/// The settings contract exposed through the SDK/Core IPC boundary. Keep this
+/// deliberately separate from `PedelecSettings`, which is used by the desktop
+/// application and contains provider credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkSettings {
+    pub default_provider: Option<ProviderCode>,
+    pub default_models: HashMap<ProviderCode, String>,
+}
+
+impl From<PedelecSettings> for SdkSettings {
+    fn from(settings: PedelecSettings) -> Self {
+        Self {
+            default_provider: settings.default_provider,
+            default_models: settings.default_models,
+        }
+    }
+}
+
+/// The provider contract exposed through the SDK/Core IPC boundary. Desktop
+/// callers retain `ProviderInfo` and its diagnostic metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkProviderInfo {
+    pub name: String,
+    pub code: ProviderCode,
+    pub available: bool,
+    pub error: Option<String>,
+}
+
+impl From<ProviderInfo> for SdkProviderInfo {
+    fn from(provider: ProviderInfo) -> Self {
+        Self {
+            name: provider.name,
+            code: provider.code,
+            available: provider.available,
+            error: provider.error,
+        }
+    }
+}
+
 impl Default for PedelecSettings {
     fn default() -> Self {
         Self {
@@ -1625,6 +1666,10 @@ impl CoreRuntime {
         list_provider_infos_with_scan(&self.provider_scan, self.provider_path_value())
     }
 
+    pub fn list_sdk_providers(&self) -> Vec<SdkProviderInfo> {
+        self.list_providers().into_iter().map(SdkProviderInfo::from).collect()
+    }
+
     /// Returns only the executable selected and version-validated by the latest
     /// external provider scan. This intentionally does not resolve PATH again.
     pub fn provider_executable_path(
@@ -1670,6 +1715,10 @@ impl CoreRuntime {
 
     pub fn get_settings(&self) -> Result<PedelecSettings, PedelecError> {
         read_settings_file(&self.resolved_settings_file_path()?)
+    }
+
+    pub fn get_sdk_settings(&self) -> Result<SdkSettings, PedelecError> {
+        self.get_settings().map(SdkSettings::from)
     }
 
     pub fn update_settings(
