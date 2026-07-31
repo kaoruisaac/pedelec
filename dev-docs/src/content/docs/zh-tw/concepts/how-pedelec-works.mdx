@@ -136,7 +136,7 @@ Web App → SDK → Chrome Extension → Native Host → Core IPC → Desktop Ru
 Asset body 使用獨立的內部 data path：
 
 ```text
-Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/
+Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session sandbox assets/
 ```
 
 SDK 透過 `session.uploadAsset()` 在內部取得並使用 upload ticket。Web App 不應自行建立 localhost server，也不應依賴 upload URL、port、token 或 ticket lifecycle；asset body 不會經過 Extension message body、Native Messaging payload 或 Core IPC message body。

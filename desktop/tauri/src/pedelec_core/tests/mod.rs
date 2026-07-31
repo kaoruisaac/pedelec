@@ -2755,12 +2755,12 @@ mod tests {
             None,
             None,
         );
-        let input = temp.path().join("sandbox/thread_assets/input");
-        fs::create_dir_all(input.join("nested")).unwrap();
-        fs::write(input.join("upl-report.txt"), b"data").unwrap();
-        fs::write(input.join(".env"), b"key=value").unwrap();
-        fs::write(input.join(".pedelec-internal"), b"hidden").unwrap();
-        fs::write(input.join("nested/ignored.txt"), b"ignored").unwrap();
+        let assets = temp.path().join("sandbox/thread_assets/assets");
+        fs::create_dir_all(assets.join("nested")).unwrap();
+        fs::write(assets.join("upl-report.txt"), b"data").unwrap();
+        fs::write(assets.join(".env"), b"key=value").unwrap();
+        fs::write(assets.join(".pedelec-internal"), b"hidden").unwrap();
+        fs::write(assets.join("nested/ignored.txt"), b"ignored").unwrap();
 
         let status_before = runtime.thread_status("thread_assets");
         let output = runtime
@@ -2775,13 +2775,13 @@ mod tests {
             .assets
             .iter()
             .any(|asset| asset.name == "upl-report.txt"
-                && asset.path == "input/upl-report.txt"
+                && asset.path == "assets/upl-report.txt"
                 && asset.size_bytes == 4
                 && asset.modified_at >= 0));
         assert!(output
             .assets
             .iter()
-            .any(|asset| asset.name == ".env" && asset.path == "input/.env"));
+            .any(|asset| asset.name == ".env" && asset.path == "assets/.env"));
         assert!(output
             .assets
             .iter()

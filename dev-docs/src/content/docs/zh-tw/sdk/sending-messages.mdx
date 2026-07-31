@@ -9,7 +9,7 @@ sidebar:
 
 ## Upload 單一 asset
 
-Session 為 `idle`，且沒有 prepare、send 或其他 upload 進行中時，使用 `uploadAsset()` 傳送一個 browser `File`。單檔上限為 100 MiB；回傳的 `input/...` 是 sandbox-relative path，只在該 session lifetime 內有效。
+Session 尚未結束時可使用 `uploadAsset()` 傳送一個 browser `File`。單檔上限為 100 MiB；回傳的 `assets/...` 是 sandbox-relative path。upload 可與 prepare、send、Agent 執行並行，但同一 session 一次只能有一個 upload。
 
 ```ts
 const file = input.files?.[0];
@@ -28,7 +28,7 @@ const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
 ```
 
-`listAssets()` 不遞迴，並以 filesystem modification time 由新到舊排序。`name` 是實際 sandbox filename，不一定等於原本的 browser `File.name`；`path` 是 sandbox-relative `input/...` path；`modifiedAt` 是 filesystem modification time，不是精確 upload completion time。絕對本機路徑不會回傳。Agent 執行時仍可 listing；ended session 會 reject `SESSION_ENDED`。目前不支援 pagination、delete、rename、download 或 recursive listing。
+`listAssets()` 不遞迴，並以 filesystem modification time 由新到舊排序，列出 App 與 Agent 共用的 `assets/`。`readAsset(path, "text" | "json" | "file")` 可讀取已知 nested path，binary bytes 走 loopback ticket data plane。
 
 ## Optional preparation
 

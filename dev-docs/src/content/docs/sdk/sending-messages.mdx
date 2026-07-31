@@ -9,7 +9,7 @@ A session processes one turn at a time. `prepare()` is an optional optimization;
 
 ## Upload a single asset
 
-Use `uploadAsset()` with one browser `File` while the session is idle. Files are limited to 100 MiB; the returned `input/...` value is a sandbox-relative path and is only valid for that session's lifetime.
+Use `uploadAsset()` with one browser `File` before the session ends. Files are limited to 100 MiB; the returned `assets/...` value is a sandbox-relative path and is only valid for that session's lifetime. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
 
 ```ts
 const file = input.files?.[0];
@@ -28,7 +28,7 @@ const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
 ```
 
-`listAssets()` is non-recursive and sorted by filesystem modification time, newest first. `name` is the actual sandbox filename (not necessarily the original browser `File.name`), `path` is a sandbox-relative `input/...` path, and `modifiedAt` is the filesystem modification time rather than a precise upload time. Absolute local paths are never returned. Listing is allowed while the agent runs, but ended sessions reject with `SESSION_ENDED`. Pagination, deletion, rename, download, and recursive listing are not supported.
+`listAssets()` is non-recursive and sorted by filesystem modification time, newest first. It lists shared `assets/` files created either by the App or Agent. `readAsset(path, "text" | "json" | "file")` reads known nested paths up to 100 MiB; binary bytes use the loopback ticket data plane. Listing and reading are allowed while the agent runs.
 
 ## Optional preparation
 

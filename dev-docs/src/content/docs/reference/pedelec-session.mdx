@@ -105,7 +105,7 @@ Common errors: `SESSION_BUSY`, `SESSION_ENDED`, `SEND_TEXT_FAILED`, `SESSION_ERR
 uploadAsset(file: File): Promise<SandboxAssetPath>
 ```
 
-Uploads one browser `File` while the session is `idle`, with no prepare, send, or other upload in progress. A file is limited to 100 MiB. On success it returns an `input/...` sandbox-relative path, valid only for this session sandbox lifecycle. It does not expose the user's absolute local path or guarantee that the provider/model can understand the file format.
+Uploads one browser `File` until session end. It can run alongside prepare, send, and provider execution, but only one upload may run per session. A file is limited to 100 MiB and returns an `assets/...` sandbox-relative path.
 
 The content is transferred through Desktop's internal `127.0.0.1` loopback upload server, rather than extension, Native Messaging, or Core IPC message bodies. See [Error Codes](./error-codes/) for request, upload-PUT, and ticket failures.
 
@@ -115,7 +115,7 @@ The content is transferred through Desktop's internal `127.0.0.1` loopback uploa
 listAssets(): Promise<SandboxAsset[]>
 ```
 
-Returns completed first-level `input/` assets, non-recursively, ordered by filesystem modification time newest first. It is allowed while a session runs; an ended session rejects with `SESSION_ENDED`. `name` is the actual sandbox name and can differ from `File.name`; `modifiedAt` is filesystem modification time, not an exact completion timestamp. Pagination, delete, rename, download, and recursive listing are not supported.
+Returns completed first-level shared `assets/`, non-recursively, ordered by filesystem modification time newest first. `readAsset(path, "text")`, `readAsset(path, "json")`, and `readAsset(path, "file")` can read known nested asset paths. Text decoding is strict UTF-8 and JSON parsing has compile-time generic typing only.
 
 ## `onChat()`
 

@@ -125,7 +125,7 @@ async function listAssetsHasPublicTypes() {
   const assets = await session.listAssets();
   assets satisfies SandboxAsset[];
   const path: SandboxAssetPath = assets[0]!.path;
-  path satisfies `input/${string}`;
+  path satisfies `assets/${string}`;
 }
 
 async function availabilityHasPublicType() {

@@ -1251,6 +1251,19 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
+      if (message.type === "create_asset_download") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        const result = await sendSdkNativeRequest(context, "create_asset_download", {
+          threadId: message.sessionId,
+          path: message.path,
+        });
+        postSdkResponse(port, channelId, requestId, true, result || {});
+        return;
+      }
+
       if (message.type === "prepare_session") {
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);

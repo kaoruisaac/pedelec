@@ -328,7 +328,7 @@ export default function App() {
       return;
     }
 
-    if (state.status !== "idle" || state.sending || state.uploadingAsset) return;
+    if (state.status === "ended" || state.uploadingAsset) return;
 
     updateSession(state.sessionId, (current) => ({ ...current, uploadingAsset: true, updatedAt: Date.now() }));
     appendSessionEvent(state.sessionId, "asset_upload_requested", {
@@ -766,7 +766,7 @@ export default function App() {
             <textarea
               rows="4"
               value={prompt()}
-              disabled={!activeSession() || activeSession()?.status !== "idle" || activeSession()?.sending || activeSession()?.uploadingAsset}
+              disabled={!activeSession() || activeSession()?.status === "ended" || activeSession()?.uploadingAsset}
               onInput={(event) => setPrompt(event.currentTarget.value)}
               placeholder="Send text to the active session"
             />
@@ -951,10 +951,10 @@ function AssetUploadBlock(props: {
   return (
     <Show when={props.session} fallback={<EmptyText text="Create or resume a session before uploading assets." />}>
       {(session) => {
-        const fileInputDisabled = () => session().status !== "idle" || session().uploadingAsset || session().sending;
+        const fileInputDisabled = () => session().status === "ended" || session().uploadingAsset;
         const hint = () => {
           if (session().uploadingAsset) return "Uploading asset...";
-          if (session().status !== "idle") return "Assets can only be uploaded while the session is idle.";
+          if (session().status === "ended") return "Assets cannot be uploaded after the session ends.";
           if (props.selectedFile && props.selectedFile.size > MAX_ASSET_SIZE_BYTES) return "File exceeds the 100 MiB limit.";
           return `Single files up to 100 MiB can be uploaded to this session's sandbox.`;
         };

@@ -1,6 +1,6 @@
 use encoding_rs::Encoding;
 use pedelec_core::{
-    error_codes, CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput,
+    error_codes, CreateAssetDownloadInput, CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput,
     PedelecError, PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose,
     SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
     ToolCallInput, ToolSpecInput,
@@ -403,6 +403,15 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
         "create_asset_upload" => match decode_payload::<CreateAssetUploadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| runtime.lock().unwrap().create_asset_upload(input))
+            {
+                Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                Err(err) => error_response(&request.request_id, err),
+            },
+            Err(err) => error_response(&request.request_id, err),
+        },
+        "create_asset_download" => match decode_payload::<CreateAssetDownloadInput>(&request) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| runtime.lock().unwrap().create_asset_download(input))
             {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),

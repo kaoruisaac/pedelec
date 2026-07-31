@@ -51,7 +51,7 @@ Pedelec Desktop Runtime
 Codex / Antigravity / OpenCode / Cursor / Claude Code / Ollama
 ```
 
-上圖是 control/event path。Asset file body 使用另一條內部路徑：`Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/`。只使用 `session.uploadAsset()`，不要依賴內部 URL、port、token 或 ticket lifecycle。
+上圖是 control/event path。Asset file body 使用另一條內部路徑：`Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session sandbox assets/`。只使用 asset API，不要依賴內部 URL、port、token 或 ticket lifecycle。
 
 SDK 不會要求 Web App 自行啟動 localhost server，也不會直接啟動 provider executable。它只和已安裝的 Extension 溝通，再由 Extension 將通過使用者核准的要求送往 Desktop Runtime。
 

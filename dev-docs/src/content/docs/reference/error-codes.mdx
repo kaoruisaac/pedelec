@@ -136,3 +136,9 @@ Asset failures can occur while creating the SDK request, during the loopback upl
 | `ASSET_UPLOAD_SIZE_MISMATCH` | Uploaded byte count did not match the selected file | Retry with the unchanged file; inspect a persistent failure |
 | `ASSET_UPLOAD_FAILED` | Upload failed for another transport/runtime reason | Preserve details and retry only after diagnosis |
 | `ASSET_LIST_FAILED` | Completed assets could not be listed | Retry a read after Desktop/session recovery |
+| `ASSET_PATH_INVALID` | Path is outside `assets/` or contains unsafe segments | Use a valid `assets/...` relative path |
+| `ASSET_NOT_FOUND` / `ASSET_NOT_FILE` | Requested asset is absent or not a regular file | Wait for the writer or choose a file path |
+| `ASSET_READ_TOO_LARGE` | Read target exceeds 100 MiB | Choose a smaller asset |
+| `ASSET_DOWNLOAD_TICKET_EXPIRED` / `ASSET_DOWNLOAD_UNAUTHORIZED` | Loopback download ticket was rejected | Start a fresh read |
+| `ASSET_READ_FAILED` | Download or filesystem read failed | Retry after diagnosing the session/filesystem |
+| `ASSET_TEXT_DECODE_FAILED` / `ASSET_INVALID_JSON` | SDK conversion could not decode UTF-8 or parse JSON | Use `file` or correct the file contents |

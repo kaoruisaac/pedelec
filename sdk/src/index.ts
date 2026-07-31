@@ -13,7 +13,8 @@ export type JsonPrimitive = string | number | boolean | null;
 
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
-export type SandboxAssetPath = `input/${string}`;
+export type SandboxAssetPath = `assets/${string}`;
+export type ReadAssetType = "text" | "json" | "file";
 
 export type SandboxAsset = {
   name: string;
@@ -30,7 +31,7 @@ function normalizeListAssetsResponse(response: unknown): SandboxAsset[] {
     if (!asset || typeof asset !== "object" || Array.isArray(asset)) return invalidListAssetsResponse({ index, asset });
     const { name, path, sizeBytes, modifiedAt } = asset as Record<string, unknown>;
     const validName = typeof name === "string" && name.length > 0 && name !== "." && name !== ".." && !name.includes("/") && !name.includes("\\");
-    const validPath = typeof path === "string" && !path.includes("\\") && path === `input/${name}` && !path.split("/").includes("..");
+    const validPath = typeof path === "string" && !path.includes("\\") && path === `assets/${name}` && !path.split("/").includes("..");
     const validNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
     if (!validName || !validPath || !validNumber(sizeBytes) || !validNumber(modifiedAt)) {
       return invalidListAssetsResponse({ index, asset });
@@ -41,6 +42,11 @@ function normalizeListAssetsResponse(response: unknown): SandboxAsset[] {
 
 function invalidListAssetsResponse(details: unknown): never {
   throw makeError("SDK_PROTOCOL_ERROR", "list_assets response had an invalid shape", { response: details });
+}
+
+function isValidAssetPath(path: unknown): path is SandboxAssetPath {
+  return typeof path === "string" && path.startsWith("assets/") && path.length > "assets/".length && !path.includes("\\") &&
+    path.split("/").every((part, index) => index === 0 || (part.length > 0 && part !== "." && part !== ".."));
 }
 
 export type ToolArgsSchemaMeta<TDefault extends JsonValue = JsonValue> = {
@@ -910,6 +916,7 @@ export class PedelecSession<TToolName extends string = string> {
   private pendingPrepare: PendingSend | null = null;
   private preparePromise: Promise<void> | null = null;
   private uploadPromise: Promise<SandboxAssetPath> | null = null;
+  private ending = false;
   private prepared = false;
   private activeTurn: ActiveTurn | null = null;
   private genericToolHandler: GenericToolHandler<TToolName> | null = null;
@@ -938,7 +945,7 @@ export class PedelecSession<TToolName extends string = string> {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
 
-    if (this.pendingSend || this.uploadPromise) {
+    if (this.pendingSend) {
       return Promise.reject(makeError("SESSION_BUSY", "session is already running", { sessionId: this.sessionId }));
     }
 
@@ -982,9 +989,6 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   async sendText(text: string): Promise<void> {
-    if (this.uploadPromise) {
-      return Promise.reject(makeError("SESSION_BUSY", "an asset upload is in progress", { sessionId: this.sessionId }));
-    }
     if (this.preparePromise) {
       try {
         await this.preparePromise;
@@ -1065,8 +1069,8 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   uploadAsset(file: File): Promise<SandboxAssetPath> {
-    if (this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
-    if (this.pendingSend || this.pendingPrepare || this.preparePromise || this.uploadPromise || this.status !== "idle") {
+    if (this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    if (this.uploadPromise) {
       return Promise.reject(makeError("SESSION_BUSY", "session is busy", { sessionId: this.sessionId }));
     }
     if (typeof File === "undefined" || !(file instanceof File) || !file.name || file.size < 0) {
@@ -1084,17 +1088,50 @@ export class PedelecSession<TToolName extends string = string> {
       let payload: any = null;
       try { payload = await response.json(); } catch { /* normalized below */ }
       if (!response.ok) throw normalizeError(payload?.error, "ASSET_UPLOAD_FAILED", "asset upload failed");
-      if (typeof payload?.path !== "string" || !payload.path.startsWith("input/") || payload.path.includes("..")) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response had an invalid path");
+      if (!isValidAssetPath(payload?.path)) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response had an invalid path");
       return payload.path as SandboxAssetPath;
     }).finally(() => { this.uploadPromise = null; });
     return this.uploadPromise;
   }
 
   listAssets(): Promise<SandboxAsset[]> {
-    if (this.status === "ended") {
+    if (this.ending || this.status === "ended") {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
     return this.client.request("list_assets", { sessionId: this.sessionId }).then(normalizeListAssetsResponse);
+  }
+
+  readAsset(path: SandboxAssetPath, type: "text"): Promise<string>;
+  readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>;
+  readAsset(path: SandboxAssetPath, type: "file"): Promise<File>;
+  readAsset<T = JsonValue>(path: SandboxAssetPath, type: ReadAssetType): Promise<string | T | File> {
+    if (this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    if (!isValidAssetPath(path) || !["text", "json", "file"].includes(type)) {
+      return Promise.reject(makeError("ASSET_PATH_INVALID", "asset path or read type is invalid"));
+    }
+    return this.client.request<unknown>("create_asset_download", { sessionId: this.sessionId, path }).then(async ticket => {
+      if (!ticket || typeof ticket !== "object") throw makeError("SDK_PROTOCOL_ERROR", "asset download ticket was invalid");
+      const value = ticket as Record<string, unknown>;
+      if (typeof value.downloadUrl !== "string" || typeof value.token !== "string" || typeof value.name !== "string" ||
+          typeof value.mimeType !== "string" || typeof value.modifiedAt !== "number" || !Number.isFinite(value.modifiedAt) || !isValidAssetPath(value.path)) {
+        throw makeError("SDK_PROTOCOL_ERROR", "asset download ticket was invalid");
+      }
+      let response: Response;
+      try { response = await fetch(value.downloadUrl, { headers: { Authorization: `Bearer ${value.token}` }, credentials: "omit" }); }
+      catch (error) { throw normalizeError(error, "ASSET_READ_FAILED", "asset read failed"); }
+      if (!response.ok) {
+        let payload: unknown; try { payload = await response.json(); } catch { /* normalize below */ }
+        throw normalizeError((payload as { error?: unknown } | undefined)?.error, "ASSET_READ_FAILED", "asset read failed");
+      }
+      const bytes = await response.arrayBuffer();
+      if (type === "file") return new File([bytes], value.name, { type: value.mimeType || "application/octet-stream", lastModified: value.modifiedAt });
+      let text: string;
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+      catch { throw makeError("ASSET_TEXT_DECODE_FAILED", "asset is not valid UTF-8"); }
+      if (type === "text") return text;
+      try { return JSON.parse(text) as T; }
+      catch { throw makeError("ASSET_INVALID_JSON", "asset does not contain valid JSON"); }
+    });
   }
 
   onError(handler: ErrorHandler): () => void {
@@ -1117,13 +1154,15 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   async end(): Promise<void> {
-    if (this.status === "ended") return;
+    if (this.status === "ended" || this.ending) return;
+    this.ending = true;
 
     try {
       await this.client.request("end_session", {
         sessionId: this.sessionId,
       });
     } catch (err) {
+      this.ending = false;
       const error = normalizeError(err, "END_SESSION_FAILED", "end failed");
       this.emitError(error, { source: "sdk" });
       throw error;

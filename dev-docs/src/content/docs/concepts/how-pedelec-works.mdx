@@ -136,7 +136,7 @@ Web App → SDK → Chrome Extension → Native Host → Core IPC → Desktop Ru
 Asset bodies use a separate internal data path:
 
 ```text
-Web App fetch(PUT) → Desktop-managed 127.0.0.1 loopback upload server → session sandbox input/
+Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session sandbox assets/
 ```
 
 The SDK obtains and uses the upload ticket internally through `session.uploadAsset()`. Applications must not create a localhost server or depend on upload URLs, ports, tokens, or ticket lifecycles. Asset bodies do not pass through the Extension message body, Native Messaging payload, or Core IPC message body.

@@ -128,14 +128,22 @@ await session.sendText("Please help me analyze the current page state");
 
 `sendText()` resolves after the current agent response completes. If the session is already handling a previous prompt, the new `sendText()` call is rejected to prevent multiple concurrent requests from running in the same session.
 
-## Listing uploaded assets
+## Session assets
 
 ```ts
 const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
 ```
 
-`listAssets()` lists only the first level of `input/`, ordered by filesystem modification time (newest first). Each item's `name` is the actual sandbox filename and may differ from the original `File.name`; `modifiedAt` is a filesystem modification timestamp, not an exact upload time. `path` is an agent-sandbox-relative `input/...` path and never an absolute local path. It may be called while the agent is running. Ended sessions reject with `SESSION_ENDED`. Recursive listing, pagination, download, deletion, rename, and move are not supported.
+`assets/` is shared by uploads and files written by the agent. `listAssets()` lists only its first level, ordered by filesystem modification time (newest first), and may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
+
+```ts
+const text = await session.readAsset("assets/report.txt", "text");
+const json = await session.readAsset<{ ok: boolean }>("assets/result.json", "json");
+const result = await session.readAsset("assets/model.glb", "file");
+```
+
+Reads support nested `assets/...` paths up to 100 MiB. `text` and `json` require valid UTF-8; binary content is transferred over a loopback download ticket rather than extension messages.
 
 ---
 

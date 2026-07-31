@@ -191,6 +191,7 @@ fn native_message_to_core_request(
         | "end_thread"
         | "subscribe_thread"
         | "create_asset_upload"
+        | "create_asset_download"
         | "list_assets" => Some(Value::Object(object)),
         "list_providers" | "get_settings" => Some(Value::Object(object)),
         // The connectivity probe deliberately has no caller-controlled payload.
