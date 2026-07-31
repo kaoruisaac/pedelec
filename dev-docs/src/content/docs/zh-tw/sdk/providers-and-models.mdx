@@ -19,7 +19,7 @@ type ProviderCode =
   | "ollama";
 ```
 
-SDK boundary 的 provider code 固定使用 lowercase。Display name、executable path、version 與 model catalog 另外探測或設定。
+SDK boundary 的 provider code 固定使用 lowercase。SDK 只公開 display name 與 availability；executable path、version、credentials 與 model catalog 屬於 Desktop 內部或 provider-specific 資訊。
 
 ## 探測 providers
 
@@ -40,7 +40,6 @@ type ProviderInfo = {
 
 - `name`：適合顯示在 picker 的名稱。
 - `code`：傳給 `createSession()` 的值。
-- `path`：Core 探測到的 executable path；unavailable 或不是一般 CLI path 時可為 `null`。
 - `available`：Core 目前是否認為 provider 已足以被選擇。
 - `error`：unavailable 時的 discovery/setup 說明，正常時通常為 `null`。
 
@@ -169,6 +168,26 @@ const session = await pedelec.createSession({
 
 沒有 model 時 Core 回傳 `MODEL_REQUIRED`。
 
+## Ollama 的 Optional Tavily Web Search
+
+Desktop Settings 在 Ollama provider 下提供 optional Tavily API key。Trim 後的值非空時，內附 `pedelec-agent` 才會向 Ollama model 提供 `web_search` tool；欄位為空時不會提供。
+
+這是 Ollama agent 內部能力，不是透過 `skills.tools` 註冊的 frontend tool，Web App 也不需要替它提供 `onTool()` handler。
+
+目前 search behavior 固定為：
+
+- Tavily endpoint：`https://api.tavily.com/search`；
+- search depth：`basic`；
+- topic：`general`；
+- 每次最多 5 筆結果；
+- 每個 model round 最多嘗試 10 次 web search；
+- request timeout：30 秒；
+- 不要求 answer synthesis、raw content、images、image descriptions 或 favicons。
+
+回傳給 model 的 compact result 會包含 query，以及最多五筆帶有 `title`、`url`、`content` 與 optional relevance `score` 的項目。
+
+設定 key 只會啟用 tool，不代表每個 turn 都一定搜尋。是否搜尋與 query 內容由 model 決定。Tavily authentication、rate limit、usage limit、network failure 或 invalid response 都可能成為 provider error。
+
 ## Provider picker 範例
 
 ```ts
@@ -191,5 +210,7 @@ const choices = providers.map((provider) => ({
 ## Privacy 與 provider choice
 
 Pedelec bridge 在本機，但 cloud provider CLI 可能將 context 傳到其服務。因此 provider/model selector 同時也是 data-routing choice。處理敏感資料時，應清楚顯示哪個 provider 會收到 prompt 與 tool descriptions。
+
+Ollama 啟用 Tavily 後，model 產生的 search query 會送到 Tavily，compact search results 再回到 local agent。相關情境應揭露這條額外 external data path。
 
 下一頁：[建立 Sessions](./creating-sessions/)。

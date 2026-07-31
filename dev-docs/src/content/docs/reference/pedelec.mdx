@@ -170,7 +170,8 @@ Special behavior: when the Extension is unavailable or disconnected, this method
 {
   installed: false,
   approved: false,
-  origin: location.origin
+  origin: location.origin,
+  appConnected: false
 }
 ```
 
@@ -223,7 +224,9 @@ A session handle registered in this client. A newly resumed handle may not conta
 
 - `INVALID_INPUT` for an empty ID;
 - approval errors;
-- session-not-found/runtime errors;
+- `SDK_ORIGIN_UNAVAILABLE` when the caller origin cannot be forwarded;
+- `THREAD_ACCESS_DENIED` when the session belongs to another origin;
+- `THREAD_NOT_FOUND` when Core no longer knows the ID; and
 - transport errors.
 
 After resume, register chat, status, error, ended, and tool handlers again.

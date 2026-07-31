@@ -63,7 +63,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 
 An empty ID rejects with `INVALID_INPUT`.
 
-If Core no longer knows the ID, the runtime returns an error. The SDK does not silently create a replacement session.
+If Core no longer knows the ID, it returns `THREAD_NOT_FOUND`; remove stale persistence or create another session. If the session belongs to another browser origin, access rejects with `THREAD_ACCESS_DENIED`. The SDK does not silently create a replacement session.
 
 ## Re-register every browser handler
 

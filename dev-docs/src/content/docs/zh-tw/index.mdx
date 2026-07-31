@@ -178,6 +178,8 @@ const session = await pedelec.createSession({
 });
 ```
 
+Desktop Settings 也可替 Ollama session 設定 optional Tavily API key。設定後，內附 agent 可自行判斷是否使用 Tavily web search；目前固定使用 `basic` search depth，每次最多回傳五筆結果。未設定 key 時，不會向 Ollama model 提供 web-search tool。
+
 ### 使用 Desktop App 預設 provider
 
 如果 Desktop App 已設定 default provider，可以不傳 `provider`：
@@ -330,22 +332,23 @@ session.onStatus((status) => {
 
 ## Error Event 來源
 
-Error event 會在 event 頂層（不在 `error` object 內）附帶責任領域。`source` 為 `"provider"` 或 `"core"`。provider error 一定會包含 `provider`；目前合法的 provider code 為 `"codex"`、`"antigravity"`、`"opencode"`、`"cursor"`、`"claude"` 與 `"ollama"`。core error 不會包含 `provider`。
+Public SDK 透過 `session.onError((error, ctx) => ...)` 回報錯誤。`error` 是 `PedelecError`；`ctx.source` 表示 callback 是由 Core event 還是 SDK-side handling 產生：
+
+- `"core"`：錯誤事件來自 Core/provider execution path；
+- `"sdk"`：SDK 在處理 local request、disconnect 或 protocol condition 時產生錯誤。
 
 ```ts
-type ProviderErrorEvent = {
-  type: "error";
-  source: "provider";
-  provider: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
-  error: { code: string; message: string; details?: unknown };
+type ErrorEventContext = PedelecEventContext & {
+  type: "error" | "sdk_error";
+  source: "core" | "sdk";
 };
 
-type CoreErrorEvent = {
-  type: "error";
-  source: "core";
-  error: { code: string; message: string; details?: unknown };
-};
+session.onError((error, ctx) => {
+  console.error(ctx.source, error.code, error.message, error.details);
+});
 ```
+
+目前公開 callback context 不會另外提供 provider responsibility 欄位。不要判斷 `ctx.source === "provider"`，也不要預期存在 `ctx.provider`。
 
 `getSettings()` 與 `listProviders()` 需要 origin approval 且可能開啟 popup。Settings 絕不公開 provider credentials，而 provider entry 僅含上述欄位。請以 `getApprovalStatus().appConnected` 做非敏感 Desktop connectivity probe。
 

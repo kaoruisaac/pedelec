@@ -32,6 +32,7 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | --- | --- | --- | --- |
 | `EXTENSION_UNAVAILABLE` | SDK is outside a supported page context or cannot reach the Extension | Check browser profile, installation, supported origin, and client initialization | After fixing environment; create a fresh client/page |
 | `EXTENSION_DISCONNECTED` | Existing Extension port closed | Disable active controls; check Extension; reload/recreate client state | Not on the same broken client |
+| `SDK_ORIGIN_UNAVAILABLE` | The Extension cannot determine or forward the SDK caller origin | Use a supported HTTP(S) page origin; reload after correcting the page context | After fixing origin/context |
 | `INVALID_ORIGIN` | Extension popup received a non-HTTP(S) origin | Use HTTPS, localhost, or 127.0.0.1 as supported | After changing origin |
 | `STORAGE_ERROR` | Extension could not read/write approved origins | Check Extension health/storage; reinstall if persistent | A limited retry is reasonable |
 
@@ -45,6 +46,7 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `APPROVAL_REJECTED` | User rejected or closed approval | Return to connect-ready state | Only after explicit user action |
 | `APPROVAL_TIMEOUT` | Approval was not completed in time | Tell user to keep popup open; offer connect again | Yes, user initiated |
 | `OPEN_POPUP_FAILED` | Extension could not open its popup | Ask user to click the Extension icon manually | Yes after manual action |
+| `THREAD_ACCESS_DENIED` | The requested SDK session is owned by another origin, or the caller origin is invalid/missing | Do not retry with the same cross-origin ID; return to the owning origin or create a new session | Only after using the owner origin |
 
 ## Native and Core transport
 
@@ -76,7 +78,22 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `OLLAMA_REQUEST_FAILED` | Ollama request failed for another endpoint reason | Preserve message; inspect endpoint and logs | Depends on cause |
 | `OLLAMA_RESPONSE_INVALID` | Ollama endpoint returned an unusable response | Verify endpoint compatibility and report details | After endpoint fix |
 
-Provider-specific errors can describe authentication, executable startup, model support, server connectivity, or provider output parsing. Display the provider and preserve the original message.
+### Tavily web search
+
+These errors can surface from the bundled Ollama agent only when a Tavily API key enables its internal `web_search` tool.
+
+| Code | Meaning | Recommended response | Retry? |
+| --- | --- | --- | --- |
+| `TAVILY_UNAVAILABLE` | Web search could not initialize or reach Tavily | Check network/service availability | After recovery |
+| `TAVILY_REQUEST_INVALID` | Tavily rejected the generated search request | Preserve details; report a reproducible query | Only after changing the request |
+| `TAVILY_AUTH_FAILED` | Tavily rejected the configured API key | Correct the Tavily key in Desktop Settings | After configuration |
+| `TAVILY_RATE_LIMITED` | Tavily temporarily rate-limited the request | Wait before retrying | Yes, later |
+| `TAVILY_USAGE_LIMIT_EXCEEDED` | The Tavily account usage limit was reached | Wait for quota reset or change the account/plan | After quota recovery |
+| `TAVILY_REQUEST_FAILED` | Tavily returned another request failure | Preserve message/details; inspect service status | Depends on cause |
+| `TAVILY_RESPONSE_INVALID` | Tavily returned an unusable result shape | Report the response incompatibility | After service/runtime fix |
+| `TAVILY_MODEL_ROUND_LIMIT_EXCEEDED` | The model attempted more than 10 searches in one model round | Let the agent continue without another search or start a later turn | In a later model round |
+
+Provider-specific errors can describe authentication, executable startup, model support, server connectivity, web search, or provider output parsing. Display the provider and preserve the original message.
 
 ## Session and turn
 
@@ -84,6 +101,7 @@ Provider-specific errors can describe authentication, executable startup, model 
 | --- | --- | --- | --- |
 | `SESSION_BUSY` | Session already has an active prepare/turn | Wait until `idle`; prevent duplicate submit | Yes after idle |
 | `SESSION_ENDED` | Session can no longer accept work | Create or resume another valid session | Not on this handle |
+| `THREAD_NOT_FOUND` | Core no longer has the requested session ID | Remove stale persistence or create another session | Not with the same missing ID |
 | `SESSION_ERROR` | Runtime reported error state | Show failure; inspect provider/runtime detail | Usually create/recover deliberately |
 | `PREPARE_FAILED` | SDK fallback code for failed preparation request | Continue normal send path if appropriate | Preparation can be retried deliberately |
 | `SEND_TEXT_FAILED` | SDK fallback code for failed send request | Preserve prompt; inspect transport/runtime | Only after state is known |

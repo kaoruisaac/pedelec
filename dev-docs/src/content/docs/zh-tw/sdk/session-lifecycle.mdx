@@ -63,7 +63,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 
 空 ID 會收到 `INVALID_INPUT`。
 
-Core 不再認得 ID 時會回傳 runtime error；SDK 不會靜默建立 replacement session。
+Core 不再認得 ID 時會回傳 `THREAD_NOT_FOUND`，應移除 stale persistence 或建立另一個 session。Session 屬於其他 browser origin 時會 reject `THREAD_ACCESS_DENIED`。SDK 不會靜默建立 replacement session。
 
 ## 每次都要重新註冊 browser handlers
 

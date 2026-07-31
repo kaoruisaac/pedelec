@@ -135,6 +135,8 @@ async function connectPedelec() {
 | `APPROVAL_REJECTED` | The user rejected or closed the approval flow | Return to the ready-to-approve state |
 | `APPROVAL_TIMEOUT` | Approval was not completed within the extension timeout | Offer retry and tell the user to keep the popup open |
 | `OPEN_POPUP_FAILED` | Chrome could not open the extension popup programmatically | Ask the user to click the Pedelec extension icon manually |
+| `SDK_ORIGIN_UNAVAILABLE` | The SDK caller origin could not be determined or forwarded | Use a supported HTTP(S) page origin and reload |
+| `THREAD_ACCESS_DENIED` | A resumed or operated session belongs to a different origin | Return to the owner origin or create a new session; do not treat the ID as a bearer token |
 | `STORAGE_ERROR` | Approved-origin storage could not be read or updated | Suggest checking extension state or reinstalling if persistent |
 | `INVALID_ORIGIN` | A popup action received a non-HTTP(S) origin | Use a supported page origin |
 

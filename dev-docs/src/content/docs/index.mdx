@@ -173,6 +173,8 @@ const session = await pedelec.createSession({
 });
 ```
 
+Desktop Settings also accepts an optional Tavily API key for Ollama sessions. When configured, the bundled agent can decide to use Tavily web search with `basic` search depth and up to five results per call. Without the key, the web-search tool is not exposed to the Ollama model.
+
 ### Using the Desktop App's Default Provider
 
 If the Desktop App has a default provider configured, you can omit `provider`:
@@ -325,22 +327,23 @@ Common statuses:
 
 ## Error Event Source
 
-Error events include their responsibility domain at the event top level, outside the `error` object. `source` is either `"provider"` or `"core"`. A provider error always includes `provider`; valid provider codes are `"codex"`, `"antigravity"`, `"opencode"`, `"cursor"`, `"claude"`, and `"ollama"`. Core errors do not include `provider`.
+The public SDK reports errors through `session.onError((error, ctx) => ...)`. `error` is a `PedelecError`; `ctx.source` describes whether the callback came from a Core-delivered event or from SDK-side handling:
+
+- `"core"`: the error event arrived through the Core/provider execution path;
+- `"sdk"`: the SDK generated the error while handling a local request, disconnect, or protocol condition.
 
 ```ts
-type ProviderErrorEvent = {
-  type: "error";
-  source: "provider";
-  provider: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
-  error: { code: string; message: string; details?: unknown };
+type ErrorEventContext = PedelecEventContext & {
+  type: "error" | "sdk_error";
+  source: "core" | "sdk";
 };
 
-type CoreErrorEvent = {
-  type: "error";
-  source: "core";
-  error: { code: string; message: string; details?: unknown };
-};
+session.onError((error, ctx) => {
+  console.error(ctx.source, error.code, error.message, error.details);
+});
 ```
+
+The current public callback context does not expose a separate provider-responsibility field. Do not branch on `ctx.source === "provider"` or expect `ctx.provider`.
 
 `getSettings()` and `listProviders()` require origin approval and may open its popup. Settings never expose provider credentials, and provider entries contain only the fields shown above. Use `getApprovalStatus().appConnected` for a non-sensitive Desktop connectivity probe.
 

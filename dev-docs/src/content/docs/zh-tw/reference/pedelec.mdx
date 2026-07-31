@@ -166,7 +166,8 @@ type ApprovalStatus = {
 {
   installed: false,
   approved: false,
-  origin: location.origin
+  origin: location.origin,
+  appConnected: false
 }
 ```
 
@@ -202,7 +203,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 
 回傳註冊於此 client 的 session handle。目前 bridge 只回傳 ID，因此新的 resumed handle 可能沒有 provider/model metadata。
 
-常見 errors：空 ID 的 `INVALID_INPUT`、approval errors、session-not-found/runtime errors、transport errors。
+常見 errors：空 ID 的 `INVALID_INPUT`、approval errors、caller origin 無法傳遞時的 `SDK_ORIGIN_UNAVAILABLE`、session 屬於其他 origin 時的 `THREAD_ACCESS_DENIED`、Core 已找不到 ID 時的 `THREAD_NOT_FOUND`，以及 transport errors。
 
 Resume 後要重新註冊 chat、status、error、ended 與 tool handlers。
 

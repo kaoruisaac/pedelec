@@ -133,6 +133,8 @@ async function connectPedelec() {
 | `APPROVAL_REJECTED` | 使用者拒絕或關閉 approval flow | 回到 ready-to-approve |
 | `APPROVAL_TIMEOUT` | 使用者未在時限內完成 | 提供 retry，提醒保持 popup 開啟 |
 | `OPEN_POPUP_FAILED` | Chrome 無法自動開啟 Extension popup | 請使用者手動點 Pedelec Extension icon |
+| `SDK_ORIGIN_UNAVAILABLE` | 無法判定或傳遞 SDK caller origin | 使用支援的 HTTP(S) page origin 並 reload |
+| `THREAD_ACCESS_DENIED` | Resume 或操作的 session 屬於不同 origin | 回到 owner origin 或建立新 session；不要把 ID 當 bearer token |
 | `STORAGE_ERROR` | Extension 無法讀寫 approved origins | 檢查 Extension，持續發生時考慮重裝 |
 | `INVALID_ORIGIN` | Popup action 收到非 HTTP(S) origin | 使用支援的 page origin |
 

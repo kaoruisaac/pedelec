@@ -32,6 +32,7 @@ try {
 | --- | --- | --- | --- |
 | `EXTENSION_UNAVAILABLE` | 不在支援的 page context，或無法連到 Extension | 檢查 profile、installation、origin、client initialization | 修復後建立 fresh client/page |
 | `EXTENSION_DISCONNECTED` | 既有 Extension port 關閉 | Disable controls、檢查 Extension、reload/recreate state | 不在同一 broken client |
+| `SDK_ORIGIN_UNAVAILABLE` | Extension 無法判定或傳遞 SDK caller origin | 使用支援的 HTTP(S) page origin，修正 page context 後 reload | 修正 origin/context 後 |
 | `INVALID_ORIGIN` | Extension popup 收到非 HTTP(S) origin | 使用支援的 HTTPS、localhost 或 127.0.0.1 | 改 origin 後 |
 | `STORAGE_ERROR` | Extension 無法讀寫 approved origins | 檢查 Extension/storage；持續發生時重裝 | 可有限度 retry |
 
@@ -45,6 +46,7 @@ try {
 | `APPROVAL_REJECTED` | 使用者拒絕或關閉 approval | 回到 connect-ready | 使用者明確操作後 |
 | `APPROVAL_TIMEOUT` | 未在時限內完成 | 提醒保持 popup 開啟，提供 connect again | 可以，user initiated |
 | `OPEN_POPUP_FAILED` | Extension 無法自動開 popup | 請使用者手動點 Extension icon | Manual action 後 |
+| `THREAD_ACCESS_DENIED` | SDK session 屬於另一個 origin，或 caller origin invalid/missing | 不要用相同 cross-origin ID 重試；回到 owner origin 或建立新 session | 使用 owner origin 後 |
 
 ## Native 與 Core transport
 
@@ -76,7 +78,22 @@ try {
 | `OLLAMA_REQUEST_FAILED` | 其他 endpoint request failure | 保留 message，檢查 endpoint/logs | 視原因 |
 | `OLLAMA_RESPONSE_INVALID` | Endpoint response 無法使用 | 確認 endpoint compatibility 並回報 details | Endpoint 修復後 |
 
-Provider-specific errors 可能描述 authentication、executable startup、model support、server connectivity 或 output parsing。請顯示 provider 並保留原始 message。
+### Tavily web search
+
+只有在 Tavily API key 啟用 bundled Ollama agent 的 internal `web_search` tool 時，才可能出現以下 errors。
+
+| Code | 意義 | 建議處理 | Retry？ |
+| --- | --- | --- | --- |
+| `TAVILY_UNAVAILABLE` | Web search 無法初始化或連到 Tavily | 檢查 network/service availability | Recovery 後 |
+| `TAVILY_REQUEST_INVALID` | Tavily 拒絕 model 產生的 search request | 保留 details，回報可重現 query | 修改 request 後 |
+| `TAVILY_AUTH_FAILED` | Tavily 拒絕設定的 API key | 在 Desktop Settings 更正 Tavily key | 設定後 |
+| `TAVILY_RATE_LIMITED` | Tavily 暫時 rate limit | 等待後再試 | 稍後可以 |
+| `TAVILY_USAGE_LIMIT_EXCEEDED` | Tavily account usage limit 已用完 | 等待 quota reset，或更換 account/plan | Quota recovery 後 |
+| `TAVILY_REQUEST_FAILED` | Tavily 回傳其他 request failure | 保留 message/details，檢查 service status | 視原因 |
+| `TAVILY_RESPONSE_INVALID` | Tavily 回傳無法使用的 result shape | 回報 response incompatibility | Service/runtime 修復後 |
+| `TAVILY_MODEL_ROUND_LIMIT_EXCEEDED` | Model 在單一 model round 嘗試超過 10 次搜尋 | 讓 agent 在沒有更多搜尋的情況下繼續，或等待下一個 turn | 後續 model round |
+
+Provider-specific errors 可能描述 authentication、executable startup、model support、server connectivity、web search 或 output parsing。請顯示 provider 並保留原始 message。
 
 ## Session 與 turn
 
@@ -84,6 +101,7 @@ Provider-specific errors 可能描述 authentication、executable startup、mode
 | --- | --- | --- | --- |
 | `SESSION_BUSY` | 已有 active prepare/turn | 等待 `idle`，阻止 duplicate submit | Idle 後 |
 | `SESSION_ENDED` | Session 不再接受工作 | 建立或 resume 另一個 valid session | 同 handle 不可 |
+| `THREAD_NOT_FOUND` | Core 已找不到 requested session ID | 移除 stale persistence，或建立另一個 session | 相同 missing ID 不可 |
 | `SESSION_ERROR` | Runtime 回報 error state | 顯示失敗，查看 provider/runtime detail | 需 deliberate recovery |
 | `PREPARE_FAILED` | Preparation request 的 SDK fallback code | 視情況繼續 normal send | 可 deliberate retry |
 | `SEND_TEXT_FAILED` | Send request 的 SDK fallback code | 保留 prompt，檢查 transport/runtime | 確認 state 後 |

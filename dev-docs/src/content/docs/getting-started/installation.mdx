@@ -63,7 +63,7 @@ console.log("Current origin:", approval.origin);
 console.log("Already approved:", approval.approved);
 ```
 
-`getApprovalStatus()` intentionally converts extension-unavailable and extension-disconnected cases into `{ installed: false, approved: false, origin }`. Other failures may still throw.
+`getApprovalStatus()` intentionally converts extension-unavailable and extension-disconnected cases into `{ installed: false, approved: false, origin, appConnected: false }`. Other failures may still throw.
 
 ## Verify the desktop runtime and providers
 
@@ -107,8 +107,9 @@ Pedelec's Ollama provider uses the bundled `pedelec-agent`, not the `ollama` CLI
 - run an Ollama-compatible server at the default `http://127.0.0.1:11434` endpoint or configure another local, remote, or Ollama Cloud endpoint;
 - configure its base URL in the Desktop App when it is not the default;
 - set the Ollama API key in Desktop Settings. The current agent requires a non-empty value: use `ollama` for a local server, or the service-issued key for an authenticated remote/Cloud endpoint;
-- install the chosen model; and
-- choose a model explicitly or set the Ollama default model.
+- install the chosen model;
+- choose a model explicitly or set the Ollama default model; and
+- optionally add a Tavily API key to expose Tavily web search to the Ollama model. The current agent uses `basic` search depth and returns at most five results per call. Without a Tavily key, web search is not exposed.
 
 ## Next step
 

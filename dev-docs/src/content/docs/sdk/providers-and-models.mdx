@@ -19,7 +19,7 @@ type ProviderCode =
   | "ollama";
 ```
 
-Provider codes are lowercase and stable at the SDK boundary. Display names, executable paths, versions, and model catalogs are discovered or configured separately.
+Provider codes are lowercase and stable at the SDK boundary. Display names and availability are exposed by the SDK; executable paths, versions, credentials, and model catalogs remain Desktop-internal or provider-specific.
 
 ## Discover providers
 
@@ -40,7 +40,6 @@ type ProviderInfo = {
 
 - `name`: human-readable provider name suitable for a picker.
 - `code`: value to pass to `createSession()`.
-- `path`: executable path detected by Core, or `null` when unavailable or not represented as a normal provider CLI path.
 - `available`: whether Core currently considers the provider usable enough to select.
 - `error`: provider discovery/setup detail when unavailable, otherwise usually `null`.
 
@@ -169,6 +168,26 @@ const session = await pedelec.createSession({
 
 Without a model, Core returns `MODEL_REQUIRED`.
 
+## Optional Tavily web search for Ollama
+
+Desktop Settings includes an optional Tavily API-key field for the Ollama provider. When the trimmed value is non-empty, the bundled `pedelec-agent` exposes a `web_search` tool to the Ollama model. When the field is empty, that tool is omitted.
+
+This capability is internal to the Ollama agent; it is not a frontend tool registered through `skills.tools`, and the Web App does not provide an `onTool()` handler for it.
+
+Current search behavior is fixed by the agent implementation:
+
+- Tavily endpoint: `https://api.tavily.com/search`;
+- search depth: `basic`;
+- topic: `general`;
+- maximum results: 5 per call;
+- maximum attempts: 10 web searches per model round;
+- request timeout: 30 seconds;
+- answer synthesis, raw content, images, image descriptions, and favicons are disabled.
+
+The compact result returned to the model contains the query and up to five items with `title`, `url`, `content`, and an optional relevance `score`.
+
+A configured key enables the tool but does not force every turn to search. The model decides whether and what to query. Tavily authentication, rate limits, usage limits, network failures, and invalid responses can surface as provider errors.
+
 ## Provider picker example
 
 ```ts
@@ -191,5 +210,7 @@ When the user changes provider, update the model field to that provider's saved 
 ## Privacy and provider choice
 
 Pedelec's bridge is local, but a cloud provider CLI can send context to its service. The model/provider selector is therefore also a data-routing choice. Applications handling sensitive content should disclose which provider will receive the prompt and tool descriptions.
+
+When Tavily is enabled for Ollama, model-generated search queries are sent to Tavily and compact search results are returned to the local agent. Applications should disclose that additional external data path when relevant.
 
 Continue with [Creating sessions](./creating-sessions/).
