@@ -125,7 +125,7 @@ Core tool timeout 也可能導致 session/runtime error 或後續 `SUBMIT_TOOL_R
 
 ## Assets
 
-Asset failure 可能發生在 SDK request、loopback upload `PUT` 或 listing，不會全部在 `uploadAsset()` 的同一階段出現。
+Asset failure 可能發生在 SDK request、loopback upload `PUT`、download `GET`、asset listing，或 SDK 執行 UTF-8 decode 與 JSON parsing 時。因此 `uploadAsset()`、`listAssets()` 與 `readAsset()` 會從不同階段回傳錯誤。
 
 | Code | 意義 | 建議處理 |
 | --- | --- | --- |

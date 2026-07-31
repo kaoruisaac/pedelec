@@ -125,7 +125,7 @@ The SDK handles the transport, but the application owns the semantics and safety
 
 ToolRegistry is the runtime source of truth. Core can generate per-tool spec artifacts as an implementation detail, but a normal Web App integration and agent flow never need to locate or read `tools.md`.
 
-## Asset upload data path
+## Asset transfer data path
 
 Session requests, events, and tool results use the control/event path:
 
@@ -139,7 +139,7 @@ Asset bodies use a separate internal data path:
 Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session sandbox assets/
 ```
 
-The SDK obtains and uses the upload ticket internally through `session.uploadAsset()`. Applications must not create a localhost server or depend on upload URLs, ports, tokens, or ticket lifecycles. Asset bodies do not pass through the Extension message body, Native Messaging payload, or Core IPC message body.
+The SDK obtains and uses upload and download tickets internally through `session.uploadAsset()` and `session.readAsset()`. Applications must not create a localhost server or depend on transfer URLs, ports, tokens, or ticket lifecycles. Asset bodies do not pass through the Extension message body, Native Messaging payload, or Core IPC message body.
 
 ## Ownership boundaries
 

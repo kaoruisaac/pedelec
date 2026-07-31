@@ -125,7 +125,7 @@ A Core tool timeout can also lead to a session/runtime error or a later `SUBMIT_
 
 ## Assets
 
-Asset failures can occur while creating the SDK request, during the loopback upload `PUT`, or while listing assets; they are not all emitted by the same stage of `uploadAsset()`.
+Asset failures can occur while creating an SDK request, during loopback upload `PUT` or download `GET`, while listing assets, or while the SDK decodes UTF-8 and parses JSON. `uploadAsset()`, `listAssets()`, and `readAsset()` therefore surface errors from different stages.
 
 | Code | Meaning | Recommended response |
 | --- | --- | --- |

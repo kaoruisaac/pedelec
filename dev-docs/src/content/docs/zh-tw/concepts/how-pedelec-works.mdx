@@ -125,7 +125,7 @@ SDK 處理 transport，但操作的語意與安全仍由 Web App 負責。例如
 
 ToolRegistry 是 runtime source of truth。Core 可能產生 per-tool spec artifacts 作為實作細節，但正常的 Web App integration 與 agent flow 不需要尋找或閱讀 `tools.md`。
 
-## Asset upload data path
+## Asset transfer data path
 
 Session request、event 與 tool result 使用 control/event path：
 
@@ -139,7 +139,7 @@ Asset body 使用獨立的內部 data path：
 Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session sandbox assets/
 ```
 
-SDK 透過 `session.uploadAsset()` 在內部取得並使用 upload ticket。Web App 不應自行建立 localhost server，也不應依賴 upload URL、port、token 或 ticket lifecycle；asset body 不會經過 Extension message body、Native Messaging payload 或 Core IPC message body。
+SDK 會透過 `session.uploadAsset()` 與 `session.readAsset()` 在內部取得並使用 upload/download ticket。Web App 不應自行建立 localhost server，也不應依賴 transfer URL、port、token 或 ticket lifecycle；asset body 不會經過 Extension message body、Native Messaging payload 或 Core IPC message body。
 
 ## 責任邊界
 

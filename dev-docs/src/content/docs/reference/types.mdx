@@ -16,6 +16,7 @@ import type {
   ToolArgsSchema,
   SandboxAsset,
   SandboxAssetPath,
+  ReadAssetType,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -112,13 +113,27 @@ type PedelecAvailability = {
 
 `available` requires every layer. `launchAttempted` can be true once the non-sensitive approval-status ping is sent; it does not confirm a process launch. `appConnected` reflects that ping only, not approval or provider readiness.
 
-## Errors and status
-
 ## Assets
+
+### `SandboxAssetPath`
 
 ```ts
 type SandboxAssetPath = `assets/${string}`;
+```
 
+A sandbox-relative path in the session's shared `assets/` directory. Runtime validation also rejects backslashes, empty path segments, `.` and `..`.
+
+### `ReadAssetType`
+
+```ts
+type ReadAssetType = "text" | "json" | "file";
+```
+
+Selects the conversion performed by `PedelecSession.readAsset()`: strict UTF-8 text, parsed JSON, or a browser `File`.
+
+### `SandboxAsset`
+
+```ts
 type SandboxAsset = {
   name: string;
   path: SandboxAssetPath;
@@ -128,6 +143,8 @@ type SandboxAsset = {
 ```
 
 `modifiedAt` is the sandbox filesystem modification time. `path` is sandbox-relative and does not reveal the browser user's absolute local path.
+
+## Errors and status
 
 ### `PedelecError`
 

@@ -105,7 +105,7 @@ uploadAsset(file: File): Promise<SandboxAssetPath>
 
 Session 尚未結束時可 upload 一個 browser `File`。upload 可與 prepare、send 和 provider execution 同時進行，但每個 session 只允許一個 upload。單檔上限 100 MiB；成功時回傳 `assets/...` sandbox-relative path。
 
-內容經由 Desktop 內部的 `127.0.0.1` loopback upload server 傳輸，不經 Extension、Native Messaging 或 Core IPC message body。SDK request、loopback PUT 與 ticket 都可能失敗，請見 [Error Codes](./error-codes/)。
+內容經由 Desktop 內部的 `127.0.0.1` loopback asset transfer server 傳輸，不經 Extension、Native Messaging 或 Core IPC message body。SDK request、loopback upload `PUT` 與 ticket 都可能失敗，請見 [Error Codes](./error-codes/)。
 
 ## `listAssets()`
 
@@ -113,7 +113,38 @@ Session 尚未結束時可 upload 一個 browser `File`。upload 可與 prepare�
 listAssets(): Promise<SandboxAsset[]>
 ```
 
-回傳 App 與 Agent 共用的第一層 `assets/`；不遞迴，依 filesystem modification time 由新到舊排序。`readAsset(path, "text")`、`readAsset(path, "json")` 與 `readAsset(path, "file")` 可讀取已知 nested asset path；text 使用 strict UTF-8，JSON generic 僅提供 TypeScript typing。
+回傳 App 與 Agent 共用 `assets/` 目錄第一層中已完成的一般檔案，並依 filesystem modification time 由新到舊排序。此 listing 不遞迴，因此不會列出 nested assets。
+
+`name` 是實際 sandbox filename，`path` 是 sandbox-relative path，`modifiedAt` 是 filesystem modification time，不保證等同精確的 write completion timestamp。Agent 執行期間仍可 listing；session 正在結束或已結束時會 reject `SESSION_ENDED`。目前不支援 pagination、delete、rename、move 或 recursive listing。
+
+## `readAsset()`
+
+```ts
+readAsset(path: SandboxAssetPath, type: "text"): Promise<string>
+readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>
+readAsset(path: SandboxAssetPath, type: "file"): Promise<File>
+```
+
+讀取 shared session `assets/` 中的已知檔案。和 `listAssets()` 不同，這個 method 可接受 `assets/results/report.json` 之類的 nested path。Path 必須以 `assets/` 開頭、使用 `/`，且不能包含空 segment、`.` 或 `..`。
+
+單檔 read 上限為 100 MiB。prepare、send 或 provider execution 進行時仍可讀取；session 正在結束或已結束時會 reject `SESSION_ENDED`。若 Agent 可能仍在寫入相同 path，application 或 agent workflow 應先協調完成時機再讀取。
+
+回傳方式由 `type` 決定：
+
+- `"text"` 使用 strict UTF-8 decode；invalid bytes 會收到 `ASSET_TEXT_DECODE_FAILED`；
+- `"json"` 先 strict UTF-8 decode 再 parse JSON；invalid JSON 會收到 `ASSET_INVALID_JSON`。Generic `T` 只提供 compile-time typing，不會驗證 parsed value；
+- `"file"` 回傳 browser `File`，並使用 Desktop 回報的 asset name、MIME type 與 modification time。
+
+```ts
+const text = await session.readAsset("assets/report.txt", "text");
+const result = await session.readAsset<{ ok: boolean }>(
+  "assets/results/result.json",
+  "json",
+);
+const model = await session.readAsset("assets/model.glb", "file");
+```
+
+File bytes 透過 internal loopback download ticket 傳輸。Application 不應依賴 URL、token、port 或 ticket lifetime。Path、file、size、download、decode 與 parse failure 請見 [Error Codes](./error-codes/)。
 
 ## `onChat()`
 

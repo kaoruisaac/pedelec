@@ -16,6 +16,7 @@ import type {
   ToolArgsSchema,
   SandboxAsset,
   SandboxAssetPath,
+  ReadAssetType,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -112,13 +113,27 @@ type PedelecAvailability = {
 
 `available` 需要所有 layer 都成功。`launchAttempted` 在非敏感 approval-status ping 送出後即可為 true，不代表已確認啟動 Desktop；`appConnected` 只表示該 ping 成功，不代表已 approval 或 provider ready。
 
-## Errors 與 status
-
 ## Assets
+
+### `SandboxAssetPath`
 
 ```ts
 type SandboxAssetPath = `assets/${string}`;
+```
 
+Session shared `assets/` 目錄中的 sandbox-relative path。Runtime validation 也會拒絕 backslash、空 path segment、`.` 與 `..`。
+
+### `ReadAssetType`
+
+```ts
+type ReadAssetType = "text" | "json" | "file";
+```
+
+決定 `PedelecSession.readAsset()` 的轉換方式：strict UTF-8 text、parsed JSON，或 browser `File`。
+
+### `SandboxAsset`
+
+```ts
 type SandboxAsset = {
   name: string;
   path: SandboxAssetPath;
@@ -128,6 +143,8 @@ type SandboxAsset = {
 ```
 
 `modifiedAt` 是 sandbox filesystem modification time。`path` 是 sandbox-relative，不會揭露 browser 使用者的 absolute local path。
+
+## Errors 與 status
 
 ### `PedelecError`
 

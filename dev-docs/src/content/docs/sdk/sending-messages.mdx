@@ -7,9 +7,13 @@ sidebar:
 
 A session processes one turn at a time. `prepare()` is an optional optimization; `sendText()` starts a user turn and resolves after that turn completes.
 
-## Upload a single asset
+## Work with session assets
 
-Use `uploadAsset()` with one browser `File` before the session ends. Files are limited to 100 MiB; the returned `assets/...` value is a sandbox-relative path and is only valid for that session's lifetime. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
+The App and Agent share the session sandbox's `assets/` directory. The App can upload input files, list completed top-level files, and read files produced by either side until the session ends.
+
+### Upload a file
+
+Use `uploadAsset()` with one browser `File`. Files are limited to 100 MiB; the returned `assets/...` value is a sandbox-relative path and is only valid for that session's lifetime. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
 
 ```ts
 const file = input.files?.[0];
@@ -21,14 +25,33 @@ await session.sendText(`Please process this file: ${path}`);
 
 The file body is sent directly to a loopback server listening on `127.0.0.1`; it does not travel through the extension, native-messaging host, or Core IPC. A successful upload only means the file is available in the sandbox—it does not guarantee that the selected provider or model can understand its format.
 
-## List completed assets
+### List top-level assets
 
 ```ts
-const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
+for (const asset of assets) {
+  console.log(asset.path, asset.sizeBytes, asset.modifiedAt);
+}
 ```
 
-`listAssets()` is non-recursive and sorted by filesystem modification time, newest first. It lists shared `assets/` files created either by the App or Agent. `readAsset(path, "text" | "json" | "file")` reads known nested paths up to 100 MiB; binary bytes use the loopback ticket data plane. Listing and reading are allowed while the agent runs.
+`listAssets()` returns regular files from the first level of `assets/`, sorted by filesystem modification time newest first. It is non-recursive, has no pagination, and can be called while the Agent runs. Use a known path with `readAsset()` when the Agent writes a nested file.
+
+### Read an asset
+
+```ts
+const text = await session.readAsset("assets/report.txt", "text");
+
+const result = await session.readAsset<{ ok: boolean; score: number }>(
+  "assets/results/result.json",
+  "json",
+);
+
+const modelFile = await session.readAsset("assets/model.glb", "file");
+```
+
+`"text"` requires valid UTF-8. `"json"` also parses the text as JSON; its generic type is only a TypeScript annotation, so validate untrusted data before using it. `"file"` preserves binary bytes in a browser `File`. Reads support known nested `assets/...` paths and files up to 100 MiB.
+
+Listing and reading can run alongside provider execution. When the Agent may still be writing the target path, wait for an explicit tool result, message, or other workflow signal before reading to avoid observing an unstable file. All asset methods reject with `SESSION_ENDED` after session shutdown.
 
 ## Optional preparation
 

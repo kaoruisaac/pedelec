@@ -7,9 +7,13 @@ sidebar:
 
 一個 session 同時只處理一個 turn。`prepare()` 是 optional optimization；`sendText()` 會啟動 user turn，並在 turn 完成後 resolve。
 
-## Upload 單一 asset
+## 操作 session assets
 
-Session 尚未結束時可使用 `uploadAsset()` 傳送一個 browser `File`。單檔上限為 100 MiB；回傳的 `assets/...` 是 sandbox-relative path。upload 可與 prepare、send、Agent 執行並行，但同一 session 一次只能有一個 upload。
+App 與 Agent 共用 session sandbox 的 `assets/` 目錄。Session 結束前，App 可以 upload input file、列出第一層已完成檔案，並讀取任一方產生的檔案。
+
+### Upload 檔案
+
+使用 `uploadAsset()` 傳送一個 browser `File`。單檔上限為 100 MiB；回傳的 `assets/...` 是 sandbox-relative path，只在該 session lifecycle 內有效。Upload 可與 prepare 和 Agent execution 並行，但同一 session 一次只能有一個 upload。
 
 ```ts
 const file = input.files?.[0];
@@ -21,14 +25,33 @@ await session.sendText(`請處理這個檔案：${path}`);
 
 File body 直接送往 `127.0.0.1` loopback server，不經過 Extension、Native Messaging host 或 Core IPC。Upload 成功只表示檔案位於 sandbox，不能保證 provider 或 model 能理解其格式。
 
-## 列出已完成的 assets
+### 列出第一層 assets
 
 ```ts
-const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
+for (const asset of assets) {
+  console.log(asset.path, asset.sizeBytes, asset.modifiedAt);
+}
 ```
 
-`listAssets()` 不遞迴，並以 filesystem modification time 由新到舊排序，列出 App 與 Agent 共用的 `assets/`。`readAsset(path, "text" | "json" | "file")` 可讀取已知 nested path，binary bytes 走 loopback ticket data plane。
+`listAssets()` 會回傳 `assets/` 第一層的一般檔案，並依 filesystem modification time 由新到舊排序。此 method 不遞迴、不支援 pagination，Agent 執行期間仍可呼叫。Agent 寫入 nested file 時，請使用已知 path 搭配 `readAsset()`。
+
+### 讀取 asset
+
+```ts
+const text = await session.readAsset("assets/report.txt", "text");
+
+const result = await session.readAsset<{ ok: boolean; score: number }>(
+  "assets/results/result.json",
+  "json",
+);
+
+const modelFile = await session.readAsset("assets/model.glb", "file");
+```
+
+`"text"` 要求 valid UTF-8。`"json"` 會再將文字 parse 成 JSON；generic type 只提供 TypeScript annotation，使用不可信資料前仍應自行驗證。`"file"` 會將 binary bytes 保留在 browser `File`。Read 支援已知 nested `assets/...` path，單檔上限同樣為 100 MiB。
+
+Listing 與 reading 可和 provider execution 同時進行。若 Agent 可能仍在寫入 target path，請先等待明確的 tool result、message 或其他 workflow signal，再開始讀取，避免取得不穩定內容。Session shutdown 後，所有 asset methods 都會 reject `SESSION_ENDED`。
 
 ## Optional preparation
 
