@@ -118,7 +118,7 @@ type PedelecAvailability = {
 ### `SandboxAssetPath`
 
 ```ts
-type SandboxAssetPath = `assets/${string}`;
+type SandboxAssetPath = `/${string}`;
 ```
 
 Session shared `assets/` 目錄中的 sandbox-relative path。Runtime validation 也會拒絕 backslash、空 path segment、`.` 與 `..`。

@@ -89,7 +89,7 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
     let length = headers
         .get("content-length")
         .and_then(|v| v.parse::<u64>().ok());
-    let (tmp, final_path, expected) = {
+    let (tmp, asset_root, relative_path, final_path, expected, public_path) = {
         let mut core = runtime.lock().unwrap();
         core.expire_asset_uploads();
         let ticket = match core.asset_upload_tickets.get_mut(upload_id) {
@@ -137,11 +137,14 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
                 .sandbox_path
                 .join("tmp")
                 .join(format!("{upload_id}.upload")),
+            ticket.sandbox_path.join("assets"),
+            ticket.relative_path.clone(),
             ticket
                 .sandbox_path
                 .join("assets")
-                .join(format!("{upload_id}-{}", ticket.safe_filename)),
+                .join(&ticket.relative_path),
             ticket.expected_size_bytes,
+            ticket.public_path.clone(),
         )
     };
     let result = (|| -> std::io::Result<u64> {
@@ -163,7 +166,7 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
     })();
     let ok = matches!(result, Ok(n) if n == expected);
     if ok {
-        let moved = fs::rename(&tmp, &final_path);
+        let moved = finalize_upload(&tmp, &asset_root, &relative_path, &final_path, upload_id);
         if moved.is_ok() {
             runtime
                 .lock()
@@ -174,10 +177,7 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
             return respond(
                 &mut stream,
                 201,
-                Some(&format!(
-                    r#"{{"path":"assets/{}"}}"#,
-                    final_path.file_name().unwrap().to_string_lossy()
-                )),
+                Some(&format!(r#"{{"path":"{public_path}"}}"#)),
             );
         }
     }
@@ -191,8 +191,8 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
     respond_error(
         &mut stream,
         400,
-        error_codes::ASSET_UPLOAD_SIZE_MISMATCH,
-        "upload did not match the expected size",
+        error_codes::ASSET_UPLOAD_FAILED,
+        "asset upload failed",
     )
 }
 
@@ -211,7 +211,7 @@ fn handle_download(stream: &mut TcpStream, runtime: SharedCoreRuntime, first: &s
             ticket.state = AssetDownloadState::Failed;
             return respond_error(stream, 401, error_codes::ASSET_DOWNLOAD_UNAUTHORIZED, "download token is invalid");
         }
-        let relative = match ticket.public_path.strip_prefix("assets/") { Some(value) if !value.is_empty() && !value.contains('\\') && !value.split('/').any(|part| part.is_empty() || part == "." || part == "..") => value, _ => { ticket.state = AssetDownloadState::Failed; return respond_error(stream, 400, error_codes::ASSET_PATH_INVALID, "asset path is invalid"); } };
+        let relative = match ticket.public_path.strip_prefix('/') { Some(value) if !value.is_empty() && !value.contains('\\') && !value.split('/').any(|part| part.is_empty() || part == "." || part == "..") => value, _ => { ticket.state = AssetDownloadState::Failed; return respond_error(stream, 400, error_codes::ASSET_PATH_INVALID, "asset path is invalid"); } };
         let root = ticket.sandbox_path.join("assets");
         let target = relative.split('/').fold(root.clone(), |path, part| path.join(part));
         let metadata = match fs::symlink_metadata(&target) { Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= MAX_ASSET_UPLOAD_BYTES => metadata, _ => { ticket.state = AssetDownloadState::Failed; return respond_error(stream, 404, error_codes::ASSET_READ_FAILED, "asset is unavailable"); } };
@@ -231,6 +231,36 @@ fn handle_download(stream: &mut TcpStream, runtime: SharedCoreRuntime, first: &s
     })();
     runtime.lock().unwrap().asset_download_tickets.get_mut(download_id).map(|ticket| ticket.state = if result.is_ok() { AssetDownloadState::Completed } else { AssetDownloadState::Failed });
     result
+}
+
+fn finalize_upload(tmp: &std::path::Path, asset_root: &std::path::Path, relative: &std::path::Path, target: &std::path::Path, upload_id: &str) -> std::io::Result<()> {
+    fs::create_dir_all(asset_root)?;
+    let canonical_root = asset_root.canonicalize()?;
+    let parent_relative = relative.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let mut parent = asset_root.to_path_buf();
+    for component in parent_relative.components() {
+        parent.push(component);
+        if parent.exists() {
+            let metadata = fs::symlink_metadata(&parent)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() || !parent.canonicalize()?.starts_with(&canonical_root) {
+                return Err(std::io::Error::other("asset parent is unsafe"));
+            }
+        } else {
+            fs::create_dir(&parent)?;
+            if !parent.canonicalize()?.starts_with(&canonical_root) { return Err(std::io::Error::other("asset parent escapes root")); }
+        }
+    }
+    if let Ok(metadata) = fs::symlink_metadata(target) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() { return Err(std::io::Error::other("asset target is not a regular file")); }
+        let backup = target.with_file_name(format!(".pedelec-{upload_id}.backup"));
+        fs::rename(target, &backup)?;
+        match fs::rename(tmp, target) {
+            Ok(()) => { let _ = fs::remove_file(backup); Ok(()) }
+            Err(error) => { let _ = fs::rename(&backup, target); Err(error) }
+        }
+    } else {
+        fs::rename(tmp, target)
+    }
 }
 
 fn respond(stream: &mut TcpStream, status: u16, body: Option<&str>) -> std::io::Result<()> {

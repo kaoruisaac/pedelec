@@ -138,12 +138,12 @@ const assets = await session.listAssets();
 `assets/` is shared by uploads and files written by the agent. `listAssets()` lists only its first level, ordered by filesystem modification time (newest first), and may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
 
 ```ts
-const text = await session.readAsset("assets/report.txt", "text");
-const json = await session.readAsset<{ ok: boolean }>("assets/result.json", "json");
-const result = await session.readAsset("assets/model.glb", "file");
+const text = await session.readAsset("/report.txt", "text");
+const json = await session.readAsset<{ ok: boolean }>("/result.json", "json");
+const result = await session.readAsset("/model.glb", "file");
 ```
 
-Reads support nested `assets/...` paths up to 100 MiB. `text` and `json` require valid UTF-8; binary content is transferred over a loopback download ticket rather than extension messages.
+Public asset paths use `/...` with `assets/` as their implicit root; nested paths such as `/results/model.glb` are supported up to 100 MiB.
 
 ---
 

@@ -47,6 +47,8 @@ pub struct PedelecError {
 #[serde(rename_all = "camelCase")]
 pub struct CreateAssetUploadInput {
     pub thread_id: String,
+    #[serde(default)]
+    pub target_path: Option<String>,
     pub filename: String,
     pub size_bytes: u64,
     #[serde(default)]
@@ -98,6 +100,8 @@ pub struct ListAssetsOutput {
 pub struct AssetUploadTicket {
     pub thread_id: String,
     pub sandbox_path: PathBuf,
+    pub public_path: String,
+    pub relative_path: PathBuf,
     pub filename: String,
     pub safe_filename: String,
     pub expected_size_bytes: u64,
@@ -1488,11 +1492,20 @@ impl CoreRuntime {
         let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
         let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
         let safe_filename = safe_asset_filename(&input.filename);
+        let (public_path, relative_path) = match input.target_path.as_deref() {
+            Some(path) => parse_public_asset_path(path).map_err(|_| PedelecError::with_details(error_codes::ASSET_PATH_INVALID, "asset path is invalid", serde_json::json!({"threadId": input.thread_id, "path": path})))?,
+            None => {
+                let filename = format!("{upload_id}-{safe_filename}");
+                (format!("/{filename}"), PathBuf::from(filename))
+            }
+        };
         self.asset_upload_tickets.insert(
             upload_id.clone(),
             AssetUploadTicket {
                 thread_id: input.thread_id,
                 sandbox_path,
+                public_path,
+                relative_path,
                 filename: input.filename,
                 safe_filename,
                 expected_size_bytes: input.size_bytes,
@@ -1590,7 +1603,7 @@ impl CoreRuntime {
                 )
             })?;
             assets.push(SandboxAsset {
-                path: format!("assets/{name}"),
+                path: format!("/{name}"),
                 name,
                 size_bytes: metadata.len(),
                 modified_at,
@@ -3904,16 +3917,19 @@ fn invalid_sdk_origin_error() -> PedelecError {
     PedelecError::new(error_codes::THREAD_ACCESS_DENIED, "invalid caller origin")
 }
 
+fn parse_public_asset_path(public_path: &str) -> Result<(String, PathBuf), ()> {
+    if !public_path.starts_with('/') || public_path.len() == 1 || public_path.starts_with("//") || public_path.contains('\\') || public_path.chars().any(char::is_control) {
+        return Err(());
+    }
+    let relative = &public_path[1..];
+    if relative.split('/').any(|part| part.is_empty() || part == "." || part == "..") { return Err(()); }
+    Ok((public_path.to_string(), relative.split('/').collect()))
+}
+
 fn resolve_asset_file(thread: &ThreadState, public_path: &str) -> Result<(PathBuf, String, u64, i64), PedelecError> {
-    if !public_path.starts_with("assets/") || public_path.len() == 7 || public_path.contains('\\') {
-        return Err(PedelecError::with_details(error_codes::ASSET_PATH_INVALID, "asset path is invalid", serde_json::json!({"threadId": thread.thread_id, "path": public_path})));
-    }
-    let relative = &public_path[7..];
-    if relative.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
-        return Err(PedelecError::with_details(error_codes::ASSET_PATH_INVALID, "asset path is invalid", serde_json::json!({"threadId": thread.thread_id, "path": public_path})));
-    }
+    let (_, relative_path) = parse_public_asset_path(public_path).map_err(|_| PedelecError::with_details(error_codes::ASSET_PATH_INVALID, "asset path is invalid", serde_json::json!({"threadId": thread.thread_id, "path": public_path})))?;
     let root = thread.sandbox_path.join("assets");
-    let target = relative.split('/').fold(root.clone(), |path, part| path.join(part));
+    let target = root.join(relative_path);
     let metadata = fs::symlink_metadata(&target).map_err(|_| PedelecError::with_details(error_codes::ASSET_NOT_FOUND, "asset was not found", serde_json::json!({"threadId": thread.thread_id, "path": public_path})))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() { return Err(PedelecError::with_details(error_codes::ASSET_NOT_FILE, "asset is not a regular file", serde_json::json!({"threadId": thread.thread_id, "path": public_path}))); }
     let canonical_root = root.canonicalize().map_err(|_| PedelecError::new(error_codes::ASSET_NOT_FOUND, "asset root was not found"))?;

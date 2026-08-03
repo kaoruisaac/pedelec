@@ -13,7 +13,7 @@ App 與 Agent 共用 session sandbox 的 `assets/` 目錄。Session 結束前，
 
 ### Upload 檔案
 
-使用 `uploadAsset()` 傳送一個 browser `File`。單檔上限為 100 MiB；回傳的 `assets/...` 是 sandbox-relative path，只在該 session lifecycle 內有效。Upload 可與 prepare 和 Agent execution 並行，但同一 session 一次只能有一個 upload。
+使用 `uploadAsset()` 傳送一個 browser `File`。單檔上限為 100 MiB；公開 path 使用 `/...`，並以 sandbox 的 `assets/` 為隱含根目錄。Upload 可與 prepare 和 Agent execution 並行，但同一 session 一次只能有一個 upload。
 
 ```ts
 const file = input.files?.[0];
@@ -39,17 +39,17 @@ for (const asset of assets) {
 ### 讀取 asset
 
 ```ts
-const text = await session.readAsset("assets/report.txt", "text");
+const text = await session.readAsset("/report.txt", "text");
 
 const result = await session.readAsset<{ ok: boolean; score: number }>(
-  "assets/results/result.json",
+  "/results/result.json",
   "json",
 );
 
-const modelFile = await session.readAsset("assets/model.glb", "file");
+const modelFile = await session.readAsset("/model.glb", "file");
 ```
 
-`"text"` 要求 valid UTF-8。`"json"` 會再將文字 parse 成 JSON；generic type 只提供 TypeScript annotation，使用不可信資料前仍應自行驗證。`"file"` 會將 binary bytes 保留在 browser `File`。Read 支援已知 nested `assets/...` path，單檔上限同樣為 100 MiB。
+`"text"` 要求 valid UTF-8。`"json"` 會再將文字 parse 成 JSON；generic type 只提供 TypeScript annotation，使用不可信資料前仍應自行驗證。`"file"` 會將 binary bytes 保留在 browser `File`。Read 支援已知 nested `/...` path，單檔上限同樣為 100 MiB。
 
 Listing 與 reading 可和 provider execution 同時進行。若 Agent 可能仍在寫入 target path，請先等待明確的 tool result、message 或其他 workflow signal，再開始讀取，避免取得不穩定內容。Session shutdown 後，所有 asset methods 都會 reject `SESSION_ENDED`。
 

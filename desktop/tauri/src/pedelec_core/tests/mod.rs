@@ -2775,13 +2775,13 @@ mod tests {
             .assets
             .iter()
             .any(|asset| asset.name == "upl-report.txt"
-                && asset.path == "assets/upl-report.txt"
+                && asset.path == "/upl-report.txt"
                 && asset.size_bytes == 4
                 && asset.modified_at >= 0));
         assert!(output
             .assets
             .iter()
-            .any(|asset| asset.name == ".env" && asset.path == "assets/.env"));
+            .any(|asset| asset.name == ".env" && asset.path == "/.env"));
         assert!(output
             .assets
             .iter()

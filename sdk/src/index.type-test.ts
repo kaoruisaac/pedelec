@@ -125,7 +125,22 @@ async function listAssetsHasPublicTypes() {
   const assets = await session.listAssets();
   assets satisfies SandboxAsset[];
   const path: SandboxAssetPath = assets[0]!.path;
-  path satisfies `assets/${string}`;
+  path satisfies `/${string}`;
+}
+
+async function assetPathsUseAssetsAsAnImplicitRoot() {
+  const pedelec = new Pedelec();
+  const session = await pedelec.resumeSession("thread_1");
+  const file = new File(["asset"], "original.txt", { type: "text/plain" });
+  const generated = await session.uploadAsset(file);
+  generated satisfies SandboxAssetPath;
+  const exact = await session.uploadAsset(file, "/img/image.txt");
+  exact satisfies SandboxAssetPath;
+  const namedAssetsDirectory: SandboxAssetPath = "/assets/image.txt";
+  void namedAssetsDirectory;
+  // @ts-expect-error asset paths must begin with a slash
+  const missingSlash: SandboxAssetPath = "assets/image.txt";
+  void missingSlash;
 }
 
 async function availabilityHasPublicType() {

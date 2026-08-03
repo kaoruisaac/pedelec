@@ -13,7 +13,7 @@ export type JsonPrimitive = string | number | boolean | null;
 
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
-export type SandboxAssetPath = `assets/${string}`;
+export type SandboxAssetPath = `/${string}`;
 export type ReadAssetType = "text" | "json" | "file";
 
 export type SandboxAsset = {
@@ -31,7 +31,7 @@ function normalizeListAssetsResponse(response: unknown): SandboxAsset[] {
     if (!asset || typeof asset !== "object" || Array.isArray(asset)) return invalidListAssetsResponse({ index, asset });
     const { name, path, sizeBytes, modifiedAt } = asset as Record<string, unknown>;
     const validName = typeof name === "string" && name.length > 0 && name !== "." && name !== ".." && !name.includes("/") && !name.includes("\\");
-    const validPath = typeof path === "string" && !path.includes("\\") && path === `assets/${name}` && !path.split("/").includes("..");
+      const validPath = typeof path === "string" && path === `/${name}` && isValidAssetPath(path);
     const validNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
     if (!validName || !validPath || !validNumber(sizeBytes) || !validNumber(modifiedAt)) {
       return invalidListAssetsResponse({ index, asset });
@@ -45,8 +45,8 @@ function invalidListAssetsResponse(details: unknown): never {
 }
 
 function isValidAssetPath(path: unknown): path is SandboxAssetPath {
-  return typeof path === "string" && path.startsWith("assets/") && path.length > "assets/".length && !path.includes("\\") &&
-    path.split("/").every((part, index) => index === 0 || (part.length > 0 && part !== "." && part !== ".."));
+  return typeof path === "string" && /^\/(?:[^/\\\x00-\x1f]+)(?:\/[^/\\\x00-\x1f]+)*$/.test(path) &&
+    path.split("/").every((part, index) => index === 0 || (part !== "." && part !== ".."));
 }
 
 export type ToolArgsSchemaMeta<TDefault extends JsonValue = JsonValue> = {
@@ -1068,7 +1068,9 @@ export class PedelecSession<TToolName extends string = string> {
     };
   }
 
-  uploadAsset(file: File): Promise<SandboxAssetPath> {
+  uploadAsset(file: File): Promise<SandboxAssetPath>;
+  uploadAsset(file: File, targetPath: SandboxAssetPath): Promise<SandboxAssetPath>;
+  uploadAsset(file: File, targetPath?: SandboxAssetPath): Promise<SandboxAssetPath> {
     if (this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     if (this.uploadPromise) {
       return Promise.reject(makeError("SESSION_BUSY", "session is busy", { sessionId: this.sessionId }));
@@ -1077,8 +1079,10 @@ export class PedelecSession<TToolName extends string = string> {
       return Promise.reject(makeError("INVALID_INPUT", "uploadAsset requires a browser File with a filename"));
     }
     if (file.size > MAX_ASSET_UPLOAD_BYTES) return Promise.reject(makeError("ASSET_TOO_LARGE", "asset exceeds the 100 MiB limit"));
+    if (targetPath !== undefined && !isValidAssetPath(targetPath)) return Promise.reject(makeError("ASSET_PATH_INVALID", "asset target path is invalid"));
     this.uploadPromise = this.client.request<{ uploadId: string; uploadUrl: string; token: string }>("create_asset_upload", {
       sessionId: this.sessionId, filename: file.name, sizeBytes: file.size, mimeType: file.type,
+      ...(targetPath === undefined ? {} : { targetPath }),
     }).then(async (ticket) => {
       if (!ticket?.uploadUrl || !ticket.token) throw makeError("SDK_PROTOCOL_ERROR", "asset upload ticket was invalid");
       let response: Response;
@@ -1088,7 +1092,8 @@ export class PedelecSession<TToolName extends string = string> {
       let payload: any = null;
       try { payload = await response.json(); } catch { /* normalized below */ }
       if (!response.ok) throw normalizeError(payload?.error, "ASSET_UPLOAD_FAILED", "asset upload failed");
-      if (!isValidAssetPath(payload?.path)) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response had an invalid path");
+        if (!isValidAssetPath(payload?.path)) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response had an invalid path");
+        if (targetPath !== undefined && payload.path !== targetPath) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response path did not match target path");
       return payload.path as SandboxAssetPath;
     }).finally(() => { this.uploadPromise = null; });
     return this.uploadPromise;

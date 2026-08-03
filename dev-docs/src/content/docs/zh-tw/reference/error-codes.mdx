@@ -136,7 +136,7 @@ Asset failure 可能發生在 SDK request、loopback upload `PUT`、download `GE
 | `ASSET_UPLOAD_SIZE_MISMATCH` | Upload byte count 和選擇的 file 不同 | 使用相同檔案 retry；持續發生時檢查問題 |
 | `ASSET_UPLOAD_FAILED` | 其他 transport/runtime upload failure | 保留 details，診斷後再 retry |
 | `ASSET_LIST_FAILED` | 無法列出 completed assets | Session/Desktop recovery 後 retry read |
-| `ASSET_PATH_INVALID` | Path 不在 `assets/` 或含不安全 segment | 使用有效的 `assets/...` relative path |
+| `ASSET_PATH_INVALID` | Path 不在隱含的 `assets/` 根目錄或含不安全 segment | 使用有效的 `/...` path |
 | `ASSET_NOT_FOUND` / `ASSET_NOT_FILE` | Asset 不存在或不是一般檔案 | 等待寫入完成或選擇正確檔案 |
 | `ASSET_READ_TOO_LARGE` | Read target 超過 100 MiB | 選擇較小 asset |
 | `ASSET_DOWNLOAD_TICKET_EXPIRED` / `ASSET_DOWNLOAD_UNAUTHORIZED` | Loopback download ticket 被拒絕 | 重新開始 read |

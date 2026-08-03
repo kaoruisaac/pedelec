@@ -13,7 +13,7 @@ The App and Agent share the session sandbox's `assets/` directory. The App can u
 
 ### Upload a file
 
-Use `uploadAsset()` with one browser `File`. Files are limited to 100 MiB; the returned `assets/...` value is a sandbox-relative path and is only valid for that session's lifetime. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
+Use `uploadAsset()` with one browser `File`. Files are limited to 100 MiB; returned public paths use `/...`, with the sandbox `assets/` directory as their implicit root. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
 
 ```ts
 const file = input.files?.[0];
@@ -39,17 +39,17 @@ for (const asset of assets) {
 ### Read an asset
 
 ```ts
-const text = await session.readAsset("assets/report.txt", "text");
+const text = await session.readAsset("/report.txt", "text");
 
 const result = await session.readAsset<{ ok: boolean; score: number }>(
-  "assets/results/result.json",
+  "/results/result.json",
   "json",
 );
 
-const modelFile = await session.readAsset("assets/model.glb", "file");
+const modelFile = await session.readAsset("/model.glb", "file");
 ```
 
-`"text"` requires valid UTF-8. `"json"` also parses the text as JSON; its generic type is only a TypeScript annotation, so validate untrusted data before using it. `"file"` preserves binary bytes in a browser `File`. Reads support known nested `assets/...` paths and files up to 100 MiB.
+`"text"` requires valid UTF-8. `"json"` also parses the text as JSON; its generic type is only a TypeScript annotation, so validate untrusted data before using it. `"file"` preserves binary bytes in a browser `File`. Reads support known nested `/...` paths and files up to 100 MiB.
 
 Listing and reading can run alongside provider execution. When the Agent may still be writing the target path, wait for an explicit tool result, message, or other workflow signal before reading to avoid observing an unstable file. All asset methods reject with `SESSION_ENDED` after session shutdown.
 

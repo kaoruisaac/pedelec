@@ -103,9 +103,10 @@ Common errors: `SESSION_BUSY`, `SESSION_ENDED`, `SEND_TEXT_FAILED`, `SESSION_ERR
 
 ```ts
 uploadAsset(file: File): Promise<SandboxAssetPath>
+uploadAsset(file: File, targetPath: SandboxAssetPath): Promise<SandboxAssetPath>
 ```
 
-Uploads one browser `File` until session end. It can run alongside prepare, send, and provider execution, but only one upload may run per session. A file is limited to 100 MiB and returns an `assets/...` sandbox-relative path.
+Uploads one browser `File` until session end. It can run alongside prepare, send, and provider execution, but only one upload may run per session. A file is limited to 100 MiB and returns a `/...` path rooted implicitly in `assets/`. Pass `targetPath` to write exactly to a nested path, creating missing parent directories and replacing an existing regular file.
 
 The content is transferred through Desktop's internal `127.0.0.1` loopback asset transfer server, rather than extension, Native Messaging, or Core IPC message bodies. See [Error Codes](./error-codes/) for request, upload `PUT`, and ticket failures.
 
@@ -127,7 +128,7 @@ readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>
 readAsset(path: SandboxAssetPath, type: "file"): Promise<File>
 ```
 
-Reads a known file from the shared session `assets/` directory. Unlike `listAssets()`, it accepts nested paths such as `assets/results/report.json`. The path must begin with `assets/`, use forward slashes, and contain no empty, `.` or `..` segments.
+Reads a known file from the shared session `assets/` directory. Unlike `listAssets()`, it accepts nested public paths such as `/results/report.json`. The path must begin with `/`, use forward slashes, and contain no empty, `.` or `..` segments.
 
 The read limit is 100 MiB. Reads are allowed while prepare, send, or provider execution is active, but an ending or ended session rejects with `SESSION_ENDED`. If the Agent may still be writing the same path, coordinate completion in your application or agent workflow before reading it.
 
@@ -138,12 +139,12 @@ Return behavior depends on `type`:
 - `"file"` returns a browser `File` using the asset name, MIME type, and modification time reported by Desktop.
 
 ```ts
-const text = await session.readAsset("assets/report.txt", "text");
+const text = await session.readAsset("/report.txt", "text");
 const result = await session.readAsset<{ ok: boolean }>(
-  "assets/results/result.json",
+  "/results/result.json",
   "json",
 );
-const model = await session.readAsset("assets/model.glb", "file");
+const model = await session.readAsset("/model.glb", "file");
 ```
 
 The bytes are transferred through an internal loopback download ticket. Applications must not depend on the URL, token, port, or ticket lifetime. See [Error Codes](./error-codes/) for path, file, size, download, decode, and parse failures.

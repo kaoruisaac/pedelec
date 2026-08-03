@@ -118,7 +118,7 @@ type PedelecAvailability = {
 ### `SandboxAssetPath`
 
 ```ts
-type SandboxAssetPath = `assets/${string}`;
+type SandboxAssetPath = `/${string}`;
 ```
 
 A sandbox-relative path in the session's shared `assets/` directory. Runtime validation also rejects backslashes, empty path segments, `.` and `..`.

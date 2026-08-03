@@ -1236,6 +1236,7 @@ function createBackground(runtimeChrome, options = {}) {
           filename: message.filename,
           sizeBytes: message.sizeBytes,
           mimeType: message.mimeType,
+          ...(message.targetPath === undefined ? {} : { targetPath: message.targetPath }),
         });
         postSdkResponse(port, channelId, requestId, true, result || {});
         return;
