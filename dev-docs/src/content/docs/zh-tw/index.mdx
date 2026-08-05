@@ -426,6 +426,8 @@ await session.end();
 
 結束後，該 session 不能再呼叫 `sendText()`。如果需要新的對話，請重新 `createSession()`。
 
+結束 session 不會立即刪除其 sandbox。Sandbox 是 Desktop 管理的暫存資料：Desktop App 正常退出時會清除，異常結束後的殘留會在下次啟動時清理。關閉主視窗只會隱藏 App，不會觸發 cleanup。ended session 不能透過 asset API 存取保留的 sandbox；強制終止或檔案鎖定時，cleanup 可能延後到後續啟動。
+
 若啟用 `autoEndOnDisconnect`，disconnect cleanup 的目標與呼叫 `session.end()` 相同：thread 會被結束，且不再被視為 active。
 
 ---

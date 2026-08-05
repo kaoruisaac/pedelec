@@ -284,6 +284,8 @@ On success:
 - the session is removed from the client registry;
 - later `sendText()`/`prepare()` rejects.
 
+Calling `end()` terminates the session but does not immediately delete its sandbox. Sandboxes are temporary Desktop-managed storage, not application-owned durable storage: Pedelec removes them when the Desktop App exits normally, and attempts to remove leftovers when it next starts. Closing the main window only hides the app, so it does not trigger cleanup. An ended session still cannot use `uploadAsset()`, `listAssets()`, or `readAsset()`, even while its sandbox remains temporarily present. A forced termination or locked file can defer cleanup until a later launch.
+
 Calling `end()` on an already-ended handle resolves immediately.
 
 If the end request fails, the method emits an SDK error and rejects; it does not claim Core ended successfully.

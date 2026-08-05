@@ -125,6 +125,8 @@ A successful `end()`:
 - unregisters the session from the client; and
 - causes future `sendText()`/`prepare()` calls to reject with `SESSION_ENDED`.
 
+`end()` does not immediately delete the session sandbox. It is temporary Desktop-managed storage, not durable application storage. The Desktop App removes sandboxes on normal app exit and attempts to clean up leftovers at the next launch after an abnormal termination. Closing the main window only hides the app and does not run this cleanup. The ended handle cannot access assets through `uploadAsset()`, `listAssets()`, or `readAsset()`, even before cleanup runs. Locked files can leave cleanup for a later launch.
+
 Calling `end()` again on the same already-ended handle resolves without another request.
 
 If the end request fails, `end()` emits an SDK error and rejects. The session is not locally marked ended by that failed call, because Core state is uncertain.

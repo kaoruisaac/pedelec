@@ -765,6 +765,188 @@ mod tests {
         assert!(events.iter().all(
             |event| !matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "ignore")
         ));
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::RawStdout { text, .. } if text.contains("do-not-use"))
+        ));
+    }
+
+    #[test]
+    fn claude_stdout_filter_drops_large_chunked_user_tool_result_and_recovers() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_tool_result",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime.event_bus.subscribe("thread_claude_tool_result");
+        let payload = "BASE64_PAYLOAD_MARKER".repeat(8 * 1024);
+        let assistant =
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"after image"}]}}"#
+                .to_string()
+                + "\n";
+
+        runtime.emit_provider_stdout("thread_claude_tool_result", r#"{"ty"#.into());
+        runtime.emit_provider_stdout(
+            "thread_claude_tool_result",
+            r#"pe":"user","message":{"role":"user","content":[{"ty"#.into(),
+        );
+        runtime.emit_provider_stdout("thread_claude_tool_result", r#"pe":"tool_res"#.into());
+        runtime.emit_provider_stdout(
+            "thread_claude_tool_result",
+            r#"ult","content":[{"type":"image","source":{"type":"base64","data":""#.into(),
+        );
+        let midpoint = payload.len() / 2;
+        runtime.emit_provider_stdout("thread_claude_tool_result", payload[..midpoint].to_string());
+        runtime.emit_provider_stdout(
+            "thread_claude_tool_result",
+            payload[midpoint..].to_string() + r#""}}]}]}]}}"# + "\r\n" + &assistant,
+        );
+
+        assert_eq!(
+            runtime.thread_status("thread_claude_tool_result"),
+            Some(ThreadStatus::Idle)
+        );
+        assert_eq!(
+            runtime
+                .provider_state("thread_claude_tool_result")
+                .unwrap()
+                .provider_session_id,
+            None
+        );
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadEvent::RawStdout { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(raw_stdout, assistant);
+        assert!(!raw_stdout.contains("BASE64_PAYLOAD_MARKER"));
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "after image")
+        ));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
+    }
+
+    #[test]
+    fn claude_stdout_filter_handles_multiple_crlf_events_in_one_chunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_multi_filter",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime.event_bus.subscribe("thread_claude_multi_filter");
+        let init = r#"{"type":"system","subtype":"init","session_id":"4fab02ca-67b9-489d-8b89-0b1f0b9550e6"}"#;
+        let dropped =
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"DROP_ME"}]}}"#;
+        let assistant = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"kept"}]}}"#;
+
+        runtime.emit_provider_stdout(
+            "thread_claude_multi_filter",
+            format!("{init}\r\n{dropped}\r\n{assistant}\r\n"),
+        );
+
+        assert_eq!(
+            runtime
+                .provider_state("thread_claude_multi_filter")
+                .unwrap()
+                .provider_session_id
+                .as_deref(),
+            Some("4fab02ca-67b9-489d-8b89-0b1f0b9550e6")
+        );
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadEvent::RawStdout { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(raw_stdout, format!("{init}\r\n{assistant}\r\n"));
+        assert!(!raw_stdout.contains("DROP_ME"));
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "kept")
+        ));
+    }
+
+    #[test]
+    fn claude_stdout_filter_keeps_user_and_non_user_false_positives() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_filter_false_positive",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_claude_filter_false_positive");
+        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"ordinary"}]}}"#;
+        let assistant_text = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"literal \"type\":\"tool_result\""}]}}"#;
+        let assistant_structured = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_result","text":"structured but kept"}]}}"#;
+        let input = format!("{user}\n{assistant_text}\n{assistant_structured}\n");
+
+        runtime.emit_provider_stdout("thread_claude_filter_false_positive", input.clone());
+
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadEvent::RawStdout { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(raw_stdout, input);
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "literal \"type\":\"tool_result\"")
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "structured but kept")
+        ));
+    }
+
+    #[test]
+    fn claude_stdout_filter_does_not_affect_stderr_or_other_providers() {
+        let temp = tempfile::tempdir().unwrap();
+        let matching = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"keep outside claude stdout"}]}}"#
+            .to_string()
+            + "\n";
+        let mut claude = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_stderr_filter",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let claude_rx = claude.event_bus.subscribe("thread_claude_stderr_filter");
+        claude.emit_provider_stderr("thread_claude_stderr_filter", matching.clone());
+        let claude_events = collect_available_core_events(&claude_rx);
+        assert!(claude_events.iter().any(
+            |event| matches!(event, ThreadEvent::RawStderr { text, .. } if text == &matching)
+        ));
+
+        let mut codex = runtime_with_provider_thread(
+            temp.path(),
+            "thread_codex_filter_passthrough",
+            ProviderCode::Codex,
+            None,
+            None,
+        );
+        let codex_rx = codex.event_bus.subscribe("thread_codex_filter_passthrough");
+        codex.emit_provider_stdout("thread_codex_filter_passthrough", matching.clone());
+        let codex_events = collect_available_core_events(&codex_rx);
+        assert!(codex_events.iter().any(
+            |event| matches!(event, ThreadEvent::RawStdout { text, .. } if text == &matching)
+        ));
     }
 
     #[test]
@@ -786,6 +968,9 @@ mod tests {
             Some(ThreadStatus::Error)
         );
         let events = collect_available_core_events(&event_rx);
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::RawStdout { text, .. } if text == "{not-json}\n")
+        ));
         assert!(events
             .iter()
             .any(|event| matches!(event, ThreadEvent::Error {
@@ -2919,6 +3104,56 @@ mod tests {
     }
 
     #[test]
+    fn end_thread_preserves_sandbox_until_app_exit_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_root = temp.path().join("sandbox");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            ..CoreRuntime::default()
+        };
+        let thread = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                model: None,
+                skills: None,
+            })
+            .unwrap();
+        let sandbox_path = runtime.thread_sandbox_path(&thread.thread_id).unwrap();
+        let sentinel_path = sandbox_path.join("assets").join("sentinel.txt");
+        fs::write(&sentinel_path, "preserve me").unwrap();
+        let event_rx = runtime.event_bus.subscribe(&thread.thread_id);
+        runtime
+            .tool_request_broker
+            .create_pending(thread.thread_id.clone(), "echo".into(), json!({}), 1000)
+            .unwrap();
+
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread.thread_id.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            runtime.thread_status(&thread.thread_id),
+            Some(ThreadStatus::Ended)
+        );
+        assert_eq!(runtime.active_process_id(&thread.thread_id), None);
+        assert_eq!(runtime.running_process_count(), 0);
+        assert!(!runtime
+            .tool_request_broker
+            .has_pending_for_thread(&thread.thread_id));
+        assert!(runtime.tool_registry.get(&thread.thread_id).is_none());
+        assert!(event_rx
+            .try_iter()
+            .any(|event| matches!(event, ThreadEvent::Ended { .. })));
+        assert!(sandbox_path.exists());
+        assert_eq!(fs::read_to_string(&sentinel_path).unwrap(), "preserve me");
+
+        assert!(runtime.cleanup_for_app_exit().is_empty());
+        assert!(!sandbox_path.exists());
+    }
+
+    #[test]
     fn cleanup_for_app_exit_removes_orphan_sandbox_directories() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox_root = temp.path().join("sandbox");
@@ -2934,6 +3169,44 @@ mod tests {
         assert!(errors.is_empty());
         assert!(!sandbox_root.join("t000999").exists());
         assert!(sandbox_root.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn startup_cleanup_removes_stale_sandbox_directories_without_touching_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_root = temp.path().join("sandbox");
+        fs::create_dir_all(sandbox_root.join("t000999").join("assets")).unwrap();
+        fs::write(
+            sandbox_root
+                .join("t000999")
+                .join("assets")
+                .join("stale.txt"),
+            "stale",
+        )
+        .unwrap();
+        fs::write(sandbox_root.join("keep.txt"), "not a sandbox").unwrap();
+        let runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            ..CoreRuntime::default()
+        };
+
+        assert!(runtime.cleanup_stale_sandboxes_for_app_start().is_empty());
+        assert!(!sandbox_root.join("t000999").exists());
+        assert!(sandbox_root.join("keep.txt").exists());
+        assert!(runtime.thread_manager.thread_ids().is_empty());
+    }
+
+    #[test]
+    fn startup_cleanup_succeeds_when_sandbox_root_does_not_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_root = temp.path().join("missing-sandbox");
+        let runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            ..CoreRuntime::default()
+        };
+
+        assert!(runtime.cleanup_stale_sandboxes_for_app_start().is_empty());
+        assert!(!sandbox_root.exists());
     }
 
     #[test]

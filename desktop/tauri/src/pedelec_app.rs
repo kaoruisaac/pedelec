@@ -71,6 +71,15 @@ pub fn run() {
                     .set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
+            let _startup_cleanup_errors = runtime_for_setup
+                .lock()
+                .unwrap()
+                .cleanup_stale_sandboxes_for_app_start();
+            #[cfg(debug_assertions)]
+            for err in _startup_cleanup_errors {
+                eprintln!("sandbox cleanup failed during app startup: {}", err.message);
+            }
+
             write_app_launch_config_for_current_exe().map_err(|err| {
                 tauri::Error::from(std::io::Error::other(format!(
                     "cannot write desktop launch config: {}",

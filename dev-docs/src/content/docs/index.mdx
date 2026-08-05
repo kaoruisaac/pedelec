@@ -421,6 +421,8 @@ await session.end();
 
 After a session ends, `sendText()` can no longer be called on it. Create a new session with `createSession()` if you need a new conversation.
 
+Ending a session does not immediately delete its sandbox. Sandboxes are temporary Desktop-managed storage: they are removed on normal Desktop App exit, and leftover directories are cleaned up on the next app launch. Closing the main window only hides the app and does not trigger cleanup. Ended sessions cannot access retained sandbox assets through the asset APIs; forced termination or locked files can defer cleanup until a later launch.
+
 If `autoEndOnDisconnect` is enabled, disconnect cleanup has the same goal as calling `session.end()`: the thread is ended and no longer treated as active.
 
 ---

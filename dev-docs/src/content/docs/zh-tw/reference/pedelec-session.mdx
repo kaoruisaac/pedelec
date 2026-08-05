@@ -282,6 +282,8 @@ end(): Promise<void>
 - session 從 client registry 移除；
 - 後續 `sendText()`／`prepare()` reject。
 
+呼叫 `end()` 會結束 session，但不會立即刪除其 sandbox。Sandbox 是由 Desktop 管理的暫存資料，不是 application-owned durable storage：Desktop App 正常退出時會清除，異常終止遺留的內容會在下次啟動時嘗試清除。關閉主視窗只會隱藏 App，不會觸發 cleanup。即使 sandbox 暫時仍存在，ended session 仍不能使用 `uploadAsset()`、`listAssets()` 或 `readAsset()`；若強制終止或檔案持續鎖定，cleanup 可能延後到後續啟動。
+
 Already-ended handle 呼叫 `end()` 立即 resolve。
 
 End request 失敗時 emit SDK error 並 reject，不會假裝 Core 已成功 ended。

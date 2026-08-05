@@ -125,6 +125,8 @@ await session.end();
 - 從 client unregister session；
 - 未來 `sendText()`／`prepare()` 收到 `SESSION_ENDED`。
 
+`end()` 不會立即刪除 session sandbox。它是 Desktop 管理的暫存資料，不是 application 的 durable storage。Desktop App 正常退出時會移除 sandbox；異常終止留下的內容會在下次啟動時嘗試清除。關閉主視窗只會隱藏 App，不會執行此 cleanup。即使 cleanup 尚未執行，ended handle 也不能透過 `uploadAsset()`、`listAssets()` 或 `readAsset()` 存取 asset；檔案被鎖定時，cleanup 可能要到後續啟動才能完成。
+
 同一個已 ended handle 再呼叫 `end()` 會直接 resolve，不送第二次 request。
 
 End request 失敗時，`end()` emit SDK error 並 reject。因 Core state 不確定，failed call 不會先 local mark ended。

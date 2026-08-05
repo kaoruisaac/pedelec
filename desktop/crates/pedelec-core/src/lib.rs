@@ -30,6 +30,8 @@ const THREAD_ID_MAX_COUNTER: u64 = 78_364_164_095;
 pub const MAX_ASSET_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const ASSET_UPLOAD_TICKET_SECONDS: i64 = 5 * 60;
 const MAX_PROVIDER_STDERR_BYTES: usize = 64 * 1024;
+const SANDBOX_REMOVE_MAX_ATTEMPTS: usize = 10;
+const SANDBOX_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -670,6 +672,9 @@ trait ProviderAdapter {
         provider_session_id: &str,
         message: &str,
     ) -> Result<CommandSpec, PedelecError>;
+    fn preprocess_stdout_chunk(&mut self, chunk: &str) -> Vec<String> {
+        vec![chunk.to_string()]
+    }
     fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial>;
     fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial>;
 }
@@ -769,6 +774,13 @@ impl ProviderAdapter for ProviderAdapterInstance {
             Self::Cursor(adapter) => adapter.parse_stdout_event(chunk),
             Self::Claude(adapter) => adapter.parse_stdout_event(chunk),
             Self::Ollama(adapter) => adapter.parse_stdout_event(chunk),
+        }
+    }
+
+    fn preprocess_stdout_chunk(&mut self, chunk: &str) -> Vec<String> {
+        match self {
+            Self::Claude(adapter) => adapter.preprocess_stdout_chunk(chunk),
+            _ => vec![chunk.to_string()],
         }
     }
 
@@ -1173,8 +1185,458 @@ impl ProviderAdapter for CursorProviderAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeStdoutFilterMode {
+    Inspecting,
+    Passing,
+    Dropping,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeJsonObjectState {
+    KeyOrEnd,
+    Colon,
+    Value,
+    CommaOrEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeJsonArrayState {
+    ValueOrEnd,
+    CommaOrEnd,
+}
+
+#[derive(Debug, Clone)]
+enum ClaudeJsonContainer {
+    Object {
+        state: ClaudeJsonObjectState,
+        key_is_type: bool,
+    },
+    Array {
+        state: ClaudeJsonArrayState,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClaudeJsonStringRole {
+    Key,
+    Value {
+        is_type_value: bool,
+        is_root_type_value: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ClaudeJsonStringScanner {
+    raw: String,
+    role: ClaudeJsonStringRole,
+    escaped: bool,
+    too_long: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeStdoutFilterDecision {
+    Continue,
+    Pass,
+    Drop,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ClaudeJsonEventScanner {
+    containers: Vec<ClaudeJsonContainer>,
+    string: Option<ClaudeJsonStringScanner>,
+    primitive: Option<String>,
+    root_started: bool,
+    root_complete: bool,
+    root_type_is_user: Option<bool>,
+    saw_tool_result: bool,
+}
+
+impl ClaudeJsonEventScanner {
+    fn scan_char(&mut self, ch: char) -> ClaudeStdoutFilterDecision {
+        let mut current = Some(ch);
+        while let Some(ch) = current.take() {
+            if let Some(string) = self.string.as_mut() {
+                if string.escaped {
+                    if !string.too_long {
+                        string.raw.push(ch);
+                        string.too_long = string.raw.len() > 128;
+                    }
+                    string.escaped = false;
+                    continue;
+                }
+                match ch {
+                    '\\' => {
+                        if !string.too_long {
+                            string.raw.push(ch);
+                        }
+                        string.escaped = true;
+                    }
+                    '"' => return self.finish_string(),
+                    ch if ch.is_control() => return ClaudeStdoutFilterDecision::Pass,
+                    _ => {
+                        if !string.too_long {
+                            string.raw.push(ch);
+                            string.too_long = string.raw.len() > 128;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if self.primitive.is_some() {
+                if ch.is_whitespace() || matches!(ch, ',' | ']' | '}') {
+                    if !self.finish_primitive() {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                    current = Some(ch);
+                    continue;
+                }
+                let primitive = self.primitive.as_mut().expect("primitive exists");
+                if primitive.len() >= 64 || matches!(ch, ':' | '{' | '[' | '"') {
+                    return ClaudeStdoutFilterDecision::Pass;
+                }
+                primitive.push(ch);
+                continue;
+            }
+
+            if ch.is_whitespace() {
+                continue;
+            }
+            if self.root_complete {
+                return ClaudeStdoutFilterDecision::Pass;
+            }
+
+            match ch {
+                '{' => {
+                    if !self.start_container(true) {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                }
+                '[' => {
+                    if !self.root_started {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                    if !self.start_container(false) {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                }
+                '}' => {
+                    if !matches!(
+                        self.containers.last(),
+                        Some(ClaudeJsonContainer::Object {
+                            state: ClaudeJsonObjectState::KeyOrEnd
+                                | ClaudeJsonObjectState::CommaOrEnd,
+                            ..
+                        })
+                    ) {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                    self.containers.pop();
+                    if !self.complete_container_value() {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                    if self.root_complete {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                }
+                ']' => {
+                    if !matches!(
+                        self.containers.last(),
+                        Some(ClaudeJsonContainer::Array {
+                            state: ClaudeJsonArrayState::ValueOrEnd
+                                | ClaudeJsonArrayState::CommaOrEnd,
+                        })
+                    ) {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                    self.containers.pop();
+                    if !self.complete_container_value() {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                    if self.root_complete {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                }
+                ':' => match self.containers.last_mut() {
+                    Some(ClaudeJsonContainer::Object { state, .. })
+                        if *state == ClaudeJsonObjectState::Colon =>
+                    {
+                        *state = ClaudeJsonObjectState::Value;
+                    }
+                    _ => return ClaudeStdoutFilterDecision::Pass,
+                },
+                ',' => match self.containers.last_mut() {
+                    Some(ClaudeJsonContainer::Object { state, .. })
+                        if *state == ClaudeJsonObjectState::CommaOrEnd =>
+                    {
+                        *state = ClaudeJsonObjectState::KeyOrEnd;
+                    }
+                    Some(ClaudeJsonContainer::Array { state })
+                        if *state == ClaudeJsonArrayState::CommaOrEnd =>
+                    {
+                        *state = ClaudeJsonArrayState::ValueOrEnd;
+                    }
+                    _ => return ClaudeStdoutFilterDecision::Pass,
+                },
+                '"' => {
+                    let role = match self.containers.last() {
+                        Some(ClaudeJsonContainer::Object {
+                            state: ClaudeJsonObjectState::KeyOrEnd,
+                            ..
+                        }) => ClaudeJsonStringRole::Key,
+                        _ => {
+                            let Some((is_type_value, is_root_type_value)) =
+                                self.string_value_context()
+                            else {
+                                return ClaudeStdoutFilterDecision::Pass;
+                            };
+                            ClaudeJsonStringRole::Value {
+                                is_type_value,
+                                is_root_type_value,
+                            }
+                        }
+                    };
+                    self.string = Some(ClaudeJsonStringScanner {
+                        raw: String::new(),
+                        role,
+                        escaped: false,
+                        too_long: false,
+                    });
+                }
+                '-' | '0'..='9' | 't' | 'f' | 'n' => {
+                    let Some((is_type_value, is_root_type_value)) = self.string_value_context()
+                    else {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    };
+                    if is_type_value && is_root_type_value {
+                        self.root_type_is_user = Some(false);
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                    self.primitive = Some(ch.to_string());
+                }
+                _ => return ClaudeStdoutFilterDecision::Pass,
+            }
+        }
+
+        self.decision()
+    }
+
+    fn start_container(&mut self, object: bool) -> bool {
+        if !self.root_started {
+            if !object || !self.containers.is_empty() {
+                return false;
+            }
+            self.root_started = true;
+        } else if self.string_value_context().is_none() {
+            return false;
+        }
+
+        self.containers.push(if object {
+            ClaudeJsonContainer::Object {
+                state: ClaudeJsonObjectState::KeyOrEnd,
+                key_is_type: false,
+            }
+        } else {
+            ClaudeJsonContainer::Array {
+                state: ClaudeJsonArrayState::ValueOrEnd,
+            }
+        });
+        true
+    }
+
+    fn string_value_context(&self) -> Option<(bool, bool)> {
+        match self.containers.last()? {
+            ClaudeJsonContainer::Object {
+                state: ClaudeJsonObjectState::Value,
+                key_is_type,
+            } => Some((*key_is_type, *key_is_type && self.containers.len() == 1)),
+            ClaudeJsonContainer::Array {
+                state: ClaudeJsonArrayState::ValueOrEnd,
+            } => Some((false, false)),
+            _ => None,
+        }
+    }
+
+    fn finish_string(&mut self) -> ClaudeStdoutFilterDecision {
+        let string = self.string.take().expect("string scanner exists");
+        if string.escaped || string.too_long {
+            return match string.role {
+                _ if string.escaped => ClaudeStdoutFilterDecision::Pass,
+                ClaudeJsonStringRole::Key => match self.containers.last_mut() {
+                    Some(ClaudeJsonContainer::Object { state, key_is_type })
+                        if *state == ClaudeJsonObjectState::KeyOrEnd =>
+                    {
+                        *state = ClaudeJsonObjectState::Colon;
+                        *key_is_type = false;
+                        self.decision()
+                    }
+                    _ => ClaudeStdoutFilterDecision::Pass,
+                },
+                ClaudeJsonStringRole::Value {
+                    is_root_type_value, ..
+                } => {
+                    if !self.complete_scalar_value() {
+                        return ClaudeStdoutFilterDecision::Pass;
+                    }
+                    if is_root_type_value {
+                        self.root_type_is_user = Some(false);
+                    }
+                    self.decision()
+                }
+            };
+        }
+        let encoded = format!("\"{}\"", string.raw);
+        let Ok(value) = serde_json::from_str::<String>(&encoded) else {
+            return ClaudeStdoutFilterDecision::Pass;
+        };
+
+        match string.role {
+            ClaudeJsonStringRole::Key => match self.containers.last_mut() {
+                Some(ClaudeJsonContainer::Object { state, key_is_type })
+                    if *state == ClaudeJsonObjectState::KeyOrEnd =>
+                {
+                    *state = ClaudeJsonObjectState::Colon;
+                    *key_is_type = value == "type";
+                }
+                _ => return ClaudeStdoutFilterDecision::Pass,
+            },
+            ClaudeJsonStringRole::Value {
+                is_type_value,
+                is_root_type_value,
+            } => {
+                if !self.complete_scalar_value() {
+                    return ClaudeStdoutFilterDecision::Pass;
+                }
+                if is_type_value {
+                    self.saw_tool_result |= value == "tool_result";
+                    if is_root_type_value {
+                        self.root_type_is_user = Some(value == "user");
+                    }
+                }
+            }
+        }
+        self.decision()
+    }
+
+    fn finish_primitive(&mut self) -> bool {
+        let primitive = self.primitive.take().expect("primitive exists");
+        if serde_json::from_str::<Value>(&primitive).is_err() {
+            return false;
+        }
+        self.complete_scalar_value()
+    }
+
+    fn complete_scalar_value(&mut self) -> bool {
+        match self.containers.last_mut() {
+            Some(ClaudeJsonContainer::Object { state, key_is_type })
+                if *state == ClaudeJsonObjectState::Value =>
+            {
+                *state = ClaudeJsonObjectState::CommaOrEnd;
+                *key_is_type = false;
+                true
+            }
+            Some(ClaudeJsonContainer::Array { state })
+                if *state == ClaudeJsonArrayState::ValueOrEnd =>
+            {
+                *state = ClaudeJsonArrayState::CommaOrEnd;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn complete_container_value(&mut self) -> bool {
+        if self.containers.is_empty() {
+            self.root_complete = true;
+            return true;
+        }
+        self.complete_scalar_value()
+    }
+
+    fn decision(&self) -> ClaudeStdoutFilterDecision {
+        if self.root_type_is_user == Some(true) && self.saw_tool_result {
+            ClaudeStdoutFilterDecision::Drop
+        } else if self.root_type_is_user == Some(false) || self.root_complete {
+            ClaudeStdoutFilterDecision::Pass
+        } else {
+            ClaudeStdoutFilterDecision::Continue
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ClaudeStdoutFilter {
+    mode: ClaudeStdoutFilterMode,
+    pending: String,
+    scanner: ClaudeJsonEventScanner,
+}
+
+impl Default for ClaudeStdoutFilter {
+    fn default() -> Self {
+        Self {
+            mode: ClaudeStdoutFilterMode::Inspecting,
+            pending: String::new(),
+            scanner: ClaudeJsonEventScanner::default(),
+        }
+    }
+}
+
+impl ClaudeStdoutFilter {
+    fn preprocess_chunk(&mut self, chunk: &str) -> Vec<String> {
+        let mut retained = String::new();
+        for ch in chunk.chars() {
+            if ch == '\n' {
+                match self.mode {
+                    ClaudeStdoutFilterMode::Inspecting => {
+                        self.pending.push(ch);
+                        retained.push_str(&self.pending);
+                    }
+                    ClaudeStdoutFilterMode::Passing => retained.push(ch),
+                    ClaudeStdoutFilterMode::Dropping => {}
+                }
+                self.reset_event();
+                continue;
+            }
+
+            match self.mode {
+                ClaudeStdoutFilterMode::Passing => retained.push(ch),
+                ClaudeStdoutFilterMode::Dropping => {}
+                ClaudeStdoutFilterMode::Inspecting => {
+                    self.pending.push(ch);
+                    match self.scanner.scan_char(ch) {
+                        ClaudeStdoutFilterDecision::Continue => {}
+                        ClaudeStdoutFilterDecision::Pass => {
+                            retained.push_str(&self.pending);
+                            self.pending.clear();
+                            self.mode = ClaudeStdoutFilterMode::Passing;
+                        }
+                        ClaudeStdoutFilterDecision::Drop => {
+                            self.pending.clear();
+                            self.mode = ClaudeStdoutFilterMode::Dropping;
+                        }
+                    }
+                }
+            }
+        }
+
+        if retained.is_empty() {
+            Vec::new()
+        } else {
+            vec![retained]
+        }
+    }
+
+    fn reset_event(&mut self) {
+        self.mode = ClaudeStdoutFilterMode::Inspecting;
+        self.pending.clear();
+        self.scanner = ClaudeJsonEventScanner::default();
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct ClaudeProviderAdapter {
+    stdout_filter: ClaudeStdoutFilter,
     stdout_buffer: String,
     stderr_buffer: String,
 }
@@ -1254,6 +1716,10 @@ impl ProviderAdapter for ClaudeProviderAdapter {
 
     fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
         parse_claude_provider_chunk(&mut self.stdout_buffer, chunk)
+    }
+
+    fn preprocess_stdout_chunk(&mut self, chunk: &str) -> Vec<String> {
+        self.stdout_filter.preprocess_chunk(chunk)
     }
 
     fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
@@ -2192,13 +2658,20 @@ impl CoreRuntime {
     }
 
     pub fn emit_provider_stdout(&mut self, thread_id: &str, text: String) {
-        self.event_bus.emit_raw_stdout(thread_id, text.clone());
-        let events = self
+        let retained = self
             .thread_manager
             .provider_adapter_mut(thread_id)
-            .map(|adapter| adapter.parse_stdout_event(&text))
-            .unwrap_or_default();
-        self.emit_provider_partials(thread_id, events);
+            .map(|adapter| adapter.preprocess_stdout_chunk(&text))
+            .unwrap_or_else(|| vec![text]);
+        for fragment in retained {
+            self.event_bus.emit_raw_stdout(thread_id, fragment.clone());
+            let events = self
+                .thread_manager
+                .provider_adapter_mut(thread_id)
+                .map(|adapter| adapter.parse_stdout_event(&fragment))
+                .unwrap_or_default();
+            self.emit_provider_partials(thread_id, events);
+        }
     }
 
     pub fn emit_provider_stderr(&mut self, thread_id: &str, text: String) {
@@ -2443,7 +2916,7 @@ impl CoreRuntime {
     pub fn end_thread(&mut self, input: EndThreadInput) -> Result<(), PedelecError> {
         self.invalidate_asset_uploads_for_thread(&input.thread_id);
         self.invalidate_asset_downloads_for_thread(&input.thread_id);
-        let sandbox_path = {
+        {
             let thread = self.thread_manager.thread_mut(&input.thread_id)?;
             if thread.status != ThreadStatus::Ended {
                 thread.status = ThreadStatus::Stopping;
@@ -2451,8 +2924,7 @@ impl CoreRuntime {
                 self.event_bus
                     .emit_status_changed(&input.thread_id, ThreadStatus::Stopping);
             }
-            thread.sandbox_path.clone()
-        };
+        }
 
         self.stop_running_process(&input.thread_id);
         self.tool_request_broker.clear_thread(&input.thread_id);
@@ -2466,9 +2938,12 @@ impl CoreRuntime {
         self.event_bus
             .emit_status_changed(&input.thread_id, ThreadStatus::Ended);
         self.event_bus.emit_ended(&input.thread_id);
-        let _ = self.remove_thread_sandbox_with_retry(&sandbox_path);
         self.event_bus.unregister_thread_log(&input.thread_id);
         Ok(())
+    }
+
+    pub fn cleanup_stale_sandboxes_for_app_start(&self) -> Vec<PedelecError> {
+        self.sandbox_manager.remove_all_thread_sandboxes()
     }
 
     pub fn cleanup_for_app_exit(&mut self) -> Vec<PedelecError> {
@@ -2479,29 +2954,6 @@ impl CoreRuntime {
 
         self.sandbox_manager.remove_all_thread_sandboxes()
     }
-
-    fn remove_thread_sandbox_with_retry(&self, sandbox_path: &Path) -> Result<(), PedelecError> {
-        let mut last_error = None;
-        for attempt in 0..10 {
-            match self.sandbox_manager.remove_thread_sandbox(sandbox_path) {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    last_error = Some(err);
-                    if attempt < 9 {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                }
-            }
-        }
-        Err(last_error.unwrap_or_else(|| {
-            PedelecError::with_details(
-                error_codes::SANDBOX_REMOVE_FAILED,
-                "cannot remove thread sandbox",
-                serde_json::json!({ "path": sandbox_path.to_string_lossy() }),
-            )
-        }))
-    }
-
     pub fn active_process_id(&self, thread_id: &str) -> Option<u32> {
         self.thread_manager
             .thread(thread_id)
@@ -2947,6 +3399,33 @@ impl SandboxManager {
         })
     }
 
+    pub fn remove_thread_sandbox_with_retry(
+        &self,
+        sandbox_path: impl AsRef<Path>,
+    ) -> Result<(), PedelecError> {
+        let sandbox_path = sandbox_path.as_ref();
+        let mut last_error = None;
+        for attempt in 0..SANDBOX_REMOVE_MAX_ATTEMPTS {
+            match self.remove_thread_sandbox(sandbox_path) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    last_error = Some(err);
+                    if attempt + 1 < SANDBOX_REMOVE_MAX_ATTEMPTS {
+                        std::thread::sleep(SANDBOX_REMOVE_RETRY_DELAY);
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            PedelecError::with_details(
+                error_codes::SANDBOX_REMOVE_FAILED,
+                "cannot remove thread sandbox",
+                serde_json::json!({ "path": sandbox_path.to_string_lossy() }),
+            )
+        }))
+    }
+
     pub fn remove_all_thread_sandboxes(&self) -> Vec<PedelecError> {
         let sandbox_root = match self.sandbox_root() {
             Ok(root) => root,
@@ -3000,7 +3479,7 @@ impl SandboxManager {
                 continue;
             }
 
-            if let Err(err) = self.remove_thread_sandbox(&path) {
+            if let Err(err) = self.remove_thread_sandbox_with_retry(&path) {
                 errors.push(err);
             }
         }

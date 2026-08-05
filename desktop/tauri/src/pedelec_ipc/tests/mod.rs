@@ -603,6 +603,8 @@ mod tests {
             .thread_sandbox_path(&output.thread_id)
             .unwrap();
         assert!(sandbox_path.exists());
+        let sentinel_path = sandbox_path.join("assets").join("end-sentinel.txt");
+        std::fs::write(&sentinel_path, "preserve me").unwrap();
         let end = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
                 request_id: "phase09_end".into(),
@@ -629,6 +631,9 @@ mod tests {
                 }
             )
         }));
+        assert!(sandbox_path.exists());
+        assert_eq!(std::fs::read_to_string(&sentinel_path).unwrap(), "preserve me");
+        assert!(runtime.lock().unwrap().cleanup_for_app_exit().is_empty());
         assert!(!sandbox_path.exists());
     }
 
@@ -1084,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn end_thread_stops_running_process_emits_ended_and_removes_sandbox() {
+    fn end_thread_stops_running_process_emits_ended_and_preserves_sandbox() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
         insert_thread_with_registry(
@@ -1112,6 +1117,8 @@ mod tests {
             .thread_sandbox_path("thread_end")
             .unwrap();
         assert!(sandbox_path.exists());
+        let sentinel_path = sandbox_path.join("logs").join("end-sentinel.txt");
+        std::fs::write(&sentinel_path, "preserve me").unwrap();
 
         runtime
             .lock()
@@ -1138,6 +1145,9 @@ mod tests {
             None
         );
         assert_eq!(runtime.lock().unwrap().running_process_count(), 0);
+        assert!(sandbox_path.exists());
+        assert_eq!(std::fs::read_to_string(&sentinel_path).unwrap(), "preserve me");
+        assert!(runtime.lock().unwrap().cleanup_for_app_exit().is_empty());
         assert!(!sandbox_path.exists());
     }
 
