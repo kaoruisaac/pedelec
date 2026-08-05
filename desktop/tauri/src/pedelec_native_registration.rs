@@ -1,5 +1,5 @@
-use pedelec_core::{error_codes, PedelecError};
 use crate::pedelec_binary_install::{pedelec_home_dir, pedelec_native_host_install_path};
+use pedelec_core::{error_codes, PedelecError};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};

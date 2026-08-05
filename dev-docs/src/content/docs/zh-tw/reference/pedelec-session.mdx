@@ -114,9 +114,9 @@ Session 尚未結束時可 upload 一個 browser `File`。upload 可與 prepare�
 listAssets(): Promise<SandboxAsset[]>
 ```
 
-回傳 App 與 Agent 共用 `assets/` 目錄第一層中已完成的一般檔案，並依 filesystem modification time 由新到舊排序。此 listing 不遞迴，因此不會列出 nested assets。
+以 flat array 回傳 App 與 Agent 共用 `assets/` 目錄所有層級中已完成的一般檔案。依 filesystem modification time 由新到舊排序；時間相同時依 `name` 排序。資料夾項目不會回傳，file 與 directory symlink 也不會回傳或被跟隨。所有層級 basename 以 `.pedelec-` 開頭的 entry 都會排除；其他 dotfile 與 dot-directory 中的檔案會列出。
 
-`name` 是實際 sandbox filename，`path` 是 sandbox-relative path，`modifiedAt` 是 filesystem modification time，不保證等同精確的 write completion timestamp。Agent 執行期間仍可 listing；session 正在結束或已結束時會 reject `SESSION_ENDED`。目前不支援 pagination、delete、rename、move 或 recursive listing。
+`name` 是 basename，`path` 是相對於 `assets/` 的完整 public path，例如 `/results/report.json`。`modifiedAt` 是 filesystem modification time，不保證等同精確的 write completion timestamp。Agent 執行期間仍可 listing；session 正在結束或已結束時會 reject `SESSION_ENDED`。目前不支援 pagination、delete、rename 或 move。
 
 ## `readAsset()`
 
@@ -126,7 +126,7 @@ readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>
 readAsset(path: SandboxAssetPath, type: "file"): Promise<File>
 ```
 
-讀取 shared session `assets/` 中的已知檔案。和 `listAssets()` 不同，這個 method 可接受 `/results/report.json` 之類的 nested public path。Path 必須以 `/` 開頭、使用 `/`，且不能包含空 segment、`.` 或 `..`。
+讀取 shared session `assets/` 中的已知檔案，也可使用 `/results/report.json` 之類的 nested public path。Path 必須以 `/` 開頭、使用 `/`，且不能包含空 segment、`.` 或 `..`。
 
 單檔 read 上限為 100 MiB。prepare、send 或 provider execution 進行時仍可讀取；session 正在結束或已結束時會 reject `SESSION_ENDED`。若 Agent 可能仍在寫入相同 path，application 或 agent workflow 應先協調完成時機再讀取。
 

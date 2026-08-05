@@ -135,7 +135,7 @@ const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
 ```
 
-`assets/` is shared by uploads and files written by the agent. `listAssets()` lists only its first level, ordered by filesystem modification time (newest first), and may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
+`assets/` is shared by uploads and files written by the agent. `listAssets()` recursively lists regular files at every level as a flat array, ordered by filesystem modification time (newest first) and then by name; nested paths such as `/results/report.json` are returned in full. Directory entries and symlinks are excluded, as are `.pedelec-*` entries at every level; other dotfiles are included. It may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
 
 ```ts
 const text = await session.readAsset("/report.txt", "text");

@@ -1522,13 +1522,27 @@ describe("Pedelec SDK", () => {
     const list = session.listAssets();
     const request = pageWindow.lastSent();
     expect(request).toMatchObject({ type: "list_assets", sessionId: "thread_1" });
-    respondOk(pageWindow, request, { assets: [{ name: "upl_file.txt", path: "/upl_file.txt", sizeBytes: 4, modifiedAt: 1 }] });
-    await expect(list).resolves.toEqual([{ name: "upl_file.txt", path: "/upl_file.txt", sizeBytes: 4, modifiedAt: 1 }]);
+    respondOk(pageWindow, request, { assets: [
+      { name: "upl_file.txt", path: "/upl_file.txt", sizeBytes: 4, modifiedAt: 1 },
+      { name: "report.json", path: "/results/report.json", sizeBytes: 10, modifiedAt: 2 },
+    ] });
+    await expect(list).resolves.toEqual([
+      { name: "upl_file.txt", path: "/upl_file.txt", sizeBytes: 4, modifiedAt: 1 },
+      { name: "report.json", path: "/results/report.json", sizeBytes: 10, modifiedAt: 2 },
+    ]);
     expect(session.getStatus()).toBe("idle");
 
-    const invalid = session.listAssets();
-    respondOk(pageWindow, pageWindow.lastSent(), { assets: [{ name: "../bad", path: "/../bad", sizeBytes: 1, modifiedAt: 1 }] });
-    await expect(invalid).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR", message: "list_assets response had an invalid shape" });
+    for (const asset of [
+      { name: "report.json", path: "/results/other.json", sizeBytes: 1, modifiedAt: 1 },
+      { name: "report.json", path: "/results/../report.json", sizeBytes: 1, modifiedAt: 1 },
+      { name: "report.json", path: "/results//report.json", sizeBytes: 1, modifiedAt: 1 },
+      { name: "report.json", path: "/results\\report.json", sizeBytes: 1, modifiedAt: 1 },
+      { name: "nested/report.json", path: "/results/report.json", sizeBytes: 1, modifiedAt: 1 },
+    ]) {
+      const invalid = session.listAssets();
+      respondOk(pageWindow, pageWindow.lastSent(), { assets: [asset] });
+      await expect(invalid).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR", message: "list_assets response had an invalid shape" });
+    }
   });
 
   it("rejects listAssets locally after session end", async () => {

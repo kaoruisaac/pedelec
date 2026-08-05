@@ -31,7 +31,7 @@ function normalizeListAssetsResponse(response: unknown): SandboxAsset[] {
     if (!asset || typeof asset !== "object" || Array.isArray(asset)) return invalidListAssetsResponse({ index, asset });
     const { name, path, sizeBytes, modifiedAt } = asset as Record<string, unknown>;
     const validName = typeof name === "string" && name.length > 0 && name !== "." && name !== ".." && !name.includes("/") && !name.includes("\\");
-      const validPath = typeof path === "string" && path === `/${name}` && isValidAssetPath(path);
+      const validPath = typeof path === "string" && isValidAssetPath(path) && path.slice(path.lastIndexOf("/") + 1) === name;
     const validNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
     if (!validName || !validPath || !validNumber(sizeBytes) || !validNumber(modifiedAt)) {
       return invalidListAssetsResponse({ index, asset });

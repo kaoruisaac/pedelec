@@ -116,9 +116,9 @@ The content is transferred through Desktop's internal `127.0.0.1` loopback asset
 listAssets(): Promise<SandboxAsset[]>
 ```
 
-Returns completed regular files from the first level of the shared `assets/` directory, ordered by filesystem modification time newest first. Files created by either the App or Agent can appear. The list is non-recursive, so nested assets are not returned.
+Returns completed regular files from every level of the shared `assets/` directory as a flat array. Files created by either the App or Agent can appear. Results are ordered by filesystem modification time newest first, then by `name` when timestamps are equal. Directory entries and file or directory symlinks are not returned or followed. At every level, entries whose basename starts with `.pedelec-` are excluded; other dotfiles and files inside dot-directories are included.
 
-`name` is the actual sandbox filename, `path` is sandbox-relative, and `modifiedAt` is the filesystem modification time rather than a guaranteed write-completion timestamp. Listing is allowed while the agent runs; an ending or ended session rejects with `SESSION_ENDED`. Pagination, deletion, rename, move, and recursive listing are not supported.
+`name` is the basename, while `path` is the complete public path relative to `assets/`, such as `/results/report.json`. `modifiedAt` is the filesystem modification time rather than a guaranteed write-completion timestamp. Listing is allowed while the agent runs; an ending or ended session rejects with `SESSION_ENDED`. Pagination, deletion, rename, and move are not supported.
 
 ## `readAsset()`
 
@@ -128,7 +128,7 @@ readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>
 readAsset(path: SandboxAssetPath, type: "file"): Promise<File>
 ```
 
-Reads a known file from the shared session `assets/` directory. Unlike `listAssets()`, it accepts nested public paths such as `/results/report.json`. The path must begin with `/`, use forward slashes, and contain no empty, `.` or `..` segments.
+Reads a known file from the shared session `assets/` directory, including a nested public path such as `/results/report.json`. The path must begin with `/`, use forward slashes, and contain no empty, `.` or `..` segments.
 
 The read limit is 100 MiB. Reads are allowed while prepare, send, or provider execution is active, but an ending or ended session rejects with `SESSION_ENDED`. If the Agent may still be writing the same path, coordinate completion in your application or agent workflow before reading it.
 

@@ -1,8 +1,8 @@
 use super::config::AgentConfig;
 use super::error::AgentError;
 use super::jsonl::append_jsonl;
-use pedelec_shared::paths::pedelec_home_dir;
 use chrono::{DateTime, Datelike, TimeZone, Utc};
+use pedelec_shared::paths::pedelec_home_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, DirBuilder};

@@ -2931,7 +2931,7 @@ mod tests {
     }
 
     #[test]
-    fn list_assets_reads_only_completed_first_level_files_without_mutating_thread() {
+    fn list_assets_recursively_reads_regular_files_without_mutating_thread() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = runtime_with_provider_thread(
             temp.path(),
@@ -2941,11 +2941,38 @@ mod tests {
             None,
         );
         let assets = temp.path().join("sandbox/thread_assets/assets");
-        fs::create_dir_all(assets.join("nested")).unwrap();
+        fs::create_dir_all(assets.join("nested/previews")).unwrap();
+        fs::create_dir_all(assets.join(".cache")).unwrap();
+        fs::create_dir_all(assets.join(".pedelec-cache")).unwrap();
         fs::write(assets.join("upl-report.txt"), b"data").unwrap();
         fs::write(assets.join(".env"), b"key=value").unwrap();
         fs::write(assets.join(".pedelec-internal"), b"hidden").unwrap();
-        fs::write(assets.join("nested/ignored.txt"), b"ignored").unwrap();
+        fs::write(assets.join("nested/report.json"), b"report").unwrap();
+        fs::write(assets.join("nested/previews/final.png"), b"preview").unwrap();
+        fs::write(assets.join("nested/.metadata.json"), b"metadata").unwrap();
+        fs::write(assets.join(".cache/result.json"), b"cache").unwrap();
+        fs::write(assets.join("nested/.pedelec-state.json"), b"hidden").unwrap();
+        fs::write(assets.join(".pedelec-cache/hidden.txt"), b"hidden").unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(assets.join("upl-report.txt"), assets.join("file-link.txt"))
+                .unwrap();
+            std::os::unix::fs::symlink(assets.join("nested"), assets.join("directory-link"))
+                .unwrap();
+        }
+        #[cfg(windows)]
+        {
+            // Developer Mode or elevated privileges are needed for symlinks on some Windows hosts.
+            let _ = std::os::windows::fs::symlink_file(
+                assets.join("upl-report.txt"),
+                assets.join("file-link.txt"),
+            );
+            let _ = std::os::windows::fs::symlink_dir(
+                assets.join("nested"),
+                assets.join("directory-link"),
+            );
+        }
 
         let status_before = runtime.thread_status("thread_assets");
         let output = runtime
@@ -2955,7 +2982,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(status_before, runtime.thread_status("thread_assets"));
-        assert_eq!(output.assets.len(), 2);
+        assert_eq!(output.assets.len(), 6);
         assert!(output
             .assets
             .iter()
@@ -2970,7 +2997,50 @@ mod tests {
         assert!(output
             .assets
             .iter()
+            .any(|asset| asset.name == "report.json" && asset.path == "/nested/report.json"));
+        assert!(output
+            .assets
+            .iter()
+            .any(|asset| asset.name == "final.png" && asset.path == "/nested/previews/final.png"));
+        assert!(output
+            .assets
+            .iter()
+            .any(|asset| asset.name == ".metadata.json" && asset.path == "/nested/.metadata.json"));
+        assert!(output
+            .assets
+            .iter()
+            .any(|asset| asset.name == "result.json" && asset.path == "/.cache/result.json"));
+        assert!(output
+            .assets
+            .iter()
+            .all(|asset| !asset.path.contains(".pedelec-")
+                && !asset.path.contains("file-link")
+                && !asset.path.contains("directory-link")));
+        assert!(output.assets.iter().all(|asset| !asset.path.ends_with('/')));
+        assert!(output.assets.windows(2).all(|pair| {
+            pair[0].modified_at > pair[1].modified_at
+                || (pair[0].modified_at == pair[1].modified_at && pair[0].name <= pair[1].name)
+        }));
+        assert!(output
+            .assets
+            .iter()
             .all(|asset| !asset.path.contains(temp.path().to_string_lossy().as_ref())));
+    }
+
+    #[test]
+    fn list_assets_fails_when_a_nested_directory_cannot_be_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets_root = temp.path().join("assets");
+        fs::create_dir_all(&assets_root).unwrap();
+        let missing_nested_directory = assets_root.join("nested");
+        let mut assets = Vec::new();
+
+        let error = collect_sandbox_assets(&assets_root, &missing_nested_directory, &mut assets)
+            .unwrap_err();
+
+        assert_eq!(error.code, error_codes::ASSET_LIST_FAILED);
+        assert_eq!(error.details.unwrap()["path"], "/nested");
+        assert!(assets.is_empty());
     }
 
     #[test]

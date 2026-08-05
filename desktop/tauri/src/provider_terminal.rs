@@ -251,7 +251,9 @@ mod tests {
             ProviderCode::Cursor,
             ProviderCode::Claude,
         ] {
-            assert!(terminal_plan(&provider, &executable, Path::new("/tmp/provider-terminal")).is_ok());
+            assert!(
+                terminal_plan(&provider, &executable, Path::new("/tmp/provider-terminal")).is_ok()
+            );
         }
     }
     #[test]

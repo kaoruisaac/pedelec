@@ -68,13 +68,23 @@ pub struct CreateAssetUploadOutput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateAssetDownloadInput { pub thread_id: String, pub path: String }
+pub struct CreateAssetDownloadInput {
+    pub thread_id: String,
+    pub path: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateAssetDownloadOutput {
-    pub download_id: String, pub download_url: String, pub token: String, pub path: String,
-    pub name: String, pub size_bytes: u64, pub modified_at: i64, pub mime_type: String, pub expires_at: i64,
+    pub download_id: String,
+    pub download_url: String,
+    pub token: String,
+    pub path: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub modified_at: i64,
+    pub mime_type: String,
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,11 +133,21 @@ pub enum AssetUploadState {
 
 #[derive(Debug, Clone)]
 pub struct AssetDownloadTicket {
-    pub thread_id: String, pub sandbox_path: PathBuf, pub public_path: String, pub token_hash: String,
-    pub expires_at: DateTime<Utc>, pub state: AssetDownloadState,
+    pub thread_id: String,
+    pub sandbox_path: PathBuf,
+    pub public_path: String,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub state: AssetDownloadState,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssetDownloadState { Pending, Downloading, Completed, Failed, Expired }
+pub enum AssetDownloadState {
+    Pending,
+    Downloading,
+    Completed,
+    Failed,
+    Expired,
+}
 
 impl PedelecError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
@@ -1959,7 +1979,13 @@ impl CoreRuntime {
         let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
         let safe_filename = safe_asset_filename(&input.filename);
         let (public_path, relative_path) = match input.target_path.as_deref() {
-            Some(path) => parse_public_asset_path(path).map_err(|_| PedelecError::with_details(error_codes::ASSET_PATH_INVALID, "asset path is invalid", serde_json::json!({"threadId": input.thread_id, "path": path})))?,
+            Some(path) => parse_public_asset_path(path).map_err(|_| {
+                PedelecError::with_details(
+                    error_codes::ASSET_PATH_INVALID,
+                    "asset path is invalid",
+                    serde_json::json!({"threadId": input.thread_id, "path": path}),
+                )
+            })?,
             None => {
                 let filename = format!("{upload_id}-{safe_filename}");
                 (format!("/{filename}"), PathBuf::from(filename))
@@ -1996,85 +2022,18 @@ impl CoreRuntime {
             ));
         }
         let thread = self.thread_manager.thread(&input.thread_id)?;
-        if matches!(thread.status, ThreadStatus::Stopping | ThreadStatus::Ended) { return Err(PedelecError::new(error_codes::THREAD_ENDED, "thread has ended")); }
+        if matches!(thread.status, ThreadStatus::Stopping | ThreadStatus::Ended) {
+            return Err(PedelecError::new(
+                error_codes::THREAD_ENDED,
+                "thread has ended",
+            ));
+        }
         let input_path = thread.sandbox_path.join("assets");
         if !input_path.exists() {
             return Ok(ListAssetsOutput { assets: Vec::new() });
         }
-        let entries = fs::read_dir(&input_path).map_err(|err| {
-            PedelecError::with_details(
-                error_codes::ASSET_LIST_FAILED,
-                "failed to read sandbox assets",
-                serde_json::json!({ "error": err.to_string() }),
-            )
-        })?;
         let mut assets = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|err| {
-                PedelecError::with_details(
-                    error_codes::ASSET_LIST_FAILED,
-                    "failed to read sandbox asset",
-                    serde_json::json!({ "error": err.to_string() }),
-                )
-            })?;
-            let file_type = entry.file_type().map_err(|err| {
-                PedelecError::with_details(
-                    error_codes::ASSET_LIST_FAILED,
-                    "failed to inspect sandbox asset",
-                    serde_json::json!({ "error": err.to_string() }),
-                )
-            })?;
-            if !file_type.is_file() || file_type.is_symlink() {
-                continue;
-            }
-            let name = entry.file_name().into_string().map_err(|_| {
-                PedelecError::new(
-                    error_codes::ASSET_LIST_FAILED,
-                    "sandbox asset filename cannot be encoded",
-                )
-            })?;
-            if name.starts_with(".pedelec-") {
-                continue;
-            }
-            let metadata = entry.metadata().map_err(|err| {
-                PedelecError::with_details(
-                    error_codes::ASSET_LIST_FAILED,
-                    "failed to read sandbox asset metadata",
-                    serde_json::json!({ "name": name, "error": err.to_string() }),
-                )
-            })?;
-            let modified_at = metadata
-                .modified()
-                .map_err(|err| {
-                    PedelecError::with_details(
-                        error_codes::ASSET_LIST_FAILED,
-                        "failed to read sandbox asset modified time",
-                        serde_json::json!({ "name": name, "error": err.to_string() }),
-                    )
-                })?
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| {
-                    PedelecError::with_details(
-                        error_codes::ASSET_LIST_FAILED,
-                        "sandbox asset modified time predates Unix epoch",
-                        serde_json::json!({ "name": name }),
-                    )
-                })?
-                .as_millis();
-            let modified_at = i64::try_from(modified_at).map_err(|_| {
-                PedelecError::with_details(
-                    error_codes::ASSET_LIST_FAILED,
-                    "sandbox asset modified time is out of range",
-                    serde_json::json!({ "name": name }),
-                )
-            })?;
-            assets.push(SandboxAsset {
-                path: format!("/{name}"),
-                name,
-                size_bytes: metadata.len(),
-                modified_at,
-            });
-        }
+        collect_sandbox_assets(&input_path, &input_path, &mut assets)?;
         assets.sort_by(|a, b| {
             b.modified_at
                 .cmp(&a.modified_at)
@@ -2105,22 +2064,80 @@ impl CoreRuntime {
         }
     }
 
-    pub fn create_asset_download(&mut self, input: CreateAssetDownloadInput) -> Result<CreateAssetDownloadOutput, PedelecError> {
+    pub fn create_asset_download(
+        &mut self,
+        input: CreateAssetDownloadInput,
+    ) -> Result<CreateAssetDownloadOutput, PedelecError> {
         let thread = self.thread_manager.thread(&input.thread_id)?;
-        if matches!(thread.status, ThreadStatus::Stopping | ThreadStatus::Ended) { return Err(PedelecError::new(error_codes::THREAD_ENDED, "thread has ended")); }
+        if matches!(thread.status, ThreadStatus::Stopping | ThreadStatus::Ended) {
+            return Err(PedelecError::new(
+                error_codes::THREAD_ENDED,
+                "thread has ended",
+            ));
+        }
         let (target, name, size_bytes, modified_at) = resolve_asset_file(thread, &input.path)?;
         let sandbox_path = thread.sandbox_path.clone();
-        let port = self.asset_upload_port.ok_or_else(|| PedelecError::new(error_codes::ASSET_UPLOAD_SERVER_UNAVAILABLE, "asset transfer server is unavailable"))?;
+        let port = self.asset_upload_port.ok_or_else(|| {
+            PedelecError::new(
+                error_codes::ASSET_UPLOAD_SERVER_UNAVAILABLE,
+                "asset transfer server is unavailable",
+            )
+        })?;
         self.expire_asset_downloads();
-        let download_id = loop { let candidate = format!("dnl_{}", &Uuid::new_v4().simple().to_string()[..8]); if !self.asset_download_tickets.contains_key(&candidate) { break candidate; } };
-        let token = (0..8).map(|_| Uuid::new_v4().simple().to_string()).collect::<String>();
+        let download_id = loop {
+            let candidate = format!("dnl_{}", &Uuid::new_v4().simple().to_string()[..8]);
+            if !self.asset_download_tickets.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let token = (0..8)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect::<String>();
         let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
-        self.asset_download_tickets.insert(download_id.clone(), AssetDownloadTicket { thread_id: input.thread_id, sandbox_path, public_path: input.path.clone(), token_hash: format!("{:x}", Sha256::digest(token.as_bytes())), expires_at, state: AssetDownloadState::Pending });
-        Ok(CreateAssetDownloadOutput { download_id: download_id.clone(), download_url: format!("http://127.0.0.1:{port}/downloads/{download_id}"), token, path: input.path, name, size_bytes, modified_at, mime_type: asset_mime_type(&target), expires_at: expires_at.timestamp_millis() })
+        self.asset_download_tickets.insert(
+            download_id.clone(),
+            AssetDownloadTicket {
+                thread_id: input.thread_id,
+                sandbox_path,
+                public_path: input.path.clone(),
+                token_hash: format!("{:x}", Sha256::digest(token.as_bytes())),
+                expires_at,
+                state: AssetDownloadState::Pending,
+            },
+        );
+        Ok(CreateAssetDownloadOutput {
+            download_id: download_id.clone(),
+            download_url: format!("http://127.0.0.1:{port}/downloads/{download_id}"),
+            token,
+            path: input.path,
+            name,
+            size_bytes,
+            modified_at,
+            mime_type: asset_mime_type(&target),
+            expires_at: expires_at.timestamp_millis(),
+        })
     }
 
-    pub fn expire_asset_downloads(&mut self) { let now = Utc::now(); for ticket in self.asset_download_tickets.values_mut() { if ticket.state == AssetDownloadState::Pending && ticket.expires_at <= now { ticket.state = AssetDownloadState::Expired; } } }
-    pub(crate) fn invalidate_asset_downloads_for_thread(&mut self, thread_id: &str) { for ticket in self.asset_download_tickets.values_mut() { if ticket.thread_id == thread_id && matches!(ticket.state, AssetDownloadState::Pending | AssetDownloadState::Downloading) { ticket.state = AssetDownloadState::Failed; } } }
+    pub fn expire_asset_downloads(&mut self) {
+        let now = Utc::now();
+        for ticket in self.asset_download_tickets.values_mut() {
+            if ticket.state == AssetDownloadState::Pending && ticket.expires_at <= now {
+                ticket.state = AssetDownloadState::Expired;
+            }
+        }
+    }
+    pub(crate) fn invalidate_asset_downloads_for_thread(&mut self, thread_id: &str) {
+        for ticket in self.asset_download_tickets.values_mut() {
+            if ticket.thread_id == thread_id
+                && matches!(
+                    ticket.state,
+                    AssetDownloadState::Pending | AssetDownloadState::Downloading
+                )
+            {
+                ticket.state = AssetDownloadState::Failed;
+            }
+        }
+    }
 
     pub fn create_thread(
         &mut self,
@@ -4396,34 +4413,235 @@ fn invalid_sdk_origin_error() -> PedelecError {
     PedelecError::new(error_codes::THREAD_ACCESS_DENIED, "invalid caller origin")
 }
 
+fn collect_sandbox_assets(
+    root: &Path,
+    directory: &Path,
+    assets: &mut Vec<SandboxAsset>,
+) -> Result<(), PedelecError> {
+    let relative_directory = asset_relative_path(root, directory)?;
+    let entries = fs::read_dir(directory).map_err(|err| {
+        PedelecError::with_details(
+            error_codes::ASSET_LIST_FAILED,
+            "failed to read sandbox assets",
+            serde_json::json!({ "path": relative_directory, "error": err.to_string() }),
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            PedelecError::with_details(
+                error_codes::ASSET_LIST_FAILED,
+                "failed to read sandbox asset",
+                serde_json::json!({ "path": relative_directory, "error": err.to_string() }),
+            )
+        })?;
+        let path = entry.path();
+        let public_path = asset_relative_path(root, &path)?;
+        let file_type = entry.file_type().map_err(|err| {
+            PedelecError::with_details(
+                error_codes::ASSET_LIST_FAILED,
+                "failed to inspect sandbox asset",
+                serde_json::json!({ "path": public_path, "error": err.to_string() }),
+            )
+        })?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().into_string().map_err(|_| {
+            PedelecError::with_details(
+                error_codes::ASSET_LIST_FAILED,
+                "sandbox asset filename cannot be encoded",
+                serde_json::json!({ "path": public_path }),
+            )
+        })?;
+        if name.starts_with(".pedelec-") {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_sandbox_assets(root, &path, assets)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|err| {
+            PedelecError::with_details(
+                error_codes::ASSET_LIST_FAILED,
+                "failed to read sandbox asset metadata",
+                serde_json::json!({ "path": public_path, "error": err.to_string() }),
+            )
+        })?;
+        let modified_at = metadata
+            .modified()
+            .map_err(|err| {
+                PedelecError::with_details(
+                    error_codes::ASSET_LIST_FAILED,
+                    "failed to read sandbox asset modified time",
+                    serde_json::json!({ "path": public_path, "error": err.to_string() }),
+                )
+            })?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| {
+                PedelecError::with_details(
+                    error_codes::ASSET_LIST_FAILED,
+                    "sandbox asset modified time predates Unix epoch",
+                    serde_json::json!({ "path": public_path }),
+                )
+            })?
+            .as_millis();
+        let modified_at = i64::try_from(modified_at).map_err(|_| {
+            PedelecError::with_details(
+                error_codes::ASSET_LIST_FAILED,
+                "sandbox asset modified time is out of range",
+                serde_json::json!({ "path": public_path }),
+            )
+        })?;
+        assets.push(SandboxAsset {
+            name,
+            path: public_path,
+            size_bytes: metadata.len(),
+            modified_at,
+        });
+    }
+    Ok(())
+}
+
+fn asset_relative_path(root: &Path, path: &Path) -> Result<String, PedelecError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        PedelecError::new(
+            error_codes::ASSET_LIST_FAILED,
+            "sandbox asset path is outside the asset root",
+        )
+    })?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => components.push(part.to_str().ok_or_else(|| {
+                PedelecError::new(
+                    error_codes::ASSET_LIST_FAILED,
+                    "sandbox asset path cannot be encoded",
+                )
+            })?),
+            _ => {
+                return Err(PedelecError::new(
+                    error_codes::ASSET_LIST_FAILED,
+                    "sandbox asset path is invalid",
+                ))
+            }
+        }
+    }
+    Ok(if components.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", components.join("/"))
+    })
+}
+
 fn parse_public_asset_path(public_path: &str) -> Result<(String, PathBuf), ()> {
-    if !public_path.starts_with('/') || public_path.len() == 1 || public_path.starts_with("//") || public_path.contains('\\') || public_path.chars().any(char::is_control) {
+    if !public_path.starts_with('/')
+        || public_path.len() == 1
+        || public_path.starts_with("//")
+        || public_path.contains('\\')
+        || public_path.chars().any(char::is_control)
+    {
         return Err(());
     }
     let relative = &public_path[1..];
-    if relative.split('/').any(|part| part.is_empty() || part == "." || part == "..") { return Err(()); }
+    if relative
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(());
+    }
     Ok((public_path.to_string(), relative.split('/').collect()))
 }
 
-fn resolve_asset_file(thread: &ThreadState, public_path: &str) -> Result<(PathBuf, String, u64, i64), PedelecError> {
-    let (_, relative_path) = parse_public_asset_path(public_path).map_err(|_| PedelecError::with_details(error_codes::ASSET_PATH_INVALID, "asset path is invalid", serde_json::json!({"threadId": thread.thread_id, "path": public_path})))?;
+fn resolve_asset_file(
+    thread: &ThreadState,
+    public_path: &str,
+) -> Result<(PathBuf, String, u64, i64), PedelecError> {
+    let (_, relative_path) = parse_public_asset_path(public_path).map_err(|_| {
+        PedelecError::with_details(
+            error_codes::ASSET_PATH_INVALID,
+            "asset path is invalid",
+            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
+        )
+    })?;
     let root = thread.sandbox_path.join("assets");
     let target = root.join(relative_path);
-    let metadata = fs::symlink_metadata(&target).map_err(|_| PedelecError::with_details(error_codes::ASSET_NOT_FOUND, "asset was not found", serde_json::json!({"threadId": thread.thread_id, "path": public_path})))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() { return Err(PedelecError::with_details(error_codes::ASSET_NOT_FILE, "asset is not a regular file", serde_json::json!({"threadId": thread.thread_id, "path": public_path}))); }
-    let canonical_root = root.canonicalize().map_err(|_| PedelecError::new(error_codes::ASSET_NOT_FOUND, "asset root was not found"))?;
-    let canonical_target = target.canonicalize().map_err(|_| PedelecError::with_details(error_codes::ASSET_NOT_FOUND, "asset was not found", serde_json::json!({"threadId": thread.thread_id, "path": public_path})))?;
-    if !canonical_target.starts_with(&canonical_root) { return Err(PedelecError::with_details(error_codes::ASSET_PATH_INVALID, "asset path escapes the asset root", serde_json::json!({"threadId": thread.thread_id, "path": public_path}))); }
-    if metadata.len() > MAX_ASSET_UPLOAD_BYTES { return Err(PedelecError::with_details(error_codes::ASSET_READ_TOO_LARGE, "asset exceeds the 100 MiB limit", serde_json::json!({"threadId": thread.thread_id, "path": public_path}))); }
-    let modified_at = metadata.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).and_then(|duration| i64::try_from(duration.as_millis()).ok()).unwrap_or(0);
-    let name = target.file_name().and_then(|name| name.to_str()).ok_or_else(|| PedelecError::new(error_codes::ASSET_PATH_INVALID, "asset filename is invalid"))?.to_string();
+    let metadata = fs::symlink_metadata(&target).map_err(|_| {
+        PedelecError::with_details(
+            error_codes::ASSET_NOT_FOUND,
+            "asset was not found",
+            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(PedelecError::with_details(
+            error_codes::ASSET_NOT_FILE,
+            "asset is not a regular file",
+            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
+        ));
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| PedelecError::new(error_codes::ASSET_NOT_FOUND, "asset root was not found"))?;
+    let canonical_target = target.canonicalize().map_err(|_| {
+        PedelecError::with_details(
+            error_codes::ASSET_NOT_FOUND,
+            "asset was not found",
+            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
+        )
+    })?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err(PedelecError::with_details(
+            error_codes::ASSET_PATH_INVALID,
+            "asset path escapes the asset root",
+            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
+        ));
+    }
+    if metadata.len() > MAX_ASSET_UPLOAD_BYTES {
+        return Err(PedelecError::with_details(
+            error_codes::ASSET_READ_TOO_LARGE,
+            "asset exceeds the 100 MiB limit",
+            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
+        ));
+    }
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0);
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            PedelecError::new(error_codes::ASSET_PATH_INVALID, "asset filename is invalid")
+        })?
+        .to_string();
     Ok((canonical_target, name, metadata.len(), modified_at))
 }
 
 fn asset_mime_type(path: &Path) -> String {
-    match path.extension().and_then(|part| part.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
-        "txt" | "md" | "csv" => "text/plain", "json" => "application/json", "html" => "text/html", "pdf" => "application/pdf", "png" => "image/png", "jpg" | "jpeg" => "image/jpeg", "webp" => "image/webp", "glb" => "model/gltf-binary", _ => "application/octet-stream"
-    }.to_string()
+    match path
+        .extension()
+        .and_then(|part| part.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "txt" | "md" | "csv" => "text/plain",
+        "json" => "application/json",
+        "html" => "text/html",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "glb" => "model/gltf-binary",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 pub mod error_codes {

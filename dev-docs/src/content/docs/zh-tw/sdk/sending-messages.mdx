@@ -9,7 +9,7 @@ sidebar:
 
 ## 操作 session assets
 
-App 與 Agent 共用 session sandbox 的 `assets/` 目錄。Session 結束前，App 可以 upload input file、列出第一層已完成檔案，並讀取任一方產生的檔案。
+App 與 Agent 共用 session sandbox 的 `assets/` 目錄。Session 結束前，App 可以 upload input file、遞迴列出所有已完成檔案，並讀取任一方產生的檔案。
 
 ### Upload 檔案
 
@@ -25,7 +25,7 @@ await session.sendText(`請處理這個檔案：${path}`);
 
 File body 直接送往 `127.0.0.1` loopback server，不經過 Extension、Native Messaging host 或 Core IPC。Upload 成功只表示檔案位於 sandbox，不能保證 provider 或 model 能理解其格式。
 
-### 列出第一層 assets
+### 列出 assets
 
 ```ts
 const assets = await session.listAssets();
@@ -34,7 +34,7 @@ for (const asset of assets) {
 }
 ```
 
-`listAssets()` 會回傳 `assets/` 第一層的一般檔案，並依 filesystem modification time 由新到舊排序。此 method 不遞迴、不支援 pagination，Agent 執行期間仍可呼叫。Agent 寫入 nested file 時，請使用已知 path 搭配 `readAsset()`。
+`listAssets()` 會以 flat array 遞迴回傳 `assets/` 所有層級的一般檔案，依 filesystem modification time 由新到舊排序，時間相同時依 `name` 排序。nested file 的 `name` 仍是 basename，`path` 則是完整 public path，例如 `/results/report.json`。資料夾項目與 symlink 不會列出；所有層級只排除 `.pedelec-*` entry，其他 dotfile 仍會列出。此 method 不支援 pagination，Agent 執行期間仍可呼叫。可使用任一回傳 path 搭配 `readAsset()`。
 
 ### 讀取 asset
 

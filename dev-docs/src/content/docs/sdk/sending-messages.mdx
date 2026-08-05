@@ -25,7 +25,7 @@ await session.sendText(`Please process this file: ${path}`);
 
 The file body is sent directly to a loopback server listening on `127.0.0.1`; it does not travel through the extension, native-messaging host, or Core IPC. A successful upload only means the file is available in the sandbox—it does not guarantee that the selected provider or model can understand its format.
 
-### List top-level assets
+### List assets
 
 ```ts
 const assets = await session.listAssets();
@@ -34,7 +34,7 @@ for (const asset of assets) {
 }
 ```
 
-`listAssets()` returns regular files from the first level of `assets/`, sorted by filesystem modification time newest first. It is non-recursive, has no pagination, and can be called while the Agent runs. Use a known path with `readAsset()` when the Agent writes a nested file.
+`listAssets()` recursively returns regular files from every level of `assets/` as a flat array, sorted by filesystem modification time newest first and then by `name`. A nested file retains its basename in `name` and uses its complete public path in `path`, such as `/results/report.json`. Directory entries and symlinks are excluded; only `.pedelec-*` entries are excluded from every level, while other dotfiles are included. It has no pagination and can be called while the Agent runs. Use `readAsset()` with any returned path.
 
 ### Read an asset
 
