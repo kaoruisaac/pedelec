@@ -5,7 +5,11 @@ import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_TIMEOUT_MS } from "./constants"
 import { usePopUp } from "../services/PopUpProvider";
 import EditingProviderPopup from "./EditingProviderPopup";
 import MissingProviderPopup from "./MissingProviderPopup";
-import { findFirstAvailableCliProvider } from "./providerInitialization";
+import {
+  buildAutomaticDefaultProviderSettings,
+  findFirstAvailableCliProvider,
+} from "./providerInitialization";
+import { canSaveSettings } from "./settingsValidation";
 import { OcTerminal2 } from "solid-icons/oc";
 
 const emptySettings: Settings = {
@@ -56,10 +60,7 @@ function SettingsPage(props: SettingsPageProps) {
     return provider.scanned && provider.available === false;
   });
   const canSave = createMemo(() => {
-    const provider = selectedProviderInfo();
-    if (!provider || saving()) return false;
-    if (provider.code === "ollama") return true;
-    return Boolean(provider.available);
+    return canSaveSettings(draftSettings(), selectedProviderInfo(), saving());
   });
 
   onMount(() => {
@@ -120,6 +121,10 @@ function SettingsPage(props: SettingsPageProps) {
     }
     if (provider.code !== "ollama" && !provider.available) {
       setError("Choose an available provider before saving.");
+      return;
+    }
+    if (provider.code === "ollama" && !canSaveSettings(draftSettings(), provider)) {
+      setError("Ollama API key and a model are required before saving.");
       return;
     }
 
@@ -241,7 +246,7 @@ function SettingsPage(props: SettingsPageProps) {
     }
 
     const savedSettings = await invoke<Settings>("update_settings", {
-      input: cloneSettings({ ...initialSettings, defaultProvider: provider.code }),
+      input: buildAutomaticDefaultProviderSettings(initialSettings, provider.code),
     });
     const normalizedSettings = normalizeSettings(savedSettings);
     setSettings(normalizedSettings);

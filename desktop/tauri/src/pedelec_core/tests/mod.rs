@@ -7,6 +7,9 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     #[test]
     fn provider_info_exposes_scanned_version_without_exposing_ollama_version() {
@@ -41,7 +44,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn provider_version_command_runs_script_wrappers_through_headless_cmd() {
-        let command = provider_version_command(Path::new("C:/providers/codex.cmd"));
+        let command = provider_version_command(Path::new("C:/providers/codex.cmd"), None);
 
         assert_eq!(command.get_program(), "cmd.exe");
         assert_eq!(
@@ -62,6 +65,184 @@ mod tests {
 
         assert!(env::split_paths(&merged).any(|path| path == original));
         assert!(!env::split_paths(&merged).any(|path| path.to_string_lossy().starts_with(r"\\?\")));
+    }
+
+    #[test]
+    fn merge_provider_paths_keeps_process_login_and_existing_fallback_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let process_dir = temp.path().join("process");
+        let login_dir = temp.path().join("login");
+        let fallback_dir = temp.path().join("fallback");
+        let missing_dir = temp.path().join("missing");
+        fs::create_dir_all(&process_dir).unwrap();
+        fs::create_dir_all(&login_dir).unwrap();
+        fs::create_dir_all(&fallback_dir).unwrap();
+
+        let process_path = env::join_paths([&process_dir, &login_dir]).unwrap();
+        let login_path = env::join_paths([&login_dir]).unwrap();
+        let merged = merge_provider_paths(
+            Some(&process_path),
+            Some(&login_path),
+            vec![fallback_dir.clone(), missing_dir],
+        );
+        let paths = env::split_paths(&merged).collect::<Vec<_>>();
+
+        assert_eq!(paths, vec![process_dir, login_dir, fallback_dir]);
+    }
+
+    #[test]
+    fn login_shell_path_parser_handles_noise_and_rejects_invalid_output() {
+        let parsed = parse_login_shell_path_output(
+            b"startup noise\nprompt/plugin warning\n__PEDELEC_PATH_START__/one:/two__PEDELEC_PATH_END__\nmore noise",
+        )
+        .unwrap();
+        assert_eq!(parsed, OsString::from("/one:/two"));
+
+        assert!(parse_login_shell_path_output(b"__PEDELEC_PATH_END__/one").is_none());
+        assert!(parse_login_shell_path_output(b"__PEDELEC_PATH_START__/one").is_none());
+        assert!(
+            parse_login_shell_path_output(b"__PEDELEC_PATH_START____PEDELEC_PATH_END__").is_none()
+        );
+        assert!(parse_login_shell_path_output(&[0xff, 0xfe]).is_none());
+        assert_eq!(
+            parse_login_shell_path_output(
+                b"\xffstartup\n__PEDELEC_PATH_START__/one:/two__PEDELEC_PATH_END__"
+            )
+            .unwrap(),
+            OsString::from("/one:/two")
+        );
+    }
+
+    #[test]
+    fn macos_shell_strategy_uses_interactive_login_for_zsh() {
+        assert_eq!(
+            macos_shell_probe_arguments(Path::new("/opt/homebrew/bin/zsh")),
+            vec![vec!["-l", "-i", "-c", MACOS_PATH_MARKER_COMMAND]]
+        );
+    }
+
+    #[test]
+    fn macos_shell_strategy_probes_bash_login_and_interactive_separately() {
+        assert_eq!(
+            macos_shell_probe_arguments(Path::new("/usr/local/bin/bash")),
+            vec![
+                vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND],
+                vec!["-i", "-c", MACOS_PATH_MARKER_COMMAND],
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    fn executable_shell_fixture(temp: &tempfile::TempDir, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shell = temp.path().join("bash");
+        fs::write(&shell, body).unwrap();
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+        shell
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_login_success_is_preserved_when_interactive_probe_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = executable_shell_fixture(
+            &temp,
+            "#!/bin/sh\nif [ \"$1\" = \"-l\" ]; then\n  printf 'warning\\n%s/login/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\n  exit 0\nfi\nexit 1\n",
+        );
+
+        let path = resolve_macos_shell_path_with_strategies(
+            &shell,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(path, OsString::from("/login/bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_interactive_success_is_preserved_when_login_probe_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = executable_shell_fixture(
+            &temp,
+            "#!/bin/sh\nif [ \"$1\" = \"-i\" ]; then\n  printf '%s/interactive/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\n  exit 0\nfi\nexit 1\n",
+        );
+
+        let path = resolve_macos_shell_path_with_strategies(
+            &shell,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(path, OsString::from("/interactive/bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_successful_probes_are_merged_and_deduplicated() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = executable_shell_fixture(
+            &temp,
+            "#!/bin/sh\nif [ \"$1\" = \"-l\" ]; then\n  printf '%s/login/bin:/shared/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\nelse\n  printf '%s/interactive/bin:/shared/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\nfi\n",
+        );
+
+        let path = resolve_macos_shell_path_with_strategies(
+            &shell,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            env::split_paths(&path).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/login/bin"),
+                PathBuf::from("/shared/bin"),
+                PathBuf::from("/interactive/bin"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_probe_timeout_is_bounded_and_reaps_the_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = executable_shell_fixture(&temp, "#!/bin/sh\nwhile true; do :; done\n");
+        let started = Instant::now();
+
+        let result = probe_shell_path(
+            &shell,
+            &["-c", MACOS_PATH_MARKER_COMMAND],
+            Instant::now() + Duration::from_millis(100),
+        );
+
+        assert!(result.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_version_scan_passes_resolved_path_to_env_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let provider_dir = temp.path().join("provider");
+        let runtime_dir = temp.path().join("runtime");
+        fs::create_dir_all(&provider_dir).unwrap();
+        fs::create_dir_all(&runtime_dir).unwrap();
+
+        let runtime = runtime_dir.join("fake-runtime");
+        fs::write(&runtime, "#!/bin/sh\nprintf '9.8.7\\n'\n").unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let provider = provider_dir.join("codex");
+        fs::write(&provider, "#!/usr/bin/env fake-runtime\n").unwrap();
+        fs::set_permissions(&provider, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let resolved_path = env::join_paths([&provider_dir, &runtime_dir]).unwrap();
+        let scan = scan_provider_cli("codex", Some(&resolved_path));
+
+        assert_eq!(scan.path, Some(provider));
+        assert_eq!(scan.version, Some(ProviderVersion(vec![9, 8, 7])));
     }
 
     #[test]
@@ -113,6 +294,59 @@ mod tests {
         assert!(env_value(&start.command, "PATH")
             .unwrap()
             .contains(".pedelec"));
+    }
+
+    #[test]
+    fn provider_command_uses_saved_resolved_path_and_pedelec_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let resolved_dir = temp.path().join("login-bin");
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_codex_resolved_path",
+            ProviderCode::Codex,
+            None,
+            Some("gpt-5".into()),
+        );
+        runtime.provider_resolved_path = Some(env::join_paths([&resolved_dir]).unwrap());
+        let selected_provider = temp.path().join("scanned-codex");
+        runtime.provider_scan.insert(
+            ProviderCode::Codex,
+            ProviderCli {
+                path: Some(selected_provider.clone()),
+                version: Some(ProviderVersion(vec![1, 2, 3])),
+                error: None,
+            },
+        );
+
+        let start = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: "thread_codex_resolved_path".into(),
+                message: "hello".into(),
+            })
+            .unwrap();
+        let command_path = OsString::from(env_value(&start.command, "PATH").unwrap());
+        let paths = env::split_paths(&command_path).collect::<Vec<_>>();
+
+        assert_eq!(start.command.program, selected_provider.to_string_lossy());
+        assert_eq!(
+            paths.first(),
+            dirs::home_dir().map(|home| home.join(".pedelec")).as_ref()
+        );
+        assert!(paths.contains(&resolved_dir));
+    }
+
+    #[test]
+    fn refresh_stores_the_exact_override_path_used_for_the_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_path = test_provider_path(temp.path(), "codex");
+        let mut runtime = CoreRuntime {
+            provider_path_value_override: Some(provider_path.clone()),
+            ..CoreRuntime::default()
+        };
+
+        runtime.refresh_providers();
+
+        assert_eq!(runtime.provider_resolved_path, Some(provider_path));
     }
 
     #[test]
@@ -1486,7 +1720,7 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::new(),
+                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: Some("   ".into()),
@@ -1522,7 +1756,7 @@ mod tests {
         let invalid_url = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::new(),
+                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: Some("ftp://127.0.0.1:11434".into()),
@@ -1538,7 +1772,7 @@ mod tests {
         let invalid_timeout = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::new(),
+                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: Some(DEFAULT_OLLAMA_BASE_URL.into()),
@@ -1628,7 +1862,7 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::new(),
+                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
                 provider_settings: ProviderSettingsInput::default(),
             })
             .unwrap();
@@ -1663,6 +1897,91 @@ mod tests {
             saved.default_models.get(&ProviderCode::Antigravity),
             Some(&"antigravity-2.5-pro".to_string())
         );
+    }
+
+    #[test]
+    fn update_settings_for_non_ollama_provider_does_not_require_ollama_credentials_or_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_path = test_provider_path(temp.path(), "codex");
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(temp.path().join("settings.json")),
+            provider_path_value_override: Some(provider_path),
+            ..CoreRuntime::default()
+        };
+
+        let saved = runtime
+            .update_settings(UpdateSettingsInput {
+                default_provider: ProviderCode::Codex,
+                default_models: HashMap::new(),
+                provider_settings: ProviderSettingsInput {
+                    ollama: OllamaProviderSettingsInput {
+                        base_url: None,
+                        timeout_ms: None,
+                        api_key: Some("   ".into()),
+                        tavily_api_key: None,
+                    },
+                },
+            })
+            .unwrap();
+
+        assert_eq!(saved.default_provider, Some(ProviderCode::Codex));
+        assert!(saved.default_models.is_empty());
+        assert_eq!(saved.provider_settings.ollama.api_key, "");
+        assert!(!saved.default_models.contains_key(&ProviderCode::Ollama));
+    }
+
+    #[test]
+    fn update_settings_requires_ollama_model_when_ollama_is_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_path = test_provider_path(temp.path(), "pedelec-agent");
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(temp.path().join("settings.json")),
+            provider_path_value_override: Some(provider_path),
+            ..CoreRuntime::default()
+        };
+
+        let error = runtime
+            .update_settings(UpdateSettingsInput {
+                default_provider: ProviderCode::Ollama,
+                default_models: HashMap::new(),
+                provider_settings: ProviderSettingsInput::default(),
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code, error_codes::MODEL_REQUIRED);
+        assert_eq!(error.details.unwrap()["provider"], "ollama");
+    }
+
+    #[test]
+    fn update_settings_for_other_provider_preserves_existing_ollama_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_path = test_provider_path(temp.path(), "codex");
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(temp.path().join("settings.json")),
+            provider_path_value_override: Some(provider_path),
+            ..CoreRuntime::default()
+        };
+
+        let saved = runtime
+            .update_settings(UpdateSettingsInput {
+                default_provider: ProviderCode::Codex,
+                default_models: HashMap::from([(ProviderCode::Ollama, " qwen3:8b ".into())]),
+                provider_settings: ProviderSettingsInput {
+                    ollama: OllamaProviderSettingsInput {
+                        base_url: None,
+                        timeout_ms: None,
+                        api_key: Some(String::new()),
+                        tavily_api_key: None,
+                    },
+                },
+            })
+            .unwrap();
+
+        assert_eq!(
+            saved.default_models.get(&ProviderCode::Ollama),
+            Some(&"qwen3:8b".to_string())
+        );
+        assert_eq!(saved.provider_settings.ollama.api_key, "");
     }
 
     #[test]

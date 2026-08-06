@@ -4,13 +4,19 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
+#[cfg(any(target_os = "macos", test))]
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+#[cfg(any(target_os = "macos", all(test, unix)))]
+use std::process::Stdio;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
+#[cfg(any(target_os = "macos", all(test, unix)))]
+use std::time::Instant;
 use url::Url;
 use uuid::Uuid;
 
@@ -648,6 +654,7 @@ pub struct RunPromptProviderContext {
     pub settings: PedelecSettings,
     pub core_ipc_endpoint: String,
     pub core_ipc_runtime_file_path: PathBuf,
+    pub provider_resolved_path: Option<OsString>,
 }
 
 #[derive(Debug, Clone)]
@@ -1895,6 +1902,7 @@ pub struct CoreRuntime {
     pub core_ipc_runtime_file_path: Option<PathBuf>,
     pub settings_file_path: Option<PathBuf>,
     pub provider_scan: HashMap<ProviderCode, ProviderCli>,
+    pub provider_resolved_path: Option<OsString>,
     pub provider_refresh_in_progress: bool,
     pub asset_upload_port: Option<u16>,
     pub asset_upload_tickets: HashMap<String, AssetUploadTicket>,
@@ -2282,7 +2290,9 @@ impl CoreRuntime {
     /// Replaces the complete external-provider scan only after every provider has
     /// been inspected, so concurrent callers never observe a partial refresh.
     pub fn refresh_providers(&mut self) {
-        self.provider_scan = scan_external_providers(self.provider_path_value());
+        let path_value = self.resolve_provider_path_value();
+        self.provider_resolved_path = Some(path_value.clone());
+        self.provider_scan = scan_external_providers(Some(path_value));
     }
 
     pub fn get_settings(&self) -> Result<PedelecSettings, PedelecError> {
@@ -2328,7 +2338,17 @@ impl CoreRuntime {
             return Some(path.clone());
         }
 
+        if let Some(path) = &self.provider_resolved_path {
+            return Some(path.clone());
+        }
+
         Some(merged_provider_path(env::var_os("PATH")))
+    }
+
+    fn resolve_provider_path_value(&self) -> OsString {
+        self.provider_path_value_override
+            .clone()
+            .unwrap_or_else(resolve_provider_path_value)
     }
 
     fn resolved_settings_file_path(&self) -> Result<PathBuf, PedelecError> {
@@ -2540,6 +2560,7 @@ impl CoreRuntime {
                 .core_ipc_runtime_file_path
                 .clone()
                 .unwrap_or_else(default_runtime_file_path_for_provider),
+            provider_resolved_path: self.provider_path_value(),
         };
         let adapter = self.thread_manager.provider_adapter(thread_id)?;
         if adapter.code() != ctx.thread.provider {
@@ -3191,16 +3212,20 @@ fn append_provider_stderr(stderr: &mut String, truncated: &mut bool, text: &str)
 /// scan is installed atomically, so readers see either the prior complete scan
 /// or the new complete scan, never partial results.
 pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo> {
-    let path_value = {
+    let path_override = {
         let mut runtime = runtime.lock().unwrap();
         if runtime.provider_refresh_in_progress {
             return runtime.list_providers();
         }
         runtime.provider_refresh_in_progress = true;
-        runtime.provider_path_value()
+        runtime.provider_path_value_override.clone()
     };
-    let provider_scan = scan_external_providers(path_value);
+    // Resolve the login shell only after releasing the runtime mutex. A shell
+    // profile is user-controlled and may take several seconds to finish.
+    let path_value = path_override.unwrap_or_else(resolve_provider_path_value);
+    let provider_scan = scan_external_providers(Some(path_value.clone()));
     let mut runtime = runtime.lock().unwrap();
+    runtime.provider_resolved_path = Some(path_value);
     runtime.provider_scan = provider_scan;
     runtime.provider_refresh_in_progress = false;
     runtime.list_providers()
@@ -4775,12 +4800,29 @@ fn external_provider_codes() -> [ProviderCode; 5] {
     ]
 }
 
-/// GUI applications do not reliably inherit shell profile PATH updates. Merge the
-/// installer locations here instead of changing the user's global environment.
+/// GUI applications do not reliably inherit shell profile PATH updates. The
+/// process PATH and platform-specific installer locations are merged without
+/// mutating the user's shell configuration or process-wide environment.
 fn merged_provider_path(current: Option<OsString>) -> OsString {
-    let mut paths = current
-        .as_ref()
-        .map_or_else(Vec::new, |value| env::split_paths(value).collect());
+    merge_provider_paths(current.as_ref(), None, provider_fallback_paths())
+}
+
+fn resolve_provider_path_value() -> OsString {
+    let process_path = env::var_os("PATH");
+    #[cfg(target_os = "macos")]
+    let login_shell_path = resolve_macos_login_shell_path();
+    #[cfg(not(target_os = "macos"))]
+    let login_shell_path = None;
+
+    merge_provider_paths(
+        process_path.as_ref(),
+        login_shell_path.as_ref(),
+        provider_fallback_paths(),
+    )
+}
+
+fn provider_fallback_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
     #[cfg(windows)]
     if let Ok(hkcu) =
         winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey("Environment")
@@ -4789,7 +4831,9 @@ fn merged_provider_path(current: Option<OsString>) -> OsString {
             paths.extend(env::split_paths(&value));
         }
     }
+
     if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".pedelec"));
         #[cfg(windows)]
         paths.extend([
             home.join("AppData/Local/Programs/OpenAI/Codex/bin"),
@@ -4799,29 +4843,242 @@ fn merged_provider_path(current: Option<OsString>) -> OsString {
         ]);
         #[cfg(not(windows))]
         paths.extend([home.join(".local/bin"), home.join(".opencode/bin")]);
+        #[cfg(target_os = "macos")]
+        paths.extend([
+            home.join(".volta/bin"),
+            home.join(".asdf/shims"),
+            home.join(".local/share/mise/shims"),
+            home.join("Library/pnpm"),
+            home.join(".bun/bin"),
+        ]);
     }
+    #[cfg(target_os = "macos")]
+    paths.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/local/bin"),
+    ]);
+    paths
+}
+
+fn merge_provider_paths(
+    process_path: Option<&OsString>,
+    login_shell_path: Option<&OsString>,
+    fallback_paths: Vec<PathBuf>,
+) -> OsString {
+    let mut paths = process_path.map_or_else(Vec::new, |value| env::split_paths(value).collect());
+    if let Some(login_shell_path) = login_shell_path {
+        paths.extend(env::split_paths(login_shell_path));
+    }
+    paths.extend(fallback_paths);
+
     let mut normalized = Vec::new();
     for path in paths {
-        if !path.exists() {
+        if !path.is_dir() {
             continue;
         }
-        let duplicate = normalized.iter().any(|existing: &PathBuf| {
-            #[cfg(windows)]
-            {
-                existing
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&path.to_string_lossy())
-            }
-            #[cfg(not(windows))]
-            {
-                existing == &path
-            }
-        });
-        if !duplicate {
-            normalized.push(path);
-        }
+        append_unique_provider_path(&mut normalized, path);
     }
     env::join_paths(normalized).unwrap_or_default()
+}
+
+fn append_unique_provider_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    let duplicate = paths.iter().any(|existing| {
+        #[cfg(windows)]
+        {
+            existing
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&path.to_string_lossy())
+        }
+        #[cfg(not(windows))]
+        {
+            existing == &path
+        }
+    });
+    if !duplicate {
+        paths.push(path);
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+const MACOS_PATH_MARKER_COMMAND: &str =
+    "printf '__PEDELEC_PATH_START__%s__PEDELEC_PATH_END__\\n' \"$PATH\"";
+#[cfg(any(target_os = "macos", test))]
+const MACOS_PATH_MARKER_START: &str = "__PEDELEC_PATH_START__";
+#[cfg(any(target_os = "macos", test))]
+const MACOS_PATH_MARKER_END: &str = "__PEDELEC_PATH_END__";
+#[cfg(target_os = "macos")]
+const MACOS_LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_shell_probe_arguments(shell_path: &Path) -> Vec<Vec<&'static str>> {
+    match shell_path.file_name().and_then(OsStr::to_str) {
+        Some("zsh") => vec![vec!["-l", "-i", "-c", MACOS_PATH_MARKER_COMMAND]],
+        Some("bash") => vec![
+            vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND],
+            vec!["-i", "-c", MACOS_PATH_MARKER_COMMAND],
+        ],
+        _ => vec![vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND]],
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_login_shell_path() -> Option<OsString> {
+    let shell_path = env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && is_provider_executable(path))
+        .or_else(|| {
+            [PathBuf::from("/bin/zsh"), PathBuf::from("/bin/bash")]
+                .into_iter()
+                .find(|path| is_provider_executable(path))
+        })?;
+
+    resolve_macos_shell_path_with_strategies(
+        &shell_path,
+        Instant::now() + MACOS_LOGIN_SHELL_TIMEOUT,
+    )
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn resolve_macos_shell_path_with_strategies(
+    shell_path: &Path,
+    deadline: Instant,
+) -> Option<OsString> {
+    let mut paths = Vec::new();
+    for args in macos_shell_probe_arguments(shell_path) {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if let Some(path) = probe_shell_path(shell_path, &args, deadline) {
+            paths.push(path);
+        }
+    }
+    merge_shell_probe_paths(&paths)
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn probe_shell_path(shell_path: &Path, args: &[&str], deadline: Instant) -> Option<OsString> {
+    if Instant::now() >= deadline {
+        log_macos_login_shell_failure(shell_path, "timeout");
+        return None;
+    }
+
+    let mut command = Command::new(shell_path);
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        log_macos_login_shell_failure(shell_path, "spawn");
+        return None;
+    };
+
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        log_macos_login_shell_failure(shell_path, "stdout");
+        return None;
+    };
+    let (output_sender, output_receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let result = stdout
+            .take(u64::MAX)
+            .read_to_end(&mut output)
+            .map(|_| output);
+        let _ = output_sender.send(result);
+    });
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    log_macos_login_shell_failure(shell_path, "timeout");
+                    break None;
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(10)));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                log_macos_login_shell_failure(shell_path, "wait");
+                break None;
+            }
+        }
+    }?;
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let output = match output_receiver.recv_timeout(remaining) {
+        Ok(Ok(output)) => output,
+        Ok(Err(_)) => {
+            log_macos_login_shell_failure(shell_path, "read");
+            return None;
+        }
+        Err(_) => {
+            log_macos_login_shell_failure(shell_path, "read-timeout");
+            return None;
+        }
+    };
+    if !status.success() {
+        log_macos_login_shell_failure(shell_path, "exit");
+        return None;
+    }
+    let path = parse_login_shell_path_output(&output);
+    if path.is_none() {
+        log_macos_login_shell_failure(shell_path, "parse");
+    }
+    path
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn merge_shell_probe_paths(paths: &[OsString]) -> Option<OsString> {
+    let mut merged = Vec::new();
+    for value in paths {
+        for path in env::split_paths(value) {
+            if !path.as_os_str().is_empty() {
+                append_unique_provider_path(&mut merged, path);
+            }
+        }
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        env::join_paths(merged).ok()
+    }
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn log_macos_login_shell_failure(shell_path: &Path, category: &str) {
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "macOS login shell PATH lookup failed: shell={} failure={}",
+        shell_path.display(),
+        category
+    );
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_login_shell_path_output(output: &[u8]) -> Option<OsString> {
+    let start = output
+        .windows(MACOS_PATH_MARKER_START.len())
+        .position(|window| window == MACOS_PATH_MARKER_START.as_bytes())?
+        + MACOS_PATH_MARKER_START.len();
+    let end = output[start..]
+        .windows(MACOS_PATH_MARKER_END.len())
+        .position(|window| window == MACOS_PATH_MARKER_END.as_bytes())?
+        + start;
+    let path = std::str::from_utf8(&output[start..end]).ok()?.trim();
+    if path.is_empty()
+        || !env::split_paths(OsString::from(path).as_os_str())
+            .any(|entry| !entry.as_os_str().is_empty())
+    {
+        return None;
+    }
+    Some(OsString::from(path))
 }
 
 fn scan_external_providers(path_value: Option<OsString>) -> HashMap<ProviderCode, ProviderCli> {
@@ -4848,7 +5105,9 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
     let recognized = candidates
         .into_iter()
         .filter(|path| is_provider_executable(path))
-        .filter_map(|path| provider_cli_version(&path).map(|version| (path, version)))
+        .filter_map(|path| {
+            provider_cli_version(&path, Some(path_value)).map(|version| (path, version))
+        })
         .max_by(|(left_path, left), (right_path, right)| {
             left.cmp(right).then_with(|| left_path.cmp(right_path))
         });
@@ -4884,8 +5143,10 @@ fn is_provider_executable(path: &Path) -> bool {
     }
 }
 
-fn provider_cli_version(path: &Path) -> Option<ProviderVersion> {
-    let output = provider_version_command(path).arg("--version").output();
+fn provider_cli_version(path: &Path, path_value: Option<&OsString>) -> Option<ProviderVersion> {
+    let output = provider_version_command(path, path_value)
+        .arg("--version")
+        .output();
     #[cfg(test)]
     let output = output.ok().or_else(|| {
         Some(std::process::Output {
@@ -4915,7 +5176,7 @@ fn provider_cli_version(path: &Path) -> Option<ProviderVersion> {
     }
 }
 
-fn provider_version_command(path: &Path) -> Command {
+fn provider_version_command(path: &Path, path_value: Option<&OsString>) -> Command {
     #[cfg(windows)]
     {
         let is_script_wrapper = path
@@ -4931,13 +5192,20 @@ fn provider_version_command(path: &Path) -> Command {
         } else {
             Command::new(path)
         };
+        if let Some(path_value) = path_value {
+            command.env("PATH", path_value);
+        }
         command.creation_flags(CREATE_NO_WINDOW);
         command
     }
 
     #[cfg(not(windows))]
     {
-        Command::new(path)
+        let mut command = Command::new(path);
+        if let Some(path_value) = path_value {
+            command.env("PATH", path_value);
+        }
+        command
     }
 }
 
@@ -5081,7 +5349,7 @@ fn normalize_update_settings(
         ));
     }
 
-    let default_models = input
+    let default_models: HashMap<ProviderCode, String> = input
         .default_models
         .into_iter()
         .filter_map(|(provider, model)| {
@@ -5094,10 +5362,29 @@ fn normalize_update_settings(
         })
         .collect();
 
+    let provider_settings = normalize_provider_settings(
+        input.provider_settings,
+        if input.default_provider == ProviderCode::Ollama {
+            OllamaValidationMode::Required
+        } else {
+            OllamaValidationMode::Optional
+        },
+    )?;
+
+    if input.default_provider == ProviderCode::Ollama
+        && !default_models.contains_key(&ProviderCode::Ollama)
+    {
+        return Err(PedelecError::with_details(
+            error_codes::MODEL_REQUIRED,
+            "Ollama provider requires a model.",
+            serde_json::json!({ "provider": "ollama" }),
+        ));
+    }
+
     Ok(PedelecSettings {
         default_provider: Some(input.default_provider),
         default_models,
-        provider_settings: normalize_provider_settings(input.provider_settings)?,
+        provider_settings,
     })
 }
 
@@ -5110,23 +5397,34 @@ fn normalize_update_settings_for_test(
     normalize_update_settings(input, &scan)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OllamaValidationMode {
+    Required,
+    Optional,
+}
+
 fn normalize_provider_settings(
     settings: ProviderSettingsInput,
+    ollama_validation: OllamaValidationMode,
 ) -> Result<ProviderSettings, PedelecError> {
     Ok(ProviderSettings {
-        ollama: normalize_ollama_provider_settings(settings.ollama)?,
+        ollama: normalize_ollama_provider_settings(settings.ollama, ollama_validation)?,
     })
 }
 
 fn normalize_ollama_provider_settings(
     settings: OllamaProviderSettingsInput,
+    validation: OllamaValidationMode,
 ) -> Result<OllamaProviderSettings, PedelecError> {
     Ok(OllamaProviderSettings {
         base_url: normalize_ollama_base_url(settings.base_url)?,
         timeout_ms: validate_ollama_timeout(
             settings.timeout_ms.unwrap_or(DEFAULT_OLLAMA_TIMEOUT_MS),
         )?,
-        api_key: require_ollama_api_key(settings.api_key)?,
+        api_key: match validation {
+            OllamaValidationMode::Required => require_ollama_api_key(settings.api_key)?,
+            OllamaValidationMode::Optional => normalize_optional_secret(settings.api_key),
+        },
         tavily_api_key: normalize_optional_secret(settings.tavily_api_key),
     })
 }
@@ -5509,18 +5807,26 @@ fn build_provider_env(
     if let Some(model) = &ctx.thread.model {
         env.push(("PEDELEC_MODEL".to_string(), model.clone()));
     }
+    let provider_path = provider_process_path(ctx.provider_resolved_path.as_ref())?;
     env.push((
         "PATH".to_string(),
-        pedelec_shared::paths::path_value_with_default_pedelec_dir()
-            .map_err(|err| PedelecError {
-                code: err.code,
-                message: err.message,
-                details: err.details,
-            })?
-            .to_string_lossy()
-            .to_string(),
+        provider_path.to_string_lossy().to_string(),
     ));
     Ok(env)
+}
+
+fn provider_process_path(resolved_path: Option<&OsString>) -> Result<OsString, PedelecError> {
+    let pedelec_dir = pedelec_shared::paths::pedelec_home_dir().map_err(|err| PedelecError {
+        code: err.code,
+        message: err.message,
+        details: err.details,
+    })?;
+    let mut paths =
+        resolved_path.map_or_else(Vec::new, |path| env::split_paths(path).collect::<Vec<_>>());
+    paths.retain(|path| path != &pedelec_dir);
+    paths.insert(0, pedelec_dir);
+    env::join_paths(paths)
+        .map_err(|err| PedelecError::new(error_codes::IPC_UNAVAILABLE, err.to_string()))
 }
 
 fn build_provider_run_prompt(
