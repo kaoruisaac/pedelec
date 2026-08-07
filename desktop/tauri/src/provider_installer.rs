@@ -359,9 +359,17 @@ if ($installed) {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn shell_plan(provider: &ProviderCode) -> InstallerPlan {
     let script = match provider {
-        ProviderCode::Codex => format!(r#"if curl -fsSL https://chatgpt.com/codex/install.sh | sh; then
-  codex_command="${{CODEX_INSTALL_DIR:-$HOME/.local/bin}}/codex"
-  if [ -x "$codex_command" ]; then
+        ProviderCode::Codex => format!(r#"if curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh; then
+  codex_command=""
+  if [ -n "${{CODEX_INSTALL_DIR:-}}" ] && [ -x "$CODEX_INSTALL_DIR/codex" ]; then
+    codex_command="$CODEX_INSTALL_DIR/codex"
+  elif [ -x "$HOME/.local/bin/codex" ]; then
+    codex_command="$HOME/.local/bin/codex"
+  else
+    codex_command="$(command -v codex 2>/dev/null || true)"
+  fi
+
+  if [ -n "$codex_command" ] && [ -x "$codex_command" ]; then
     printf '%s\n' 'Starting Codex sign-in...'
     if "$codex_command" login; then
       printf '%s\n' 'Codex sign-in completed.'
@@ -551,13 +559,55 @@ mod tests {
         let codex = installer_plan(&ProviderCode::Codex).unwrap();
         assert_eq!(codex.method, "codex-shell");
         let codex_script = codex.args.last().unwrap();
-        assert!(codex_script.contains("https://chatgpt.com/codex/install.sh | sh"));
-        assert!(codex_script.contains("${CODEX_INSTALL_DIR:-$HOME/.local/bin}/codex"));
+        assert!(codex_script
+            .contains("https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"));
+        assert!(!codex_script
+            .contains("CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh"));
+        assert!(codex_script.contains("[ -n \"${CODEX_INSTALL_DIR:-}\" ]"));
+        assert!(codex_script.contains("[ -x \"$CODEX_INSTALL_DIR/codex\" ]"));
+        assert!(codex_script.contains("[ -x \"$HOME/.local/bin/codex\" ]"));
+        assert!(codex_script.contains("command -v codex 2>/dev/null"));
+        assert!(codex_script.contains("[ -n \"$codex_command\" ] && [ -x \"$codex_command\" ]"));
         assert!(codex_script.contains("if \"$codex_command\" login; then"));
         assert!(codex_script.contains("Codex sign-in completed."));
         assert!(codex_script.contains("sign-in was not completed"));
         assert!(codex_script.contains("if curl -fsSL"));
         assert!(codex_script.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+        assert!(!codex_script.contains("https://chatgpt.com/codex/install.sh | sh"));
+        assert!(
+            codex_script
+                .find("if curl -fsSL https://chatgpt.com/codex/install.sh")
+                .unwrap()
+                < codex_script
+                    .find("if \"$codex_command\" login; then")
+                    .unwrap()
+        );
+        assert!(
+            codex_script.find("CODEX_NON_INTERACTIVE=1 sh").unwrap()
+                < codex_script
+                    .find("if [ -n \"${CODEX_INSTALL_DIR:-}\" ]")
+                    .unwrap()
+        );
+        assert!(
+            codex_script
+                .find("[ -n \"${CODEX_INSTALL_DIR:-}\" ]")
+                .unwrap()
+                < codex_script
+                    .find("[ -x \"$HOME/.local/bin/codex\" ]")
+                    .unwrap()
+        );
+        assert!(
+            codex_script
+                .find("[ -x \"$HOME/.local/bin/codex\" ]")
+                .unwrap()
+                < codex_script.find("command -v codex 2>/dev/null").unwrap()
+        );
+        assert!(
+            codex_script.find("command -v codex 2>/dev/null").unwrap()
+                < codex_script
+                    .find("if \"$codex_command\" login; then")
+                    .unwrap()
+        );
 
         let opencode = installer_plan(&ProviderCode::OpenCode).unwrap();
         assert_eq!(opencode.method, "opencode-shell");
