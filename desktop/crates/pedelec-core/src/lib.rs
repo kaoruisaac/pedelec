@@ -929,7 +929,6 @@ impl ProviderAdapter for CodexProviderAdapter {
 struct AntigravityProviderAdapter {
     stdout_buffer: String,
     stderr_buffer: String,
-    received_agent_delta: bool,
 }
 
 impl ProviderAdapter for AntigravityProviderAdapter {
@@ -1010,19 +1009,11 @@ impl ProviderAdapter for AntigravityProviderAdapter {
     }
 
     fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_antigravity_provider_chunk(
-            &mut self.stdout_buffer,
-            chunk,
-            &mut self.received_agent_delta,
-        )
+        parse_antigravity_provider_chunk(&mut self.stdout_buffer, chunk)
     }
 
     fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_antigravity_provider_chunk(
-            &mut self.stderr_buffer,
-            chunk,
-            &mut self.received_agent_delta,
-        )
+        parse_antigravity_provider_chunk(&mut self.stderr_buffer, chunk)
     }
 }
 
@@ -5955,11 +5946,7 @@ fn parse_provider_chunk(
     events
 }
 
-fn parse_antigravity_provider_chunk(
-    buffer: &mut String,
-    chunk: &str,
-    received_agent_delta: &mut bool,
-) -> Vec<ThreadEventPartial> {
+fn parse_antigravity_provider_chunk(buffer: &mut String, chunk: &str) -> Vec<ThreadEventPartial> {
     buffer.push_str(chunk);
     let mut events = Vec::new();
     while let Some(newline_index) = buffer.find('\n') {
@@ -5968,7 +5955,7 @@ fn parse_antigravity_provider_chunk(
             line.pop();
         }
         buffer.drain(..=newline_index);
-        events.extend(parse_antigravity_provider_line(&line, received_agent_delta));
+        events.extend(parse_antigravity_provider_line(&line));
     }
     if buffer.len() > 64 * 1024 {
         buffer.clear();
@@ -5982,10 +5969,7 @@ fn parse_antigravity_provider_chunk(
     events
 }
 
-fn parse_antigravity_provider_line(
-    line: &str,
-    received_agent_delta: &mut bool,
-) -> Vec<ThreadEventPartial> {
+fn parse_antigravity_provider_line(line: &str) -> Vec<ThreadEventPartial> {
     if line.trim().is_empty() {
         return Vec::new();
     }
@@ -5999,39 +5983,19 @@ fn parse_antigravity_provider_line(
         return Vec::new();
     };
     match object.get("event").and_then(Value::as_str) {
-        Some("init") => {
-            *received_agent_delta = false;
-            object
-                .get("conversation_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(
-                    |provider_session_id| ThreadEventPartial::ProviderSessionIdUpdated {
-                        provider_session_id: provider_session_id.to_string(),
-                    },
-                )
-                .into_iter()
-                .collect()
-        }
-        Some("step_update") => {
-            let Some(step_update) = object.get("step_update").and_then(Value::as_object) else {
-                return Vec::new();
-            };
-            if step_update.get("step_type").and_then(Value::as_str) != Some("agent_response") {
-                return Vec::new();
-            }
-            let Some(text) = step_update.get("text_delta").and_then(Value::as_str) else {
-                return Vec::new();
-            };
-            if text.is_empty() {
-                return Vec::new();
-            }
-            *received_agent_delta = true;
-            vec![ThreadEventPartial::AssistantMessage {
-                text: text.to_string(),
-            }]
-        }
+        Some("init") => object
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(
+                |provider_session_id| ThreadEventPartial::ProviderSessionIdUpdated {
+                    provider_session_id: provider_session_id.to_string(),
+                },
+            )
+            .into_iter()
+            .collect(),
+        Some("step_update") => Vec::new(),
         Some("result") => {
             let Some(result) = object.get("result").and_then(Value::as_object) else {
                 return Vec::new();
@@ -6041,9 +6005,6 @@ fn parse_antigravity_provider_line(
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if status == "SUCCESS" {
-                if *received_agent_delta {
-                    return Vec::new();
-                }
                 return result
                     .get("response")
                     .and_then(Value::as_str)

@@ -2391,7 +2391,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_assistant_message_parser_accepts_only_agent_response_deltas() {
+    fn antigravity_assistant_step_update_deltas_do_not_emit_assistant_messages() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
@@ -2416,46 +2416,190 @@ mod tests {
         );
 
         let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "hello")
-        ));
-        assert!(events.iter().all(|event| {
-            !matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "ignore user" || text == "ignore missing role")
-        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::AssistantMessage { .. })));
     }
 
     #[test]
-    fn antigravity_assistant_message_parser_preserves_delta_whitespace() {
+    fn antigravity_assistant_uses_clean_final_response_after_corrupted_deltas() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
-            "thread_antigravity_nested_role",
+            "thread_antigravity_final_response",
             ProviderCode::Antigravity,
             None,
             None,
         );
         let event_rx = runtime
             .event_bus
-            .subscribe("thread_antigravity_nested_role");
+            .subscribe("thread_antigravity_final_response");
 
         runtime.emit_provider_stdout(
-            "thread_antigravity_nested_role",
-            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"  nested hello\n"}}"#
-                .to_string() + "\n",
+            "thread_antigravity_final_response",
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"眼前�"}}"#.to_string()
+                + "\n",
         );
         runtime.emit_provider_stdout(
-            "thread_antigravity_nested_role",
-            r#"{"event":"step_update","step_update":{"step_type":"agent_response"}}"#.to_string()
+            "thread_antigravity_final_response",
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"��火光"}}"#.to_string()
+                + "\n",
+        );
+        runtime.emit_provider_stdout(
+            "thread_antigravity_final_response",
+            r#"{"event":"result","result":{"status":"SUCCESS","response":"眼前的火光"}}"#
+                .to_string()
                 + "\n",
         );
 
         let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "  nested hello\n")
-        ));
-        assert!(events.iter().all(|event| {
-            !matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "sibling text")
-        }));
+        let assistant_messages: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadEvent::AssistantMessage { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(assistant_messages, vec!["眼前的火光"]);
+    }
+
+    #[test]
+    fn antigravity_assistant_final_response_preserves_whitespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_antigravity_final_whitespace",
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_antigravity_final_whitespace");
+
+        runtime.emit_provider_stdout(
+            "thread_antigravity_final_whitespace",
+            r#"{"event":"result","result":{"status":"SUCCESS","response":"  nested hello\n"}}"#
+                .to_string()
+                + "\n",
+        );
+
+        let events = collect_available_core_events(&event_rx);
+        let assistant_messages: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadEvent::AssistantMessage { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(assistant_messages, vec!["  nested hello\n"]);
+    }
+
+    #[test]
+    fn antigravity_assistant_success_with_empty_final_response_does_not_emit_assistant_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_antigravity_empty_final",
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_antigravity_empty_final");
+
+        runtime.emit_provider_stdout(
+            "thread_antigravity_empty_final",
+            r#"{"event":"result","result":{"status":"SUCCESS","response":""}}"#.to_string() + "\n",
+        );
+
+        let events = collect_available_core_events(&event_rx);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::AssistantMessage { .. })));
+    }
+
+    #[test]
+    fn antigravity_assistant_unsuccessful_result_still_emits_provider_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_antigravity_failed_result",
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_antigravity_failed_result");
+
+        runtime.emit_provider_stdout(
+            "thread_antigravity_failed_result",
+            r#"{"event":"result","result":{"status":"FAILED","conversation_id":"conv_1","response":"failed"}}"#.to_string()
+                + "\n",
+        );
+
+        let events = collect_available_core_events(&event_rx);
+        let error = events
+            .iter()
+            .find_map(|event| match event {
+                ThreadEvent::Error {
+                    source:
+                        ThreadErrorSource::Provider {
+                            provider: ProviderCode::Antigravity,
+                        },
+                    error,
+                    ..
+                } => Some(error),
+                _ => None,
+            })
+            .expect("Antigravity unsuccessful result should emit a provider error");
+        assert_eq!(error.code, error_codes::PROVIDER_COMMAND_FAILED);
+        assert_eq!(error.details.as_ref().unwrap()["status"], json!("FAILED"));
+        assert_eq!(
+            error.details.as_ref().unwrap()["conversation_id"],
+            json!("conv_1")
+        );
+        assert_eq!(error.details.as_ref().unwrap()["response"], json!("failed"));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::AssistantMessage { .. })));
+    }
+
+    #[test]
+    fn antigravity_assistant_init_updates_provider_session_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_antigravity_init",
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let event_rx = runtime.event_bus.subscribe("thread_antigravity_init");
+
+        runtime.emit_provider_stdout(
+            "thread_antigravity_init",
+            r#"{"event":"init","conversation_id":"conv_123"}"#.to_string() + "\n",
+        );
+
+        assert_eq!(
+            runtime
+                .provider_state("thread_antigravity_init")
+                .unwrap()
+                .provider_session_id
+                .as_deref(),
+            Some("conv_123")
+        );
+        let events = collect_available_core_events(&event_rx);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ThreadEvent::ProviderSessionIdUpdated { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
