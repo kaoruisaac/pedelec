@@ -11,6 +11,13 @@ import {
 } from "./providerInitialization";
 import { canSaveSettings } from "./settingsValidation";
 import { OcTerminal2 } from "solid-icons/oc";
+import {
+  isProviderInstallerSupported,
+  openProviderInstaller as openProviderInstallerCommand,
+  restartPedelec as restartPedelecCommand,
+  type OnboardingInstallerCode,
+  type ProviderInstallerCode,
+} from "./providerInstaller";
 
 const emptySettings: Settings = {
   defaultProvider: null,
@@ -229,7 +236,11 @@ function SettingsPage(props: SettingsPageProps) {
     if (!provider) {
       if (!missingProviderPopupShown()) {
         setMissingProviderPopupShown(true);
-        pop(MissingProviderPopup, { onGoToSettings: props.onNavigateToSettings }, {
+        pop(MissingProviderPopup, {
+          onGoToSettings: props.onNavigateToSettings,
+          onOpenProviderInstaller: openOnboardingProviderInstaller,
+          onRestart: restartPedelecCommand,
+        }, {
           background: true,
           closeOnBackground: false,
         });
@@ -263,8 +274,8 @@ function SettingsPage(props: SettingsPageProps) {
     return draftSettings().defaultModels[provider.code] || "auto";
   }
 
-  function canInstallProvider(provider: Provider): boolean {
-    return provider.scanned && !provider.available && (provider.code === "codex" || provider.code === "antigravity" || provider.code === "opencode" || provider.code === "cursor");
+  function canInstallProvider(provider: Provider): provider is Provider & { code: ProviderInstallerCode } {
+    return provider.scanned && !provider.available && isProviderInstallerSupported(provider.code);
   }
 
   function canOpenProviderTerminal(provider: Provider): boolean {
@@ -286,10 +297,11 @@ function SettingsPage(props: SettingsPageProps) {
   }
 
   async function openProviderInstaller(provider: Provider): Promise<void> {
+    if (!canInstallProvider(provider)) return;
     setError("");
     setLaunchingInstaller(provider.code);
     try {
-      await invoke("open_provider_installer", { input: { provider: provider.code } });
+      await openProviderInstallerCommand(provider.code);
       setInstallerOpenedProviders((current) => new Set(current).add(provider.code));
     } catch (err) {
       setError(formatError(err));
@@ -300,7 +312,11 @@ function SettingsPage(props: SettingsPageProps) {
 
   async function restartPedelec(): Promise<void> {
     setRestarting(true);
-    try { await invoke("restart_app"); } catch (err) { setError(formatError(err)); setRestarting(false); }
+    try { await restartPedelecCommand(); } catch (err) { setError(formatError(err)); setRestarting(false); }
+  }
+
+  function openOnboardingProviderInstaller(provider: OnboardingInstallerCode): Promise<void> {
+    return openProviderInstallerCommand(provider);
   }
 
   return (
