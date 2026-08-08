@@ -4830,6 +4830,7 @@ fn provider_fallback_paths() -> Vec<PathBuf> {
             home.join("AppData/Local/Programs/OpenAI/Codex/bin"),
             home.join("AppData/Local/agy/bin"),
             home.join(".opencode/bin"),
+            home.join(".local/bin"),
             home.join("AppData/Roaming/npm"),
         ]);
         #[cfg(not(windows))]

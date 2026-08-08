@@ -29,6 +29,8 @@ const ANTIGRAVITY_FINISHED: &str =
     "Antigravity installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
 const CURSOR_FINISHED: &str =
     "Cursor installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
+const CLAUDE_FINISHED: &str =
+    "Claude installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const CODEX_FINISHED: &str = "Codex installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.";
 #[cfg(windows)]
@@ -112,6 +114,7 @@ pub(crate) fn installer_plan(provider: &ProviderCode) -> Result<InstallerPlan, P
             | ProviderCode::Antigravity
             | ProviderCode::OpenCode
             | ProviderCode::Cursor
+            | ProviderCode::Claude
     ) {
         return Err(unsupported(provider));
     }
@@ -135,6 +138,7 @@ fn windows_plan(provider: &ProviderCode) -> InstallerPlan {
         ProviderCode::Codex => windows_codex_script(),
         ProviderCode::Antigravity => windows_antigravity_script(),
         ProviderCode::Cursor => windows_cursor_script(),
+        ProviderCode::Claude => windows_claude_script(),
         ProviderCode::OpenCode => format!("$bash=Get-Command bash.exe -ErrorAction SilentlyContinue; $native=$false; if($bash){{$u=& $bash.Source -lc 'uname -s' 2>$null; if($u -match '^(MINGW|MSYS|CYGWIN)'){{$native=$true}}}}; if($native){{Write-Host 'Installing OpenCode with native Windows Bash and curl...'; & $bash.Source -lc 'curl -fsSL https://opencode.ai/install | bash'}} else {{$npm=Get-Command npm.cmd -ErrorAction SilentlyContinue; if(-not $npm){{$npm=Get-Command npm -ErrorAction SilentlyContinue}}; if($npm){{Write-Host 'Installing OpenCode with npm...'; & $npm.Source install -g opencode-ai}} else {{if($bash){{Write-Host 'WSL Bash was found, but it installs the Linux OpenCode binary and cannot be used for this Windows installation.'}}; Write-Host 'OpenCode installation requires Node.js/npm or a native Windows Bash (Git Bash, MSYS2, or Cygwin).'; Write-Host 'Install Node.js or Git Bash, then return to Pedelec and try again.'}}}}; Write-Host ''; Write-Host '{}'", FINISHED),
         _ => unreachable!(),
     };
@@ -152,6 +156,7 @@ fn windows_plan(provider: &ProviderCode) -> InstallerPlan {
             ProviderCode::Codex => "codex-windows-auto",
             ProviderCode::Antigravity => "antigravity-windows-auto",
             ProviderCode::Cursor => "cursor-windows-auto",
+            ProviderCode::Claude => "claude-windows-auto",
             ProviderCode::OpenCode => "opencode-windows-auto",
             _ => unreachable!(),
         }
@@ -210,6 +215,66 @@ if (Test-Path -LiteralPath $cursorInstallDir -PathType Container) {{
 }}
 "#,
         CURSOR_FINISHED
+    )
+}
+
+#[cfg(windows)]
+fn windows_claude_script() -> String {
+    format!(
+        r#"
+$claudeCommand = $null
+$installerFailed = $false
+Write-Host 'Installing Claude Code...'
+try {{
+    $ErrorActionPreference = 'Stop'
+    $global:LASTEXITCODE = 0
+    irm https://claude.ai/install.ps1 | iex
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {{
+        throw "Claude installer exited with code $LASTEXITCODE."
+    }}
+}} catch {{
+    $installerFailed = $true
+    Write-Host "The Claude Code installer failed: $($_.Exception.Message)"
+}}
+
+if ($installerFailed) {{
+    Write-Host 'Claude installation failed.'
+    Write-Host 'Review the errors above, then try again.'
+}} else {{
+    $claudeCandidate = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+    if (Test-Path -LiteralPath $claudeCandidate -PathType Leaf) {{
+        $claudeCommand = $claudeCandidate
+    }} else {{
+        $claudeLookup = Get-Command claude -ErrorAction SilentlyContinue
+        if ($claudeLookup -and $claudeLookup.CommandType -eq 'Application' -and (Test-Path -LiteralPath $claudeLookup.Source -PathType Leaf)) {{
+            $claudeCommand = $claudeLookup.Source
+        }}
+    }}
+
+    if ($claudeCommand -and (Test-Path -LiteralPath $claudeCommand -PathType Leaf)) {{
+        Write-Host 'Claude Code installation completed.'
+        Write-Host 'Starting Claude sign-in...'
+        try {{
+            & $claudeCommand auth login
+            $loginExitCode = $LASTEXITCODE
+            if ($loginExitCode -eq 0) {{
+                Write-Host 'Claude sign-in completed.'
+            }} else {{
+                Write-Host "Claude is installed, but sign-in was not completed (exit code $loginExitCode)."
+                Write-Host 'You can run claude auth login again later.'
+            }}
+        }} catch {{
+            Write-Host "Claude is installed, but sign-in could not be started: $($_.Exception.Message)"
+            Write-Host 'You can run claude auth login again later.'
+        }}
+        Write-Host '{}'
+    }} else {{
+        Write-Host 'Claude installer ran, but this installer could not locate the Claude executable.'
+        Write-Host 'Open a new Terminal and run claude auth login after checking the installation.'
+    }}
+}}
+"#,
+        CLAUDE_FINISHED
     )
 }
 
@@ -388,6 +453,43 @@ else
 fi
 exec "${{SHELL:-/bin/sh}}" -l"#, CODEX_FINISHED),
         ProviderCode::OpenCode => format!("curl -fsSL https://opencode.ai/install | bash\nprintf '\\n{}\\n'\nexec \"${{SHELL:-/bin/sh}}\" -l", FINISHED),
+        ProviderCode::Claude => format!(r#"claude_install_script="$(mktemp "${{TMPDIR:-/tmp}}/pedelec-claude-install.XXXXXX")"
+claude_install_success=false
+if [ -n "$claude_install_script" ] && curl -fsSL https://claude.ai/install.sh -o "$claude_install_script"; then
+  if bash "$claude_install_script"; then
+    claude_install_success=true
+  fi
+fi
+if [ -n "$claude_install_script" ]; then
+  rm -f "$claude_install_script"
+fi
+
+if [ "$claude_install_success" = true ]; then
+  claude_command=""
+  if [ -x "$HOME/.local/bin/claude" ]; then
+    claude_command="$HOME/.local/bin/claude"
+  else
+    claude_command="$(command -v claude 2>/dev/null || true)"
+  fi
+
+  if [ -n "$claude_command" ] && [ -x "$claude_command" ]; then
+    printf '%s\n' 'Starting Claude sign-in...'
+    if "$claude_command" auth login; then
+      printf '%s\n' 'Claude sign-in completed.'
+    else
+      login_exit_code=$?
+      printf '%s\n' "Claude is installed, but sign-in was not completed (exit code $login_exit_code)."
+      printf '%s\n' 'You can run claude auth login again later.'
+    fi
+  else
+    printf '%s\n' 'Claude installer ran, but this installer could not locate the Claude executable.'
+    printf '%s\n' 'Open a new Terminal and run claude auth login after checking the installation.'
+  fi
+  printf '\n%s\n' '{}'
+else
+  printf '%s\n' 'Claude installation failed. Review the errors above, then try again.'
+fi
+exec "${{SHELL:-/bin/sh}}" -l"#, CLAUDE_FINISHED),
         ProviderCode::Cursor => format!(r#"if curl -fsSL https://cursor.com/install | bash; then
   cursor_command="${{CURSOR_INSTALL_DIR:-$HOME/.local/bin}}/cursor-agent"
   if [ -x "$cursor_command" ]; then
@@ -438,6 +540,7 @@ exec "${{SHELL:-/bin/sh}}" -l"#, ANTIGRAVITY_FINISHED),
             ProviderCode::Antigravity => "antigravity-shell",
             ProviderCode::Cursor => "cursor-shell",
             ProviderCode::OpenCode => "opencode-shell",
+            ProviderCode::Claude => "claude-shell",
             _ => unreachable!(),
         }
         .into(),
@@ -465,7 +568,7 @@ mod tests {
 
     #[test]
     fn rejects_non_installable_providers() {
-        for provider in [ProviderCode::Claude, ProviderCode::Ollama] {
+        for provider in [ProviderCode::Ollama] {
             assert_eq!(
                 installer_plan(&provider).unwrap_err().code,
                 error_codes::PROVIDER_INSTALL_UNSUPPORTED
@@ -551,6 +654,34 @@ mod tests {
         assert!(antigravity_script.contains(ANTIGRAVITY_FINISHED));
         assert!(!antigravity_script.contains("codex login"));
         assert!(!antigravity_script.contains("install -g opencode-ai"));
+
+        let claude = installer_plan(&ProviderCode::Claude).unwrap();
+        assert_eq!(claude.program, "powershell.exe");
+        assert_eq!(claude.method, "claude-windows-auto");
+        assert!(claude.args.contains(&"-NoExit".to_string()));
+        let claude_script = claude.args.last().unwrap();
+        assert!(claude_script.contains("irm https://claude.ai/install.ps1 | iex"));
+        assert!(claude_script.contains("$env:USERPROFILE"));
+        assert!(claude_script.contains(".local\\bin\\claude.exe"));
+        assert!(claude_script.contains("Get-Command claude -ErrorAction SilentlyContinue"));
+        assert!(claude_script.contains("claude auth login"));
+        assert!(claude_script.contains("Claude sign-in completed."));
+        assert!(claude_script.contains("Claude is installed, but sign-in was not completed"));
+        assert!(claude_script.contains("could not locate the Claude executable"));
+        assert!(claude_script.contains("Claude installation failed."));
+        assert!(claude_script.contains("$installerFailed = $false"));
+        assert!(claude_script.contains("$global:LASTEXITCODE = 0"));
+        assert!(claude_script.contains("if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)"));
+        assert!(claude_script
+            .contains("if ($installerFailed) {\n    Write-Host 'Claude installation failed.'"));
+        assert!(claude_script.contains("} else {\n    $claudeCandidate ="));
+        assert!(
+            claude_script
+                .find("irm https://claude.ai/install.ps1 | iex")
+                .unwrap()
+                < claude_script.find("claude auth login").unwrap()
+        );
+        assert!(!claude_script.contains("install -g @anthropic-ai/claude-code"));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -642,5 +773,50 @@ mod tests {
         assert!(antigravity_script.contains("exec \"${SHELL:-/bin/sh}\" -l"));
         assert!(!antigravity_script.contains("codex login"));
         assert!(!antigravity_script.contains("https://opencode.ai/install"));
+
+        let claude = installer_plan(&ProviderCode::Claude).unwrap();
+        assert_eq!(claude.method, "claude-shell");
+        let claude_script = claude.args.last().unwrap();
+        assert!(claude_script.contains(
+            "claude_install_script=\"$(mktemp \"${TMPDIR:-/tmp}/pedelec-claude-install.XXXXXX\")\""
+        ));
+        assert!(claude_script
+            .contains("curl -fsSL https://claude.ai/install.sh -o \"$claude_install_script\""));
+        assert!(claude_script.contains("bash \"$claude_install_script\""));
+        assert!(claude_script.contains("rm -f \"$claude_install_script\""));
+        assert!(!claude_script.contains("if curl -fsSL https://claude.ai/install.sh | bash; then"));
+        assert!(claude_script.contains("$HOME/.local/bin/claude"));
+        assert!(claude_script.contains("command -v claude 2>/dev/null"));
+        assert!(claude_script.contains("if \"$claude_command\" auth login; then"));
+        assert!(claude_script.contains("Claude sign-in completed."));
+        assert!(claude_script.contains("Claude is installed, but sign-in was not completed"));
+        assert!(claude_script.contains("could not locate the Claude executable"));
+        assert!(claude_script.contains("Claude installation failed."));
+        assert!(claude_script.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+        assert!(
+            claude_script
+                .find("if [ \"$claude_install_success\" = true ]; then")
+                .unwrap()
+                < claude_script
+                    .find("if \"$claude_command\" auth login; then")
+                    .unwrap()
+        );
+        assert!(
+            claude_script
+                .find("curl -fsSL https://claude.ai/install.sh -o \"$claude_install_script\"")
+                .unwrap()
+                < claude_script
+                    .find("bash \"$claude_install_script\"")
+                    .unwrap()
+        );
+        assert!(
+            claude_script
+                .find("bash \"$claude_install_script\"")
+                .unwrap()
+                < claude_script
+                    .find("if [ \"$claude_install_success\" = true ]; then")
+                    .unwrap()
+        );
+        assert!(!claude_script.contains("npm install"));
     }
 }

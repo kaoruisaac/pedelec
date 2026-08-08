@@ -1,21 +1,25 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ProviderCode } from "./types";
 
-export type ProviderInstallerCode = Extract<ProviderCode, "codex" | "antigravity" | "opencode" | "cursor">;
+export type ProviderInstallerCode = Extract<
+  ProviderCode,
+  "codex" | "antigravity" | "opencode" | "cursor" | "claude"
+>;
 export type OnboardingInstallerCode = Exclude<ProviderInstallerCode, "opencode">;
 
 export const ONBOARDING_INSTALLER_CODES: readonly OnboardingInstallerCode[] = [
   "codex",
+  "claude",
   "antigravity",
   "cursor",
 ];
 
 export function isProviderInstallerSupported(code: ProviderCode): code is ProviderInstallerCode {
-  return code === "codex" || code === "antigravity" || code === "opencode" || code === "cursor";
+  return code === "codex" || code === "claude" || code === "antigravity" || code === "opencode" || code === "cursor";
 }
 
 export function isOnboardingInstallerSupported(
-  code: "codex" | "claude" | "antigravity" | "cursor",
+  code: ProviderInstallerCode,
 ): code is OnboardingInstallerCode {
   return (ONBOARDING_INSTALLER_CODES as readonly string[]).includes(code);
 }

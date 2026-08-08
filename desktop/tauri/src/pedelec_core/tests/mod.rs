@@ -67,6 +67,14 @@ mod tests {
         assert!(!env::split_paths(&merged).any(|path| path.to_string_lossy().starts_with(r"\\?\")));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_provider_fallback_paths_include_claude_native_bin() {
+        let home = dirs::home_dir().expect("Windows test environment should have a home directory");
+
+        assert!(provider_fallback_paths().contains(&home.join(".local/bin")));
+    }
+
     #[test]
     fn merge_provider_paths_keeps_process_login_and_existing_fallback_directories() {
         let temp = tempfile::tempdir().unwrap();

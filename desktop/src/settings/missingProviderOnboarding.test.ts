@@ -7,21 +7,21 @@ import {
 import { isOnboardingInstallerSupported, type OnboardingInstallerCode } from "./providerInstaller";
 
 describe("missing provider onboarding", () => {
-  it.each(["codex", "antigravity", "cursor"] as const)(
+  it.each(["codex", "claude", "antigravity", "cursor"] as const)(
     "%s is available for one-click installation",
     (provider) => {
       expect(isOnboardingInstallerSupported(provider)).toBe(true);
     },
   );
 
-  it("keeps Claude Code in the list without enabling one-click installation", () => {
+  it("keeps Claude Code in the recommended one-click installation list", () => {
     expect(RECOMMENDED_PROVIDERS.map((provider) => provider.code)).toEqual([
       "codex",
       "claude",
       "antigravity",
       "cursor",
     ]);
-    expect(isOnboardingInstallerSupported("claude")).toBe(false);
+    expect(isOnboardingInstallerSupported("claude")).toBe(true);
   });
 
   it("does not include OpenCode in the onboarding recommendations", () => {
@@ -74,6 +74,40 @@ describe("missing provider onboarding", () => {
       launchingProvider: null,
       restarting: false,
       error: "",
+    });
+  });
+
+  it("transitions Claude to installation progress after a successful launch", async () => {
+    const openProviderInstaller = vi.fn(async (_provider: OnboardingInstallerCode) => undefined);
+    const controller = createMissingProviderOnboardingController({
+      openProviderInstaller,
+      restartPedelec: vi.fn(async () => undefined),
+    });
+
+    await controller.installProvider("claude");
+
+    expect(openProviderInstaller).toHaveBeenCalledWith("claude");
+    expect(controller.getState()).toMatchObject({
+      phase: "installation-progress",
+      launchingProvider: null,
+      error: "",
+    });
+  });
+
+  it("keeps Claude in selection when its Terminal cannot be opened", async () => {
+    const openProviderInstaller = vi.fn(async (_provider: OnboardingInstallerCode) => undefined);
+    openProviderInstaller.mockRejectedValueOnce(new Error("Terminal could not be opened"));
+    const controller = createMissingProviderOnboardingController({
+      openProviderInstaller,
+      restartPedelec: vi.fn(async () => undefined),
+    });
+
+    await controller.installProvider("claude");
+
+    expect(controller.getState()).toMatchObject({
+      phase: "selection",
+      launchingProvider: null,
+      error: "Terminal could not be opened",
     });
   });
 

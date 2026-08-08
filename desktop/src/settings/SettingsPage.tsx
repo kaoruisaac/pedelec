@@ -409,6 +409,8 @@ function SettingsPage(props: SettingsPageProps) {
                         <span>
                           {provider.code === "codex"
                             ? "Installation opened in Terminal. Complete the installation and sign-in flow, then restart Pedelec."
+                            : provider.code === "claude"
+                              ? "Installation opened in Terminal. Complete the installation and Claude sign-in flow, then restart Pedelec."
                             : provider.code === "antigravity"
                               ? "Installation opened in Terminal. Complete the Antigravity sign-in and onboarding flow, then restart Pedelec."
                               : provider.code === "cursor"
