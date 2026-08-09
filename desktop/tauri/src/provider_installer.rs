@@ -319,38 +319,32 @@ if (Test-Path -LiteralPath $agyCommand -PathType Leaf) {{
 #[cfg(windows)]
 fn windows_codex_script() -> String {
     r#"
-$pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
-if (-not $pwsh) {
-    $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+$windowsPowerShell = Join-Path $PSHOME 'powershell.exe'
+if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 }
 
 $installed = $false
 $codexCommand = $null
-if ($pwsh) {
-    Write-Host 'Installing Codex with PowerShell 7...'
-    try {
-        & $pwsh.Source -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "`$ErrorActionPreference = 'Stop'; irm https://chatgpt.com/codex/install.ps1 | iex"
-        $installerExitCode = $LASTEXITCODE
-        if ($installerExitCode -eq 0) {
-            $installed = $true
-            $codexInstallDir = $env:CODEX_INSTALL_DIR
-            if ([string]::IsNullOrWhiteSpace($codexInstallDir)) {
-                $codexInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin'
-            }
-            $codexCandidate = Join-Path $codexInstallDir 'codex.exe'
-            if (Test-Path -LiteralPath $codexCandidate -PathType Leaf) {
-                $codexCommand = $codexCandidate
-            }
-        } else {
-            Write-Host "The Codex PowerShell installer exited with code $installerExitCode."
+Write-Host 'Installing Codex with the standalone installer...'
+try {
+    & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "`$ErrorActionPreference = 'Stop'; `$env:CODEX_NON_INTERACTIVE = '1'; irm https://chatgpt.com/codex/install.ps1 | iex"
+    $installerExitCode = $LASTEXITCODE
+    if ($installerExitCode -eq 0) {
+        $installed = $true
+        $codexInstallDir = $env:CODEX_INSTALL_DIR
+        if ([string]::IsNullOrWhiteSpace($codexInstallDir)) {
+            $codexInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin'
         }
-    } catch {
-        Write-Host "The Codex PowerShell installer could not be started: $($_.Exception.Message)"
+        $codexCandidate = Join-Path $codexInstallDir 'codex.exe'
+        if (Test-Path -LiteralPath $codexCandidate -PathType Leaf) {
+            $codexCommand = $codexCandidate
+        }
+    } else {
+        Write-Host "The Codex standalone installer exited with code $installerExitCode."
     }
-
-    if (-not $installed) {
-        Write-Host 'The Codex PowerShell installer failed. Trying npm instead...'
-    }
+} catch {
+    Write-Host "The Codex standalone installer could not be started: $($_.Exception.Message)"
 }
 
 if (-not $installed) {
@@ -360,6 +354,7 @@ if (-not $installed) {
     }
 
     if ($npm) {
+        Write-Host 'The Codex standalone installer failed. Trying npm instead...'
         Write-Host 'Installing Codex with npm...'
         try {
             & $npm.Source install -g @openai/codex
@@ -389,10 +384,9 @@ if (-not $installed) {
         } catch {
             Write-Host "npm could not be started: $($_.Exception.Message)"
         }
-    } elseif (-not $pwsh) {
-        Write-Host 'Codex could not be installed automatically.'
-        Write-Host 'PowerShell 7 and Node.js/npm were not found.'
-        Write-Host 'Install PowerShell 7 or Node.js, then return to Pedelec and try again.'
+    } else {
+        Write-Host 'The Codex standalone installer failed, and npm was not found.'
+        Write-Host 'Review the installer error above or install Codex manually, then try again.'
     }
 }
 
@@ -413,9 +407,14 @@ if ($installed) {
         Write-Host 'Open a new Terminal and run codex login.'
     }
     Write-Host 'Codex installation and sign-in flow has finished. Return to Pedelec and click Restart Pedelec when ready.'
-} elseif ($pwsh -or $npm) {
+} else {
     Write-Host 'Codex installation failed.'
-    Write-Host 'Review the errors above, then install PowerShell 7 or Node.js/npm and try again.'
+    if (-not $npm) {
+        Write-Host 'The standalone installer failed, and npm was not found on this system.'
+        Write-Host 'Review the errors above or install Codex manually, then try again.'
+    } else {
+        Write-Host 'Review the installer errors above, then try again.'
+    }
 }
 "#
     .to_string()
@@ -585,11 +584,14 @@ mod tests {
         assert_eq!(CREATE_NEW_CONSOLE, 0x0000_0010);
         assert!(codex.args.contains(&"-NoExit".to_string()));
         let codex_script = codex.args.last().unwrap();
-        assert!(codex_script.contains("Get-Command pwsh.exe"));
-        assert!(codex_script.contains("Get-Command pwsh -ErrorAction SilentlyContinue"));
+        assert!(!codex_script.contains("Get-Command pwsh.exe"));
+        assert!(!codex_script.contains("Get-Command pwsh -ErrorAction SilentlyContinue"));
+        assert!(!codex_script.contains("PowerShell 7"));
+        assert!(codex_script.contains("Join-Path $PSHOME 'powershell.exe'"));
         assert!(codex_script
-            .contains("& $pwsh.Source -NoLogo -NoProfile -ExecutionPolicy Bypass -Command"));
+            .contains("& $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command"));
         assert!(codex_script.contains("chatgpt.com/codex/install.ps1 | iex"));
+        assert!(codex_script.contains("CODEX_NON_INTERACTIVE"));
         assert!(codex_script.contains("$codexCommand = $null"));
         assert!(codex_script.contains("Programs\\OpenAI\\Codex\\bin"));
         assert!(codex_script.contains("codex.exe"));
@@ -603,12 +605,19 @@ mod tests {
         assert!(codex_script.contains("sign-in was not completed"));
         assert!(codex_script.contains("could not locate its executable to start sign-in"));
         assert!(
-            codex_script.contains("The Codex PowerShell installer failed. Trying npm instead...")
+            codex_script.contains("The Codex standalone installer failed. Trying npm instead...")
         );
-        assert!(codex_script.contains("PowerShell 7 and Node.js/npm were not found."));
+        assert!(!codex_script.contains("PowerShell 7 and Node.js/npm were not found."));
         assert!(codex_script.contains("Codex installation failed."));
         assert!(codex_script
             .contains("if ($installed) {\n    Write-Host 'Codex installation command completed.'"));
+        assert!(codex_script.contains("if (-not $installed) {\n    $npm = Get-Command npm.cmd"));
+        assert!(
+            codex_script.find("chatgpt.com/codex/install.ps1").unwrap()
+                < codex_script
+                    .find("& $npm.Source install -g @openai/codex")
+                    .unwrap()
+        );
         assert!(
             codex_script.find("if ($installed) {").unwrap()
                 < codex_script.find("& $codexCommand login").unwrap()
