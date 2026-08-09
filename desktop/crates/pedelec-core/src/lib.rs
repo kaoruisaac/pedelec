@@ -28,6 +28,8 @@ const DEFAULT_MAX_SKILL_SIZE_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_OLLAMA_TIMEOUT_MS: u64 = 120_000;
 const OLLAMA_CONNECTION_CHECK_TIMEOUT_MS: u64 = 3_000;
+const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
+const OPENCODE_PERMISSION_ENV: &str = "OPENCODE_PERMISSION";
 const SANDBOX_SUBDIRS: [&str; 4] = ["skills", "assets", "logs", "tmp"];
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 const THREAD_ID_BASE36_MIN_WIDTH: usize = 6;
@@ -2593,6 +2595,7 @@ impl CoreRuntime {
             }
         }?;
         let mut command = command;
+        apply_provider_native_skills_policy(&ctx.thread.provider, &mut command);
         self.apply_scanned_provider_program(&ctx.thread.provider, &mut command)?;
         Ok(command)
     }
@@ -5771,6 +5774,86 @@ fn required_ollama_model(thread: &ThreadState) -> Result<String, PedelecError> {
                 serde_json::json!({ "provider": "ollama" }),
             )
         })
+}
+
+/// Restrict provider-native skill discovery without changing the provider's
+/// sandbox, native tools, or the Pedelec App tool registry.
+fn apply_provider_native_skills_policy(provider: &ProviderCode, command: &mut CommandSpec) {
+    match provider {
+        ProviderCode::Codex => {
+            if !command
+                .args
+                .windows(2)
+                .any(|args| args[0] == "-c" && args[1] == CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG)
+            {
+                let insertion_index = command
+                    .args
+                    .iter()
+                    .position(|arg| arg == "exec")
+                    .map_or(0, |index| index + 1);
+                command.args.splice(
+                    insertion_index..insertion_index,
+                    [
+                        "-c".to_string(),
+                        CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG.to_string(),
+                    ],
+                );
+            }
+        }
+        ProviderCode::Antigravity | ProviderCode::Claude => {
+            if !command
+                .args
+                .iter()
+                .any(|arg| arg == "--disable-slash-commands")
+            {
+                command.args.push("--disable-slash-commands".to_string());
+            }
+        }
+        ProviderCode::OpenCode => {
+            let existing_permission = command
+                .env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == OPENCODE_PERMISSION_ENV)
+                .map(|(_, value)| value.clone())
+                .or_else(|| env::var(OPENCODE_PERMISSION_ENV).ok());
+
+            // An invalid or non-object parent value is left untouched. This
+            // avoids replacing a user's permission configuration with a
+            // potentially broader or otherwise incompatible one.
+            if let Some(permission) =
+                build_opencode_permission_overlay(existing_permission.as_deref())
+            {
+                set_command_env(command, OPENCODE_PERMISSION_ENV, permission);
+            }
+        }
+        ProviderCode::Cursor | ProviderCode::Ollama => {}
+    }
+}
+
+fn build_opencode_permission_overlay(existing: Option<&str>) -> Option<String> {
+    let mut permissions = match existing {
+        Some(existing) => match serde_json::from_str::<Value>(existing).ok()? {
+            Value::Object(permissions) => permissions,
+            _ => return None,
+        },
+        None => serde_json::Map::new(),
+    };
+
+    permissions.insert("skill".to_string(), Value::String("deny".to_string()));
+    serde_json::to_string(&Value::Object(permissions)).ok()
+}
+
+fn set_command_env(command: &mut CommandSpec, key: &str, value: String) {
+    if let Some((_, existing_value)) = command
+        .env
+        .iter_mut()
+        .find(|(candidate, _)| candidate == key)
+    {
+        *existing_value = value;
+    } else {
+        command.env.push((key.to_string(), value));
+    }
 }
 
 fn build_provider_env(

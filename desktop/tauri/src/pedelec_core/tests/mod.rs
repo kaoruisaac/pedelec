@@ -277,6 +277,8 @@ mod tests {
             start.command.args,
             vec![
                 "exec",
+                "-c",
+                "skills.include_instructions=false",
                 "--cd",
                 sandbox_path.to_str().unwrap(),
                 "--sandbox",
@@ -379,6 +381,8 @@ mod tests {
             start.command.args,
             vec![
                 "exec",
+                "-c",
+                "skills.include_instructions=false",
                 "--cd",
                 temp.path()
                     .join("sandbox")
@@ -444,6 +448,11 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(start
+            .command
+            .args
+            .iter()
+            .any(|arg| arg == "--disable-slash-commands"));
         assert!(!start.command.args.iter().any(|arg| arg == "--conversation"));
         assert!(!start
             .command
@@ -489,6 +498,11 @@ mod tests {
             .args
             .windows(2)
             .any(|args| args[0] == "-p" && args[1] == "continue"));
+        assert!(start
+            .command
+            .args
+            .iter()
+            .any(|arg| arg == "--disable-slash-commands"));
         assert!(!start
             .command
             .args
@@ -615,6 +629,7 @@ mod tests {
             .iter()
             .any(|arg| arg == &start.command.stdin));
         assert_env(&start.command, "PEDELEC_PROVIDER", "opencode");
+        assert_opencode_native_skills_policy(&start.command);
     }
 
     #[test]
@@ -649,6 +664,29 @@ mod tests {
         assert_eq!(start.command.prompt, "continue");
         assert_eq!(start.command.stdin, "continue");
         assert_provider_instruction_absent(&start.command);
+        assert_opencode_native_skills_policy(&start.command);
+    }
+
+    #[test]
+    fn opencode_permission_overlay_only_denies_skill_and_preserves_existing_permissions() {
+        let merged = build_opencode_permission_overlay(Some(
+            r#"{"read":"allow","edit":"allow","bash":"ask","skill":{"*":"allow"}}"#,
+        ))
+        .unwrap();
+        let merged: Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(merged.get("read").and_then(Value::as_str), Some("allow"));
+        assert_eq!(merged.get("edit").and_then(Value::as_str), Some("allow"));
+        assert_eq!(merged.get("bash").and_then(Value::as_str), Some("ask"));
+        assert_eq!(merged.get("skill").and_then(Value::as_str), Some("deny"));
+        assert_ne!(merged.get("read").and_then(Value::as_str), Some("deny"));
+        assert_ne!(merged.get("edit").and_then(Value::as_str), Some("deny"));
+
+        let defaults: Value =
+            serde_json::from_str(&build_opencode_permission_overlay(None).unwrap()).unwrap();
+        assert_eq!(defaults.get("skill").and_then(Value::as_str), Some("deny"));
+        assert!(build_opencode_permission_overlay(Some("not-json")).is_none());
+        assert!(build_opencode_permission_overlay(Some(r#"["allow"]"#)).is_none());
     }
 
     #[test]
@@ -910,6 +948,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--model",
                 "sonnet",
+                "--disable-slash-commands",
             ]
         );
         assert_eq!(start.command.cwd, sandbox_path);
@@ -951,6 +990,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--model",
                 "sonnet",
+                "--disable-slash-commands",
             ]
         );
         assert_eq!(start.command.prompt, "continue");
@@ -2663,6 +2703,8 @@ mod tests {
             start.command.args,
             vec![
                 "exec",
+                "-c",
+                "skills.include_instructions=false",
                 "--cd",
                 temp.path()
                     .join("sandbox")
@@ -3944,6 +3986,10 @@ mod tests {
             "Respond to the task in the following [Session Preparation] or [User Message] block."
         ));
         assert!(!command.stdin.contains("\n[User Message]\n"));
+        assert!(command
+            .args
+            .windows(2)
+            .any(|args| args == ["-c", "skills.include_instructions=false"]));
         assert_eq!(
             runtime
                 .thread_manager
@@ -4339,6 +4385,16 @@ mod tests {
 
     fn assert_env(command: &CommandSpec, key: &str, expected: &str) {
         assert_eq!(env_value(command, key), Some(expected), "env {key}");
+    }
+
+    fn assert_opencode_native_skills_policy(command: &CommandSpec) {
+        let existing = env::var(OPENCODE_PERMISSION_ENV).ok();
+        let expected = build_opencode_permission_overlay(existing.as_deref());
+        assert_eq!(
+            env_value(command, OPENCODE_PERMISSION_ENV),
+            expected.as_deref(),
+            "OpenCode permission overlay"
+        );
     }
 
     fn assert_provider_instruction_present(command: &CommandSpec) {
