@@ -14,7 +14,7 @@ use crate::provider_terminal::{
     open as open_provider_terminal_window, OpenProviderTerminalInput, OpenProviderTerminalOutput,
 };
 use pedelec_core::{
-    refresh_shared_providers, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
+    error_codes, refresh_shared_providers, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
     CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, ListOllamaModelsInput,
     OllamaModelOption, PedelecError, PedelecSettings, PrepareThreadInput, PrepareThreadOutput,
     ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput,
@@ -27,6 +27,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::path::BaseDirectory;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, Emitter, Manager, RunEvent, State};
+use tauri_plugin_opener::OpenerExt;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -57,6 +58,7 @@ pub fn run() {
             refresh_providers,
             open_provider_installer,
             open_provider_terminal,
+            open_thread_sandbox,
             restart_app,
             send_text,
             prepare_thread,
@@ -380,6 +382,59 @@ fn open_provider_terminal(
     open_provider_terminal_window(input.provider, executable)
 }
 
+fn validated_thread_sandbox_path(
+    thread_id: &str,
+    sandbox_path: Option<PathBuf>,
+) -> Result<PathBuf, PedelecError> {
+    let sandbox_path = sandbox_path.ok_or_else(|| {
+        PedelecError::with_details(
+            error_codes::THREAD_NOT_FOUND,
+            "thread sandbox could not be resolved because the thread no longer exists",
+            serde_json::json!({ "threadId": thread_id }),
+        )
+    })?;
+
+    if !sandbox_path.is_dir() {
+        return Err(PedelecError::with_details(
+            error_codes::SANDBOX_PATH_INVALID,
+            "thread sandbox path is not a directory or no longer exists",
+            serde_json::json!({
+                "threadId": thread_id,
+                "pathStatus": "missing_or_not_directory",
+            }),
+        ));
+    }
+
+    Ok(sandbox_path)
+}
+
+#[tauri::command]
+fn open_thread_sandbox(
+    app: tauri::AppHandle,
+    state: State<'_, CoreRuntimeOwner>,
+    thread_id: String,
+) -> Result<(), PedelecError> {
+    let sandbox_path = {
+        let runtime = state.runtime();
+        let runtime = runtime.lock().unwrap();
+        validated_thread_sandbox_path(&thread_id, runtime.thread_sandbox_path(&thread_id))?
+    };
+
+    app.opener()
+        .open_path(sandbox_path.to_string_lossy().into_owned(), None::<String>)
+        .map_err(|error| {
+            PedelecError::with_details(
+                error_codes::SANDBOX_OPEN_FAILED,
+                "cannot open thread sandbox",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "pathStatus": "validated_directory",
+                    "error": error.to_string(),
+                }),
+            )
+        })
+}
+
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
     app.request_restart();
@@ -477,4 +532,56 @@ fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRunt
             let _ = app.emit("thread_event", event);
         }
     });
+}
+
+#[cfg(test)]
+mod sandbox_open_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn accepts_an_existing_sandbox_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_path = temp.path().join("t000123");
+        fs::create_dir(&sandbox_path).unwrap();
+
+        assert_eq!(
+            validated_thread_sandbox_path("t000123", Some(sandbox_path.clone())).unwrap(),
+            sandbox_path
+        );
+    }
+
+    #[test]
+    fn reports_missing_thread_as_thread_not_found() {
+        let error = validated_thread_sandbox_path("t000123", None).unwrap_err();
+
+        assert_eq!(error.code, error_codes::THREAD_NOT_FOUND);
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({ "threadId": "t000123" }))
+        );
+    }
+
+    #[test]
+    fn rejects_a_missing_or_non_directory_sandbox_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_path = temp.path().join("missing");
+        let missing_error =
+            validated_thread_sandbox_path("t000123", Some(missing_path.clone())).unwrap_err();
+
+        assert_eq!(missing_error.code, error_codes::SANDBOX_PATH_INVALID);
+        assert_eq!(
+            missing_error.details,
+            Some(serde_json::json!({
+                "threadId": "t000123",
+                "pathStatus": "missing_or_not_directory",
+            }))
+        );
+
+        let file_path = temp.path().join("file");
+        fs::write(&file_path, "not a directory").unwrap();
+        let file_error = validated_thread_sandbox_path("t000123", Some(file_path)).unwrap_err();
+
+        assert_eq!(file_error.code, error_codes::SANDBOX_PATH_INVALID);
+    }
 }

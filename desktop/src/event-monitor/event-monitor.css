@@ -246,6 +246,37 @@
   padding: 14px;
 }
 
+.event-monitor-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.event-monitor-summary-folder-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0;
+  color: #566571;
+  background: transparent;
+  cursor: pointer;
+}
+
+.event-monitor-summary-folder-button:hover {
+  border-color: #b7cbd3;
+  color: #1e5f74;
+  background: #eef7fa;
+}
+
+.event-monitor-summary-folder-button:focus-visible {
+  outline: 2px solid #4d91a8;
+  outline-offset: 2px;
+}
+
 .event-monitor-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

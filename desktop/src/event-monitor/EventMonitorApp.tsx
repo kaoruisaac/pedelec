@@ -1,6 +1,7 @@
 import { createMemo, For, onCleanup, onMount, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
+import { FaRegularFolderOpen } from "solid-icons/fa";
 import {
   commandDetails,
   errorTitle,
@@ -11,6 +12,7 @@ import {
   toolCallDetails,
   toolResultDetails,
 } from "./eventMonitorFormatters";
+import { openThreadSandbox } from "./eventMonitorActions";
 import { createEventMonitorStore } from "./eventMonitorStore";
 import type { MonitorEvent, ThreadViewModel } from "./eventMonitorStore";
 
@@ -25,6 +27,14 @@ export function EventMonitorApp() {
     store.selectedThreadId ? store.threadsById[store.selectedThreadId] : null,
   );
   const hasEvents = createMemo(() => store.totalEventCount > 0);
+
+  async function handleOpenThreadSandbox(threadId: string): Promise<void> {
+    try {
+      await openThreadSandbox(threadId);
+    } catch (error) {
+      setGlobalError(error);
+    }
+  }
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
@@ -137,7 +147,12 @@ export function EventMonitorApp() {
               </Show>
             }
           >
-            {(thread) => <ThreadDetail thread={thread()} />}
+            {(thread) => (
+              <ThreadDetail
+                thread={thread()}
+                onOpenSandbox={handleOpenThreadSandbox}
+              />
+            )}
           </Show>
         </section>
       </section>
@@ -154,13 +169,27 @@ function Metric(props: { label: string; value: unknown; status?: string }) {
   );
 }
 
-function ThreadDetail(props: { thread: ThreadViewModel }) {
+function ThreadDetail(props: {
+  thread: ThreadViewModel;
+  onOpenSandbox: (threadId: string) => Promise<void>;
+}) {
   const thread = () => props.thread;
 
   return (
     <div class="event-monitor-detail">
       <section class="event-monitor-summary">
-        <h2>Thread Summary</h2>
+        <div class="event-monitor-summary-header">
+          <h2>Thread Summary</h2>
+          <button
+            type="button"
+            class="event-monitor-summary-folder-button"
+            title="Open sandbox folder"
+            aria-label="Open sandbox folder"
+            onClick={() => void props.onOpenSandbox(thread().threadId)}
+          >
+            <FaRegularFolderOpen size={16} />
+          </button>
+        </div>
         <div class="event-monitor-summary-grid">
           <SummaryItem label="Thread ID" value={thread().threadId} />
           <SummaryItem label="Status" value={thread().status} status={thread().status} />
