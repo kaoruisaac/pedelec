@@ -30,6 +30,7 @@ pub const DEFAULT_OLLAMA_TIMEOUT_MS: u64 = 120_000;
 const OLLAMA_CONNECTION_CHECK_TIMEOUT_MS: u64 = 3_000;
 const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
 const OPENCODE_PERMISSION_ENV: &str = "OPENCODE_PERMISSION";
+const ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS: usize = 20_000;
 const SANDBOX_SUBDIRS: [&str; 4] = ["skills", "assets", "logs", "tmp"];
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 const THREAD_ID_BASE36_MIN_WIDTH: usize = 6;
@@ -954,6 +955,7 @@ impl ProviderAdapter for AntigravityProviderAdapter {
         message: &str,
     ) -> Result<CommandSpec, PedelecError> {
         let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
+        validate_antigravity_prompt_length(&prompt)?;
         let mut args = vec![
             "-p".to_string(),
             prompt.clone(),
@@ -988,6 +990,7 @@ impl ProviderAdapter for AntigravityProviderAdapter {
         }
 
         let prompt = build_provider_resume_prompt(message);
+        validate_antigravity_prompt_length(&prompt)?;
         let mut args = vec![
             "--conversation".to_string(),
             provider_session_id.to_string(),
@@ -1017,6 +1020,24 @@ impl ProviderAdapter for AntigravityProviderAdapter {
     fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
         parse_antigravity_provider_chunk(&mut self.stderr_buffer, chunk)
     }
+}
+
+fn validate_antigravity_prompt_length(prompt: &str) -> Result<(), PedelecError> {
+    let prompt_length = prompt.encode_utf16().count();
+    if prompt_length <= ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS {
+        return Ok(());
+    }
+
+    Err(PedelecError::with_details(
+        error_codes::PROVIDER_PROMPT_TOO_LARGE,
+        "Antigravity prompt exceeds the 20,000 character limit",
+        serde_json::json!({
+            "provider": "antigravity",
+            "promptLength": prompt_length,
+            "maxPromptLength": ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS,
+            "lengthUnit": "utf16CodeUnits",
+        }),
+    ))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4671,6 +4692,7 @@ pub mod error_codes {
     pub const THREAD_ENDED: &str = "THREAD_ENDED";
     pub const PROVIDER_NOT_FOUND: &str = "PROVIDER_NOT_FOUND";
     pub const PROVIDER_UNSUPPORTED: &str = "PROVIDER_UNSUPPORTED";
+    pub const PROVIDER_PROMPT_TOO_LARGE: &str = "PROVIDER_PROMPT_TOO_LARGE";
     pub const PROVIDER_PROCESS_START_FAILED: &str = "PROVIDER_PROCESS_START_FAILED";
     pub const PROVIDER_PROCESS_STOP_FAILED: &str = "PROVIDER_PROCESS_STOP_FAILED";
     pub const PROVIDER_STDIN_CLOSED: &str = "PROVIDER_STDIN_CLOSED";

@@ -584,6 +584,220 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_run_allows_prompt_at_utf16_boundary_and_counts_emoji_as_two_units() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_prompt_boundary";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let message = antigravity_run_message_with_final_utf16_length(
+            &runtime,
+            thread_id,
+            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS,
+            true,
+        );
+
+        let start = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message,
+            })
+            .unwrap();
+
+        assert_eq!(
+            start.command.prompt.encode_utf16().count(),
+            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS
+        );
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args[0] == "-p" && args[1] == start.command.prompt));
+    }
+
+    #[test]
+    fn antigravity_run_rejects_prompt_over_utf16_limit_and_keeps_thread_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_prompt_too_large";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let message = antigravity_run_message_with_final_utf16_length(
+            &runtime,
+            thread_id,
+            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
+            true,
+        );
+
+        let error = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message,
+            })
+            .unwrap_err();
+
+        assert_antigravity_prompt_too_large_error(
+            error,
+            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
+        );
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+    }
+
+    #[test]
+    fn antigravity_run_checks_final_prompt_instead_of_raw_user_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_final_prompt_limit";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let message = antigravity_run_message_with_final_utf16_length(
+            &runtime,
+            thread_id,
+            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
+            false,
+        );
+        assert!(message.encode_utf16().count() < ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS);
+
+        let error = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message,
+            })
+            .unwrap_err();
+
+        assert_antigravity_prompt_too_large_error(
+            error,
+            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
+        );
+    }
+
+    #[test]
+    fn antigravity_resume_allows_prompt_at_utf16_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_resume_prompt_boundary";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            Some("conversation_boundary".into()),
+            None,
+        );
+        let message = format!(
+            "{}😀",
+            "a".repeat(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS - 2)
+        );
+
+        let start = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message,
+            })
+            .unwrap();
+
+        assert_eq!(
+            start.command.prompt.encode_utf16().count(),
+            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS
+        );
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args[0] == "-p" && args[1] == start.command.prompt));
+    }
+
+    #[test]
+    fn antigravity_resume_rejects_prompt_over_utf16_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_resume_prompt_too_large";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            Some("conversation_too_large".into()),
+            None,
+        );
+        let message = "a".repeat(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1);
+
+        let error = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message,
+            })
+            .unwrap_err();
+
+        assert_antigravity_prompt_too_large_error(
+            error,
+            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
+        );
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+    }
+
+    #[test]
+    fn antigravity_prepare_rejects_an_overlong_final_prompt_before_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_prepare_prompt_too_large";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let oversized_guidance = "g".repeat(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1);
+        runtime.tool_registry.insert(
+            thread_id,
+            ToolRegistry::from_skills_input(Some(&CreateThreadSkillsInput {
+                guidance: oversized_guidance,
+                tools: vec![],
+            }))
+            .unwrap(),
+        );
+
+        let error = runtime
+            .begin_prepare_thread(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap_err();
+
+        assert!(error.code == error_codes::PROVIDER_PROMPT_TOO_LARGE);
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+    }
+
+    #[test]
+    fn codex_large_stdin_prompt_is_not_rejected_by_antigravity_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_codex_large_prompt";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        let message = "c".repeat(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1);
+
+        let start = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message,
+            })
+            .unwrap();
+
+        assert!(
+            start.command.stdin.encode_utf16().count() > ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS
+        );
+        assert_eq!(start.command.prompt, start.command.stdin);
+        assert_eq!(start.command.args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
     fn opencode_new_command_uses_json_dir_model_and_stdin_prompt() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
@@ -4317,6 +4531,46 @@ mod tests {
         assert!(stderr.len() <= MAX_PROVIDER_STDERR_BYTES);
         assert!(stderr.ends_with("最後錯誤"));
         assert!(std::str::from_utf8(stderr.as_bytes()).is_ok());
+    }
+
+    fn antigravity_run_message_with_final_utf16_length(
+        runtime: &CoreRuntime,
+        thread_id: &str,
+        target_length: usize,
+        include_supplementary_character: bool,
+    ) -> String {
+        let thread = runtime.thread_manager.thread(thread_id).unwrap();
+        let registry = runtime.tool_registry.get(thread_id).unwrap();
+        let prompt_prefix = build_provider_run_prompt(thread, registry, "");
+        let prefix_length = prompt_prefix.encode_utf16().count();
+        let message = if include_supplementary_character {
+            assert!(target_length >= prefix_length + 2);
+            format!("{}😀", "a".repeat(target_length - prefix_length - 2))
+        } else {
+            assert!(target_length >= prefix_length);
+            "a".repeat(target_length - prefix_length)
+        };
+        let final_prompt = build_provider_run_prompt(thread, registry, &message);
+        assert_eq!(final_prompt.encode_utf16().count(), target_length);
+        message
+    }
+
+    fn assert_antigravity_prompt_too_large_error(error: PedelecError, prompt_length: usize) {
+        assert_eq!(error.code, error_codes::PROVIDER_PROMPT_TOO_LARGE);
+        assert_eq!(
+            error.message,
+            "Antigravity prompt exceeds the 20,000 character limit"
+        );
+        let details = error
+            .details
+            .expect("prompt length error should include details");
+        assert_eq!(details["provider"], json!("antigravity"));
+        assert_eq!(details["promptLength"], json!(prompt_length));
+        assert_eq!(
+            details["maxPromptLength"],
+            json!(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS)
+        );
+        assert_eq!(details["lengthUnit"], json!("utf16CodeUnits"));
     }
 
     fn runtime_with_provider_thread(
