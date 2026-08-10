@@ -343,6 +343,7 @@ type ChromeRuntime = {
 };
 
 type PendingRequest = {
+  port: RuntimePort;
   resolve: (value: unknown) => void;
   reject: (error: PedelecError) => void;
   timeoutId: ReturnType<typeof setTimeout>;
@@ -488,7 +489,6 @@ export class Pedelec {
   private readonly sessions = new Map<string, PedelecSession<string>>();
   private readonly lastSeqBySession = new Map<string, number>();
   private nextRequestNumber = 1;
-  private disconnectedError: PedelecError | null = null;
   private port: RuntimePort | null = null;
 
   constructor(options: PedelecOptions = {}) {
@@ -497,10 +497,6 @@ export class Pedelec {
     this.bridgeTimeoutMs = Math.max(1, options.bridgeTimeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS);
 
     if (!this.pageWindow) {
-      this.disconnectedError = makeError(
-        "EXTENSION_UNAVAILABLE",
-        "Pedelec SDK must run in a browser page context."
-      );
       return;
     }
 
@@ -546,15 +542,6 @@ export class Pedelec {
   }
 
   async getApprovalStatus(): Promise<ApprovalStatus> {
-    if (this.disconnectedError) {
-      return {
-        installed: false,
-        approved: false,
-        origin: getCurrentOrigin(this.pageWindow),
-        appConnected: false,
-      };
-    }
-
     try {
       const result = await this.request<ApprovalStatus>("get_approval_status");
       return result;
@@ -589,12 +576,11 @@ export class Pedelec {
   }
 
   request<T>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
-    if (this.disconnectedError) {
-      return Promise.reject(this.disconnectedError);
-    }
-
-    if (!this.port) {
-      return Promise.reject(makeError("EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable."));
+    let port: RuntimePort;
+    try {
+      port = this.ensureExtensionPort();
+    } catch (err) {
+      return Promise.reject(normalizeError(err, "EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable."));
     }
 
     const requestId = `sdk_${Date.now()}_${this.nextRequestNumber++}`;
@@ -612,17 +598,22 @@ export class Pedelec {
       }, this.bridgeTimeoutMs);
 
       this.pendingRequests.set(requestId, {
+        port,
         resolve: (value) => resolve(value as T),
         reject,
         timeoutId,
       });
 
       try {
-        this.port?.postMessage(message);
+        port.postMessage(message);
       } catch (err) {
         this.pendingRequests.delete(requestId);
         clearTimeout(timeoutId);
-        reject(normalizeError(err, "EXTENSION_DISCONNECTED", "Pedelec extension disconnected."));
+        const error = normalizeError(err, "EXTENSION_DISCONNECTED", "Pedelec extension disconnected.");
+        if (this.port === port) {
+          this.handleDisconnect(port, error);
+        }
+        reject(error);
       }
     });
   }
@@ -805,7 +796,7 @@ export class Pedelec {
     inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map()
   ): PedelecSession<string> {
     const existing = this.sessions.get(sessionId);
-    if (existing) {
+    if (existing && !existing.isTransportDetached()) {
       existing.replaceInlineToolHandlers(inlineToolHandlers);
       return existing;
     }
@@ -815,24 +806,40 @@ export class Pedelec {
     return session;
   }
 
-  private connectExtension(): void {
+  private ensureExtensionPort(): RuntimePort {
+    if (this.port) return this.port;
+    if (!this.pageWindow) {
+      throw makeError("EXTENSION_UNAVAILABLE", "Pedelec SDK must run in a browser page context.");
+    }
+
     const runtime = (globalThis as { chrome?: ChromeRuntime }).chrome?.runtime;
     if (!runtime?.connect) {
-      this.disconnectedError = makeError("EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable.");
-      return;
+      throw makeError("EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable.");
     }
 
     try {
-      this.port = runtime.connect(PEDELEC_EXTENSION_ID, { name: SDK_EXTERNAL_PORT_NAME });
-      this.port.onMessage.addListener((message) => this.handlePortMessage(message));
-      this.port.onDisconnect.addListener(() => this.handleDisconnect());
+      const port = runtime.connect(PEDELEC_EXTENSION_ID, { name: SDK_EXTERNAL_PORT_NAME });
+      port.onMessage.addListener((message) => this.handlePortMessage(port, message));
+      port.onDisconnect.addListener(() => this.handleDisconnect(port));
+      this.port = port;
+      return port;
     } catch (err) {
-      this.disconnectedError = normalizeError(err, "EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable.");
       this.port = null;
+      throw normalizeError(err, "EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable.");
     }
   }
 
-  private handlePortMessage(raw: unknown): void {
+  private connectExtension(): void {
+    try {
+      this.ensureExtensionPort();
+    } catch (_err) {
+      // The first connection is eager for normal browser startup, but a failed
+      // attempt remains retryable through the next request.
+    }
+  }
+
+  private handlePortMessage(port: RuntimePort, raw: unknown): void {
+    if (port !== this.port) return;
     const message = raw as PortMessage;
     if (!message || typeof message !== "object") return;
     if (message.channelId && message.channelId !== this.channelId) return;
@@ -880,27 +887,35 @@ export class Pedelec {
     return true;
   }
 
-  private handleDisconnect(): void {
+  private handleDisconnect(port: RuntimePort, disconnectError?: PedelecError): void {
+    if (port !== this.port) return;
+
     const runtime = (globalThis as { chrome?: ChromeRuntime }).chrome?.runtime;
     const error = normalizeError(
-      runtime?.lastError,
+      disconnectError ?? runtime?.lastError,
       "EXTENSION_DISCONNECTED",
       "Pedelec extension disconnected."
     );
-    this.disconnectedError = error;
     this.port = null;
 
-    for (const pending of this.pendingRequests.values()) {
+    this.invalidateSessions(error);
+    for (const [requestId, pending] of this.pendingRequests) {
+      if (pending.port !== port) continue;
+      this.pendingRequests.delete(requestId);
       clearTimeout(pending.timeoutId);
       pending.reject(error);
     }
-    this.pendingRequests.clear();
-    this.broadcastError(error);
   }
 
   private broadcastError(error: PedelecError): void {
     for (const session of this.sessions.values()) {
       session.handleEvent({ type: "error", sessionId: session.sessionId, error }, { source: "sdk" });
+    }
+  }
+
+  private invalidateSessions(error: PedelecError): void {
+    for (const session of this.sessions.values()) {
+      session.handleTransportDisconnect(error);
     }
   }
 }
@@ -919,6 +934,7 @@ export class PedelecSession<TToolName extends string = string> {
   private ending = false;
   private prepared = false;
   private activeTurn: ActiveTurn | null = null;
+  private transportDetached = false;
   private genericToolHandler: GenericToolHandler<TToolName> | null = null;
   private inlineToolHandlers = new Map<string, ToolSpecificHandler>();
   private readonly namedToolHandlers = new Map<string, ToolSpecificHandler>();
@@ -941,7 +957,7 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   prepare(): Promise<void> {
-    if (this.status === "ended") {
+    if (this.transportDetached || this.status === "ended") {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
 
@@ -971,7 +987,7 @@ export class PedelecSession<TToolName extends string = string> {
       })
       .catch((err) => {
         const error = normalizeError(err, "PREPARE_FAILED", "prepare failed");
-        this.emitError(error, { source: "sdk" });
+        if (!this.transportDetached) this.emitError(error, { source: "sdk" });
         this.clearPendingPrepare();
         this.finishActiveTurn(turn);
         throw error;
@@ -997,7 +1013,7 @@ export class PedelecSession<TToolName extends string = string> {
       }
     }
 
-    if (this.status === "ended") {
+    if (this.transportDetached || this.status === "ended") {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
 
@@ -1020,7 +1036,7 @@ export class PedelecSession<TToolName extends string = string> {
       })
       .catch((err) => {
         const error = normalizeError(err, "SEND_TEXT_FAILED", "sendText failed");
-        this.emitError(error, { source: "sdk" });
+        if (!this.transportDetached) this.emitError(error, { source: "sdk" });
         this.clearPendingSend();
         this.finishActiveTurn(turn);
         throw error;
@@ -1071,7 +1087,7 @@ export class PedelecSession<TToolName extends string = string> {
   uploadAsset(file: File): Promise<SandboxAssetPath>;
   uploadAsset(file: File, targetPath: SandboxAssetPath): Promise<SandboxAssetPath>;
   uploadAsset(file: File, targetPath?: SandboxAssetPath): Promise<SandboxAssetPath> {
-    if (this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    if (this.transportDetached || this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     if (this.uploadPromise) {
       return Promise.reject(makeError("SESSION_BUSY", "session is busy", { sessionId: this.sessionId }));
     }
@@ -1100,7 +1116,7 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   listAssets(): Promise<SandboxAsset[]> {
-    if (this.ending || this.status === "ended") {
+    if (this.transportDetached || this.ending || this.status === "ended") {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
     return this.client.request("list_assets", { sessionId: this.sessionId }).then(normalizeListAssetsResponse);
@@ -1110,7 +1126,7 @@ export class PedelecSession<TToolName extends string = string> {
   readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>;
   readAsset(path: SandboxAssetPath, type: "file"): Promise<File>;
   readAsset<T = JsonValue>(path: SandboxAssetPath, type: ReadAssetType): Promise<string | T | File> {
-    if (this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    if (this.transportDetached || this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     if (!isValidAssetPath(path) || !["text", "json", "file"].includes(type)) {
       return Promise.reject(makeError("ASSET_PATH_INVALID", "asset path or read type is invalid"));
     }
@@ -1159,7 +1175,12 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   async end(): Promise<void> {
-    if (this.status === "ended" || this.ending) return;
+    if (this.transportDetached || this.status === "ended" || this.ending) {
+      if (this.transportDetached) {
+        throw makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId });
+      }
+      return;
+    }
     this.ending = true;
 
     try {
@@ -1233,6 +1254,20 @@ export class PedelecSession<TToolName extends string = string> {
     this.inlineToolHandlers = new Map(handlers);
   }
 
+  /** @internal */
+  isTransportDetached(): boolean {
+    return this.transportDetached;
+  }
+
+  /** @internal */
+  handleTransportDisconnect(error: PedelecError): void {
+    if (this.transportDetached) return;
+    this.transportDetached = true;
+    this.setStatus("error", { source: "sdk" });
+    this.emitError(error, { source: "sdk" });
+    this.rejectActivePending(error);
+  }
+
   private async handleToolCall(
     event: Extract<SessionEvent, { type: "tool_call" }>,
     meta: EventDispatchMeta,
@@ -1276,6 +1311,8 @@ export class PedelecSession<TToolName extends string = string> {
         }),
       };
     }
+
+    if (this.transportDetached) return;
 
     try {
       await this.client.request("submit_tool_result", {

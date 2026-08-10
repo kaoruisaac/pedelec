@@ -91,7 +91,7 @@ Use separate checks for extension, runtime, and provider readiness. Approval sta
 | Runtime unavailable | Native/Core request fails | Ask the user to start or repair the Desktop App |
 | No provider | No `ProviderInfo.available` is true | Open provider setup guidance |
 | Connected | Session was created | Show provider, model, and session status |
-| Disconnected | An active SDK port disconnects | Disable send and offer a page reload/reconnect flow |
+| Disconnected | An active SDK port disconnects | Disable send; the next new client operation retries the port, or explicitly resume a surviving session |
 
 Example:
 
@@ -145,7 +145,7 @@ async function connectPedelec() {
 | Code | Layer | Typical response |
 | --- | --- | --- |
 | `EXTENSION_UNAVAILABLE` | Page → extension | Check installation, browser profile, and supported origin |
-| `EXTENSION_DISCONNECTED` | Page → extension | Stop sending; recreate the page/client connection |
+| `EXTENSION_DISCONNECTED` | Page → extension | Stop the affected operation; the next new client operation retries, or explicitly resume a surviving session |
 | `NATIVE_HOST_UNAVAILABLE` | Extension → native host | Start/repair the Desktop App installation |
 | `NATIVE_CONNECTION_CLOSED` | Extension → native host | Ask the user to restart the Desktop App; retry a safe read operation |
 | `CORE_RUNTIME_UNAVAILABLE` | Native host → Core | The background launch may have failed; open Desktop manually or repair its installation/launch configuration |
@@ -158,7 +158,7 @@ async function connectPedelec() {
 - An approved origin does not mean a provider is available.
 - `ProviderInfo.available: true` does not guarantee a particular model identifier is valid.
 - Ollama provider availability does not guarantee that its server or model is ready.
-- A client that disconnected does not reconnect automatically.
+- A disconnected client reconnects lazily on the next new operation; an old session handle still requires explicit resume.
 
 A robust connection screen presents the failing layer and the corrective action rather than one generic “connection failed” message.
 

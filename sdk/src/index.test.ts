@@ -7,6 +7,8 @@ type Listener<T> = (value: T) => void;
 class MockWindow {
   location = { origin: "https://app.example.test" };
   port = new MockRuntimePort();
+  queuedPorts: MockRuntimePort[] = [];
+  queuedConnectErrors: unknown[] = [];
   connectCalls: Array<{ extensionId: string; connectInfo: { name: string } }> = [];
 
   postMessage(_message: any, _targetOrigin: string): void {
@@ -27,6 +29,14 @@ class MockWindow {
 
   lastSent(): any {
     return this.port.sent.at(-1);
+  }
+
+  queuePort(port: MockRuntimePort): void {
+    this.queuedPorts.push(port);
+  }
+
+  queueConnectFailure(error: unknown): void {
+    this.queuedConnectErrors.push(error);
   }
 }
 
@@ -66,6 +76,9 @@ function installWindowMock() {
       lastError: null,
       connect: (extensionId: string, connectInfo: { name: string }) => {
         pageWindow.connectCalls.push({ extensionId, connectInfo });
+        const connectError = pageWindow.queuedConnectErrors.shift();
+        if (connectError) throw connectError;
+        pageWindow.port = pageWindow.queuedPorts.shift() ?? pageWindow.port;
         return pageWindow.port;
       },
     },
@@ -256,6 +269,179 @@ describe("Pedelec SDK", () => {
       origin: "https://app.example.test",
       appConnected: false,
     });
+  });
+
+  it("reconnects the parent client after a real runtime Port disconnect", async () => {
+    const pedelec = new Pedelec();
+    const portA = pageWindow.port;
+    const initial = pedelec.getSettings();
+    respondSettings(pageWindow, pageWindow.lastSent());
+    await initial;
+
+    const portB = new MockRuntimePort();
+    pageWindow.queuePort(portB);
+    portA.disconnect();
+
+    const recovered = pedelec.getSettings();
+    expect(pageWindow.connectCalls).toHaveLength(2);
+    expect(pageWindow.port).toBe(portB);
+    expect(portB.sent.at(-1)).toMatchObject({ type: "get_settings" });
+    respondSettings(pageWindow, pageWindow.lastSent());
+    await expect(recovered).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+  });
+
+  it("rejects old-port requests without replaying them, then succeeds on a replacement Port", async () => {
+    const pedelec = new Pedelec();
+    const portA = pageWindow.port;
+    const pendingOldRequest = pedelec.request("get_settings");
+    const oldMessage = portA.sent.at(-1);
+
+    const portB = new MockRuntimePort();
+    pageWindow.queuePort(portB);
+    portA.disconnect();
+
+    await expect(pendingOldRequest).rejects.toMatchObject({ code: "EXTENSION_DISCONNECTED" });
+    expect(portB.sent).toHaveLength(0);
+
+    const newRequest = pedelec.request("get_settings");
+    const newMessage = portB.sent.at(-1);
+    expect(newMessage.requestId).not.toBe(oldMessage.requestId);
+    respondSettings(pageWindow, newMessage);
+    await expect(newRequest).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+  });
+
+  it("keeps a failed reconnect retryable", async () => {
+    const pedelec = new Pedelec();
+    const portA = pageWindow.port;
+    const portB = new MockRuntimePort();
+    pageWindow.queueConnectFailure(new Error("extension unavailable"));
+    portA.disconnect();
+
+    await expect(pedelec.getSettings()).rejects.toMatchObject({ code: "EXTENSION_UNAVAILABLE" });
+
+    pageWindow.queuePort(portB);
+    const recovered = pedelec.getSettings();
+    expect(pageWindow.connectCalls).toHaveLength(3);
+    expect(pageWindow.port).toBe(portB);
+    respondSettings(pageWindow, pageWindow.lastSent());
+    await expect(recovered).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+  });
+
+  it("shares one replacement Port across concurrent operations", async () => {
+    const pedelec = new Pedelec();
+    const portA = pageWindow.port;
+    const portB = new MockRuntimePort();
+    pageWindow.queuePort(portB);
+    portA.disconnect();
+
+    const settings = pedelec.getSettings();
+    const approval = pedelec.getApprovalStatus();
+    expect(pageWindow.connectCalls).toHaveLength(2);
+    expect(portB.sent.map((message) => message.type)).toEqual(["get_settings", "get_approval_status"]);
+
+    const settingsRequest = portB.sent[0];
+    const approvalRequest = portB.sent[1];
+    respondSettings(pageWindow, settingsRequest);
+    respondOk(pageWindow, approvalRequest, {
+      installed: true,
+      approved: false,
+      origin: "https://app.example.test",
+      appConnected: true,
+    });
+    await expect(settings).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+    await expect(approval).resolves.toMatchObject({ installed: true, appConnected: true });
+  });
+
+  it("ignores a stale Port A disconnect after Port B has pending requests", async () => {
+    const pedelec = new Pedelec();
+    const portA = pageWindow.port;
+    const portB = new MockRuntimePort();
+    pageWindow.queuePort(portB);
+    portA.disconnect();
+
+    const request = pedelec.getSettings();
+    portA.disconnect();
+
+    expect(pageWindow.port).toBe(portB);
+    expect(portB.sent).toHaveLength(1);
+    respondSettings(pageWindow, portB.sent[0]);
+    await expect(request).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+  });
+
+  it("recovers checkAvailability after a prior runtime Port disconnect", async () => {
+    const pedelec = new Pedelec();
+    const portA = pageWindow.port;
+    const first = pedelec.checkAvailability();
+    respondOk(pageWindow, pageWindow.lastSent(), {
+      installed: true,
+      approved: false,
+      origin: "https://app.example.test",
+      appConnected: true,
+    });
+    await first;
+
+    const portB = new MockRuntimePort();
+    pageWindow.queuePort(portB);
+    portA.disconnect();
+
+    const second = pedelec.checkAvailability();
+    const approvalRequest = portB.sent[0];
+    expect(approvalRequest).toMatchObject({ type: "get_approval_status" });
+    respondOk(pageWindow, approvalRequest, {
+      installed: true,
+      approved: true,
+      origin: "https://app.example.test",
+      appConnected: true,
+    });
+    await nextTick();
+    const settingsRequest = portB.sent[1];
+    expect(settingsRequest).toMatchObject({ type: "get_settings" });
+    respondSettings(pageWindow, settingsRequest);
+
+    await expect(second).resolves.toMatchObject({
+      available: true,
+      extension: { available: true },
+      approval: { approved: true },
+      desktop: { available: true, launchAttempted: true },
+    });
+  });
+
+  it("does not let an old session handle silently migrate after reconnect", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const portA = pageWindow.port;
+    const portB = new MockRuntimePort();
+    pageWindow.queuePort(portB);
+    portA.disconnect();
+
+    const parentRequest = pedelec.getSettings();
+    respondSettings(pageWindow, portB.sent[0]);
+    await parentRequest;
+
+    await expect(session.sendText("must fail")).rejects.toMatchObject({ code: "SESSION_ENDED" });
+    expect(portB.sent.map((message) => message.type)).toEqual(["get_settings"]);
+  });
+
+  it("requires explicit resume to bind a disconnected session to the replacement Port", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const portA = pageWindow.port;
+    const portB = new MockRuntimePort();
+    pageWindow.queuePort(portB);
+    portA.disconnect();
+
+    const resumedPromise = pedelec.resumeSession(session.sessionId);
+    const resumeRequest = portB.sent[0];
+    expect(resumeRequest).toMatchObject({ type: "resume_session", sessionId: session.sessionId });
+    respondOk(pageWindow, resumeRequest, { sessionId: session.sessionId });
+    const resumed = await resumedPromise;
+    expect(resumed).not.toBe(session);
+
+    const send = resumed.sendText("after resume");
+    const sendRequest = portB.sent[1];
+    respondOk(pageWindow, sendRequest);
+    emitEvent(pageWindow, sendRequest, { type: "done", sessionId: session.sessionId, seq: 1 });
+    await send;
   });
 
   it("creates an opencode session and lists providers", async () => {

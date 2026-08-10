@@ -260,7 +260,7 @@ Prefer typed public methods. `request<T>()` does not validate that your generic 
 
 The method:
 
-- rejects immediately when the client has a stored disconnect error;
+- lazily ensures that a current Extension port exists, retrying after a transient disconnect;
 - applies `bridgeTimeoutMs`;
 - generates a request ID;
 - posts through the Extension port; and
@@ -270,7 +270,7 @@ The method:
 
 ## Client disconnection
 
-When the Extension port disconnects, pending requests reject and registered sessions receive an SDK error event. This client does not expose a reconnect method. Recover by restoring the external conditions and creating a fresh browser client/page lifecycle.
+When the Extension port disconnects, requests already sent through that port reject and registered sessions receive an SDK error event. The parent client remains reusable and reconnects on the next new operation; old session handles do not silently migrate, so resume an intentional surviving session with `resumeSession(sessionId)`.
 
 ## Related references
 

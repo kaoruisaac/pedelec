@@ -17,7 +17,7 @@ const pedelec = new Pedelec();
 
 Constructor 會立刻嘗試連到設定好的 Pedelec Extension ID，不會等待 Desktop App 或 provider ready。
 
-若執行時沒有 browser `window`，或不存在 `chrome.runtime.connect`，instance 會記錄 `EXTENSION_UNAVAILABLE`。後續 bridge method 會從這個狀態 reject；hydration 後同一 instance 不會自動 retry。
+若執行時沒有 browser `window`，instance 就無法使用 browser bridge。若不存在 `chrome.runtime.connect`，或第一次 connection attempt 失敗，後續 bridge operation 仍會 retry；暫時性的啟動失敗不會永久 poison client。
 
 ## Options
 
@@ -112,12 +112,11 @@ Client 會產生唯一 `channelId` 並開啟 external runtime port。每個 requ
 
 Port disconnect 時：
 
-- 所有 pending bridge request reject；
-- client 記錄 `EXTENSION_DISCONNECTED`；
-- 每個已註冊 session 收到 SDK-originated error callback；
-- client 不會自動開啟 replacement port。
+- 已透過該 port 送出的 request 會以 `EXTENSION_DISCONNECTED` reject，且不會 replay；
+- 每個已註冊 session 收到 SDK-originated error callback，舊 handle 也會變成不可使用；
+- parent client 仍可 reuse，下一個新的 operation 會 lazy 開啟一條 replacement port。
 
-一般 recovery 是 disable active controls，請使用者檢查 Extension 後 reload page。只有在 Extension 已恢復，而且應用程式明確清理舊 session state 時，才考慮在同一 page 建立第二個 client。
+`getApprovalStatus()` 與 `checkAvailability()` 也會走這條 retry path。若 replacement connection attempt 失敗，當次 operation 會回報 unavailable error，之後的 operation 仍可再次嘗試。若要在 disconnect 後繼續 session，請明確呼叫 `resumeSession(sessionId)`；舊的 `PedelecSession` handle 不會靜默移到 replacement route。
 
 ## Client 與 session 的責任
 

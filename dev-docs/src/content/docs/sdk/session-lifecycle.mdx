@@ -46,6 +46,8 @@ localStorage.setItem("pedelec-session", JSON.stringify(record));
 
 With `false`, loss of the SDK route does not automatically end the Core session. The application can later resume using the saved ID.
 
+The browser-side `PedelecSession` handle remains bound to the SDK route that created it. If that runtime port disconnects, the handle becomes unusable even when the parent `Pedelec` client reconnects. Call `resumeSession(sessionId)` explicitly to subscribe a new handle to the surviving Core session; the SDK does not silently migrate old session operations.
+
 Use this only when you have a deliberate retention and cleanup policy. A session that is never resumed or ended can remain in Desktop state longer than the UI implies.
 
 ## Resume a session

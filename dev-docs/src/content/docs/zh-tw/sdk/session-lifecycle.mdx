@@ -46,6 +46,8 @@ localStorage.setItem("pedelec-session", JSON.stringify(record));
 
 `false` 代表 SDK route 消失時不自動 end Core session，application 之後可用 saved ID resume。
 
+Browser-side 的 `PedelecSession` handle 綁定於建立它的 SDK route。若該 runtime port disconnect，即使 parent `Pedelec` client 已 reconnect，這個 handle 仍會變成不可使用。請明確呼叫 `resumeSession(sessionId)`，讓新 handle subscribe 到仍存活的 Core session；SDK 不會靜默搬移舊 session operation。
+
 只有在已有 retention 與 cleanup policy 時使用。永遠不 resume 或 end 的 session 可能在 Desktop state 存活得比 UI 暗示更久。
 
 ## Resume session

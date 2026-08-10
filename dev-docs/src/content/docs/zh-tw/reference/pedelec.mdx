@@ -236,7 +236,7 @@ const result = await pedelec.request<{ sessionId: string }>(
 
 此 method：
 
-- client 已保存 disconnect error 時立即 reject；
+- lazy 確保目前存在 Extension port，並在暫時 disconnect 後 retry；
 - 套用 `bridgeTimeoutMs`；
 - 產生 request ID；
 - 經 Extension port post；
@@ -246,7 +246,7 @@ const result = await pedelec.request<{ sessionId: string }>(
 
 ## Client disconnection
 
-Extension port disconnect 時，pending requests reject，registered sessions 收到 SDK error event。Client 沒有 reconnect method；修復外部條件後，建立新的 browser client/page lifecycle。
+Extension port disconnect 時，已透過該 port 送出的 request 會 reject，registered sessions 收到 SDK error event。Parent client 仍可 reuse，下一個新的 operation 會 reconnect；舊 session handle 不會靜默遷移，因此要繼續明確保留的 session 時請呼叫 `resumeSession(sessionId)`。
 
 ## Related references
 

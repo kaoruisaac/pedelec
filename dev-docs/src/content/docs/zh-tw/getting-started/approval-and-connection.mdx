@@ -91,7 +91,7 @@ Extension、runtime 與 provider readiness 應分開檢查。Approval status 無
 | Runtime unavailable | Native/Core request 失敗 | 引導啟動或修復 Desktop App |
 | No provider | 沒有 `ProviderInfo.available === true` | 顯示 provider setup |
 | Connected | Session 建立成功 | 顯示 provider、model 與 session status |
-| Disconnected | Active SDK port 中斷 | Disable send，提供 reload/reconnect flow |
+| Disconnected | Active SDK port 中斷 | Disable send；下一個新的 client operation 會 retry port，需繼續的 session 請明確 resume |
 
 ```ts
 async function connectPedelec() {
@@ -143,7 +143,7 @@ async function connectPedelec() {
 | Code | 層級 | 常見處理 |
 | --- | --- | --- |
 | `EXTENSION_UNAVAILABLE` | Page → Extension | 檢查安裝、browser profile 與 origin |
-| `EXTENSION_DISCONNECTED` | Page → Extension | 停止 send，重新建立 page/client connection |
+| `EXTENSION_DISCONNECTED` | Page → Extension | 停止受影響的 operation；下一個新的 client operation 會 retry，需要繼續的 session 請明確 resume |
 | `NATIVE_HOST_UNAVAILABLE` | Extension → native host | 啟動或修復 Desktop App installation |
 | `NATIVE_CONNECTION_CLOSED` | Extension → native host | 重啟 Desktop App，安全的 read 操作可重試 |
 | `CORE_RUNTIME_UNAVAILABLE` | Native host → Core | Background launch 可能失敗；手動開啟 Desktop 或修復 installation/launch config |
@@ -156,7 +156,7 @@ async function connectPedelec() {
 - Origin 已核准不代表 provider 可用。
 - `ProviderInfo.available: true` 不代表任意 model id 都有效。
 - Ollama provider available 不代表 server 或 model 已準備好。
-- 已 disconnected 的 client 不會自動 reconnect。
+- 已 disconnected 的 client 會在下一個新的 operation lazy reconnect；舊 session handle 仍需要明確 resume。
 
 穩健的 connection screen 應顯示失敗層級與具體修復方式，而不是只有一個「連線失敗」。
 

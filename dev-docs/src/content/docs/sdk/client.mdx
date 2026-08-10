@@ -17,7 +17,7 @@ const pedelec = new Pedelec();
 
 The constructor immediately attempts to connect to the configured Pedelec Extension ID. It does not wait for the Desktop App or provider to become available.
 
-If the constructor runs without a browser `window`, or if `chrome.runtime.connect` is unavailable, the instance records an `EXTENSION_UNAVAILABLE` state. Later bridge methods reject from that state. The same instance does not automatically retry after hydration.
+If the constructor runs without a browser `window`, the instance cannot use the browser bridge. If `chrome.runtime.connect` is unavailable or an initial connection attempt fails, later bridge operations retry the connection; a transient startup failure does not permanently poison the client.
 
 ## Options
 
@@ -112,12 +112,11 @@ The client creates a unique `channelId` and opens an external runtime port. Ever
 
 When the port disconnects:
 
-- all pending bridge requests reject;
-- the client records `EXTENSION_DISCONNECTED`;
-- each registered session receives an SDK-originated error callback; and
-- the client does not automatically open a replacement port.
+- requests already sent through that port reject with `EXTENSION_DISCONNECTED` and are not replayed;
+- each registered session receives an SDK-originated error callback and its handle becomes unusable; and
+- the parent client remains reusable and lazily opens one replacement port for the next new operation.
 
-The usual recovery is to disable active controls and ask the user to reload the page after checking the extension. Creating a second client in the same broken page may help only when the extension is available again and your application has deliberately cleaned up the old session state.
+`getApprovalStatus()` and `checkAvailability()` also use this retry path. If a replacement connection attempt fails, the current operation reports the unavailable error and a later operation can try again. To continue a session after a disconnect, call `resumeSession(sessionId)` explicitly; the old `PedelecSession` handle is never silently moved to the replacement route.
 
 ## Client versus session responsibility
 
