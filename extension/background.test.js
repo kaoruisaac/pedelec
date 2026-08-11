@@ -132,6 +132,42 @@ async function createSdkSession(background, sdkPort, nativePort, sessionId, auto
   return sdkPort.sent.find((message) => message.requestId === `create_${sessionId}`);
 }
 
+test("create_session forwards an explicit sandbox without inventing a path", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "create_custom",
+    type: "create_session",
+    input: {
+      provider: "codex",
+      sandbox: { path: "C:\\workspace\\project-a" },
+      autoEndOnDisconnect: true,
+    },
+  });
+  const nativeCreate = await respondToNative(background, native, { threadId: "thread_custom" });
+  assert.deepEqual(nativeCreate.sandbox, { path: "C:\\workspace\\project-a" });
+
+  await respondToNative(background, native, {}, 2);
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "create_custom"));
+
+  const defaultSdk = connectExternal(chrome);
+  defaultSdk.emit({
+    channelId: "channel_b",
+    requestId: "create_default",
+    type: "create_session",
+    input: { provider: "codex" },
+  });
+  const nativeDefault = await respondToNative(background, native, { threadId: "thread_default" }, 3);
+  assert.equal(nativeDefault.sandbox, undefined);
+  await respondToNative(background, native, {}, 4);
+});
+
 test("native idle shutdown is preserved and the next SDK request reconnects lazily", async () => {
   const chrome = createChrome();
   const nativeA = new MockPort();

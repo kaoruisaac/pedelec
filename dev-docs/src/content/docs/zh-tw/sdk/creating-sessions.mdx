@@ -23,12 +23,14 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       provider: ProviderCode;
       model?: string;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       model?: never;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -70,6 +72,25 @@ const session = await pedelec.createSession({
 ```
 
 Pedelec 將 model 視為 provider-specific opaque string。Invalid model 通常由 Core 或 provider execution 回報。
+
+## 指定 application workspace
+
+未指定時，Pedelec 會在 managed sandbox root（目前是 `~/.pedelec/sandbox/<threadId>`）建立 temporary managed sandbox。這些目錄由 Pedelec 擁有，Desktop App 正常退出或下次啟動清理 stale sandbox 時會移除。
+
+如果應用程式需要可重複使用的 workspace，請傳入 `sandbox.path`：
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  sandbox: {
+    path: "C:\\workspace\\project-a",
+  },
+});
+```
+
+Path 必須是 absolute path，可以是尚不存在的目錄或既有目錄。Pedelec 會在需要時建立 workspace 與 `skills/`、`assets/`、`logs/`、`tmp/` 子目錄，但會保留既有檔案。Generated tool specs 會 merge 到 `skills/`，只覆蓋同名 generated file。
+
+Explicit workspace 由 application 管理：`session.end()`、App 正常退出與 stale cleanup 都不會刪除它。同一個 workspace 可以同時被多個 active session 使用；Pedelec 不處理 filesystem write conflict，請由 application 或 agent orchestration 負責協調。Path 不得等於、包含或被 Pedelec managed sandbox root 包含；無效 path 會以 `SANDBOX_PATH_INVALID` 失敗。
 
 ## 加入 skills 與 tools
 

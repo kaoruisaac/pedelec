@@ -244,7 +244,7 @@ await session.end();
 disposeBindings();
 ```
 
-`session.end()` ends the session and makes its handle unusable, but does not immediately delete its sandbox. Sandboxes are temporary Desktop-managed storage: they are removed when the Desktop App exits normally and stale directories are retried at the next app launch. Closing the main window only hides the app. Never treat a retained sandbox as durable storage or expect an ended session to access it through asset APIs; forced termination or locked files can defer cleanup.
+`session.end()` ends the session and makes its handle unusable, but does not immediately delete its sandbox. A session without `sandbox.path` uses temporary Desktop-managed storage, which is removed on normal Desktop App exit and retried during the next startup's stale cleanup. A session with an absolute `sandbox.path` uses application-managed workspace storage: Pedelec never deletes it on `end()`, normal exit, or stale cleanup. Multiple active sessions may share an explicit workspace, but Pedelec does not resolve filesystem write conflicts and the path must not overlap the managed sandbox root. Closing the main window only hides the app. Never treat a managed sandbox as durable storage or expect an ended session to access any retained sandbox through asset APIs; forced termination or locked files can defer managed cleanup.
 
 If the session survives the current route or component, unregister handlers referencing old UI state and register new handlers only after the replacement UI is ready.
 

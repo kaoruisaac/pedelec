@@ -1155,6 +1155,7 @@ function createBackground(runtimeChrome, options = {}) {
             provider: input.provider,
             model: input.model,
             skills: input.skills,
+            sandbox: input.sandbox,
           });
           const sessionId = result?.threadId;
           if (!sessionId) {

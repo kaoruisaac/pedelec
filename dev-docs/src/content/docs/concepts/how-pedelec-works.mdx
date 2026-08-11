@@ -85,6 +85,10 @@ A typical explicit-provider session follows this flow:
 
 Creating a session does not necessarily launch a long-running provider process immediately. Provider execution is managed by the desktop runtime when the session is prepared or receives a turn.
 
+### Sandbox ownership
+
+Without `sandbox.path`, the desktop runtime creates a temporary managed sandbox under `~/.pedelec/sandbox/<threadId>` and owns its cleanup. An application can instead pass an absolute `sandbox.path` to select an application-managed workspace. Pedelec creates missing `skills/`, `assets/`, `logs/`, and `tmp/` directories, preserves existing content, and never deletes an explicit workspace. Multiple active sessions may share one explicit path; filesystem write coordination remains the application's responsibility. Explicit paths cannot overlap the managed sandbox root.
+
 ## What happens during `sendText()`
 
 ```text

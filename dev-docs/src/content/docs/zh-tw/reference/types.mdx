@@ -17,6 +17,7 @@ import type {
   SandboxAsset,
   SandboxAssetPath,
   ReadAssetType,
+  CreateSessionSandboxInput,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -52,17 +53,29 @@ type CreateSessionInput<
       provider: ProviderCode;
       model?: string;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       model?: never;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
 Union 在 TypeScript 阻止只有 `model` 沒有 `provider`。
+
+### `CreateSessionSandboxInput`
+
+```ts
+type CreateSessionSandboxInput = {
+  path: string;
+};
+```
+
+`path` 是 absolute、由 application 管理的 workspace path。Pedelec 會建立缺少的 sandbox 子目錄，但永遠不會刪除這個 workspace。它可以由多個 active session 共用，且不得與 managed sandbox root overlap。
 
 ## Provider 與 settings
 

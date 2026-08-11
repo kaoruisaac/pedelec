@@ -57,12 +57,14 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       provider: ProviderCode;
       model?: string;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       model?: never;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -72,8 +74,11 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 - No `provider`: use Desktop `defaultProvider`; verify it is available; use its default model if configured.
 - `provider` only: use that provider and its Desktop default model when configured.
 - `provider` + `model`: use both explicit values.
+- `sandbox.path`: optionally use an absolute application-managed workspace instead of a temporary managed sandbox.
 - `model` without `provider`: invalid.
 - `autoEndOnDisconnect`: defaults to `true`.
+
+An explicit `sandbox.path` may be new or existing. Core creates the required `skills/`, `assets/`, `logs/`, and `tmp/` directories without clearing existing contents. Pedelec never deletes an explicit workspace, and multiple active sessions may share it. The path must not overlap Pedelec's managed sandbox root; invalid paths return `SANDBOX_PATH_INVALID`.
 
 ### Returns
 

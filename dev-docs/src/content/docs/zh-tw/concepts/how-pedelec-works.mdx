@@ -85,6 +85,10 @@ Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 
 
 建立 session 不代表一定會立刻啟動長時間存活的 provider process。Desktop Runtime 會在 prepare 或收到 turn 時管理 provider execution。
 
+### Sandbox ownership
+
+未指定 `sandbox.path` 時，Desktop Runtime 會在 `~/.pedelec/sandbox/<threadId>` 建立 temporary managed sandbox，並負責 cleanup。Application 也可以傳入 absolute `sandbox.path`，選擇由 application 管理的 workspace。Pedelec 會建立缺少的 `skills/`、`assets/`、`logs/`、`tmp/` 子目錄、保留既有內容，且永遠不會刪除 explicit workspace。多個 active session 可以共用同一個 path；filesystem write coordination 由 application 負責。Explicit path 不得與 managed sandbox root overlap。
+
 ## `sendText()` 的資料流
 
 ```text

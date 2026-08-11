@@ -17,6 +17,7 @@ import type {
   SandboxAsset,
   SandboxAssetPath,
   ReadAssetType,
+  CreateSessionSandboxInput,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -52,17 +53,29 @@ type CreateSessionInput<
       provider: ProviderCode;
       model?: string;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       model?: never;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
 The union prevents `model` without `provider` in TypeScript.
+
+### `CreateSessionSandboxInput`
+
+```ts
+type CreateSessionSandboxInput = {
+  path: string;
+};
+```
+
+`path` is an absolute application-managed workspace path. Pedelec creates missing sandbox subdirectories but never deletes this workspace. It may be shared by multiple active sessions and must not overlap the managed sandbox root.
 
 ## Provider and settings
 

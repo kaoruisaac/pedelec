@@ -23,12 +23,14 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       provider: ProviderCode;
       model?: string;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       model?: never;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -70,6 +72,25 @@ const session = await pedelec.createSession({
 ```
 
 Pedelec treats the model as an opaque provider-specific string. An invalid model normally fails in Core or provider execution.
+
+## Choose an application workspace
+
+By default, Pedelec creates a temporary managed sandbox under its managed sandbox root, currently `~/.pedelec/sandbox/<threadId>`. Pedelec owns these directories and removes them during normal Desktop App exit or stale-sandbox cleanup at the next startup.
+
+Pass `sandbox.path` when the application wants a reusable workspace instead:
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  sandbox: {
+    path: "C:\\workspace\\project-a",
+  },
+});
+```
+
+The path must be absolute. It may be new or an existing directory; Pedelec creates the workspace and the `skills/`, `assets/`, `logs/`, and `tmp/` subdirectories when needed, while preserving existing files. Generated tool specs merge into `skills/` and overwrite same-name generated files only.
+
+An explicit workspace is application-managed: `session.end()`, normal app exit, and stale cleanup never delete it. Multiple active sessions may use the same path. Pedelec does not coordinate filesystem write conflicts, so the application or its agent orchestration must do so. The path must not equal, contain, or be contained by Pedelec's managed sandbox root; invalid paths fail with `SANDBOX_PATH_INVALID`.
 
 ## Add skills and tools
 

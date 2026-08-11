@@ -57,12 +57,14 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       provider: ProviderCode;
       model?: string;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       model?: never;
       skills?: SkillsInput<TTools>;
+      sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -72,8 +74,11 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 - 無 `provider`：使用 Desktop `defaultProvider`，確認 available，並使用 configured default model。
 - 只有 `provider`：使用該 provider 與其 Desktop default model（若有）。
 - `provider` + `model`：使用 explicit values。
+- `sandbox.path`：可選擇使用 absolute、由 application 管理的 workspace，取代 temporary managed sandbox。
 - 只有 `model`：invalid。
 - `autoEndOnDisconnect`：預設 `true`。
+
+Explicit `sandbox.path` 可以是新目錄或既有目錄。Core 會建立必要的 `skills/`、`assets/`、`logs/`、`tmp/` 子目錄，但不清空既有內容。Pedelec 永遠不會刪除 explicit workspace，多個 active session 也可以共用它。Path 不得與 Pedelec managed sandbox root overlap；無效 path 回傳 `SANDBOX_PATH_INVALID`。
 
 ### Returns
 

@@ -519,6 +519,13 @@ pub struct CreateThreadInput {
     pub provider: ProviderCode,
     pub model: Option<String>,
     pub skills: Option<CreateThreadSkillsInput>,
+    pub sandbox: Option<CreateThreadSandboxInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateThreadSandboxInput {
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2183,22 +2190,20 @@ impl CoreRuntime {
         sdk_origin: Option<String>,
     ) -> Result<CreateThreadOutput, PedelecError> {
         let thread_id = self.next_available_thread_id()?;
-        let (sandbox_path, (skills, registry)) =
-            self.sandbox_manager
-                .create_thread_sandbox_with(&thread_id, |sandbox| {
-                    let skills_dir = sandbox.join("skills");
-                    fs::create_dir_all(&skills_dir).map_err(|err| {
-                        skill_download_error(
-                            "cannot create skills directory",
-                            None,
-                            Some(&skills_dir),
-                            err,
-                        )
-                    })?;
-                    let registry = ToolRegistry::from_skills_input(input.skills.as_ref())?;
-                    let skills = write_generated_tool_specs(&skills_dir, &registry)?;
-                    Ok((skills, registry))
-                })?;
+        let initialize =
+            |sandbox: &Path| initialize_generated_skills(sandbox, input.skills.as_ref());
+        let (sandbox_path, (skills, registry)) = match input.sandbox.as_ref() {
+            Some(custom_sandbox) => {
+                let sandbox_path = self
+                    .sandbox_manager
+                    .prepare_custom_sandbox(&custom_sandbox.path)?;
+                let initialized = initialize(&sandbox_path)?;
+                (sandbox_path, initialized)
+            }
+            None => self
+                .sandbox_manager
+                .create_thread_sandbox_with(&thread_id, initialize)?,
+        };
 
         let now = Utc::now();
         let state = ThreadState {
@@ -2224,7 +2229,7 @@ impl CoreRuntime {
         );
         self.tool_registry.insert(thread_id.clone(), registry);
         self.event_bus
-            .register_thread_log(&thread_id, sandbox_path.join("logs").join("events.jsonl"));
+            .register_thread_log(&thread_id, thread_event_log_path(&sandbox_path, &thread_id));
         self.event_bus.emit_created(&thread_id);
         self.event_bus
             .emit_status_changed(&thread_id, ThreadStatus::Idle);
@@ -3398,17 +3403,7 @@ impl SandboxManager {
                 )
             })?;
 
-            for subdir in SANDBOX_SUBDIRS {
-                let path = sandbox_path.join(subdir);
-                fs::create_dir_all(&path).map_err(|err| {
-                    sandbox_io_error(
-                        error_codes::SANDBOX_CREATE_FAILED,
-                        "cannot create thread sandbox subdirectory",
-                        &path,
-                        err,
-                    )
-                })?;
-            }
+            self.create_sandbox_subdirectories(&sandbox_path)?;
 
             Ok(sandbox_path.clone())
         })();
@@ -3418,6 +3413,89 @@ impl SandboxManager {
         }
 
         create_result
+    }
+
+    pub fn prepare_custom_sandbox(
+        &self,
+        custom_path: impl AsRef<Path>,
+    ) -> Result<PathBuf, PedelecError> {
+        let custom_path = custom_path.as_ref();
+        let managed_root = self.sandbox_root()?;
+        if !custom_path.is_absolute() {
+            return Err(sandbox_path_invalid_error(
+                "custom sandbox path must be absolute",
+                custom_path,
+                &managed_root,
+            ));
+        }
+
+        let custom_comparison_path = resolve_path_for_overlap(custom_path)?;
+        let managed_comparison_path = resolve_path_for_overlap(&managed_root)?;
+        ensure_paths_do_not_overlap(
+            custom_path,
+            &custom_comparison_path,
+            &managed_root,
+            &managed_comparison_path,
+        )?;
+
+        if custom_path.exists() {
+            let metadata = fs::metadata(custom_path).map_err(|err| {
+                sandbox_path_invalid_io_error(
+                    "cannot inspect custom sandbox path",
+                    custom_path,
+                    err,
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(sandbox_path_invalid_error(
+                    "custom sandbox path is not a directory",
+                    custom_path,
+                    &managed_root,
+                ));
+            }
+        } else {
+            fs::create_dir_all(custom_path).map_err(|err| {
+                sandbox_io_error(
+                    error_codes::SANDBOX_CREATE_FAILED,
+                    "cannot create custom sandbox directory",
+                    custom_path,
+                    err,
+                )
+            })?;
+        }
+
+        let resolved_custom_path = custom_path.canonicalize().map_err(|err| {
+            sandbox_path_invalid_io_error(
+                "cannot canonicalize custom sandbox path",
+                custom_path,
+                err,
+            )
+        })?;
+        let resolved_managed_root = resolve_path_for_overlap(&managed_root)?;
+        ensure_paths_do_not_overlap(
+            custom_path,
+            &resolved_custom_path,
+            &managed_root,
+            &resolved_managed_root,
+        )?;
+
+        self.create_sandbox_subdirectories(&resolved_custom_path)?;
+        Ok(resolved_custom_path)
+    }
+
+    fn create_sandbox_subdirectories(&self, sandbox_path: &Path) -> Result<(), PedelecError> {
+        for subdir in SANDBOX_SUBDIRS {
+            let path = sandbox_path.join(subdir);
+            fs::create_dir_all(&path).map_err(|err| {
+                sandbox_io_error(
+                    error_codes::SANDBOX_CREATE_FAILED,
+                    "cannot create thread sandbox subdirectory",
+                    &path,
+                    err,
+                )
+            })?;
+        }
+        Ok(())
     }
 
     pub fn create_thread_sandbox_with<T>(
@@ -3587,6 +3665,172 @@ impl SandboxManager {
 
         Ok(())
     }
+}
+
+fn initialize_generated_skills(
+    sandbox: &Path,
+    skills_input: Option<&CreateThreadSkillsInput>,
+) -> Result<(Vec<SkillFile>, ToolRegistry), PedelecError> {
+    let skills_dir = sandbox.join("skills");
+    fs::create_dir_all(&skills_dir).map_err(|err| {
+        skill_download_error(
+            "cannot create skills directory",
+            None,
+            Some(&skills_dir),
+            err,
+        )
+    })?;
+    let registry = ToolRegistry::from_skills_input(skills_input)?;
+    let skills = write_generated_tool_specs(&skills_dir, &registry)?;
+    Ok((skills, registry))
+}
+
+fn thread_event_log_path(sandbox_path: &Path, thread_id: &str) -> PathBuf {
+    sandbox_path
+        .join("logs")
+        .join(format!("events-{thread_id}-{}.jsonl", Uuid::new_v4()))
+}
+
+fn sandbox_path_invalid_error(
+    message: &'static str,
+    custom_path: &Path,
+    managed_root: &Path,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::SANDBOX_PATH_INVALID,
+        message,
+        serde_json::json!({
+            "sandboxPath": custom_path.to_string_lossy(),
+            "managedSandboxRoot": managed_root.to_string_lossy(),
+        }),
+    )
+}
+
+fn sandbox_path_invalid_io_error(
+    message: &'static str,
+    path: &Path,
+    err: std::io::Error,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::SANDBOX_PATH_INVALID,
+        message,
+        serde_json::json!({
+            "sandboxPath": path.to_string_lossy(),
+            "error": err.to_string(),
+        }),
+    )
+}
+
+fn resolve_path_for_overlap(path: &Path) -> Result<PathBuf, PedelecError> {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|err| {
+                sandbox_path_invalid_io_error("cannot resolve current directory", path, err)
+            })?
+            .join(path)
+    };
+    let normalized_path = normalize_absolute_path(&absolute_path)?;
+    let mut existing_ancestor = normalized_path.clone();
+    let mut missing_components = Vec::new();
+
+    while !existing_ancestor.exists() {
+        let component = existing_ancestor.file_name().ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::SANDBOX_PATH_INVALID,
+                "cannot resolve sandbox path ancestor",
+                serde_json::json!({ "path": path.to_string_lossy() }),
+            )
+        })?;
+        missing_components.push(component.to_os_string());
+        if !existing_ancestor.pop() {
+            return Err(PedelecError::with_details(
+                error_codes::SANDBOX_PATH_INVALID,
+                "cannot resolve sandbox path ancestor",
+                serde_json::json!({ "path": path.to_string_lossy() }),
+            ));
+        }
+    }
+
+    let mut resolved = existing_ancestor.canonicalize().map_err(|err| {
+        sandbox_path_invalid_io_error(
+            "cannot canonicalize sandbox path ancestor",
+            &existing_ancestor,
+            err,
+        )
+    })?;
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<PathBuf, PedelecError> {
+    if !path.is_absolute() {
+        return Err(PedelecError::with_details(
+            error_codes::SANDBOX_PATH_INVALID,
+            "sandbox path must be absolute",
+            serde_json::json!({ "path": path.to_string_lossy() }),
+        ));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
+}
+
+fn ensure_paths_do_not_overlap(
+    custom_path: &Path,
+    custom_comparison_path: &Path,
+    managed_root: &Path,
+    managed_comparison_path: &Path,
+) -> Result<(), PedelecError> {
+    if path_is_prefix(custom_comparison_path, managed_comparison_path)
+        || path_is_prefix(managed_comparison_path, custom_comparison_path)
+    {
+        return Err(sandbox_path_invalid_error(
+            "custom sandbox path overlaps the managed sandbox root",
+            custom_path,
+            managed_root,
+        ));
+    }
+    Ok(())
+}
+
+fn path_is_prefix(parent: &Path, target: &Path) -> bool {
+    let mut parent_components = parent.components();
+    let mut target_components = target.components();
+    loop {
+        match (parent_components.next(), target_components.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(parent), Some(target)) if path_components_equal(parent, target) => {}
+            (Some(_), Some(_)) => return false,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn path_components_equal(left: Component<'_>, right: Component<'_>) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn path_components_equal(left: Component<'_>, right: Component<'_>) -> bool {
+    left == right
 }
 
 #[derive(Debug, Clone)]

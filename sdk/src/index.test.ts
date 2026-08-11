@@ -236,6 +236,90 @@ describe("Pedelec SDK", () => {
     expect(session.model).toBe("gpt-5");
   });
 
+  it("forwards an explicit sandbox path with an explicit provider and model", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.createSession({
+      provider: "codex",
+      model: "gpt-5",
+      sandbox: { path: "C:\\workspace\\project-a" },
+    });
+    const request = pageWindow.lastSent();
+
+    expect(request).toMatchObject({
+      type: "create_session",
+      input: {
+        provider: "codex",
+        model: "gpt-5",
+        sandbox: { path: "C:\\workspace\\project-a" },
+      },
+    });
+    respondOk(pageWindow, request, { sessionId: "thread_custom_explicit" });
+    await promise;
+  });
+
+  it("preserves sandbox through provider-only and default-provider resolution", async () => {
+    const pedelec = new Pedelec();
+    const providerOnly = pedelec.createSession({
+      provider: "codex",
+      sandbox: { path: "C:\\workspace\\provider-only" },
+    });
+    const providerSettings = pageWindow.lastSent();
+    respondSettings(pageWindow, providerSettings, {
+      defaultProvider: "codex",
+      defaultModels: { codex: "gpt-5" },
+    });
+    await nextTick();
+    const providerCreate = pageWindow.lastSent();
+    expect(providerCreate.input.sandbox).toEqual({ path: "C:\\workspace\\provider-only" });
+    respondOk(pageWindow, providerCreate, { sessionId: "thread_custom_provider" });
+    await providerOnly;
+
+    const defaultProvider = pedelec.createSession({
+      sandbox: { path: "C:\\workspace\\default" },
+    });
+    const defaultSettings = pageWindow.lastSent();
+    respondSettings(pageWindow, defaultSettings, {
+      defaultProvider: "codex",
+      defaultModels: { codex: "gpt-5" },
+    });
+    await nextTick();
+    const providersRequest = pageWindow.lastSent();
+    respondOk(pageWindow, providersRequest, [
+      { name: "Codex", code: "codex", available: true, error: null },
+    ]);
+    await nextTick();
+    const defaultCreate = pageWindow.lastSent();
+    expect(defaultCreate.input.sandbox).toEqual({ path: "C:\\workspace\\default" });
+    respondOk(pageWindow, defaultCreate, { sessionId: "thread_custom_default" });
+    await defaultProvider;
+  });
+
+  it("rejects malformed sandbox input before sending a request", async () => {
+    const pedelec = new Pedelec();
+
+    await expect(pedelec.createSession({ provider: "codex", sandbox: null } as any)).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "sandbox must be an object",
+    });
+    await expect(pedelec.createSession({ provider: "codex", sandbox: {} } as any)).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "sandbox.path must be a string",
+    });
+    await expect(
+      pedelec.createSession({ provider: "codex", sandbox: { path: "   " } })
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "sandbox.path must not be empty",
+    });
+    await expect(
+      pedelec.createSession({ provider: "codex", sandbox: { path: 123 } } as any)
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "sandbox.path must be a string",
+    });
+    expect(pageWindow.port.sent).toHaveLength(0);
+  });
+
   it("gets approval status from the extension without creating a session", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.getApprovalStatus();

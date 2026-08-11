@@ -152,12 +152,17 @@ export type SerializableSkillsManifest = {
   tools: SerializableToolManifest[];
 };
 
+export type CreateSessionSandboxInput = {
+  path: string;
+};
+
 type CreateSessionInputWithProvider<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
   provider: ProviderCode;
   model?: string;
   skills?: SkillsInput<TTools>;
+  sandbox?: CreateSessionSandboxInput;
   autoEndOnDisconnect?: boolean;
 };
 
@@ -167,6 +172,7 @@ type CreateSessionInputWithDefaults<
   provider?: undefined;
   model?: never;
   skills?: SkillsInput<TTools>;
+  sandbox?: CreateSessionSandboxInput;
   autoEndOnDisconnect?: boolean;
 };
 
@@ -517,6 +523,7 @@ export class Pedelec {
         provider: resolvedInput.provider,
         model: resolvedInput.model,
         skills: resolvedInput.skills,
+        sandbox: resolvedInput.sandbox,
         autoEndOnDisconnect: resolvedInput.autoEndOnDisconnect,
       },
     });
@@ -628,6 +635,7 @@ export class Pedelec {
         provider: ProviderCode;
         model?: string;
         skills?: SerializableSkillsManifest;
+        sandbox?: CreateSessionSandboxInput;
         inlineToolHandlers: Map<string, ToolSpecificHandler>;
         autoEndOnDisconnect: boolean;
       }
@@ -635,6 +643,7 @@ export class Pedelec {
     provider: ProviderCode;
     model?: string;
     skills?: SerializableSkillsManifest;
+    sandbox?: CreateSessionSandboxInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
     autoEndOnDisconnect: boolean;
   }> {
@@ -642,6 +651,7 @@ export class Pedelec {
       provider?: unknown;
       model?: unknown;
       skills?: unknown;
+      sandbox?: unknown;
       autoEndOnDisconnect?: unknown;
     };
     const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
@@ -649,6 +659,7 @@ export class Pedelec {
     const hasModel = raw.model !== undefined;
     const autoEndOnDisconnect = raw.autoEndOnDisconnect !== false;
     const normalizedSkills = normalizeSkillsInput(raw.skills);
+    const sandbox = normalizeCreateSessionSandboxInput(raw.sandbox);
 
     if (!hasProvider && hasModel) {
       throw makeError("INVALID_INPUT", "model cannot be provided without provider");
@@ -657,18 +668,24 @@ export class Pedelec {
     const userModel = typeof raw.model === "string" ? raw.model : undefined;
 
     if (!hasProvider) {
-      return this.resolveDefaultCreateSessionInput(normalizedSkills, autoEndOnDisconnect);
+      return this.resolveDefaultCreateSessionInput(normalizedSkills, sandbox, autoEndOnDisconnect);
     }
 
     let model = userModel;
     if (model === undefined) {
-      return this.resolveProviderOnlyCreateSessionInput(provider as ProviderCode, normalizedSkills, autoEndOnDisconnect);
+      return this.resolveProviderOnlyCreateSessionInput(
+        provider as ProviderCode,
+        normalizedSkills,
+        sandbox,
+        autoEndOnDisconnect
+      );
     }
 
     return {
       provider: provider as ProviderCode,
       model,
       skills: normalizedSkills.manifest,
+      sandbox,
       inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
@@ -731,11 +748,13 @@ export class Pedelec {
 
   private async resolveDefaultCreateSessionInput(
     normalizedSkills: NormalizedSkillsInput,
+    sandbox: CreateSessionSandboxInput | undefined,
     autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
     model?: string;
     skills?: SerializableSkillsManifest;
+    sandbox?: CreateSessionSandboxInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
     autoEndOnDisconnect: boolean;
   }> {
@@ -751,6 +770,7 @@ export class Pedelec {
       provider: settings.defaultProvider,
       model: settings.defaultModels[settings.defaultProvider] ?? undefined,
       skills: normalizedSkills.manifest,
+      sandbox,
       inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
@@ -759,11 +779,13 @@ export class Pedelec {
   private async resolveProviderOnlyCreateSessionInput(
     provider: ProviderCode,
     normalizedSkills: NormalizedSkillsInput,
+    sandbox: CreateSessionSandboxInput | undefined,
     autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
     model?: string;
     skills?: SerializableSkillsManifest;
+    sandbox?: CreateSessionSandboxInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
     autoEndOnDisconnect: boolean;
   }> {
@@ -772,6 +794,7 @@ export class Pedelec {
       provider,
       model: settings.defaultModels[provider] ?? undefined,
       skills: normalizedSkills.manifest,
+      sandbox,
       inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
@@ -918,6 +941,23 @@ export class Pedelec {
       session.handleTransportDisconnect(error);
     }
   }
+}
+
+function normalizeCreateSessionSandboxInput(value: unknown): CreateSessionSandboxInput | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw makeError("INVALID_INPUT", "sandbox must be an object");
+  }
+
+  const path = (value as { path?: unknown }).path;
+  if (typeof path !== "string") {
+    throw makeError("INVALID_INPUT", "sandbox.path must be a string");
+  }
+  if (path.trim().length === 0) {
+    throw makeError("INVALID_INPUT", "sandbox.path must not be empty");
+  }
+
+  return { path };
 }
 
 export class PedelecSession<TToolName extends string = string> {

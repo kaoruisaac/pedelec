@@ -12,7 +12,12 @@ import {
   type PedelecAvailability,
   type ApprovalStatus,
   type ProviderInfo,
+  type CreateSessionSandboxInput,
 } from "./index";
+
+function sandboxInputHasPublicType(): CreateSessionSandboxInput {
+  return { path: "C:\\workspace\\project" };
+}
 
 async function typedOnToolNameFromCreateSession() {
   const pedelec = new Pedelec();
@@ -107,7 +112,12 @@ async function resumedSessionFallsBackToString() {
 
 async function noSkillsFallsBackToString() {
   const pedelec = new Pedelec();
-  const session = await pedelec.createSession({ provider: "codex" });
+  const session = await pedelec.createSession({
+    provider: "codex",
+    sandbox: { path: "C:\\workspace\\project" },
+  });
+  const typedSandbox: CreateSessionSandboxInput = sandboxInputHasPublicType();
+  void typedSandbox;
 
   session.onTool((name) => {
     const anyString: string = name;

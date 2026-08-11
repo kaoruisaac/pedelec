@@ -145,6 +145,19 @@ const result = await session.readAsset("/model.glb", "file");
 
 Public asset paths use `/...` with `assets/` as their implicit root; nested paths such as `/results/model.glb` are supported up to 100 MiB.
 
+## Sandbox workspace
+
+By default, each session receives a temporary Desktop-managed sandbox. To use an application-owned workspace that can persist across sessions, pass an absolute path:
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  sandbox: { path: "C:\\workspace\\project-a" },
+});
+```
+
+Pedelec creates missing `skills/`, `assets/`, `logs/`, and `tmp/` directories and preserves existing files. It never deletes an explicit workspace, and multiple active sessions may share it. Filesystem write conflicts are the application's responsibility. An explicit path must not overlap Pedelec's managed sandbox root.
+
 ---
 
 ## Creating a Session

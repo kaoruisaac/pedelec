@@ -3293,6 +3293,240 @@ mod tests {
     }
 
     #[test]
+    fn custom_sandbox_validates_paths_and_preserves_existing_workspace_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed_root = temp.path().join("managed");
+        let manager = SandboxManager::with_sandbox_root(&managed_root);
+        let custom = temp.path().join("project");
+        fs::create_dir_all(custom.join("skills")).unwrap();
+        fs::create_dir_all(custom.join("assets")).unwrap();
+        fs::write(custom.join("source.txt"), "keep").unwrap();
+        fs::write(custom.join("skills").join("keep.txt"), "keep").unwrap();
+        fs::write(custom.join("assets").join("existing.bin"), b"keep").unwrap();
+
+        let resolved = manager.prepare_custom_sandbox(&custom).unwrap();
+        assert_eq!(resolved, custom.canonicalize().unwrap());
+        for subdir in SANDBOX_SUBDIRS {
+            assert!(resolved.join(subdir).is_dir(), "missing subdir {subdir}");
+        }
+        assert_eq!(
+            fs::read_to_string(resolved.join("source.txt")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(resolved.join("skills").join("keep.txt")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            fs::read(resolved.join("assets").join("existing.bin")).unwrap(),
+            b"keep"
+        );
+
+        let file_path = temp.path().join("not-a-directory");
+        fs::write(&file_path, "file").unwrap();
+        assert_eq!(
+            manager.prepare_custom_sandbox(&file_path).unwrap_err().code,
+            error_codes::SANDBOX_PATH_INVALID
+        );
+        assert_eq!(
+            manager
+                .prepare_custom_sandbox(Path::new("relative-project"))
+                .unwrap_err()
+                .code,
+            error_codes::SANDBOX_PATH_INVALID
+        );
+
+        for overlap in [
+            managed_root.clone(),
+            managed_root.join("nested"),
+            temp.path().to_path_buf(),
+        ] {
+            let error = manager.prepare_custom_sandbox(overlap).unwrap_err();
+            assert_eq!(error.code, error_codes::SANDBOX_PATH_INVALID);
+            assert!(error.details.unwrap()["managedSandboxRoot"].is_string());
+        }
+
+        let sibling = manager
+            .prepare_custom_sandbox(temp.path().join("sibling"))
+            .unwrap();
+        assert!(sibling.is_dir());
+    }
+
+    #[test]
+    fn custom_sandbox_generated_skills_merge_and_overwrite_collisions() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("project");
+        fs::create_dir_all(custom.join("skills")).unwrap();
+        fs::write(
+            custom.join("skills").join("tools-get_app_state.json"),
+            "OLD",
+        )
+        .unwrap();
+        fs::write(custom.join("skills").join("unrelated.txt"), "KEEP").unwrap();
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                model: None,
+                skills: Some(sample_skills_input()),
+                sandbox: Some(CreateThreadSandboxInput {
+                    path: custom.clone(),
+                }),
+            })
+            .unwrap();
+
+        let sandbox = runtime.thread_sandbox_path(&output.thread_id).unwrap();
+        assert_eq!(sandbox, custom.canonicalize().unwrap());
+        let generated =
+            fs::read_to_string(sandbox.join("skills").join("tools-get_app_state.json")).unwrap();
+        assert!(generated.contains("get_app_state"));
+        assert_ne!(generated, "OLD");
+        assert_eq!(
+            fs::read_to_string(sandbox.join("skills").join("unrelated.txt")).unwrap(),
+            "KEEP"
+        );
+    }
+
+    #[test]
+    fn multiple_sessions_share_custom_sandbox_with_unique_event_logs() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("shared-project");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            ..CoreRuntime::default()
+        };
+
+        let first = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                model: None,
+                skills: None,
+                sandbox: Some(CreateThreadSandboxInput {
+                    path: custom.clone(),
+                }),
+            })
+            .unwrap();
+        let second = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Claude,
+                model: None,
+                skills: None,
+                sandbox: Some(CreateThreadSandboxInput {
+                    path: custom.clone(),
+                }),
+            })
+            .unwrap();
+
+        let first_sandbox = runtime.thread_sandbox_path(&first.thread_id).unwrap();
+        let second_sandbox = runtime.thread_sandbox_path(&second.thread_id).unwrap();
+        assert_eq!(first_sandbox, second_sandbox);
+        let first_log = runtime.event_log_path(&first.thread_id).unwrap();
+        let second_log = runtime.event_log_path(&second.thread_id).unwrap();
+        assert_ne!(first_log, second_log);
+        assert_eq!(first_log.parent(), second_log.parent());
+        assert!(first_log
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(&first.thread_id));
+        assert!(second_log
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(&second.thread_id));
+        assert!(!custom.join("logs").join("events.jsonl").exists());
+        assert!(fs::read_to_string(first_log).unwrap().contains("created"));
+        assert!(fs::read_to_string(second_log).unwrap().contains("created"));
+    }
+
+    #[test]
+    fn custom_sandbox_initialization_failure_does_not_delete_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("project");
+        fs::create_dir_all(&custom).unwrap();
+        fs::write(custom.join("sentinel.txt"), "keep").unwrap();
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            ..CoreRuntime::default()
+        };
+
+        let result = runtime.create_thread(CreateThreadInput {
+            provider: ProviderCode::Codex,
+            model: None,
+            skills: Some(CreateThreadSkillsInput {
+                guidance: "bad".into(),
+                tools: vec![CreateThreadToolInput {
+                    name: "bad/name".into(),
+                    description: "Bad.".into(),
+                    args_schema: json!({ "type": "object" }),
+                    timeout_ms: None,
+                }],
+            }),
+            sandbox: Some(CreateThreadSandboxInput {
+                path: custom.clone(),
+            }),
+        });
+
+        assert_eq!(
+            result.unwrap_err().code,
+            error_codes::TOOLS_MANIFEST_INVALID
+        );
+        assert!(custom.exists());
+        assert_eq!(
+            fs::read_to_string(custom.join("sentinel.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn cleanup_removes_managed_sandboxes_but_preserves_custom_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed_root = temp.path().join("managed");
+        let custom = temp.path().join("external-project");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&managed_root),
+            ..CoreRuntime::default()
+        };
+        let custom_thread = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                model: None,
+                skills: None,
+                sandbox: Some(CreateThreadSandboxInput {
+                    path: custom.clone(),
+                }),
+            })
+            .unwrap();
+        runtime
+            .sandbox_manager
+            .create_thread_sandbox("t000001")
+            .unwrap();
+        fs::write(custom.join("keep.txt"), "keep").unwrap();
+
+        assert!(runtime.cleanup_for_app_exit().is_empty());
+        assert!(!managed_root.join("t000001").exists());
+        assert!(custom.exists());
+        assert!(custom.join("keep.txt").exists());
+        assert_eq!(
+            runtime.thread_status(&custom_thread.thread_id),
+            Some(ThreadStatus::Ended)
+        );
+
+        let startup_runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(&managed_root),
+            ..CoreRuntime::default()
+        };
+        assert!(startup_runtime
+            .cleanup_stale_sandboxes_for_app_start()
+            .is_empty());
+        assert!(custom.exists());
+    }
+
+    #[test]
     fn skill_url_validation_accepts_https_and_loopback_http() {
         for url in [
             "https://example.com/tools.md",
@@ -3782,6 +4016,7 @@ mod tests {
             provider: ProviderCode::Codex,
             model: None,
             skills: None,
+            sandbox: None,
         };
 
         let first = runtime.create_thread(input.clone()).unwrap();
@@ -3810,6 +4045,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: None,
+                sandbox: None,
             })
             .unwrap();
 
@@ -3852,6 +4088,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: None,
+                sandbox: None,
             })
             .unwrap();
 
@@ -3872,6 +4109,7 @@ mod tests {
             provider: ProviderCode::Codex,
             model: None,
             skills: None,
+            sandbox: None,
         };
         let first = runtime.create_thread(input.clone()).unwrap();
         let second = runtime.create_thread(input).unwrap();
@@ -3913,6 +4151,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: None,
+                sandbox: None,
             })
             .unwrap();
         let sandbox_path = runtime.thread_sandbox_path(&thread.thread_id).unwrap();
@@ -4044,6 +4283,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: Some(sample_skills_input()),
+                sandbox: None,
             })
             .unwrap();
 
@@ -4083,6 +4323,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: Some(sample_skills_input()),
+                sandbox: None,
             })
             .unwrap();
         fs::write(
@@ -4120,6 +4361,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: Some(sample_skills_input()),
+                sandbox: None,
             })
             .unwrap();
 
@@ -4155,6 +4397,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: None,
+                sandbox: None,
             })
             .unwrap();
 
@@ -4184,6 +4427,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: Some(sample_skills_input()),
+                sandbox: None,
             })
             .unwrap();
 
@@ -4228,6 +4472,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: Some(sample_skills_input()),
+                sandbox: None,
             })
             .unwrap();
         runtime
@@ -4269,6 +4514,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 model: None,
                 skills: Some(sample_skills_input()),
+                sandbox: None,
             })
             .unwrap();
         let thread_id = output.thread_id.clone();

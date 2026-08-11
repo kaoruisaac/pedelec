@@ -931,6 +931,7 @@ mod tests {
                     timeout_ms: None,
                 }],
             }),
+            sandbox: None,
         });
 
         assert_eq!(
