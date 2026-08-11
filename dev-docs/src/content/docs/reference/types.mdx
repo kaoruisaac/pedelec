@@ -51,21 +51,21 @@ type CreateSessionInput<
 > =
   | {
       provider: ProviderCode;
-      model?: string;
+      effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
-      model?: never;
+      effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
-The union prevents `model` without `provider` in TypeScript.
+`effortLevel` is provider-independent and may be used with or without `provider`.
 
 ### `CreateSessionSandboxInput`
 
@@ -95,7 +95,6 @@ type ProviderInfo = {
 ```ts
 type PedelecSettings = {
   defaultProvider: ProviderCode | null;
-  defaultModels: Partial<Record<ProviderCode, string>>;
 };
 ```
 
@@ -380,7 +379,7 @@ The root alias enforces an object schema at compile time.
 type PedelecEventContext = {
   sessionId: string;
   provider: string;
-  model?: string;
+  effortLevel?: "default" | "low" | "high";
   sessionCreatedAt: number;
   eventReceivedAt?: number;
   eventEmittedAt: number;

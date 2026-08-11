@@ -108,7 +108,7 @@ Pedelec 的 Ollama provider 使用內附的 `pedelec-agent`，不是把 `ollama`
 - 非預設位址時在 Desktop App 設定 base URL；
 - 在 Desktop Settings 設定 Ollama API key。現行 agent 要求非空值：本機 server 填 `ollama`，authenticated remote/Cloud endpoint 填該服務提供的有效 key；
 - 安裝選擇的 model；
-- 明確指定 model，或設定 Ollama default model；
+- 在選中的 Ollama effort profile 設定 model；
 - optional 設定 Tavily API key，讓 Ollama model 可使用 Tavily web search。目前 agent 固定使用 `basic` search depth，每次最多回傳五筆結果；未設定 Tavily key 時不會提供 web search。
 
 下一步完成[快速開始](./quick-start/)，建立真實 session、接收 assistant output 並正確結束 session。

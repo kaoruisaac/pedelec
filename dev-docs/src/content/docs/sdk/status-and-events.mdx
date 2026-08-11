@@ -135,7 +135,7 @@ Pending `sendText()` or `prepare()` work rejects with `SESSION_ENDED` when the s
 type PedelecEventContext = {
   sessionId: string;
   provider: string;
-  model?: string;
+  effortLevel?: "default" | "low" | "high";
   sessionCreatedAt: number;
   eventReceivedAt?: number;
   eventEmittedAt: number;

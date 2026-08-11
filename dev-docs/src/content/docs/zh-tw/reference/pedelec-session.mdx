@@ -39,13 +39,13 @@ readonly provider: string
 
 此 SDK handle 註冊時已知 provider。Fresh resumed handle 目前可能是 empty string。
 
-### `model`
+### `effortLevel`
 
 ```ts
-readonly model?: string
+readonly effortLevel?: "default" | "low" | "high"
 ```
 
-此 SDK handle 已知 model。沒有 explicit/default model，或 fresh resume 後可能是 `undefined`。
+此 session 使用的 normalized effort level。fresh resume handle 可能因 bridge 只回傳 ID 而為 `undefined`。
 
 ### `sessionCreatedAt`
 

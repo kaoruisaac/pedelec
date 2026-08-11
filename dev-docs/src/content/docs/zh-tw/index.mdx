@@ -95,7 +95,7 @@ const pedelec = new Pedelec();
 
 const session = await pedelec.createSession({
   provider: "codex",
-  model: "gpt-5",
+  effortLevel: "high",
   skills: {
     guidance: "需要瀏覽器頁面資訊時使用 get_current_page。",
     tools: [
@@ -149,34 +149,27 @@ const status = await pedelec.getApprovalStatus();
 console.log(status.installed, status.approved, status.origin);
 ```
 
-### 指定 provider 與 model
+### 指定 provider 與 effort
 
 ```ts
 const session = await pedelec.createSession({
   provider: "opencode",
-  model: "ollama/qwen2.5-coder:14b",
+  effortLevel: "high",
 });
 ```
 
 目前 SDK 支援的 provider code：
 
-| Provider | Code | model 範例 |
-| --- | --- | --- |
-| Codex | `codex` | `gpt-5` |
-| Antigravity | `antigravity` | provider 自己支援的 model id |
-| OpenCode | `opencode` | `ollama/qwen2.5-coder:14b` |
-| Cursor | `cursor` | `gpt-5` |
-| Claude Code | `claude` | `sonnet` |
-| Ollama | `ollama` | `qwen3-14b-32k:latest` |
+| Provider | Code |
+| --- | --- |
+| Codex | `codex` |
+| Antigravity | `antigravity` |
+| OpenCode | `opencode` |
+| Cursor | `cursor` |
+| Claude Code | `claude` |
+| Ollama | `ollama` |
 
-Ollama session 由 Desktop App 隨附的 `pedelec-agent` 執行，不會直接啟動 `ollama` CLI。它使用設定的 Ollama-compatible endpoint（default `http://127.0.0.1:11434`）：使用本機 URL 時需自行啟動 server，也可設定 remote 或 Ollama Cloud endpoint。現行 agent 要求非空 API key；本機填 `ollama`，遠端填服務提供的 key。仍必須明確指定 model 或在 Settings 設定 `defaultModels.ollama`：
-
-```ts
-const session = await pedelec.createSession({
-  provider: "ollama",
-  model: "qwen3-14b-32k:latest",
-});
-```
+Ollama session 使用 Desktop 設定的 endpoint 與內附 `pedelec-agent`。選中的 effort profile 必須有 model；空 profile 會回傳 `MODEL_REQUIRED`，不會 fallback 到 `default`。
 
 Desktop Settings 也可替 Ollama session 設定 optional Tavily API key。設定後，內附 agent 可自行判斷是否使用 Tavily web search；目前固定使用 `basic` search depth，每次最多回傳五筆結果。未設定 key 時，不會向 Ollama model 提供 web-search tool。
 
@@ -208,7 +201,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-這會先讀取 Desktop App 的 `defaultProvider` 與 `defaultModels`。如果沒有設定 default provider，SDK 會拋出 `DEFAULT_PROVIDER_NOT_SET`。如果該 default provider 有自己的 default model，SDK 會在建立 session 時帶上該 model。
+這會只讀取 Desktop App 的 `defaultProvider`。如果沒有設定 default provider，SDK 會拋出 `DEFAULT_PROVIDER_NOT_SET`；具體 effort argv 由 Core 解析 Desktop 設定。
 
 ### 只指定 provider
 
@@ -218,8 +211,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-只傳 `provider` 時，SDK 會使用該 provider 在 Desktop App 中設定的 default model；若該 provider 未設定 model，則只傳 provider，讓 provider CLI 使用自己的預設行為。
-Ollama 是例外：它必須有 model，因此只傳 Ollama provider 時需要 `defaultModels.ollama`，否則會回傳 `MODEL_REQUIRED`。
+只傳 `provider` 時，SDK 使用 `effortLevel: "default"`。非 Ollama provider 可使用空 profile；Ollama 的選中 profile 沒有 model 時會回傳 `MODEL_REQUIRED`。
 
 ### Session 生命週期
 
@@ -268,9 +260,6 @@ type ProviderInfo = {
 const settings = await pedelec.getSettings();
 
 console.log(settings.defaultProvider);
-console.log(settings.defaultModels.codex);
-console.log(settings.defaultModels.antigravity);
-console.log(settings.defaultModels.ollama);
 ```
 
 回傳格式：
@@ -278,7 +267,6 @@ console.log(settings.defaultModels.ollama);
 ```ts
 type PedelecSettings = {
   defaultProvider: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama" | null;
-  defaultModels: Partial<Record<"codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama", string>>;
 };
 ```
 

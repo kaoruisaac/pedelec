@@ -6,7 +6,7 @@ import "./SettingPop.css";
 
 export type ShapeRainSessionSettings = {
   provider: "default" | ProviderCode;
-  model: string;
+  effortLevel: "default" | "low" | "high";
 };
 
 export type PedelecProviderSettings = {
@@ -17,7 +17,6 @@ export type PedelecProviderSettings = {
 type ProviderOption = {
   value: ShapeRainSessionSettings["provider"];
   label: string;
-  defaultModel?: string;
 };
 
 export type SettingPopProps = {
@@ -28,7 +27,7 @@ export type SettingPopProps = {
 
 const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
   const [provider, setProvider] = createSignal<ShapeRainSessionSettings["provider"]>(props.value.provider);
-  const [model, setModel] = createSignal(props.value.model);
+  const [effortLevel, setEffortLevel] = createSignal(props.value.effortLevel);
   const [providerMenuOpen, setProviderMenuOpen] = createSignal(false);
   const [providerSettings, setProviderSettings] = createSignal<PedelecProviderSettings | null>(null);
   const [loading, setLoading] = createSignal(true);
@@ -42,13 +41,12 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
       ...availableProviders.map((item) => ({
         value: item.code,
         label: item.name,
-        defaultModel: loaded?.settings.defaultModels[item.code],
       })),
     ];
   });
 
   const selectedProvider = createMemo(() => providerOptions().find((option) => option.value === provider()) ?? providerOptions()[0]);
-  const modelDisabled = createMemo(() => provider() === "default" || loading() || Boolean(error()));
+  const effortDisabled = createMemo(() => loading() || Boolean(error()));
 
   onMount(() => {
     void loadOptions();
@@ -65,10 +63,10 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
       const current = props.value.provider;
       if (current !== "default" && !available.has(current)) {
         setProvider("default");
-        setModel("");
+        setEffortLevel("default");
       } else {
         setProvider(current);
-        setModel(current === "default" ? "" : props.value.model);
+        setEffortLevel(props.value.effortLevel);
       }
     } catch (err) {
       setError(providerSettingsErrorMessage(err));
@@ -80,7 +78,7 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
   function selectProvider(value: ShapeRainSessionSettings["provider"]): void {
     setProvider(value);
     if (value === "default") {
-      setModel("");
+      setEffortLevel("default");
     }
     setProviderMenuOpen(false);
   }
@@ -90,7 +88,7 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
     const selected = provider();
     props.onApply?.({
       provider: selected,
-      model: selected === "default" ? "" : model().trim(),
+      effortLevel: effortLevel(),
     });
     popup.close();
   }
@@ -116,9 +114,6 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
             >
               <span class="SettingPop-dropdownValue">
                 {loading() ? "Loading providers..." : selectedProvider().label}
-                <Show when={!loading() && selectedProvider().defaultModel}>
-                  {(defaultModel) => <span class="SettingPop-defaultModel">default: {defaultModel()}</span>}
-                </Show>
               </span>
               <FiChevronDown size={16} />
             </button>
@@ -133,9 +128,6 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
                       onClick={() => selectProvider(option.value)}
                     >
                       <span>{option.label}</span>
-                      <Show when={option.defaultModel}>
-                        {(defaultModel) => <span class="SettingPop-optionMeta">default: {defaultModel()}</span>}
-                      </Show>
                     </button>
                   )}
                 </For>
@@ -145,19 +137,21 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
         </div>
 
         <div class="SettingPop-field">
-          <label class="SettingPop-label">Model (optional)</label>
+          <label class="SettingPop-label">Effort level</label>
           <div class="SettingPop-inputWrap">
-            <input
+            <select
               class="SettingPop-input"
-              type="text"
-              value={model()}
-              disabled={modelDisabled()}
-              placeholder="e.g. llama3.2"
-              onInput={(event) => setModel(event.currentTarget.value)}
-            />
+              value={effortLevel()}
+              disabled={effortDisabled()}
+              onInput={(event) => setEffortLevel(event.currentTarget.value as "default" | "low" | "high")}
+            >
+              <option value="default">Default</option>
+              <option value="low">Low</option>
+              <option value="high">High</option>
+            </select>
           </div>
           <Show when={provider() === "default"}>
-            <p class="SettingPop-helpText">Default uses the Pedelec Desktop default provider and model.</p>
+            <p class="SettingPop-helpText">Default uses the Pedelec Desktop default provider and effort profile.</p>
           </Show>
         </div>
 

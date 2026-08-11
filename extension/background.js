@@ -1073,12 +1073,11 @@ function createBackground(runtimeChrome, options = {}) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw { code: "SDK_PROTOCOL_ERROR", message: "get_settings response had invalid shape" };
     }
-    const { defaultProvider, defaultModels } = value;
-    if ((defaultProvider !== null && typeof defaultProvider !== "string") ||
-        !defaultModels || typeof defaultModels !== "object" || Array.isArray(defaultModels)) {
+    const { defaultProvider } = value;
+    if (defaultProvider !== null && typeof defaultProvider !== "string") {
       throw { code: "SDK_PROTOCOL_ERROR", message: "get_settings response had invalid shape" };
     }
-    return { defaultProvider, defaultModels: { ...defaultModels } };
+    return { defaultProvider };
   }
 
   function projectSdkProviders(value) {
@@ -1153,7 +1152,7 @@ function createBackground(runtimeChrome, options = {}) {
           const input = message.input || {};
           const result = await sendSdkNativeRequest(context, "create_thread", {
             provider: input.provider,
-            model: input.model,
+            effortLevel: input.effortLevel,
             skills: input.skills,
             sandbox: input.sandbox,
           });

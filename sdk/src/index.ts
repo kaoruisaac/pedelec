@@ -8,6 +8,7 @@ export type PedelecOptions = {
 };
 
 export type ProviderCode = "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
+export type EffortLevel = "default" | "low" | "high";
 
 export type JsonPrimitive = string | number | boolean | null;
 
@@ -160,7 +161,7 @@ type CreateSessionInputWithProvider<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
   provider: ProviderCode;
-  model?: string;
+  effortLevel?: EffortLevel;
   skills?: SkillsInput<TTools>;
   sandbox?: CreateSessionSandboxInput;
   autoEndOnDisconnect?: boolean;
@@ -170,7 +171,7 @@ type CreateSessionInputWithDefaults<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
   provider?: undefined;
-  model?: never;
+  effortLevel?: EffortLevel;
   skills?: SkillsInput<TTools>;
   sandbox?: CreateSessionSandboxInput;
   autoEndOnDisconnect?: boolean;
@@ -191,7 +192,6 @@ export type ProviderInfo = {
 
 export type PedelecSettings = {
   defaultProvider: ProviderCode | null;
-  defaultModels: Partial<Record<ProviderCode, string>>;
 };
 
 export type ApprovalStatus = {
@@ -233,7 +233,7 @@ export type PedelecSessionStatus =
 export type PedelecEventContext = {
   sessionId: string;
   provider: string;
-  model?: string;
+  effortLevel?: EffortLevel;
   sessionCreatedAt: number;
   eventReceivedAt?: number;
   eventEmittedAt: number;
@@ -521,7 +521,7 @@ export class Pedelec {
     const result = await this.request<{ sessionId: string }>("create_session", {
       input: {
         provider: resolvedInput.provider,
-        model: resolvedInput.model,
+        effortLevel: resolvedInput.effortLevel,
         skills: resolvedInput.skills,
         sandbox: resolvedInput.sandbox,
         autoEndOnDisconnect: resolvedInput.autoEndOnDisconnect,
@@ -535,7 +535,7 @@ export class Pedelec {
     return this.registerSession(
       result.sessionId,
       resolvedInput.provider,
-      resolvedInput.model,
+      resolvedInput.effortLevel,
       resolvedInput.inlineToolHandlers
     );
   }
@@ -633,7 +633,7 @@ export class Pedelec {
   private resolveCreateSessionInput(input: CreateSessionInput):
     | {
         provider: ProviderCode;
-        model?: string;
+        effortLevel: EffortLevel;
         skills?: SerializableSkillsManifest;
         sandbox?: CreateSessionSandboxInput;
         inlineToolHandlers: Map<string, ToolSpecificHandler>;
@@ -641,7 +641,7 @@ export class Pedelec {
       }
     | Promise<{
     provider: ProviderCode;
-    model?: string;
+    effortLevel: EffortLevel;
     skills?: SerializableSkillsManifest;
     sandbox?: CreateSessionSandboxInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
@@ -650,40 +650,31 @@ export class Pedelec {
     const raw = (input ?? {}) as {
       provider?: unknown;
       model?: unknown;
+      effortLevel?: unknown;
       skills?: unknown;
       sandbox?: unknown;
       autoEndOnDisconnect?: unknown;
     };
     const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
     const hasProvider = provider.length > 0;
-    const hasModel = raw.model !== undefined;
+    if (raw.model !== undefined) {
+      throw makeError("INVALID_INPUT", "model is no longer supported; configure provider effort profiles in Desktop Settings");
+    }
+    const effortLevel = raw.effortLevel === undefined ? "default" : raw.effortLevel;
+    if (!isEffortLevel(effortLevel)) {
+      throw makeError("INVALID_INPUT", "effortLevel must be one of default, low, or high");
+    }
     const autoEndOnDisconnect = raw.autoEndOnDisconnect !== false;
     const normalizedSkills = normalizeSkillsInput(raw.skills);
     const sandbox = normalizeCreateSessionSandboxInput(raw.sandbox);
 
-    if (!hasProvider && hasModel) {
-      throw makeError("INVALID_INPUT", "model cannot be provided without provider");
-    }
-
-    const userModel = typeof raw.model === "string" ? raw.model : undefined;
-
     if (!hasProvider) {
-      return this.resolveDefaultCreateSessionInput(normalizedSkills, sandbox, autoEndOnDisconnect);
-    }
-
-    let model = userModel;
-    if (model === undefined) {
-      return this.resolveProviderOnlyCreateSessionInput(
-        provider as ProviderCode,
-        normalizedSkills,
-        sandbox,
-        autoEndOnDisconnect
-      );
+      return this.resolveDefaultCreateSessionInput(effortLevel, normalizedSkills, sandbox, autoEndOnDisconnect);
     }
 
     return {
       provider: provider as ProviderCode,
-      model,
+      effortLevel,
       skills: normalizedSkills.manifest,
       sandbox,
       inlineToolHandlers: normalizedSkills.handlers,
@@ -747,12 +738,13 @@ export class Pedelec {
   }
 
   private async resolveDefaultCreateSessionInput(
+    effortLevel: EffortLevel,
     normalizedSkills: NormalizedSkillsInput,
     sandbox: CreateSessionSandboxInput | undefined,
     autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
-    model?: string;
+    effortLevel: EffortLevel;
     skills?: SerializableSkillsManifest;
     sandbox?: CreateSessionSandboxInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
@@ -768,31 +760,7 @@ export class Pedelec {
     await this.assertDefaultProviderAvailable(settings.defaultProvider);
     return {
       provider: settings.defaultProvider,
-      model: settings.defaultModels[settings.defaultProvider] ?? undefined,
-      skills: normalizedSkills.manifest,
-      sandbox,
-      inlineToolHandlers: normalizedSkills.handlers,
-      autoEndOnDisconnect,
-    };
-  }
-
-  private async resolveProviderOnlyCreateSessionInput(
-    provider: ProviderCode,
-    normalizedSkills: NormalizedSkillsInput,
-    sandbox: CreateSessionSandboxInput | undefined,
-    autoEndOnDisconnect: boolean
-  ): Promise<{
-    provider: ProviderCode;
-    model?: string;
-    skills?: SerializableSkillsManifest;
-    sandbox?: CreateSessionSandboxInput;
-    inlineToolHandlers: Map<string, ToolSpecificHandler>;
-    autoEndOnDisconnect: boolean;
-  }> {
-    const settings = await this.getSettings();
-    return {
-      provider,
-      model: settings.defaultModels[provider] ?? undefined,
+      effortLevel,
       skills: normalizedSkills.manifest,
       sandbox,
       inlineToolHandlers: normalizedSkills.handlers,
@@ -815,7 +783,7 @@ export class Pedelec {
   private registerSession(
     sessionId: string,
     provider: string,
-    model: string | undefined,
+    effortLevel: EffortLevel | undefined,
     inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map()
   ): PedelecSession<string> {
     const existing = this.sessions.get(sessionId);
@@ -824,7 +792,7 @@ export class Pedelec {
       return existing;
     }
 
-    const session = new PedelecSession<string>(this, sessionId, provider, model, inlineToolHandlers);
+    const session = new PedelecSession<string>(this, sessionId, provider, effortLevel, inlineToolHandlers);
     this.sessions.set(sessionId, session);
     return session;
   }
@@ -963,7 +931,7 @@ function normalizeCreateSessionSandboxInput(value: unknown): CreateSessionSandbo
 export class PedelecSession<TToolName extends string = string> {
   readonly sessionId: string;
   readonly provider: string;
-  readonly model?: string;
+  readonly effortLevel?: EffortLevel;
   readonly sessionCreatedAt = Date.now();
 
   private status: PedelecSessionStatus = "idle";
@@ -987,12 +955,12 @@ export class PedelecSession<TToolName extends string = string> {
     private readonly client: Pedelec,
     sessionId: string,
     provider: string,
-    model?: string,
+    effortLevel?: EffortLevel,
     inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map()
   ) {
     this.sessionId = sessionId;
     this.provider = provider;
-    this.model = model;
+    this.effortLevel = effortLevel;
     this.inlineToolHandlers = new Map(inlineToolHandlers);
   }
 
@@ -1470,7 +1438,7 @@ export class PedelecSession<TToolName extends string = string> {
     return {
       sessionId: this.sessionId,
       provider: this.provider,
-      model: this.model,
+      ...(this.effortLevel ? { effortLevel: this.effortLevel } : {}),
       sessionCreatedAt: this.sessionCreatedAt,
       ...(meta.eventReceivedAt === undefined ? {} : { eventReceivedAt: meta.eventReceivedAt }),
       eventEmittedAt: Date.now(),
@@ -1551,23 +1519,20 @@ function isProviderCode(value: unknown): value is ProviderCode {
     value === "cursor" || value === "claude" || value === "ollama";
 }
 
+function isEffortLevel(value: unknown): value is EffortLevel {
+  return value === "default" || value === "low" || value === "high";
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizePedelecSettings(value: unknown): PedelecSettings {
   if (!isPlainObject(value) || (value.defaultProvider !== null && !isProviderCode(value.defaultProvider)) ||
-      !isPlainObject(value.defaultModels)) {
+      "defaultModels" in value || "providerSettings" in value) {
     throw makeError("SDK_PROTOCOL_ERROR", "get_settings response had invalid shape");
   }
-  const defaultModels: Partial<Record<ProviderCode, string>> = {};
-  for (const [code, model] of Object.entries(value.defaultModels)) {
-    if (!isProviderCode(code) || typeof model !== "string") {
-      throw makeError("SDK_PROTOCOL_ERROR", "get_settings response had invalid shape");
-    }
-    defaultModels[code] = model;
-  }
-  return { defaultProvider: value.defaultProvider, defaultModels };
+  return { defaultProvider: value.defaultProvider };
 }
 
 function normalizeProviderInfoList(value: unknown): ProviderInfo[] {

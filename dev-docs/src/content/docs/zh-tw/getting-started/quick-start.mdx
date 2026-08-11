@@ -50,7 +50,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-只提供 `provider` 時，SDK 會讀取 Desktop App settings；該 provider 有 default model 就一起使用，沒有則交給 provider 自己的 default behavior。Ollama 仍必須有明確或已設定的 model。
+只提供 `provider` 時，SDK 使用 `default` effort；Core 從 Desktop Settings 解析 profile。可以在有無 provider 時傳入 `effortLevel: "low"` 或 `"high"`。Ollama 選中的 profile 必須有 model。
 
 ## 4. 傳送前先註冊 callbacks
 

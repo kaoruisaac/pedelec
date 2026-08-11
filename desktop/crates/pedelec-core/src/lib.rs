@@ -185,7 +185,8 @@ impl PedelecError {
 pub struct ThreadState {
     pub thread_id: String,
     pub provider: ProviderCode,
-    pub model: Option<String>,
+    pub effort_level: EffortLevel,
+    pub effort_args: Vec<String>,
     pub sandbox_path: PathBuf,
     pub skills: Vec<SkillFile>,
     pub status: ThreadStatus,
@@ -228,6 +229,51 @@ pub enum ProviderCode {
     Ollama,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    Default,
+    Low,
+    High,
+}
+
+impl Default for EffortLevel {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortsArgs {
+    #[serde(default)]
+    pub default: Vec<String>,
+    #[serde(default)]
+    pub low: Vec<String>,
+    #[serde(default)]
+    pub high: Vec<String>,
+}
+
+impl Default for EffortsArgs {
+    fn default() -> Self {
+        Self {
+            default: Vec::new(),
+            low: Vec::new(),
+            high: Vec::new(),
+        }
+    }
+}
+
+impl EffortsArgs {
+    fn get(&self, level: EffortLevel) -> &[String] {
+        match level {
+            EffortLevel::Default => &self.default,
+            EffortLevel::Low => &self.low,
+            EffortLevel::High => &self.high,
+        }
+    }
+}
+
 /// The responsibility domain for a thread error. The tagged representation
 /// prevents provider errors from being serialized without their provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,7 +300,6 @@ pub struct ProviderInfo {
 #[serde(rename_all = "camelCase")]
 pub struct PedelecSettings {
     pub default_provider: Option<ProviderCode>,
-    pub default_models: HashMap<ProviderCode, String>,
     pub provider_settings: ProviderSettings,
 }
 
@@ -265,14 +310,12 @@ pub struct PedelecSettings {
 #[serde(rename_all = "camelCase")]
 pub struct SdkSettings {
     pub default_provider: Option<ProviderCode>,
-    pub default_models: HashMap<ProviderCode, String>,
 }
 
 impl From<PedelecSettings> for SdkSettings {
     fn from(settings: PedelecSettings) -> Self {
         Self {
             default_provider: settings.default_provider,
-            default_models: settings.default_models,
         }
     }
 }
@@ -303,7 +346,6 @@ impl Default for PedelecSettings {
     fn default() -> Self {
         Self {
             default_provider: None,
-            default_models: HashMap::new(),
             provider_settings: ProviderSettings::default(),
         }
     }
@@ -313,20 +355,50 @@ impl Default for PedelecSettings {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSettingsInput {
     pub default_provider: ProviderCode,
-    pub default_models: HashMap<ProviderCode, String>,
     pub provider_settings: ProviderSettingsInput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettings {
+    #[serde(default)]
+    pub codex: CommonProviderSettings,
+    #[serde(default)]
+    pub antigravity: CommonProviderSettings,
+    #[serde(default)]
+    pub opencode: CommonProviderSettings,
+    #[serde(default)]
+    pub cursor: CommonProviderSettings,
+    #[serde(default)]
+    pub claude: CommonProviderSettings,
+    #[serde(default)]
     pub ollama: OllamaProviderSettings,
 }
 
 impl Default for ProviderSettings {
     fn default() -> Self {
         Self {
+            codex: CommonProviderSettings::default(),
+            antigravity: CommonProviderSettings::default(),
+            opencode: CommonProviderSettings::default(),
+            cursor: CommonProviderSettings::default(),
+            claude: CommonProviderSettings::default(),
             ollama: OllamaProviderSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommonProviderSettings {
+    #[serde(default)]
+    pub efforts_args: EffortsArgs,
+}
+
+impl Default for CommonProviderSettings {
+    fn default() -> Self {
+        Self {
+            efforts_args: EffortsArgs::default(),
         }
     }
 }
@@ -340,6 +412,8 @@ pub struct OllamaProviderSettings {
     pub api_key: String,
     #[serde(default)]
     pub tavily_api_key: String,
+    #[serde(default)]
+    pub efforts_args: EffortsArgs,
 }
 
 impl Default for OllamaProviderSettings {
@@ -349,6 +423,7 @@ impl Default for OllamaProviderSettings {
             timeout_ms: DEFAULT_OLLAMA_TIMEOUT_MS,
             api_key: String::new(),
             tavily_api_key: String::new(),
+            efforts_args: EffortsArgs::default(),
         }
     }
 }
@@ -356,26 +431,52 @@ impl Default for OllamaProviderSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettingsInput {
+    #[serde(default)]
+    pub codex: CommonProviderSettingsInput,
+    #[serde(default)]
+    pub antigravity: CommonProviderSettingsInput,
+    #[serde(default)]
+    pub opencode: CommonProviderSettingsInput,
+    #[serde(default)]
+    pub cursor: CommonProviderSettingsInput,
+    #[serde(default)]
+    pub claude: CommonProviderSettingsInput,
+    #[serde(default)]
     pub ollama: OllamaProviderSettingsInput,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CommonProviderSettingsInput {
+    #[serde(default)]
+    pub efforts_args: EffortsArgs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OllamaProviderSettingsInput {
     pub base_url: Option<String>,
     pub timeout_ms: Option<u64>,
     pub api_key: Option<String>,
     pub tavily_api_key: Option<String>,
+    #[serde(default)]
+    pub efforts_args: EffortsArgs,
 }
 
 impl Default for ProviderSettingsInput {
     fn default() -> Self {
         Self {
+            codex: CommonProviderSettingsInput::default(),
+            antigravity: CommonProviderSettingsInput::default(),
+            opencode: CommonProviderSettingsInput::default(),
+            cursor: CommonProviderSettingsInput::default(),
+            claude: CommonProviderSettingsInput::default(),
             ollama: OllamaProviderSettingsInput {
                 base_url: Some(DEFAULT_OLLAMA_BASE_URL.to_string()),
                 timeout_ms: Some(DEFAULT_OLLAMA_TIMEOUT_MS),
                 api_key: Some("ollama".to_string()),
                 tavily_api_key: Some(String::new()),
+                efforts_args: EffortsArgs::default(),
             },
         }
     }
@@ -517,7 +618,8 @@ impl ThreadEvent {
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadInput {
     pub provider: ProviderCode,
-    pub model: Option<String>,
+    #[serde(default)]
+    pub effort_level: Option<EffortLevel>,
     pub skills: Option<CreateThreadSkillsInput>,
     pub sandbox: Option<CreateThreadSandboxInput>,
 }
@@ -868,7 +970,7 @@ impl ProviderAdapter for CodexProviderAdapter {
             "--skip-git-repo-check".to_string(),
             "--json".to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "-m");
+        args.extend(ctx.thread.effort_args.clone());
         args.push("-".to_string());
         let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         Ok(CommandSpec {
@@ -905,7 +1007,7 @@ impl ProviderAdapter for CodexProviderAdapter {
             "resume".to_string(),
             provider_session_id.to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "-m");
+        args.extend(ctx.thread.effort_args.clone());
         args.push("-".to_string());
         let prompt = build_provider_resume_prompt(message);
         Ok(CommandSpec {
@@ -972,7 +1074,7 @@ impl ProviderAdapter for AntigravityProviderAdapter {
             "accept-edits".to_string(),
             "--dangerously-skip-permissions".to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.extend(ctx.thread.effort_args.clone());
         Ok(CommandSpec {
             program: "agy".to_string(),
             args,
@@ -1009,7 +1111,7 @@ impl ProviderAdapter for AntigravityProviderAdapter {
             "accept-edits".to_string(),
             "--dangerously-skip-permissions".to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.extend(ctx.thread.effort_args.clone());
         Ok(CommandSpec {
             program: "agy".to_string(),
             args,
@@ -1083,7 +1185,7 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
             "--dir".to_string(),
             ctx.thread.sandbox_path.to_string_lossy().to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.extend(ctx.thread.effort_args.clone());
         args.push("-".to_string());
         let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         Ok(CommandSpec {
@@ -1121,7 +1223,7 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
             "--session".to_string(),
             provider_session_id.to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.extend(ctx.thread.effort_args.clone());
         args.push("-".to_string());
         let prompt = build_provider_resume_prompt(message);
         Ok(CommandSpec {
@@ -1177,7 +1279,7 @@ impl ProviderAdapter for CursorProviderAdapter {
             "--force".to_string(),
             "--trust".to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.extend(ctx.thread.effort_args.clone());
         let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         Ok(CommandSpec {
             program: "cursor-agent".to_string(),
@@ -1212,7 +1314,7 @@ impl ProviderAdapter for CursorProviderAdapter {
             "--force".to_string(),
             "--trust".to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.extend(ctx.thread.effort_args.clone());
         let prompt = build_provider_resume_prompt(message);
         Ok(CommandSpec {
             program: "cursor-agent".to_string(),
@@ -1716,7 +1818,7 @@ impl ProviderAdapter for ClaudeProviderAdapter {
             "--verbose".to_string(),
             "--dangerously-skip-permissions".to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.extend(ctx.thread.effort_args.clone());
         let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         Ok(CommandSpec {
             program: "claude".to_string(),
@@ -1750,7 +1852,7 @@ impl ProviderAdapter for ClaudeProviderAdapter {
             "--verbose".to_string(),
             "--dangerously-skip-permissions".to_string(),
         ];
-        add_model_args(&mut args, &ctx.thread.model, "--model");
+        args.extend(ctx.thread.effort_args.clone());
         let prompt = build_provider_resume_prompt(message);
         Ok(CommandSpec {
             program: "claude".to_string(),
@@ -1800,15 +1902,16 @@ impl ProviderAdapter for OllamaProviderAdapter {
         ctx: &RunPromptProviderContext,
         message: &str,
     ) -> Result<CommandSpec, PedelecError> {
-        let model = required_ollama_model(&ctx.thread)?;
-        let args = vec![
+        required_ollama_model(&ctx.thread)?;
+        let mut args = vec![
             "--provider".to_string(),
             "ollama".to_string(),
-            "--model".to_string(),
-            model,
+        ];
+        args.extend(ctx.thread.effort_args.clone());
+        args.extend([
             "--sandbox".to_string(),
             ctx.thread.sandbox_path.to_string_lossy().to_string(),
-        ];
+        ]);
         let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         let mut env = build_provider_env(ctx)?;
         env.push((
@@ -1856,17 +1959,18 @@ impl ProviderAdapter for OllamaProviderAdapter {
             ));
         }
 
-        let model = required_ollama_model(&ctx.thread)?;
-        let args = vec![
+        required_ollama_model(&ctx.thread)?;
+        let mut args = vec![
             "--provider".to_string(),
             "ollama".to_string(),
-            "--model".to_string(),
-            model,
+        ];
+        args.extend(ctx.thread.effort_args.clone());
+        args.extend([
             "--sandbox".to_string(),
             ctx.thread.sandbox_path.to_string_lossy().to_string(),
             "--session-id".to_string(),
             provider_session_id.to_string(),
-        ];
+        ]);
         let prompt = build_provider_resume_prompt(message);
         let mut env = build_provider_env(ctx)?;
         env.push((
@@ -2189,6 +2293,9 @@ impl CoreRuntime {
         input: CreateThreadInput,
         sdk_origin: Option<String>,
     ) -> Result<CreateThreadOutput, PedelecError> {
+        let settings = self.get_settings()?;
+        let effort_level = input.effort_level.unwrap_or_default();
+        let effort_args = resolve_thread_effort_args(&settings, &input.provider, effort_level)?;
         let thread_id = self.next_available_thread_id()?;
         let initialize =
             |sandbox: &Path| initialize_generated_skills(sandbox, input.skills.as_ref());
@@ -2209,7 +2316,8 @@ impl CoreRuntime {
         let state = ThreadState {
             thread_id: thread_id.clone(),
             provider: input.provider,
-            model: input.model,
+            effort_level,
+            effort_args,
             sandbox_path: sandbox_path.clone(),
             skills,
             status: ThreadStatus::Idle,
@@ -5611,19 +5719,6 @@ fn normalize_update_settings(
         ));
     }
 
-    let default_models: HashMap<ProviderCode, String> = input
-        .default_models
-        .into_iter()
-        .filter_map(|(provider, model)| {
-            let model = model.trim().to_string();
-            if model.is_empty() {
-                None
-            } else {
-                Some((provider, model))
-            }
-        })
-        .collect();
-
     let provider_settings = normalize_provider_settings(
         input.provider_settings,
         if input.default_provider == ProviderCode::Ollama {
@@ -5633,19 +5728,12 @@ fn normalize_update_settings(
         },
     )?;
 
-    if input.default_provider == ProviderCode::Ollama
-        && !default_models.contains_key(&ProviderCode::Ollama)
-    {
-        return Err(PedelecError::with_details(
-            error_codes::MODEL_REQUIRED,
-            "Ollama provider requires a model.",
-            serde_json::json!({ "provider": "ollama" }),
-        ));
+    if input.default_provider == ProviderCode::Ollama {
+        required_ollama_model_from_args(&provider_settings.ollama.efforts_args.default)?;
     }
 
     Ok(PedelecSettings {
         default_provider: Some(input.default_provider),
-        default_models,
         provider_settings,
     })
 }
@@ -5670,6 +5758,27 @@ fn normalize_provider_settings(
     ollama_validation: OllamaValidationMode,
 ) -> Result<ProviderSettings, PedelecError> {
     Ok(ProviderSettings {
+        codex: CommonProviderSettings {
+            efforts_args: normalize_efforts_args(ProviderCode::Codex, settings.codex.efforts_args)?,
+        },
+        antigravity: CommonProviderSettings {
+            efforts_args: normalize_efforts_args(
+                ProviderCode::Antigravity,
+                settings.antigravity.efforts_args,
+            )?,
+        },
+        opencode: CommonProviderSettings {
+            efforts_args: normalize_efforts_args(
+                ProviderCode::OpenCode,
+                settings.opencode.efforts_args,
+            )?,
+        },
+        cursor: CommonProviderSettings {
+            efforts_args: normalize_efforts_args(ProviderCode::Cursor, settings.cursor.efforts_args)?,
+        },
+        claude: CommonProviderSettings {
+            efforts_args: normalize_efforts_args(ProviderCode::Claude, settings.claude.efforts_args)?,
+        },
         ollama: normalize_ollama_provider_settings(settings.ollama, ollama_validation)?,
     })
 }
@@ -5688,11 +5797,147 @@ fn normalize_ollama_provider_settings(
             OllamaValidationMode::Optional => normalize_optional_secret(settings.api_key),
         },
         tavily_api_key: normalize_optional_secret(settings.tavily_api_key),
+        efforts_args: normalize_efforts_args(ProviderCode::Ollama, settings.efforts_args)?,
     })
 }
 
 fn normalize_optional_secret(value: Option<String>) -> String {
     value.unwrap_or_default().trim().to_string()
+}
+
+fn resolve_thread_effort_args(
+    settings: &PedelecSettings,
+    provider: &ProviderCode,
+    level: EffortLevel,
+) -> Result<Vec<String>, PedelecError> {
+    let efforts = provider_efforts_args(&settings.provider_settings, provider);
+    validate_effort_tier(provider, level, efforts.get(level))?;
+    let args = efforts.get(level).to_vec();
+    if *provider == ProviderCode::Ollama {
+        required_ollama_model_from_args(&args)?;
+    }
+    Ok(args)
+}
+
+fn provider_efforts_args<'a>(settings: &'a ProviderSettings, provider: &ProviderCode) -> &'a EffortsArgs {
+    match provider {
+        ProviderCode::Codex => &settings.codex.efforts_args,
+        ProviderCode::Antigravity => &settings.antigravity.efforts_args,
+        ProviderCode::OpenCode => &settings.opencode.efforts_args,
+        ProviderCode::Cursor => &settings.cursor.efforts_args,
+        ProviderCode::Claude => &settings.claude.efforts_args,
+        ProviderCode::Ollama => &settings.ollama.efforts_args,
+    }
+}
+
+fn normalize_efforts_args(
+    provider: ProviderCode,
+    efforts: EffortsArgs,
+) -> Result<EffortsArgs, PedelecError> {
+    validate_effort_tier(&provider, EffortLevel::Default, &efforts.default)?;
+    validate_effort_tier(&provider, EffortLevel::Low, &efforts.low)?;
+    validate_effort_tier(&provider, EffortLevel::High, &efforts.high)?;
+    Ok(efforts)
+}
+
+fn validate_effort_tier(
+    provider: &ProviderCode,
+    level: EffortLevel,
+    args: &[String],
+) -> Result<(), PedelecError> {
+    if args.len() % 2 != 0 {
+        return Err(effort_args_error(provider, level, "effort args must contain key/value pairs"));
+    }
+
+    let mut seen = Vec::new();
+    for pair in args.chunks_exact(2) {
+        let key = pair[0].as_str();
+        let value = pair[1].trim();
+        if value.is_empty() {
+            return Err(effort_args_error(provider, level, "effort arg values must not be empty"));
+        }
+        if seen.iter().any(|candidate| *candidate == key) {
+            return Err(effort_args_error(provider, level, "duplicate effort arg keys are not allowed"));
+        }
+        seen.push(key);
+
+        let model_key = if *provider == ProviderCode::Codex {
+            "-m"
+        } else {
+            "--model"
+        };
+        let allowed = if key == model_key {
+            true
+        } else {
+            match provider {
+                ProviderCode::Codex => {
+                    key == "-c"
+                        && parse_codex_reasoning_effort(value)
+                            .is_some_and(is_supported_codex_effort)
+                }
+                ProviderCode::Antigravity => {
+                    key == "--effort" && is_supported_antigravity_effort(value)
+                }
+                ProviderCode::Claude => key == "--effort" && is_supported_claude_effort(value),
+                ProviderCode::OpenCode
+                | ProviderCode::Cursor
+                | ProviderCode::Ollama => false,
+            }
+        };
+        if !allowed {
+            return Err(effort_args_error(
+                provider,
+                level,
+                "effort arg key or native value is not allowed for this provider",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_codex_reasoning_effort(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let remainder = trimmed
+        .strip_prefix("model_reasoning_effort")?
+        .trim_start();
+    let raw = remainder.strip_prefix('=')?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(quoted) = raw.strip_prefix('"') {
+        let quoted = quoted.strip_suffix('"')?.trim();
+        if quoted.is_empty() || quoted.contains('"') {
+            return None;
+        }
+        return Some(quoted);
+    }
+    if raw.contains('"') {
+        return None;
+    }
+    Some(raw)
+}
+
+fn is_supported_codex_effort(value: &str) -> bool {
+    matches!(value, "low" | "medium" | "high" | "xhigh")
+}
+
+fn is_supported_antigravity_effort(value: &str) -> bool {
+    matches!(value, "low" | "medium" | "high")
+}
+
+fn is_supported_claude_effort(value: &str) -> bool {
+    matches!(value, "low" | "medium" | "high" | "xhigh" | "max")
+}
+
+fn effort_args_error(provider: &ProviderCode, level: EffortLevel, message: &str) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::INVALID_INPUT,
+        message,
+        serde_json::json!({
+            "provider": provider_code_as_str(provider),
+            "effortLevel": level,
+        }),
+    )
 }
 
 pub fn normalize_ollama_base_url(value: Option<String>) -> Result<String, PedelecError> {
@@ -6016,22 +6261,14 @@ fn provider_binary_lookup_candidates(program: &str, path_dirs: &[PathBuf]) -> Ve
     }
 }
 
-fn add_model_args(args: &mut Vec<String>, model: &Option<String>, flag: &str) {
-    if let Some(model) = model
-        .as_deref()
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-    {
-        args.push(flag.to_string());
-        args.push(model.to_string());
-    }
+fn required_ollama_model(thread: &ThreadState) -> Result<String, PedelecError> {
+    required_ollama_model_from_args(&thread.effort_args)
 }
 
-fn required_ollama_model(thread: &ThreadState) -> Result<String, PedelecError> {
-    thread
-        .model
-        .as_deref()
-        .map(str::trim)
+fn required_ollama_model_from_args(args: &[String]) -> Result<String, PedelecError> {
+    args.windows(2)
+        .find(|pair| pair[0] == "--model")
+        .map(|pair| pair[1].trim())
         .filter(|model| !model.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| {
@@ -6146,9 +6383,6 @@ fn build_provider_env(
             ctx.core_ipc_runtime_file_path.to_string_lossy().to_string(),
         ),
     ];
-    if let Some(model) = &ctx.thread.model {
-        env.push(("PEDELEC_MODEL".to_string(), model.clone()));
-    }
     let provider_path = provider_process_path(ctx.provider_resolved_path.as_ref())?;
     env.push((
         "PATH".to_string(),

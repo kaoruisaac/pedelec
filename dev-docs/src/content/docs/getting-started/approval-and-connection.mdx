@@ -90,7 +90,7 @@ Use separate checks for extension, runtime, and provider readiness. Approval sta
 | Connecting | `createSession()` is pending | Keep the popup instructions visible |
 | Runtime unavailable | Native/Core request fails | Ask the user to start or repair the Desktop App |
 | No provider | No `ProviderInfo.available` is true | Open provider setup guidance |
-| Connected | Session was created | Show provider, model, and session status |
+| Connected | Session was created | Show provider, effort level, and session status |
 | Disconnected | An active SDK port disconnects | Disable send; the next new client operation retries the port, or explicitly resume a surviving session |
 
 Example:

@@ -129,6 +129,19 @@ async function noSkillsFallsBackToString() {
   });
 }
 
+async function effortLevelPublicTypeContract() {
+  const pedelec = new Pedelec();
+  await pedelec.createSession({ effortLevel: "high" });
+  const session = await pedelec.createSession({ provider: "codex", effortLevel: "low" });
+
+  // @ts-expect-error model is no longer a createSession option
+  pedelec.createSession({ provider: "codex", model: "gpt-5" });
+  // @ts-expect-error session no longer exposes provider model
+  session.model;
+  // @ts-expect-error unsupported effort level
+  pedelec.createSession({ effortLevel: "medium" });
+}
+
 async function listAssetsHasPublicTypes() {
   const pedelec = new Pedelec();
   const session = await pedelec.resumeSession("thread_1");
@@ -177,6 +190,7 @@ function publicSecurityTypesAreRestricted() {
 void typedOnToolNameFromCreateSession;
 void resumedSessionFallsBackToString;
 void noSkillsFallsBackToString;
+void effortLevelPublicTypeContract;
 void listAssetsHasPublicTypes;
 void availabilityHasPublicType;
 void publicSecurityTypesAreRestricted;

@@ -168,6 +168,44 @@ test("create_session forwards an explicit sandbox without inventing a path", asy
   await respondToNative(background, native, {}, 4);
 });
 
+test("create_session forwards effortLevel and never forwards model", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "create_effort",
+    type: "create_session",
+    input: { provider: "codex", effortLevel: "high", model: "should-not-forward" },
+  });
+  const nativeCreate = await respondToNative(background, native, { threadId: "thread_effort" });
+  assert.equal(nativeCreate.effortLevel, "high");
+  assert.equal(nativeCreate.model, undefined);
+});
+
+test("SDK settings projection strips provider settings and effort args", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({ channelId: "channel_a", requestId: "settings_projection", type: "get_settings" });
+  const request = await respondToNative(background, native, {
+    defaultProvider: "codex",
+    providerSettings: { codex: { effortsArgs: { default: ["-m", "secret-model"] } } },
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "settings_projection"));
+  const response = sdk.sent.find((message) => message.requestId === "settings_projection");
+  assert.deepEqual(response.result, { defaultProvider: "codex" });
+  assert.equal(request.type, "get_settings");
+});
+
 test("native idle shutdown is preserved and the next SDK request reconnects lazily", async () => {
   const chrome = createChrome();
   const nativeA = new MockPort();

@@ -372,6 +372,22 @@ pre {
   border-color: #efd1a7;
 }
 
+.provider-effort-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.settings-effort-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid #cdd6e0;
+  border-radius: 999px;
+  color: #53657a;
+  font-size: 11px;
+}
+
 .settings-field {
   display: grid;
   gap: 8px;
@@ -516,6 +532,43 @@ pre {
   color: #6b7b8f;
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.effort-settings-editor {
+  display: grid;
+  gap: 12px;
+}
+
+.effort-settings-editor h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.effort-settings-editor h3 em,
+.settings-field em {
+  color: #6b7b8f;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 400;
+}
+
+.effort-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.effort-tabs button {
+  padding: 6px 12px;
+  border: 1px solid #cdd6e0;
+  border-radius: 5px;
+  background: #f7f9fc;
+  color: #53657a;
+}
+
+.effort-tabs button.is-active {
+  border-color: #2f6fed;
+  background: #edf3ff;
+  color: #174ea6;
 }
 
 .settings-field-error {

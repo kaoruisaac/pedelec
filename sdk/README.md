@@ -88,7 +88,7 @@ const pedelec = new Pedelec();
 
 const session = await pedelec.createSession({
   provider: "codex",
-  model: "gpt-5",
+  effortLevel: "high",
   skills: {
     guidance: "Use get_current_page when you need browser page context.",
     tools: [
@@ -187,31 +187,31 @@ if (availability.available) startUi();
 
 An unavailable extension may be disconnected rather than absent. `desktop.launchAttempted` means the settings probe was sent, not that Desktop was confirmed to have launched. Invalid settings responses also count as Desktop unavailable in this probe.
 
-### Specifying Provider and Model
+### Selecting Provider and Effort
 
 ```ts
 const session = await pedelec.createSession({
-  provider: "opencode",
-  model: "ollama/qwen2.5-coder:14b",
+  provider: "codex",
+  effortLevel: "high",
 });
+
+// Or let Desktop Settings choose the provider.
+const defaultSession = await pedelec.createSession({ effortLevel: "low" });
 ```
+
+The SDK uses the provider-independent effort levels `default`, `low`, and `high`. An omitted level means `default`. Desktop users map each provider's profiles to concrete model and native effort arguments; that mapping is not exposed through the SDK.
 
 Currently supported provider codes in the SDK:
 
-| Provider | Code | Example model |
-| --- | --- | --- |
-| Codex | `codex` | `gpt-5` |
-| Antigravity | `antigravity` | Any model ID supported by the provider |
-| OpenCode | `opencode` | `ollama/qwen2.5-coder:14b` |
-| Cursor | `cursor` | `gpt-5` |
-| Claude Code | `claude` | `sonnet` |
-| Ollama | `ollama` | `qwen3-14b-32k:latest` |
+| Provider | Code |
+| --- | --- |
+| Codex | `codex` |
+| Antigravity | `antigravity` |
+| OpenCode | `opencode` |
+| Cursor | `cursor` |
+| Claude Code | `claude` |
+| Ollama | `ollama` |
 
-Ollama sessions are executed by the `pedelec-agent` binary bundled with the Desktop App, not by the `ollama` CLI. You still need to start the local Ollama server yourself and specify a model explicitly or configure `defaultModels.ollama` in Settings:
+Ollama sessions are executed by the bundled `pedelec-agent`. The selected Ollama effort profile must contain a model in Desktop Settings; otherwise Core returns `MODEL_REQUIRED`. Low and high profiles are optional, but there is no fallback between profiles.
 
-```ts
-const session = await pedelec.createSession({
-  provider: "ollama",
-  model: "qwen3-14b-32k:latest",
-});
-```
+`getSettings()` returns only `{ defaultProvider }`. It never exposes provider settings, effort arguments, credentials, or model names.

@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import { Provider, ProviderCode, ProviderSettings, Settings } from "./types";
+import { EffortsArgs, Provider, ProviderCode, ProviderSettings, Settings } from "./types";
 import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_TIMEOUT_MS } from "./constants";
 import { usePopUp } from "../services/PopUpProvider";
 import EditingProviderPopup from "./EditingProviderPopup";
@@ -10,6 +10,7 @@ import {
   findFirstAvailableCliProvider,
 } from "./providerInitialization";
 import { canSaveSettings } from "./settingsValidation";
+import { cloneEffortsArgs, configuredEffortLevels, emptyEffortsArgs, EFFORT_LEVELS, effortLevelLabel } from "./effortSettings";
 import { OcTerminal2 } from "solid-icons/oc";
 import {
   isProviderInstallerSupported,
@@ -21,13 +22,18 @@ import {
 
 const emptySettings: Settings = {
   defaultProvider: null,
-  defaultModels: {},
   providerSettings: {
+    codex: { effortsArgs: emptyEffortsArgs() },
+    antigravity: { effortsArgs: emptyEffortsArgs() },
+    opencode: { effortsArgs: emptyEffortsArgs() },
+    cursor: { effortsArgs: emptyEffortsArgs() },
+    claude: { effortsArgs: emptyEffortsArgs() },
     ollama: {
       baseUrl: DEFAULT_OLLAMA_BASE_URL,
       timeoutMs: DEFAULT_OLLAMA_TIMEOUT_MS,
       apiKey: "",
       tavilyApiKey: "",
+      effortsArgs: emptyEffortsArgs(),
     },
   },
 };
@@ -167,18 +173,32 @@ function SettingsPage(props: SettingsPageProps) {
 
   function openEditor(provider: Provider): void {
     if (!canEditProvider(provider)) return;
-    const providerSettings = draftSettings().providerSettings[provider.code as keyof ProviderSettings] || {};
+    const currentSettings = draftSettings();
+    const ollamaSettings = currentSettings.providerSettings.ollama;
+    const providerSettings = provider.code === "ollama"
+      ? ollamaSettings
+      : currentSettings.providerSettings[provider.code];
     pop(
       EditingProviderPopup, {
         provider,
-        editingBaseUrl: providerSettings?.baseUrl,
-        editingApiKey: providerSettings?.apiKey,
-        editingTavilyApiKey: providerSettings?.tavilyApiKey,
-        editingModel: draftSettings().defaultModels[provider.code],
-        editingTimeoutMs: String(draftSettings().providerSettings.ollama.timeoutMs),
-        onApply: ({ model, baseUrl, timeoutMs, apiKey, tavilyApiKey }: { model: string; baseUrl?: string; timeoutMs?: number; apiKey?: string; tavilyApiKey?: string }) => {
+        isDefaultProvider: draftSettings().defaultProvider === provider.code,
+        editingEffortsArgs: cloneEffortsArgs(providerSettings.effortsArgs),
+        editingBaseUrl: provider.code === "ollama" ? ollamaSettings.baseUrl : undefined,
+        editingApiKey: provider.code === "ollama" ? ollamaSettings.apiKey : undefined,
+        editingTavilyApiKey: provider.code === "ollama" ? ollamaSettings.tavilyApiKey : undefined,
+        editingTimeoutMs: provider.code === "ollama" ? String(ollamaSettings.timeoutMs) : undefined,
+        onApply: ({ effortsArgs, baseUrl, timeoutMs, apiKey, tavilyApiKey }: { effortsArgs: EffortsArgs; baseUrl?: string; timeoutMs?: number; apiKey?: string; tavilyApiKey?: string }) => {
           markDraftChanged();
-          setDraftSettings((current) => ({ ...current, defaultModels: { ...current.defaultModels, [provider.code]: model } }));
+          setDraftSettings((current) => ({
+            ...current,
+            providerSettings: {
+              ...current.providerSettings,
+              [provider.code]: {
+                ...current.providerSettings[provider.code],
+                effortsArgs: cloneEffortsArgs(effortsArgs),
+              },
+            },
+          }));
           if (provider.code === "ollama") {
             const nextBaseUrl = baseUrl ?? DEFAULT_OLLAMA_BASE_URL;
             setDraftSettings((current) => ({
@@ -190,6 +210,7 @@ function SettingsPage(props: SettingsPageProps) {
                   timeoutMs: timeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS,
                   apiKey: apiKey ?? "",
                   tavilyApiKey: tavilyApiKey ?? "",
+                  effortsArgs: cloneEffortsArgs(effortsArgs),
                 },
               },
             }));
@@ -270,8 +291,9 @@ function SettingsPage(props: SettingsPageProps) {
     return provider.available || provider.code === "ollama";
   }
 
-  function providerDefaultModel(provider: Provider): string {
-    return draftSettings().defaultModels[provider.code] || "auto";
+  function providerEffortLevels(provider: Provider): ReturnType<typeof configuredEffortLevels> {
+    const efforts = draftSettings().providerSettings[provider.code].effortsArgs;
+    return configuredEffortLevels(efforts);
   }
 
   function canInstallProvider(provider: Provider): provider is Provider & { code: ProviderInstallerCode } {
@@ -324,7 +346,7 @@ function SettingsPage(props: SettingsPageProps) {
       <header class="settings-header">
         <div>
           <h1>Settings</h1>
-          <p>Choose the default provider and optional model used by SDK sessions.</p>
+          <p>Choose the default provider and optional effort profiles used by SDK sessions.</p>
         </div>
         <button type="button" class="settings-secondary-button" onClick={refreshProviders} disabled={loading() || refreshingProviders()}>
           {refreshingProviders() ? "Refreshing..." : "Refresh"}
@@ -391,7 +413,11 @@ function SettingsPage(props: SettingsPageProps) {
                     </Show>
                     <Show
                       when={canInstallProvider(provider)}
-                      fallback={<span>default model: {providerDefaultModel(provider)}</span>}
+                      fallback={<>
+                        <Show when={providerEffortLevels(provider).length > 0}>
+                          <span class="provider-effort-summary">effort: {providerEffortLevels(provider).map((level) => <span class="settings-effort-badge">{effortLevelLabel(level)} ✓</span>)}</span>
+                        </Show>
+                      </>}
                     >
                       <Show
                         when={installerOpenedProviders().has(provider.code)}
@@ -512,15 +538,32 @@ function formatError(err: unknown): string {
 }
 
 function normalizeSettings(value: Settings | null | undefined): Settings {
+  const common = (provider: keyof Omit<ProviderSettings, "ollama">) => ({
+    effortsArgs: {
+      default: [...(value?.providerSettings?.[provider]?.effortsArgs?.default ?? [])],
+      low: [...(value?.providerSettings?.[provider]?.effortsArgs?.low ?? [])],
+      high: [...(value?.providerSettings?.[provider]?.effortsArgs?.high ?? [])],
+    },
+  });
+  const ollama = value?.providerSettings?.ollama;
   return {
     defaultProvider: value?.defaultProvider ?? null,
-    defaultModels: { ...(value?.defaultModels ?? {}) },
     providerSettings: {
+      codex: common("codex"),
+      antigravity: common("antigravity"),
+      opencode: common("opencode"),
+      cursor: common("cursor"),
+      claude: common("claude"),
       ollama: {
-        baseUrl: value?.providerSettings?.ollama?.baseUrl ?? DEFAULT_OLLAMA_BASE_URL,
-        timeoutMs: value?.providerSettings?.ollama?.timeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS,
-        apiKey: value?.providerSettings?.ollama?.apiKey ?? "",
-        tavilyApiKey: value?.providerSettings?.ollama?.tavilyApiKey ?? "",
+        baseUrl: ollama?.baseUrl ?? DEFAULT_OLLAMA_BASE_URL,
+        timeoutMs: ollama?.timeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS,
+        apiKey: ollama?.apiKey ?? "",
+        tavilyApiKey: ollama?.tavilyApiKey ?? "",
+        effortsArgs: {
+          default: [...(ollama?.effortsArgs?.default ?? [])],
+          low: [...(ollama?.effortsArgs?.low ?? [])],
+          high: [...(ollama?.effortsArgs?.high ?? [])],
+        },
       },
     },
   };
@@ -529,9 +572,13 @@ function normalizeSettings(value: Settings | null | undefined): Settings {
 function cloneSettings(settings: Settings): Settings {
   return {
     defaultProvider: settings.defaultProvider,
-    defaultModels: { ...settings.defaultModels },
     providerSettings: {
-      ollama: { ...settings.providerSettings.ollama },
+      codex: { effortsArgs: cloneEffortsArgs(settings.providerSettings.codex.effortsArgs) },
+      antigravity: { effortsArgs: cloneEffortsArgs(settings.providerSettings.antigravity.effortsArgs) },
+      opencode: { effortsArgs: cloneEffortsArgs(settings.providerSettings.opencode.effortsArgs) },
+      cursor: { effortsArgs: cloneEffortsArgs(settings.providerSettings.cursor.effortsArgs) },
+      claude: { effortsArgs: cloneEffortsArgs(settings.providerSettings.claude.effortsArgs) },
+      ollama: { ...settings.providerSettings.ollama, effortsArgs: cloneEffortsArgs(settings.providerSettings.ollama.effortsArgs) },
     },
   };
 }

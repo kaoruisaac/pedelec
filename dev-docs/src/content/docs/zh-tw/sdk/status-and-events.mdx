@@ -135,7 +135,7 @@ Session end 時，pending `sendText()` 或 `prepare()` 會 reject `SESSION_ENDED
 type PedelecEventContext = {
   sessionId: string;
   provider: string;
-  model?: string;
+  effortLevel?: "default" | "low" | "high";
   sessionCreatedAt: number;
   eventReceivedAt?: number;
   eventEmittedAt: number;

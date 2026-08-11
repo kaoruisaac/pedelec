@@ -5,6 +5,7 @@ import {
 } from "./providerInitialization";
 import { canSaveSettings } from "./settingsValidation";
 import { Provider, Settings } from "./types";
+import { emptyEffortsArgs } from "./effortSettings";
 
 const provider = (overrides: Partial<Provider>): Provider => ({
   code: "codex",
@@ -16,13 +17,18 @@ const provider = (overrides: Partial<Provider>): Provider => ({
 
 const settings = (overrides: Partial<Settings> = {}): Settings => ({
   defaultProvider: null,
-  defaultModels: {},
   providerSettings: {
+    codex: { effortsArgs: emptyEffortsArgs() },
+    antigravity: { effortsArgs: emptyEffortsArgs() },
+    opencode: { effortsArgs: emptyEffortsArgs() },
+    cursor: { effortsArgs: emptyEffortsArgs() },
+    claude: { effortsArgs: emptyEffortsArgs() },
     ollama: {
       baseUrl: "http://127.0.0.1:11434",
       timeoutMs: 120_000,
       apiKey: "",
       tavilyApiKey: "",
+      effortsArgs: emptyEffortsArgs(),
     },
   },
   ...overrides,
@@ -68,25 +74,28 @@ describe("findFirstAvailableCliProvider", () => {
   });
 
   it("only changes the default provider during automatic initialization", () => {
-    const initialSettings = settings({
-      defaultModels: { codex: "gpt-5" },
-    });
+    const initialSettings = settings();
 
     const nextSettings = buildAutomaticDefaultProviderSettings(initialSettings, "codex");
 
     expect(nextSettings.defaultProvider).toBe("codex");
-    expect(nextSettings.defaultModels).toEqual({ codex: "gpt-5" });
-    expect(nextSettings.defaultModels).not.toHaveProperty("ollama");
+    expect(nextSettings.providerSettings.codex.effortsArgs).toEqual({ default: [], low: [], high: [] });
   });
 
-  it("preserves an explicitly saved Ollama model during automatic initialization", () => {
+  it("preserves explicitly saved Ollama effort profiles during automatic initialization", () => {
     const initialSettings = settings({
-      defaultModels: { ollama: "qwen3:8b" },
+      providerSettings: {
+        ...settings().providerSettings,
+        ollama: {
+          ...settings().providerSettings.ollama,
+          effortsArgs: { default: ["--model", "qwen3:8b"], low: [], high: [] },
+        },
+      },
     });
 
     const nextSettings = buildAutomaticDefaultProviderSettings(initialSettings, "codex");
 
-    expect(nextSettings.defaultModels).toEqual({ ollama: "qwen3:8b" });
+    expect(nextSettings.providerSettings.ollama.effortsArgs.default).toEqual(["--model", "qwen3:8b"]);
   });
 
   it("fails closed if Ollama bypasses the automatic provider type", () => {
@@ -107,13 +116,14 @@ describe("canSaveSettings", () => {
   it("allows Ollama after the user has applied an API key and model", () => {
     expect(canSaveSettings(
       settings({
-        defaultModels: { ollama: "qwen3:8b" },
         providerSettings: {
+          ...settings().providerSettings,
           ollama: {
             baseUrl: "http://127.0.0.1:11434",
             timeoutMs: 120_000,
             apiKey: "ollama",
             tavilyApiKey: "",
+            effortsArgs: { default: ["--model", "qwen3:8b"], low: [], high: [] },
           },
         },
       }),

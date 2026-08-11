@@ -39,13 +39,13 @@ readonly provider: string
 
 Provider known when this SDK handle was registered. A fresh resumed handle may currently expose an empty string.
 
-### `model`
+### `effortLevel`
 
 ```ts
-readonly model?: string
+readonly effortLevel?: "default" | "low" | "high"
 ```
 
-Model known by this SDK handle. It can be `undefined` when no explicit/default model was selected or after a fresh resume.
+Normalized effort level selected for this session. A fresh resumed handle may leave it undefined because the bridge currently returns only the session ID.
 
 ### `sessionCreatedAt`
 

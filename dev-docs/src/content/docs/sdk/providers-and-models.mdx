@@ -1,216 +1,67 @@
 ---
-title: Providers, Models, and Settings
-description: Discover local providers, read Desktop App defaults, and choose provider and model inputs correctly.
-sidebar:
-  order: 2
+title: Providers and effort profiles
+description: Choose a provider and understand Desktop-owned effort profiles.
 ---
 
-A Pedelec session runs through one provider. The provider determines how agent work is executed, what model identifiers are accepted, how authentication works, and whether data leaves the user's machine.
+# Providers and effort profiles
+
+A Pedelec session runs through one provider. The application chooses the provider and an intent-level resource profile; the Desktop user chooses the concrete provider arguments behind that profile.
 
 ## Provider codes
 
-```ts
-type ProviderCode =
-  | "codex"
-  | "antigravity"
-  | "opencode"
-  | "cursor"
-  | "claude"
-  | "ollama";
-```
+Provider codes are stable lowercase values:
 
-Provider codes are lowercase and stable at the SDK boundary. Display names and availability are exposed by the SDK; executable paths, versions, credentials, and model catalogs remain Desktop-internal or provider-specific.
+`codex`, `antigravity`, `opencode`, `cursor`, `claude`, and `ollama`.
 
-## Discover providers
+`listProviders()` exposes only provider name, code, availability, and an optional diagnostic error. Executable paths, credentials, model catalogs, and effort arguments remain Desktop-internal.
+
+## Effort levels
+
+The shared vocabulary is:
 
 ```ts
-const providers = await pedelec.listProviders();
+type EffortLevel = "default" | "low" | "high";
 ```
+
+`default` is the user's normal profile and roughly represents medium intent, but Pedelec does not force a native provider effort value. A profile can select a model, a provider-native effort, or both where the provider supports them. The native value does not have to equal the Pedelec level name.
+
+Provider-native values are still validated against the supported provider CLI contract; they are not arbitrary passthrough strings.
+
+The application can omit the provider and let Desktop `defaultProvider` decide:
 
 ```ts
-type ProviderInfo = {
-  name: string;
-  code: ProviderCode;
-  available: boolean;
-  error: string | null;
-};
+await pedelec.createSession({ effortLevel: "high" });
 ```
 
-### Fields
-
-- `name`: human-readable provider name suitable for a picker.
-- `code`: value to pass to `createSession()`.
-- `available`: whether Core currently considers the provider usable enough to select.
-- `error`: provider discovery/setup detail when unavailable, otherwise usually `null`.
+It can also select both explicitly:
 
 ```ts
-const availableProviders = providers.filter((provider) => provider.available);
-
-for (const provider of providers) {
-  console.log(
-    provider.available ? "ready" : "unavailable",
-    provider.name,
-    provider.error,
-  );
-}
+await pedelec.createSession({
+  provider: "codex",
+  effortLevel: "low",
+});
 ```
 
-Do not hide unavailable providers without explanation. Showing the provider and its error helps the user repair `PATH`, installation, or configuration.
+Omitting `effortLevel` selects `default`. An empty `low` or `high` profile for a non-Ollama provider sends no explicit model or effort arguments. There is no fallback from `low` or `high` to `default`.
 
-## Read Desktop App settings
+## SDK settings boundary
 
-```ts
-const settings = await pedelec.getSettings();
-```
+The SDK can read only:
 
 ```ts
 type PedelecSettings = {
   defaultProvider: ProviderCode | null;
-  defaultModels: Partial<Record<ProviderCode, string>>;
 };
 ```
 
-Both APIs require origin approval and can trigger the approval popup. Settings are defaults-only and never contain provider credentials; provider entries contain only `name`, `code`, `available`, and `error`.
+It cannot inspect `providerSettings`, `effortsArgs`, credentials, or actual model names. Configure those in the Desktop Settings page.
 
-These are user-level Desktop App settings. The SDK exposes the default provider and optional per-provider model strings, not the Desktop App's entire internal settings object.
+## Ollama
 
-```ts
-const defaultProvider = settings.defaultProvider;
-const codexModel = settings.defaultModels.codex;
-const ollamaModel = settings.defaultModels.ollama;
-```
+Ollama is the exception to empty profiles: the selected profile must contain a `--model` pair. If the selected profile is empty, Core returns `MODEL_REQUIRED`; it never falls back to the default profile. Desktop Settings requires a populated default Ollama model when Ollama is the selected default provider, while low and high remain optional.
 
-Treat settings as a snapshot. They can change in the Desktop App after your read.
+Ollama uses the bundled `pedelec-agent` and the endpoint configured in Desktop Settings. The SDK does not pass an Ollama model string.
 
-## Session selection rules
+## Session snapshots
 
-### Omit provider and model
-
-```ts
-const session = await pedelec.createSession();
-```
-
-The SDK:
-
-1. calls `getSettings()`;
-2. requires `defaultProvider`;
-3. calls `listProviders()` and verifies that default provider is available;
-4. uses its configured default model when present.
-
-Possible SDK errors include `DEFAULT_PROVIDER_NOT_SET` and `DEFAULT_PROVIDER_UNAVAILABLE`.
-
-### Provide only the provider
-
-```ts
-const session = await pedelec.createSession({
-  provider: "codex",
-});
-```
-
-The SDK reads settings and applies `defaultModels.codex` when configured. Otherwise it sends no model, allowing the provider to use its own default behavior.
-
-Unlike the no-provider form, the SDK does not pre-assert explicit-provider availability. Core or the provider can reject later. Use `listProviders()` when you want a proactive picker.
-
-### Provide provider and model
-
-```ts
-const session = await pedelec.createSession({
-  provider: "claude",
-  model: "sonnet",
-});
-```
-
-The explicit model overrides the Desktop default for that session.
-
-### Model without provider is invalid
-
-```ts
-// TypeScript rejects this shape, and runtime validation also rejects it.
-await pedelec.createSession({
-  model: "some-model",
-});
-```
-
-This fails with `INVALID_INPUT` because a model identifier has no meaning without a provider namespace.
-
-## Model identifiers are provider-specific
-
-Pedelec does not maintain one universal list of valid models. The string is passed to the provider adapter. Valid IDs can change with the installed provider version.
-
-Good UI patterns include:
-
-- defaulting to the Desktop App's configured value;
-- allowing an empty model for providers with useful CLI defaults;
-- labeling the model input with the selected provider;
-- preserving exact user-entered IDs; and
-- surfacing provider errors rather than replacing them with a generic message.
-
-Do not present examples in documentation as a guaranteed model catalog.
-
-## Ollama behavior
-
-The Ollama provider differs from CLI-backed providers:
-
-- Pedelec uses its bundled `pedelec-agent` to communicate with an Ollama-compatible server.
-- The default base URL is `http://127.0.0.1:11434`; a local server must be started by the user. Desktop Settings can instead point at a remote or Ollama Cloud endpoint.
-- Desktop Settings has an Ollama API-key field. Although Core can pass an empty environment value, the current `pedelec-agent` validation requires a non-empty `OLLAMA_API_KEY`; use `ollama` locally or a valid endpoint key remotely.
-- `ProviderInfo.available === true` means that agent executable is available.
-- It does not guarantee that the endpoint is reachable or authentication succeeds.
-- It does not guarantee that the selected model is installed.
-- A model is required from explicit session input or `defaultModels.ollama`.
-
-```ts
-const session = await pedelec.createSession({
-  provider: "ollama",
-  model: "your-installed-model",
-});
-```
-
-Without a model, Core returns `MODEL_REQUIRED`.
-
-## Optional Tavily web search for Ollama
-
-Desktop Settings includes an optional Tavily API-key field for the Ollama provider. When the trimmed value is non-empty, the bundled `pedelec-agent` exposes a `web_search` tool to the Ollama model. When the field is empty, that tool is omitted.
-
-This capability is internal to the Ollama agent; it is not a frontend tool registered through `skills.tools`, and the Web App does not provide an `onTool()` handler for it.
-
-Current search behavior is fixed by the agent implementation:
-
-- Tavily endpoint: `https://api.tavily.com/search`;
-- search depth: `basic`;
-- topic: `general`;
-- maximum results: 5 per call;
-- maximum attempts: 10 web searches per model round;
-- request timeout: 30 seconds;
-- answer synthesis, raw content, images, image descriptions, and favicons are disabled.
-
-The compact result returned to the model contains the query and up to five items with `title`, `url`, `content`, and an optional relevance `score`.
-
-A configured key enables the tool but does not force every turn to search. The model decides whether and what to query. Tavily authentication, rate limits, usage limits, network failures, and invalid responses can surface as provider errors.
-
-## Provider picker example
-
-```ts
-const [providers, settings] = await Promise.all([
-  pedelec.listProviders(),
-  pedelec.getSettings(),
-]);
-
-const choices = providers.map((provider) => ({
-  value: provider.code,
-  label: provider.name,
-  disabled: !provider.available,
-  help: provider.error,
-  defaultModel: settings.defaultModels[provider.code] ?? "",
-}));
-```
-
-When the user changes provider, update the model field to that provider's saved default only when doing so will not silently overwrite a deliberate edit.
-
-## Privacy and provider choice
-
-Pedelec's bridge is local, but a cloud provider CLI can send context to its service. The model/provider selector is therefore also a data-routing choice. Applications handling sensitive content should disclose which provider will receive the prompt and tool descriptions.
-
-When Tavily is enabled for Ollama, model-generated search queries are sent to Tavily and compact search results are returned to the local agent. Applications should disclose that additional external data path when relevant.
-
-Continue with [Creating sessions](./creating-sessions/).
+Core resolves the selected profile when a session is created and stores a snapshot of its validated argv tokens. Editing Desktop Settings later does not change commands for that existing or resumed session.

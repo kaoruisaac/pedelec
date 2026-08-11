@@ -50,7 +50,7 @@ type DemoEvent = {
 type DemoSessionState = {
   sessionId: string;
   provider: string;
-  model?: string;
+  effortLevel?: "default" | "low" | "high";
   status: SessionStatus;
   transcript: DemoChatMessage[];
   errors: DemoError[];
@@ -137,7 +137,7 @@ export default function App() {
   const [provider, setProvider] = createSignal("");
   const [providers, setProviders] = createSignal<ProviderInfo[]>([]);
   const [providersLoading, setProvidersLoading] = createSignal(false);
-  const [model, setModel] = createSignal("");
+  const [effortLevel, setEffortLevel] = createSignal<"default" | "low" | "high">("default");
   const [resumeId, setResumeId] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [selectedAsset, setSelectedAsset] = createSignal<File | null>(null);
@@ -231,13 +231,13 @@ export default function App() {
     if (!sdk) return;
 
     try {
-      appendGlobalEvent("create_session_requested", { provider: provider(), model: model() });
+      appendGlobalEvent("create_session_requested", { provider: provider(), effortLevel: effortLevel() });
       const session = await sdk.createSession({
         provider: provider() as ProviderCode,
-        model: model().trim() || undefined,
+        effortLevel: effortLevel(),
         skills: createDemoSkills(),
       });
-      registerSession(session, provider(), model().trim() || undefined);
+      registerSession(session, provider(), effortLevel());
       setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
       recordError(toDemoError(err));
@@ -360,7 +360,7 @@ export default function App() {
     }
   }
 
-  function registerSession(session: PedelecSession, fallbackProvider: string, fallbackModel?: string) {
+  function registerSession(session: PedelecSession, fallbackProvider: string, fallbackEffortLevel?: "default" | "low" | "high") {
     const existing = sessions().find((item) => item.sessionId === session.sessionId);
     if (existing) {
       setActiveSessionId(session.sessionId);
@@ -397,7 +397,7 @@ export default function App() {
     const state: DemoSessionState = {
       sessionId: session.sessionId,
       provider: session.provider || fallbackProvider || "unknown",
-      model: session.model || fallbackModel,
+      effortLevel: session.effortLevel || fallbackEffortLevel,
       status: session.getStatus(),
       transcript: [],
       errors: [],
@@ -420,7 +420,7 @@ export default function App() {
     appendGlobalEvent(fallbackProvider === "resumed" ? "session_resumed" : "session_created", {
       sessionId: session.sessionId,
       provider: state.provider,
-      model: state.model,
+      effortLevel: state.effortLevel,
     });
     appendSessionEvent(session.sessionId, "session_selected", {});
     void refreshSessionAssets(session.sessionId);
@@ -665,8 +665,12 @@ export default function App() {
                 </Show>
               </label>
               <label>
-                Model
-                <input value={model()} onInput={(event) => setModel(event.currentTarget.value)} placeholder="optional" />
+                Effort level
+                <select value={effortLevel()} onInput={(event) => setEffortLevel(event.currentTarget.value as "default" | "low" | "high")}>
+                  <option value="default">Default</option>
+                  <option value="low">Low</option>
+                  <option value="high">High</option>
+                </select>
               </label>
               <button type="submit" disabled={!canCreate()}>Create</button>
             </form>
@@ -713,7 +717,7 @@ export default function App() {
                   <div class="detail-grid">
                     <Info label="Session ID" value={session().sessionId} />
                     <Info label="Provider" value={session().provider} />
-                    <Info label="Model" value={session().model || "none"} />
+                    <Info label="Effort" value={session().effortLevel || "unknown"} />
                     <Info label="Status" value={session().status} />
                     <Info label="Created" value={formatTime(session().createdAt)} />
                     <Info label="Updated" value={formatTime(session().updatedAt)} />

@@ -5,7 +5,7 @@ mod tests {
     use super::*;
     use pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
     use pedelec_core::{
-        CommandSpec, CoreRuntime, CreateThreadOutput, CreateThreadSkillsInput,
+        CommandSpec, CoreRuntime, CreateThreadOutput, CreateThreadSkillsInput, EffortLevel,
         CreateThreadToolInput, OllamaProviderSettings, PedelecSettings, ProviderAdapterState,
         ProviderCode, ProviderSettings, SandboxManager, ThreadErrorSource, ThreadState,
         ThreadStatus, ToolRegistry,
@@ -276,8 +276,7 @@ mod tests {
         assert_eq!(
             initial.result.unwrap(),
             json!({
-                "defaultProvider": null,
-                "defaultModels": {}
+                "defaultProvider": null
             })
         );
 
@@ -288,11 +287,14 @@ mod tests {
                 caller_origin: None,
                 payload: Some(json!({
                     "defaultProvider": "codex",
-                    "defaultModels": {
-                        "codex": " gpt-5 ",
-                        "antigravity": "antigravity-2.5-pro"
-                    },
                     "providerSettings": {
+                        "codex": {
+                            "effortsArgs": {
+                                "default": ["--sandbox", "danger-full-access"],
+                                "low": [],
+                                "high": []
+                            }
+                        },
                         "ollama": {
                             "baseUrl": " http://127.0.0.1:11434/ ",
                             "timeoutMs": 120000,
@@ -921,7 +923,7 @@ mod tests {
 
         let result = runtime.create_thread(CreateThreadInput {
             provider: ProviderCode::Codex,
-            model: None,
+            effort_level: Some(EffortLevel::Default),
             skills: Some(CreateThreadSkillsInput {
                 guidance: "bad".into(),
                 tools: vec![CreateThreadToolInput {
@@ -1169,7 +1171,8 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: EffortLevel::Default,
+                effort_args: vec![],
                 sandbox_path,
                 skills: vec![],
                 status,

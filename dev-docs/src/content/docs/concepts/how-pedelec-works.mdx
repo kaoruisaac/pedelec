@@ -56,7 +56,7 @@ If the host is missing or not registered, SDK operations that need the desktop r
 The Pedelec Desktop App owns the Core Runtime. It:
 
 - creates and tracks sessions;
-- stores provider and model settings;
+- stores provider settings and three effort profiles;
 - prepares a sandbox for a session;
 - launches or resumes the selected provider process;
 - converts provider output into normalized events;
@@ -75,11 +75,11 @@ Provider availability depends on the user's machine. CLI-backed providers usuall
 
 A typical explicit-provider session follows this flow:
 
-1. The application calls `pedelec.createSession({ provider, model, skills })`.
+1. The application calls `pedelec.createSession({ provider, effortLevel, skills })`.
 2. The SDK validates the basic input and serializes the skills manifest. Inline handler functions remain in the browser and are not sent to Core.
 3. The extension checks whether the page origin is approved. If it is not, the session request waits while the extension popup asks the user.
 4. The extension opens a Native Messaging connection when needed.
-5. The desktop runtime creates a session and sandbox, then returns a `sessionId`.
+5. The desktop runtime resolves and validates the selected effort profile, snapshots its argv tokens, creates the session and sandbox, then returns a `sessionId`.
 6. The extension subscribes the current SDK route to that session.
 7. The SDK returns a `PedelecSession` object.
 

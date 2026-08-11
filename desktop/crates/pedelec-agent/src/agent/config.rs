@@ -63,7 +63,6 @@ pub(crate) fn resolve_config_with_settings_path(
         .model
         .clone()
         .or_else(|| env::var("PEDELEC_AGENT_MODEL").ok())
-        .or_else(|| env::var("PEDELEC_MODEL").ok())
         .or_else(|| file_env.get("PEDELEC_AGENT_MODEL").cloned())
         .ok_or_else(|| AgentError::new("CONFIG_ERROR", "Model is required"))?;
 

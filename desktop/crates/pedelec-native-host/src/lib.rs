@@ -865,7 +865,7 @@ mod tests {
     }
 
     fn insert_idle_thread(runtime: &SharedCoreRuntime, thread_id: &str) {
-        use pedelec_core::{ProviderAdapterState, ThreadState, ThreadStatus};
+        use pedelec_core::{EffortLevel, ProviderAdapterState, ThreadState, ThreadStatus};
         use std::path::PathBuf;
 
         let now = chrono::Utc::now();
@@ -873,7 +873,8 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: EffortLevel::Default,
+                effort_args: vec![],
                 sandbox_path: PathBuf::from("sandbox").join(thread_id),
                 skills: vec![],
                 status: ThreadStatus::Idle,

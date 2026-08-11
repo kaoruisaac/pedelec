@@ -111,7 +111,7 @@ function respondError(pageWindow: MockWindow, request: any, code = "TEST_ERROR")
 function respondSettings(
   pageWindow: MockWindow,
   request: any,
-  settings = { defaultProvider: null, defaultModels: {} }
+  settings = { defaultProvider: null }
 ): void {
   respondOk(pageWindow, request, settings);
 }
@@ -135,14 +135,10 @@ async function createProviderSession(
   sessionId = "thread_1"
 ) {
   const create = pedelec.createSession({ provider: provider as any });
-  const settingsRequest = pageWindow.lastSent();
-  expect(settingsRequest).toMatchObject({ type: "get_settings" });
-  respondSettings(pageWindow, settingsRequest);
-  await nextTick();
   const createRequest = pageWindow.lastSent();
   expect(createRequest).toMatchObject({
     type: "create_session",
-    input: { provider, skills: undefined },
+    input: { provider, effortLevel: "default", skills: undefined },
   });
   respondOk(pageWindow, createRequest, { sessionId });
   return { session: await create, createRequest };
@@ -177,7 +173,7 @@ describe("Pedelec SDK", () => {
     const pedelec = new Pedelec();
     const promise = pedelec.createSession({
       provider: "codex",
-      model: "gpt-5",
+      effortLevel: "high",
       skills: {
         guidance: "Use get_app_state for app state.",
         tools: [
@@ -200,7 +196,7 @@ describe("Pedelec SDK", () => {
       type: "create_session",
       input: {
         provider: "codex",
-        model: "gpt-5",
+        effortLevel: "high",
         skills: {
           guidance: "Use get_app_state for app state.",
           tools: [
@@ -233,14 +229,14 @@ describe("Pedelec SDK", () => {
 
     expect(session.sessionId).toBe("thread_1");
     expect(session.provider).toBe("codex");
-    expect(session.model).toBe("gpt-5");
+    expect(session.effortLevel).toBe("high");
   });
 
-  it("forwards an explicit sandbox path with an explicit provider and model", async () => {
+  it("forwards an explicit sandbox path with an explicit provider and effort level", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.createSession({
       provider: "codex",
-      model: "gpt-5",
+      effortLevel: "high",
       sandbox: { path: "C:\\workspace\\project-a" },
     });
     const request = pageWindow.lastSent();
@@ -249,7 +245,7 @@ describe("Pedelec SDK", () => {
       type: "create_session",
       input: {
         provider: "codex",
-        model: "gpt-5",
+        effortLevel: "high",
         sandbox: { path: "C:\\workspace\\project-a" },
       },
     });
@@ -263,12 +259,6 @@ describe("Pedelec SDK", () => {
       provider: "codex",
       sandbox: { path: "C:\\workspace\\provider-only" },
     });
-    const providerSettings = pageWindow.lastSent();
-    respondSettings(pageWindow, providerSettings, {
-      defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5" },
-    });
-    await nextTick();
     const providerCreate = pageWindow.lastSent();
     expect(providerCreate.input.sandbox).toEqual({ path: "C:\\workspace\\provider-only" });
     respondOk(pageWindow, providerCreate, { sessionId: "thread_custom_provider" });
@@ -280,7 +270,6 @@ describe("Pedelec SDK", () => {
     const defaultSettings = pageWindow.lastSent();
     respondSettings(pageWindow, defaultSettings, {
       defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5" },
     });
     await nextTick();
     const providersRequest = pageWindow.lastSent();
@@ -371,7 +360,7 @@ describe("Pedelec SDK", () => {
     expect(pageWindow.port).toBe(portB);
     expect(portB.sent.at(-1)).toMatchObject({ type: "get_settings" });
     respondSettings(pageWindow, pageWindow.lastSent());
-    await expect(recovered).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+    await expect(recovered).resolves.toEqual({ defaultProvider: null });
   });
 
   it("rejects old-port requests without replaying them, then succeeds on a replacement Port", async () => {
@@ -391,7 +380,7 @@ describe("Pedelec SDK", () => {
     const newMessage = portB.sent.at(-1);
     expect(newMessage.requestId).not.toBe(oldMessage.requestId);
     respondSettings(pageWindow, newMessage);
-    await expect(newRequest).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+    await expect(newRequest).resolves.toEqual({ defaultProvider: null });
   });
 
   it("keeps a failed reconnect retryable", async () => {
@@ -408,7 +397,7 @@ describe("Pedelec SDK", () => {
     expect(pageWindow.connectCalls).toHaveLength(3);
     expect(pageWindow.port).toBe(portB);
     respondSettings(pageWindow, pageWindow.lastSent());
-    await expect(recovered).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+    await expect(recovered).resolves.toEqual({ defaultProvider: null });
   });
 
   it("shares one replacement Port across concurrent operations", async () => {
@@ -432,7 +421,7 @@ describe("Pedelec SDK", () => {
       origin: "https://app.example.test",
       appConnected: true,
     });
-    await expect(settings).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+    await expect(settings).resolves.toEqual({ defaultProvider: null });
     await expect(approval).resolves.toMatchObject({ installed: true, appConnected: true });
   });
 
@@ -449,7 +438,7 @@ describe("Pedelec SDK", () => {
     expect(pageWindow.port).toBe(portB);
     expect(portB.sent).toHaveLength(1);
     respondSettings(pageWindow, portB.sent[0]);
-    await expect(request).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+    await expect(request).resolves.toEqual({ defaultProvider: null });
   });
 
   it("recovers checkAvailability after a prior runtime Port disconnect", async () => {
@@ -532,7 +521,7 @@ describe("Pedelec SDK", () => {
     const pedelec = new Pedelec();
     const createPromise = pedelec.createSession({
       provider: "opencode",
-      model: "ollama/qwen2.5-coder:14b",
+      effortLevel: "high",
     });
     const createRequest = pageWindow.lastSent();
 
@@ -540,7 +529,7 @@ describe("Pedelec SDK", () => {
       type: "create_session",
       input: {
         provider: "opencode",
-        model: "ollama/qwen2.5-coder:14b",
+        effortLevel: "high",
         skills: undefined,
       },
     });
@@ -548,7 +537,7 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, createRequest, { sessionId: "thread_opencode" });
     const session = await createPromise;
     expect(session.provider).toBe("opencode");
-    expect(session.model).toBe("ollama/qwen2.5-coder:14b");
+    expect(session.effortLevel).toBe("high");
 
     const listPromise = pedelec.listProviders();
     const listRequest = pageWindow.lastSent();
@@ -568,7 +557,7 @@ describe("Pedelec SDK", () => {
     const pedelec = new Pedelec();
     const createPromise = pedelec.createSession({
       provider: "cursor",
-      model: "gpt-5",
+      effortLevel: "high",
     });
     const createRequest = pageWindow.lastSent();
 
@@ -576,7 +565,7 @@ describe("Pedelec SDK", () => {
       type: "create_session",
       input: {
         provider: "cursor",
-        model: "gpt-5",
+        effortLevel: "high",
         skills: undefined,
       },
     });
@@ -584,7 +573,7 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, createRequest, { sessionId: "thread_cursor" });
     const session = await createPromise;
     expect(session.provider).toBe("cursor");
-    expect(session.model).toBe("gpt-5");
+    expect(session.effortLevel).toBe("high");
 
     const listPromise = pedelec.listProviders();
     const listRequest = pageWindow.lastSent();
@@ -601,7 +590,7 @@ describe("Pedelec SDK", () => {
     const pedelec = new Pedelec();
     const createPromise = pedelec.createSession({
       provider: "claude",
-      model: "sonnet",
+      effortLevel: "high",
     });
     const createRequest = pageWindow.lastSent();
 
@@ -609,7 +598,7 @@ describe("Pedelec SDK", () => {
       type: "create_session",
       input: {
         provider: "claude",
-        model: "sonnet",
+        effortLevel: "high",
         skills: undefined,
       },
     });
@@ -617,7 +606,7 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, createRequest, { sessionId: "thread_claude" });
     const session = await createPromise;
     expect(session.provider).toBe("claude");
-    expect(session.model).toBe("sonnet");
+    expect(session.effortLevel).toBe("high");
 
     const listPromise = pedelec.listProviders();
     const listRequest = pageWindow.lastSent();
@@ -641,12 +630,9 @@ describe("Pedelec SDK", () => {
 
     respondOk(pageWindow, request, {
       defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5" },
-      providerSettings: { ollama: { apiKey: "secret", tavilyApiKey: "secret-too" } },
     });
     await expect(promise).resolves.toEqual({
       defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5" },
     });
   });
 
@@ -656,22 +642,19 @@ describe("Pedelec SDK", () => {
     const ollamaSettings = pedelec.getSettings();
     respondOk(pageWindow, pageWindow.lastSent(), {
       defaultProvider: "ollama",
-      defaultModels: { ollama: "qwen" },
     });
     await expect(ollamaSettings).resolves.toEqual({
       defaultProvider: "ollama",
-      defaultModels: { ollama: "qwen" },
     });
 
     const emptyModels = pedelec.getSettings();
     respondOk(pageWindow, pageWindow.lastSent(), {
       defaultProvider: null,
-      defaultModels: {},
     });
-    await expect(emptyModels).resolves.toEqual({ defaultProvider: null, defaultModels: {} });
+    await expect(emptyModels).resolves.toEqual({ defaultProvider: null });
   });
 
-  it("creates a session from default provider and model", async () => {
+  it("creates a session from the default provider and effort level", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.createSession();
 
@@ -679,7 +662,6 @@ describe("Pedelec SDK", () => {
     expect(settingsRequest).toMatchObject({ type: "get_settings" });
     respondOk(pageWindow, settingsRequest, {
       defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5" },
     });
     await nextTick();
 
@@ -693,20 +675,20 @@ describe("Pedelec SDK", () => {
     const createRequest = pageWindow.lastSent();
     expect(createRequest).toMatchObject({
       type: "create_session",
-      input: { provider: "codex", model: "gpt-5", skills: undefined },
+      input: { provider: "codex", effortLevel: "default", skills: undefined },
     });
     respondOk(pageWindow, createRequest, { sessionId: "thread_default" });
 
     const session = await promise;
     expect(session.provider).toBe("codex");
-    expect(session.model).toBe("gpt-5");
+    expect(session.effortLevel).toBe("default");
   });
 
-  it("creates an ollama session with explicit model", async () => {
+  it("creates an ollama session with explicit effort level", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.createSession({
       provider: "ollama",
-      model: "qwen3-14b-32k:latest",
+      effortLevel: "high",
     });
     const request = pageWindow.lastSent();
 
@@ -714,7 +696,7 @@ describe("Pedelec SDK", () => {
       type: "create_session",
       input: {
         provider: "ollama",
-        model: "qwen3-14b-32k:latest",
+        effortLevel: "high",
         skills: undefined,
       },
     });
@@ -722,16 +704,15 @@ describe("Pedelec SDK", () => {
 
     const session = await promise;
     expect(session.provider).toBe("ollama");
-    expect(session.model).toBe("qwen3-14b-32k:latest");
+    expect(session.effortLevel).toBe("high");
   });
 
-  it("uses ollama as default provider with default model", async () => {
+  it("uses ollama as default provider with the default effort level", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.createSession();
 
     respondOk(pageWindow, pageWindow.lastSent(), {
       defaultProvider: "ollama",
-      defaultModels: { ollama: "qwen3-14b-32k:latest" },
     });
     await nextTick();
     respondOk(pageWindow, pageWindow.lastSent(), [
@@ -742,98 +723,76 @@ describe("Pedelec SDK", () => {
     const createRequest = pageWindow.lastSent();
     expect(createRequest).toMatchObject({
       type: "create_session",
-      input: { provider: "ollama", model: "qwen3-14b-32k:latest", skills: undefined },
+      input: { provider: "ollama", effortLevel: "default", skills: undefined },
     });
     respondOk(pageWindow, createRequest, { sessionId: "thread_ollama_default" });
 
     const session = await promise;
     expect(session.provider).toBe("ollama");
-    expect(session.model).toBe("qwen3-14b-32k:latest");
+    expect(session.effortLevel).toBe("default");
   });
 
-  it("applies the selected provider's default model", async () => {
+  it("forwards the selected effort level without reading provider settings", async () => {
     const pedelec = new Pedelec();
     const codexPromise = pedelec.createSession({ provider: "codex" });
-    respondOk(pageWindow, pageWindow.lastSent(), {
-      defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5", antigravity: "antigravity-2.5-pro" },
-    });
-    await nextTick();
     const codexCreate = pageWindow.lastSent();
     expect(codexCreate).toMatchObject({
       type: "create_session",
-      input: { provider: "codex", model: "gpt-5", skills: undefined },
+      input: { provider: "codex", effortLevel: "default", skills: undefined },
     });
     respondOk(pageWindow, codexCreate, { sessionId: "thread_codex_default_model" });
-    expect((await codexPromise).model).toBe("gpt-5");
+    expect((await codexPromise).effortLevel).toBe("default");
 
-    const antigravityPromise = pedelec.createSession({ provider: "antigravity" });
-    respondOk(pageWindow, pageWindow.lastSent(), {
-      defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5", antigravity: "antigravity-2.5-pro" },
-    });
-    await nextTick();
+    const antigravityPromise = pedelec.createSession({ provider: "antigravity", effortLevel: "low" });
     const antigravityCreate = pageWindow.lastSent();
     expect(antigravityCreate).toMatchObject({
       type: "create_session",
-      input: { provider: "antigravity", model: "antigravity-2.5-pro", skills: undefined },
+      input: { provider: "antigravity", effortLevel: "low", skills: undefined },
     });
     respondOk(pageWindow, antigravityCreate, { sessionId: "thread_antigravity_no_default_model" });
-    expect((await antigravityPromise).model).toBe("antigravity-2.5-pro");
+    expect((await antigravityPromise).effortLevel).toBe("low");
 
-    const ollamaPromise = pedelec.createSession({ provider: "ollama" });
-    respondOk(pageWindow, pageWindow.lastSent(), {
-      defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5", ollama: "qwen3-14b-32k:latest" },
-    });
-    await nextTick();
+    const ollamaPromise = pedelec.createSession({ provider: "ollama", effortLevel: "high" });
     const ollamaCreate = pageWindow.lastSent();
     expect(ollamaCreate).toMatchObject({
       type: "create_session",
-      input: { provider: "ollama", model: "qwen3-14b-32k:latest", skills: undefined },
+      input: { provider: "ollama", effortLevel: "high", skills: undefined },
     });
     respondOk(pageWindow, ollamaCreate, { sessionId: "thread_ollama_default_model" });
-    expect((await ollamaPromise).model).toBe("qwen3-14b-32k:latest");
+    expect((await ollamaPromise).effortLevel).toBe("high");
   });
 
-  it("omits model when the selected provider has no default model", async () => {
+  it("normalizes an omitted explicit-provider effort level to default", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.createSession({ provider: "antigravity" });
-    respondOk(pageWindow, pageWindow.lastSent(), {
-      defaultProvider: "codex",
-      defaultModels: { codex: "gpt-5" },
-    });
-    await nextTick();
-
     const createRequest = pageWindow.lastSent();
     expect(createRequest).toMatchObject({
       type: "create_session",
-      input: { provider: "antigravity", skills: undefined },
+      input: { provider: "antigravity", effortLevel: "default", skills: undefined },
     });
-    expect(createRequest.input.model).toBeUndefined();
     respondOk(pageWindow, createRequest, { sessionId: "thread_antigravity_no_model" });
-    expect((await promise).model).toBeUndefined();
+    expect((await promise).effortLevel).toBe("default");
   });
 
-  it("does not overwrite user supplied model with default model", async () => {
+  it("forwards high effort for an explicit provider", async () => {
     const pedelec = new Pedelec();
-    const promise = pedelec.createSession({ provider: "codex", model: "user-model" });
+    const promise = pedelec.createSession({ provider: "codex", effortLevel: "high" });
     const request = pageWindow.lastSent();
 
     expect(request).toMatchObject({
       type: "create_session",
-      input: { provider: "codex", model: "user-model", skills: undefined },
+      input: { provider: "codex", effortLevel: "high", skills: undefined },
     });
     respondOk(pageWindow, request, { sessionId: "thread_user_model" });
 
-    expect((await promise).model).toBe("user-model");
+    expect((await promise).effortLevel).toBe("high");
   });
 
   it("sends explicit autoEndOnDisconnect lifecycle options", async () => {
     const pedelec = new Pedelec();
     const keepAlivePromise = pedelec.createSession({
       provider: "codex",
-      model: "gpt-5",
+      effortLevel: "high",
       autoEndOnDisconnect: false,
     });
     const keepAliveRequest = pageWindow.lastSent();
@@ -842,7 +801,7 @@ describe("Pedelec SDK", () => {
       type: "create_session",
       input: {
         provider: "codex",
-        model: "gpt-5",
+        effortLevel: "high",
         skills: undefined,
         autoEndOnDisconnect: false,
       },
@@ -852,7 +811,7 @@ describe("Pedelec SDK", () => {
 
     const pageScopedPromise = pedelec.createSession({
       provider: "codex",
-      model: "gpt-5",
+      effortLevel: "high",
       autoEndOnDisconnect: true,
     });
     const pageScopedRequest = pageWindow.lastSent();
@@ -861,7 +820,7 @@ describe("Pedelec SDK", () => {
       type: "create_session",
       input: {
         provider: "codex",
-        model: "gpt-5",
+        effortLevel: "high",
         skills: undefined,
         autoEndOnDisconnect: true,
       },
@@ -873,11 +832,11 @@ describe("Pedelec SDK", () => {
   it("returns clear errors when default provider is missing or unavailable", async () => {
     const pedelec = new Pedelec();
     const missing = pedelec.createSession();
-    respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: null, defaultModels: {} });
+    respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: null });
     await expect(missing).rejects.toMatchObject({ code: "DEFAULT_PROVIDER_NOT_SET" });
 
     const unavailable = pedelec.createSession();
-    respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: "codex", defaultModels: {} });
+    respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: "codex" });
     await nextTick();
     respondOk(pageWindow, pageWindow.lastSent(), [
       { name: "Codex", code: "codex", available: false, error: "missing" },
@@ -1296,8 +1255,6 @@ describe("Pedelec SDK", () => {
         ],
       },
     });
-    respondSettings(pageWindow, pageWindow.lastSent());
-    await nextTick();
     const createRequest = pageWindow.lastSent();
     expect(createRequest.input.skills).toEqual({
       guidance: "Use update_counter.",
@@ -1442,8 +1399,6 @@ describe("Pedelec SDK", () => {
         ],
       },
     });
-    respondSettings(pageWindow, pageWindow.lastSent());
-    await nextTick();
     const createRequest = pageWindow.lastSent();
     (argsSchema.properties.delta as { description: string }).description = "Mutated delta.";
 

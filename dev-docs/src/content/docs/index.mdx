@@ -90,7 +90,7 @@ const pedelec = new Pedelec();
 
 const session = await pedelec.createSession({
   provider: "codex",
-  model: "gpt-5",
+  effortLevel: "high",
   skills: {
     guidance: "Use get_current_page when you need browser page context.",
     tools: [
@@ -144,34 +144,27 @@ const status = await pedelec.getApprovalStatus();
 console.log(status.installed, status.approved, status.origin);
 ```
 
-### Specifying Provider and Model
+### Specifying Provider and Effort
 
 ```ts
 const session = await pedelec.createSession({
   provider: "opencode",
-  model: "ollama/qwen2.5-coder:14b",
+  effortLevel: "high",
 });
 ```
 
 Currently supported provider codes in the SDK:
 
-| Provider | Code | Example model |
-| --- | --- | --- |
-| Codex | `codex` | `gpt-5` |
-| Antigravity | `antigravity` | Any model ID supported by the provider |
-| OpenCode | `opencode` | `ollama/qwen2.5-coder:14b` |
-| Cursor | `cursor` | `gpt-5` |
-| Claude Code | `claude` | `sonnet` |
-| Ollama | `ollama` | `qwen3-14b-32k:latest` |
+| Provider | Code |
+| --- | --- |
+| Codex | `codex` |
+| Antigravity | `antigravity` |
+| OpenCode | `opencode` |
+| Cursor | `cursor` |
+| Claude Code | `claude` |
+| Ollama | `ollama` |
 
-Ollama sessions are executed by the `pedelec-agent` binary bundled with the Desktop App, not by the `ollama` CLI. It uses the configured Ollama-compatible endpoint (default `http://127.0.0.1:11434`); start a local server for that URL or configure a remote/Ollama Cloud endpoint. A non-empty API key is currently required by the agent: enter `ollama` for local Ollama, or the service-issued key for a remote endpoint. Also specify a model explicitly or configure `defaultModels.ollama` in Settings:
-
-```ts
-const session = await pedelec.createSession({
-  provider: "ollama",
-  model: "qwen3-14b-32k:latest",
-});
-```
+Ollama sessions use the bundled `pedelec-agent` and the endpoint configured in Desktop Settings. The selected profile must contain a model; an empty selected profile returns `MODEL_REQUIRED` and does not fall back to `default`.
 
 Desktop Settings also accepts an optional Tavily API key for Ollama sessions. When configured, the bundled agent can decide to use Tavily web search with `basic` search depth and up to five results per call. Without the key, the web-search tool is not exposed to the Ollama model.
 
@@ -203,7 +196,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-This first reads `defaultProvider` and `defaultModels` from the Desktop App. If no default provider is configured, the SDK throws `DEFAULT_PROVIDER_NOT_SET`. If the default provider has its own default model, the SDK sends that model with the session request.
+This first reads only `defaultProvider` from the Desktop App. If no default provider is configured, the SDK throws `DEFAULT_PROVIDER_NOT_SET`. The chosen effort profile is resolved by Core using Desktop settings.
 
 ### Specifying Only the Provider
 
@@ -213,8 +206,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-When only `provider` is passed, the SDK uses that provider's own Desktop App default model if one is configured. Otherwise, it sends the provider without a model and lets the provider CLI use its own default behavior.
-Ollama is the exception: it requires a model, so provider-only Ollama sessions need `defaultModels.ollama` or they fail with `MODEL_REQUIRED`.
+When only `provider` is passed, the SDK sends that provider with `effortLevel: "default"`. Non-Ollama providers may have an empty profile; Ollama requires a model in its selected profile and returns `MODEL_REQUIRED` otherwise.
 
 ### Session Lifecycle
 
@@ -263,9 +255,6 @@ For Ollama, `available: true` only means Pedelec can find `pedelec-agent`; it do
 const settings = await pedelec.getSettings();
 
 console.log(settings.defaultProvider);
-console.log(settings.defaultModels.codex);
-console.log(settings.defaultModels.antigravity);
-console.log(settings.defaultModels.ollama);
 ```
 
 Return format:
@@ -273,7 +262,6 @@ Return format:
 ```ts
 type PedelecSettings = {
   defaultProvider: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama" | null;
-  defaultModels: Partial<Record<"codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama", string>>;
 };
 ```
 

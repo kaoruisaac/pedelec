@@ -55,14 +55,14 @@ Creates a new Core session and subscribes the current SDK channel to it.
 type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
   | {
       provider: ProviderCode;
-      model?: string;
+      effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
-      model?: never;
+      effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
@@ -71,11 +71,10 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 
 ### Resolution rules
 
-- No `provider`: use Desktop `defaultProvider`; verify it is available; use its default model if configured.
-- `provider` only: use that provider and its Desktop default model when configured.
-- `provider` + `model`: use both explicit values.
+- No `provider`: use Desktop `defaultProvider`; verify it is available.
+- `provider` may be combined with provider-independent `effortLevel`.
+- Omitted `effortLevel` is normalized to `default`.
 - `sandbox.path`: optionally use an absolute application-managed workspace instead of a temporary managed sandbox.
-- `model` without `provider`: invalid.
 - `autoEndOnDisconnect`: defaults to `true`.
 
 An explicit `sandbox.path` may be new or existing. Core creates the required `skills/`, `assets/`, `logs/`, and `tmp/` directories without clearing existing contents. Pedelec never deletes an explicit workspace, and multiple active sessions may share it. The path must not overlap Pedelec's managed sandbox root; invalid paths return `SANDBOX_PATH_INVALID`.
@@ -90,7 +89,7 @@ A `PedelecSession` registered in this client.
 - `DEFAULT_PROVIDER_NOT_SET`;
 - `DEFAULT_PROVIDER_UNAVAILABLE`;
 - `INVALID_INPUT`;
-- `MODEL_REQUIRED` for Ollama without a model;
+- `MODEL_REQUIRED` when the selected Ollama effort profile has no model;
 - provider/Core creation errors.
 
 ### Example
@@ -141,7 +140,6 @@ Reads the SDK-visible Desktop defaults.
 ```ts
 type PedelecSettings = {
   defaultProvider: ProviderCode | null;
-  defaultModels: Partial<Record<ProviderCode, string>>;
 };
 ```
 
@@ -223,7 +221,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 
 ### Returns
 
-A session handle registered in this client. A newly resumed handle may not contain provider/model metadata because the current bridge response returns only the ID.
+A session handle registered in this client. A newly resumed handle may not contain provider/effort metadata because the current bridge response returns only the ID.
 
 ### Common errors
 

@@ -99,11 +99,11 @@ const approval = await pedelec.getApprovalStatus();
 const providers = await pedelec.listProviders();
 ```
 
-Use these APIs for installation, approval, provider, and model UI.
+Use these APIs for installation, approval, provider, and effort-profile UI.
 
 For UI that needs complete local readiness, call `checkAvailability()` first. It checks Extension, approval, and a non-sensitive Desktop ping; it does not create a session or open approval. `launchAttempted` may be true as soon as the approval-status ping runs. Use `getApprovalStatus().appConnected` for connection state, not `listProviders()`.
 
-`getSettings()` and `listProviders()` require origin approval and can open the approval popup. Settings contain only default provider/model values (never credentials); provider entries contain only `name`, `code`, `available`, and `error`.
+`getSettings()` and `listProviders()` require origin approval and can open the approval popup. Settings contain only `{ defaultProvider }` (never provider settings, effort args, credentials, or model names); provider entries contain only `name`, `code`, `available`, and `error`.
 
 A prior availability check is not a guarantee. Session creation and provider execution remain the final authority.
 
@@ -144,6 +144,7 @@ The readonly tuple preserves literal tool names for typed named handlers.
 ```ts
 const session = await pedelec.createSession({
   provider: "codex",
+  effortLevel: "high",
   skills: {
     guidance: [
       "Use the declared tools to interact with the current application.",
@@ -671,7 +672,7 @@ SDK-created sessions can only be resumed or operated by their creating origin. R
 
 Browser handlers do not survive reload.
 
-Persist provider, model, resource, or creation metadata separately when the UI needs it after reload.
+Persist provider, effort level, resource, or creation metadata separately when the UI needs it after reload.
 
 Two tabs may attach to the same persistent session. The application must explicitly decide which tab may mutate state.
 

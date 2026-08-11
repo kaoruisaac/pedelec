@@ -34,7 +34,7 @@ type RuntimeStatus = {
 
 const EXAMPLE_PROMPTS = "Try: pink triangle, five blue circles, yellow stars";
 const SHAPE_RAIN_SESSION_SETTINGS_KEY = "shape-rain:pedelec-session-settings";
-const DEFAULT_SESSION_SETTINGS: ShapeRainSessionSettings = { provider: "default", model: "" };
+const DEFAULT_SESSION_SETTINGS: ShapeRainSessionSettings = { provider: "default", effortLevel: "default" };
 type ShapeToolResult = SpawnBasicShapesResult | SpawnClosedPolygonsResult;
 type ToolCallErrorResult = { error: { code: string; message: string; details?: unknown } };
 type ToolCallResult = ShapeToolResult | ToolCallErrorResult;
@@ -858,7 +858,7 @@ function friendlyPedelecError(err: unknown): { message: string; disconnected: bo
   if (code === "DEFAULT_PROVIDER_NOT_SET" || code === "MODEL_REQUIRED") {
     return {
       disconnected: false,
-      message: "Pedelec needs a default provider and model. Open Desktop App Settings and configure them.",
+      message: "Pedelec needs a default provider and effort profile. Open Desktop App Settings and configure them.",
     };
   }
   if (code.includes("PROVIDER")) {
@@ -888,11 +888,10 @@ function friendlyPedelecError(err: unknown): { message: string; disconnected: bo
 
 function createSessionSettingsInput(settings: ShapeRainSessionSettings): CreateSessionInput {
   if (settings.provider === "default") {
-    return {};
+    return { effortLevel: settings.effortLevel };
   }
 
-  const model = settings.model.trim();
-  return model ? { provider: settings.provider, model } : { provider: settings.provider };
+  return { provider: settings.provider, effortLevel: settings.effortLevel };
 }
 
 function readStoredSessionSettings(): ShapeRainSessionSettings {
@@ -922,7 +921,7 @@ function normalizeSessionSettings(value: unknown): ShapeRainSessionSettings {
 
   const raw = value as Partial<ShapeRainSessionSettings>;
   if (raw.provider === "default") {
-    return { provider: "default", model: "" };
+    return { provider: "default", effortLevel: "default" };
   }
 
   if (!isProviderCode(raw.provider)) {
@@ -931,7 +930,7 @@ function normalizeSessionSettings(value: unknown): ShapeRainSessionSettings {
 
   return {
     provider: raw.provider,
-    model: typeof raw.model === "string" ? raw.model.trim() : "",
+    effortLevel: raw.effortLevel === "low" || raw.effortLevel === "high" ? raw.effortLevel : "default",
   };
 }
 

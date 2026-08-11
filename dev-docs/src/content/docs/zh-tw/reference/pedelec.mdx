@@ -55,14 +55,14 @@ createSession<const TTools extends readonly ToolDefinition[]>(
 type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
   | {
       provider: ProviderCode;
-      model?: string;
+      effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
-      model?: never;
+      effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
@@ -71,8 +71,8 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 
 ### Resolution rules
 
-- 無 `provider`：使用 Desktop `defaultProvider`，確認 available，並使用 configured default model。
-- 只有 `provider`：使用該 provider 與其 Desktop default model（若有）。
+- 無 `provider`：使用 Desktop `defaultProvider` 並確認 available。
+- `provider` 可搭配 provider-independent `effortLevel`；省略時使用 `default`。
 - `provider` + `model`：使用 explicit values。
 - `sandbox.path`：可選擇使用 absolute、由 application 管理的 workspace，取代 temporary managed sandbox。
 - 只有 `model`：invalid。
@@ -137,7 +137,6 @@ getSettings(): Promise<PedelecSettings>
 ```ts
 type PedelecSettings = {
   defaultProvider: ProviderCode | null;
-  defaultModels: Partial<Record<ProviderCode, string>>;
 };
 ```
 
@@ -206,7 +205,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 | --- | --- | --- |
 | `sessionId` | `string` | Non-empty Core session/thread identifier。 |
 
-回傳註冊於此 client 的 session handle。目前 bridge 只回傳 ID，因此新的 resumed handle 可能沒有 provider/model metadata。
+回傳註冊於此 client 的 session handle。目前 bridge 只回傳 ID，因此新的 resumed handle 可能沒有 provider/effort metadata。
 
 常見 errors：空 ID 的 `INVALID_INPUT`、approval errors、caller origin 無法傳遞時的 `SDK_ORIGIN_UNAVAILABLE`、session 屬於其他 origin 時的 `THREAD_ACCESS_DENIED`、Core 已找不到 ID 時的 `THREAD_NOT_FOUND`，以及 transport errors。
 

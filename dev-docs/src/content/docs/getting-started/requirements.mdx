@@ -106,16 +106,11 @@ import type { PedelecSession, ProviderInfo } from "@kaoruisaac/pedelec";
 
 Importing the runtime module is also generally possible, but calling `new Pedelec()` during server rendering creates an unusable disconnected instance. Keep the instance outside serialized server state and create it after hydration.
 
-## Provider and model compatibility
+## Provider and effort compatibility
 
-Pedelec forwards model identifiers to the selected provider. A model string is not validated against a universal Pedelec catalog. Use an identifier accepted by the provider version installed on the user's machine.
+Desktop Settings maps each provider's `default`, `low`, and `high` effort profile to provider-supported model/effort arguments. Pedelec validates provider-supported argument names and native effort values, but does not maintain a universal model catalog.
 
-Ollama requires a model from either:
-
-- `createSession({ provider: "ollama", model: "..." })`; or
-- the Desktop App's `defaultModels.ollama` setting.
-
-Without one, session creation fails with `MODEL_REQUIRED`.
+Ollama requires a model in the selected Desktop effort profile. If the selected profile is empty, session creation fails with `MODEL_REQUIRED`; it does not fall back to another tier.
 
 ## Preflight checklist
 
@@ -126,7 +121,7 @@ Before showing the main agent UI, verify:
 3. The current origin can be approved.
 4. `listProviders()` returns at least one available provider.
 5. The Desktop App was opened once after installation; handle a failed automatic launch by asking the user to open it or repair installation.
-6. The model field, when provided, is meaningful to the selected provider.
+6. The selected effort profile is meaningful to the selected provider.
 7. The UI handles disconnects and does not assume setup remains valid forever.
 
 Continue with [Installation](./installation/) to add the package and verify the complete chain.

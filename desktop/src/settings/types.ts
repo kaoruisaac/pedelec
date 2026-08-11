@@ -1,4 +1,11 @@
 export type ProviderCode = "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
+export type EffortLevel = "default" | "low" | "high";
+
+export interface EffortsArgs {
+  default: string[];
+  low: string[];
+  high: string[];
+}
 
 export interface Provider {
   code: ProviderCode;
@@ -16,15 +23,24 @@ export interface OllamaProviderSettings {
   timeoutMs: number;
   apiKey: string;
   tavilyApiKey: string;
+  effortsArgs: EffortsArgs;
+}
+
+export interface CommonProviderSettings {
+  effortsArgs: EffortsArgs;
 }
 
 export interface ProviderSettings {
+  codex: CommonProviderSettings;
+  antigravity: CommonProviderSettings;
+  opencode: CommonProviderSettings;
+  cursor: CommonProviderSettings;
+  claude: CommonProviderSettings;
   ollama: OllamaProviderSettings;
 }
 
 export interface Settings {
   defaultProvider: ProviderCode | null;
-  defaultModels: Partial<Record<ProviderCode, string>>;
   providerSettings: ProviderSettings;
 }
 

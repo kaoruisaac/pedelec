@@ -70,7 +70,7 @@ sequenceDiagram
   participant Desktop as pedelec-app CoreRuntime
   participant Agent as Provider Agent CLI
 
-  App->>SDK: createSession({ provider, model, skills })
+  App->>SDK: createSession({ provider, effortLevel, skills })
   SDK->>BG: chrome.runtime.connect external message
   BG->>BG: verify sender origin approval
   BG->>NH: native messaging create_thread

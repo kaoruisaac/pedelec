@@ -1513,7 +1513,6 @@ mod tests {
         assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
         assert_env(&start.command, "PEDELEC_THREAD_ID", "thread_ollama_new");
         assert_env(&start.command, "PEDELEC_PROVIDER", "ollama");
-        assert_env(&start.command, "PEDELEC_MODEL", "qwen3-14b-32k:latest");
         assert_env(&start.command, "OLLAMA_API_KEY", "ollama_test_key");
         assert!(!start
             .command
@@ -1836,38 +1835,24 @@ mod tests {
 
     #[test]
     fn settings_new_json_shape_round_trips() {
-        let settings = PedelecSettings {
+        let mut settings = PedelecSettings {
             default_provider: Some(ProviderCode::Ollama),
-            default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
-            provider_settings: ProviderSettings {
-                ollama: OllamaProviderSettings {
-                    base_url: "http://127.0.0.1:11434".into(),
-                    timeout_ms: 120_000,
-                    api_key: "ollama_xxx".into(),
-                    tavily_api_key: String::new(),
-                },
-            },
+            provider_settings: ProviderSettings::default(),
         };
+        settings.provider_settings.ollama.base_url = "http://127.0.0.1:11434".into();
+        settings.provider_settings.ollama.timeout_ms = 120_000;
+        settings.provider_settings.ollama.api_key = "ollama_xxx".into();
+        settings.provider_settings.ollama.efforts_args.default =
+            vec!["--model".into(), "qwen3:8b".into()];
 
         let value = serde_json::to_value(&settings).unwrap();
 
+        assert_eq!(value["defaultProvider"], json!("ollama"));
         assert_eq!(
-            value,
-            json!({
-                "defaultProvider": "ollama",
-                "defaultModels": {
-                    "ollama": "qwen3:8b"
-                },
-                "providerSettings": {
-                    "ollama": {
-                        "baseUrl": "http://127.0.0.1:11434",
-                        "timeoutMs": 120000,
-                        "apiKey": "ollama_xxx",
-                        "tavilyApiKey": ""
-                    }
-                }
-            })
+            value["providerSettings"]["ollama"]["effortsArgs"]["default"],
+            json!(["--model", "qwen3:8b"])
         );
+        assert!(value.get("defaultModels").is_none());
         assert_eq!(
             serde_json::from_value::<PedelecSettings>(value).unwrap(),
             settings
@@ -1891,13 +1876,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(settings.provider_settings.ollama.api_key, "");
+        assert!(settings.provider_settings.ollama.efforts_args.default.is_empty());
     }
 
     #[test]
-    fn update_settings_persists_provider_and_default_models() {
+    fn update_settings_persists_provider_and_effort_args() {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "pedelec-agent");
         let settings_path = temp.path().join("settings.json");
+        let mut provider_settings = ProviderSettingsInput::default();
+        provider_settings.ollama.efforts_args.default =
+            vec!["--model".into(), "qwen3-14b-32k:latest".into()];
         let mut runtime = CoreRuntime {
             settings_file_path: Some(settings_path.clone()),
             provider_path_value_override: Some(provider_path),
@@ -1907,29 +1896,15 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::from([
-                    (ProviderCode::Codex, "gpt-5".into()),
-                    (ProviderCode::Ollama, "qwen3-14b-32k:latest".into()),
-                ]),
-                provider_settings: ProviderSettingsInput::default(),
+                provider_settings,
             })
             .unwrap();
 
+        assert_eq!(saved.default_provider, Some(ProviderCode::Ollama));
+        assert_eq!(saved.provider_settings.ollama.api_key, "ollama");
         assert_eq!(
-            saved,
-            PedelecSettings {
-                default_provider: Some(ProviderCode::Ollama),
-                default_models: HashMap::from([
-                    (ProviderCode::Codex, "gpt-5".into()),
-                    (ProviderCode::Ollama, "qwen3-14b-32k:latest".into()),
-                ]),
-                provider_settings: ProviderSettings {
-                    ollama: OllamaProviderSettings {
-                        api_key: "ollama".into(),
-                        ..OllamaProviderSettings::default()
-                    },
-                },
-            }
+            saved.provider_settings.ollama.efforts_args.default,
+            vec!["--model", "qwen3-14b-32k:latest"]
         );
         assert_eq!(read_settings_file(&settings_path).unwrap(), saved);
     }
@@ -1948,14 +1923,18 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: Some(" https://ollama.example.test/ ".into()),
                         timeout_ms: Some(250_000),
                         api_key: Some(" ollama_cloud_key ".into()),
                         tavily_api_key: None,
+                        efforts_args: EffortsArgs {
+                            default: vec!["--model".into(), "qwen3:8b".into()],
+                            ..EffortsArgs::default()
+                        },
                     },
+                    ..ProviderSettingsInput::default()
                 },
             })
             .unwrap();
@@ -1966,6 +1945,10 @@ mod tests {
         );
         assert_eq!(saved.provider_settings.ollama.timeout_ms, 250_000);
         assert_eq!(saved.provider_settings.ollama.api_key, "ollama_cloud_key");
+        assert_eq!(
+            saved.provider_settings.ollama.efforts_args.default,
+            vec!["--model", "qwen3:8b"]
+        );
         assert_eq!(read_settings_file(&settings_path).unwrap(), saved);
     }
 
@@ -1982,14 +1965,18 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: Some("   ".into()),
                         timeout_ms: None,
                         api_key: Some("ollama".into()),
                         tavily_api_key: None,
+                        efforts_args: EffortsArgs {
+                            default: vec!["--model".into(), "qwen3:8b".into()],
+                            ..EffortsArgs::default()
+                        },
                     },
+                    ..ProviderSettingsInput::default()
                 },
             })
             .unwrap();
@@ -2014,18 +2001,23 @@ mod tests {
             provider_path_value_override: Some(provider_path),
             ..CoreRuntime::default()
         };
+        let valid_efforts = EffortsArgs {
+            default: vec!["--model".into(), "qwen3:8b".into()],
+            ..EffortsArgs::default()
+        };
 
         let invalid_url = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: Some("ftp://127.0.0.1:11434".into()),
                         timeout_ms: Some(120_000),
                         api_key: Some("ollama".into()),
                         tavily_api_key: None,
+                        efforts_args: valid_efforts.clone(),
                     },
+                    ..ProviderSettingsInput::default()
                 },
             })
             .unwrap_err();
@@ -2034,14 +2026,15 @@ mod tests {
         let invalid_timeout = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: Some(DEFAULT_OLLAMA_BASE_URL.into()),
                         timeout_ms: Some(0),
                         api_key: Some("ollama".into()),
                         tavily_api_key: None,
+                        efforts_args: valid_efforts.clone(),
                     },
+                    ..ProviderSettingsInput::default()
                 },
             })
             .unwrap_err();
@@ -2050,14 +2043,15 @@ mod tests {
         let missing_api_key = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::new(),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: Some(DEFAULT_OLLAMA_BASE_URL.into()),
                         timeout_ms: Some(120_000),
                         api_key: Some("   ".into()),
                         tavily_api_key: None,
+                        efforts_args: valid_efforts,
                     },
+                    ..ProviderSettingsInput::default()
                 },
             })
             .unwrap_err();
@@ -2065,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    fn update_settings_trims_and_removes_empty_default_models() {
+    fn update_settings_accepts_empty_non_ollama_effort_tiers() {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "codex");
         let mut runtime = CoreRuntime {
@@ -2077,18 +2071,13 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Codex,
-                default_models: HashMap::from([
-                    (ProviderCode::Codex, "  gpt-5  ".into()),
-                    (ProviderCode::Antigravity, "   ".into()),
-                ]),
                 provider_settings: ProviderSettingsInput::default(),
             })
             .unwrap();
 
-        assert_eq!(
-            saved.default_models,
-            HashMap::from([(ProviderCode::Codex, "gpt-5".into())])
-        );
+        assert!(saved.provider_settings.codex.efforts_args.default.is_empty());
+        assert!(saved.provider_settings.codex.efforts_args.low.is_empty());
+        assert!(saved.provider_settings.codex.efforts_args.high.is_empty());
     }
 
     #[test]
@@ -2103,7 +2092,6 @@ mod tests {
         let err = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Codex,
-                default_models: HashMap::new(),
                 provider_settings: ProviderSettingsInput::default(),
             })
             .unwrap_err();
@@ -2115,6 +2103,9 @@ mod tests {
     #[test]
     fn update_settings_allows_unavailable_ollama_provider() {
         let temp = tempfile::tempdir().unwrap();
+        let mut provider_settings = ProviderSettingsInput::default();
+        provider_settings.ollama.efforts_args.default =
+            vec!["--model".into(), "qwen3:8b".into()];
         let mut runtime = CoreRuntime {
             settings_file_path: Some(temp.path().join("settings.json")),
             provider_path_value_override: Some(OsString::from("")),
@@ -2124,8 +2115,7 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::from([(ProviderCode::Ollama, "qwen3:8b".into())]),
-                provider_settings: ProviderSettingsInput::default(),
+                provider_settings,
             })
             .unwrap();
 
@@ -2134,9 +2124,14 @@ mod tests {
     }
 
     #[test]
-    fn update_settings_allows_unavailable_non_default_provider_models() {
+    fn update_settings_allows_unavailable_non_default_provider_effort_args() {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "codex");
+        let mut provider_settings = ProviderSettingsInput::default();
+        provider_settings.codex.efforts_args.default =
+            vec!["-m".into(), "gpt-5".into()];
+        provider_settings.antigravity.efforts_args.high =
+            vec!["--model".into(), "antigravity-2.5-pro".into()];
         let mut runtime = CoreRuntime {
             settings_file_path: Some(temp.path().join("settings.json")),
             provider_path_value_override: Some(provider_path),
@@ -2146,18 +2141,14 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Codex,
-                default_models: HashMap::from([
-                    (ProviderCode::Codex, "gpt-5".into()),
-                    (ProviderCode::Antigravity, "antigravity-2.5-pro".into()),
-                ]),
-                provider_settings: ProviderSettingsInput::default(),
+                provider_settings,
             })
             .unwrap();
 
         assert_eq!(saved.default_provider, Some(ProviderCode::Codex));
         assert_eq!(
-            saved.default_models.get(&ProviderCode::Antigravity),
-            Some(&"antigravity-2.5-pro".to_string())
+            saved.provider_settings.antigravity.efforts_args.high,
+            vec!["--model", "antigravity-2.5-pro"]
         );
     }
 
@@ -2174,22 +2165,27 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Codex,
-                default_models: HashMap::new(),
                 provider_settings: ProviderSettingsInput {
                     ollama: OllamaProviderSettingsInput {
                         base_url: None,
                         timeout_ms: None,
                         api_key: Some("   ".into()),
                         tavily_api_key: None,
+                        ..OllamaProviderSettingsInput::default()
                     },
+                    ..ProviderSettingsInput::default()
                 },
             })
             .unwrap();
 
         assert_eq!(saved.default_provider, Some(ProviderCode::Codex));
-        assert!(saved.default_models.is_empty());
         assert_eq!(saved.provider_settings.ollama.api_key, "");
-        assert!(!saved.default_models.contains_key(&ProviderCode::Ollama));
+        assert!(saved
+            .provider_settings
+            .ollama
+            .efforts_args
+            .default
+            .is_empty());
     }
 
     #[test]
@@ -2205,7 +2201,6 @@ mod tests {
         let error = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Ollama,
-                default_models: HashMap::new(),
                 provider_settings: ProviderSettingsInput::default(),
             })
             .unwrap_err();
@@ -2215,9 +2210,13 @@ mod tests {
     }
 
     #[test]
-    fn update_settings_for_other_provider_preserves_existing_ollama_model() {
+    fn update_settings_for_other_provider_preserves_existing_ollama_effort_args() {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "codex");
+        let mut provider_settings = ProviderSettingsInput::default();
+        provider_settings.ollama.efforts_args.default =
+            vec!["--model".into(), "qwen3:8b".into()];
+        provider_settings.ollama.api_key = Some(String::new());
         let mut runtime = CoreRuntime {
             settings_file_path: Some(temp.path().join("settings.json")),
             provider_path_value_override: Some(provider_path),
@@ -2227,23 +2226,291 @@ mod tests {
         let saved = runtime
             .update_settings(UpdateSettingsInput {
                 default_provider: ProviderCode::Codex,
-                default_models: HashMap::from([(ProviderCode::Ollama, " qwen3:8b ".into())]),
-                provider_settings: ProviderSettingsInput {
-                    ollama: OllamaProviderSettingsInput {
-                        base_url: None,
-                        timeout_ms: None,
-                        api_key: Some(String::new()),
-                        tavily_api_key: None,
-                    },
-                },
+                provider_settings,
             })
             .unwrap();
 
         assert_eq!(
-            saved.default_models.get(&ProviderCode::Ollama),
-            Some(&"qwen3:8b".to_string())
+            saved.provider_settings.ollama.efforts_args.default,
+            vec!["--model", "qwen3:8b"]
         );
         assert_eq!(saved.provider_settings.ollama.api_key, "");
+    }
+
+    #[test]
+    fn effort_validation_rejects_malformed_duplicate_and_unsafe_args() {
+        let odd = normalize_efforts_args(
+            ProviderCode::Codex,
+            EffortsArgs {
+                default: vec!["-m".into()],
+                ..EffortsArgs::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(odd.code, error_codes::INVALID_INPUT);
+
+        let duplicate = normalize_efforts_args(
+            ProviderCode::Codex,
+            EffortsArgs {
+                default: vec![
+                    "-m".into(),
+                    "gpt-5".into(),
+                    "-m".into(),
+                    "gpt-5-mini".into(),
+                ],
+                ..EffortsArgs::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(duplicate.code, error_codes::INVALID_INPUT);
+
+        let unsafe_flag = normalize_efforts_args(
+            ProviderCode::Codex,
+            EffortsArgs {
+                default: vec!["--sandbox".into(), "unsafe".into()],
+                ..EffortsArgs::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(unsafe_flag.code, error_codes::INVALID_INPUT);
+    }
+
+    #[test]
+    fn effort_validation_checks_provider_native_values_without_matching_tier_names() {
+        assert!(normalize_efforts_args(
+            ProviderCode::Codex,
+            EffortsArgs {
+                low: vec![
+                    "-m".into(),
+                    "gpt-5".into(),
+                    "-c".into(),
+                    "model_reasoning_effort=\"xhigh\"".into(),
+                ],
+                ..EffortsArgs::default()
+            },
+        )
+        .is_ok());
+
+        assert!(normalize_efforts_args(
+            ProviderCode::Codex,
+            EffortsArgs {
+                default: vec!["-c".into(), "model_reasoning_effort=banana".into()],
+                ..EffortsArgs::default()
+            },
+        )
+        .is_err());
+        assert!(normalize_efforts_args(
+            ProviderCode::Codex,
+            EffortsArgs {
+                default: vec!["-c".into(), "skills.include_instructions=true".into()],
+                ..EffortsArgs::default()
+            },
+        )
+        .is_err());
+
+        assert!(normalize_efforts_args(
+            ProviderCode::Antigravity,
+            EffortsArgs {
+                default: vec!["--model".into(), "agy-model".into(), "--effort".into(), "high".into()],
+                ..EffortsArgs::default()
+            },
+        )
+        .is_ok());
+        assert!(normalize_efforts_args(
+            ProviderCode::Antigravity,
+            EffortsArgs {
+                default: vec!["--effort".into(), "xhigh".into()],
+                ..EffortsArgs::default()
+            },
+        )
+        .is_err());
+
+        assert!(normalize_efforts_args(
+            ProviderCode::Claude,
+            EffortsArgs {
+                default: vec!["--effort".into(), "xhigh".into()],
+                ..EffortsArgs::default()
+            },
+        )
+        .is_ok());
+        assert!(normalize_efforts_args(
+            ProviderCode::Claude,
+            EffortsArgs {
+                default: vec!["--effort".into(), "banana".into()],
+                ..EffortsArgs::default()
+            },
+        )
+        .is_err());
+
+        for provider in [ProviderCode::OpenCode, ProviderCode::Cursor, ProviderCode::Ollama] {
+            assert!(normalize_efforts_args(
+                provider,
+                EffortsArgs {
+                    default: vec!["--effort".into(), "high".into()],
+                    ..EffortsArgs::default()
+                },
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn create_thread_normalizes_default_and_does_not_fallback_empty_tiers() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let mut settings = PedelecSettings::default();
+        settings.provider_settings.codex.efforts_args.default =
+            vec!["-m".into(), "gpt-default".into()];
+        write_settings_file(&settings_path, &settings).unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(settings_path),
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("sandboxes")),
+            ..CoreRuntime::default()
+        };
+
+        let default_thread = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: None,
+                skills: None,
+                sandbox: None,
+            })
+            .unwrap();
+        let default_state = runtime
+            .thread_manager
+            .thread(&default_thread.thread_id)
+            .unwrap();
+        assert_eq!(default_state.effort_level, EffortLevel::Default);
+        assert_eq!(default_state.effort_args, vec!["-m", "gpt-default"]);
+
+        let low_thread = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: Some(EffortLevel::Low),
+                skills: None,
+                sandbox: None,
+            })
+            .unwrap();
+        let low_state = runtime.thread_manager.thread(&low_thread.thread_id).unwrap();
+        assert_eq!(low_state.effort_level, EffortLevel::Low);
+        assert!(low_state.effort_args.is_empty());
+    }
+
+    #[test]
+    fn ollama_empty_selected_tier_requires_a_model_without_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let mut settings = PedelecSettings::default();
+        settings.provider_settings.ollama.efforts_args.default =
+            vec!["--model".into(), "ollama-default".into()];
+        write_settings_file(&settings_path, &settings).unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(settings_path),
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("sandboxes")),
+            ..CoreRuntime::default()
+        };
+
+        let error = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Ollama,
+                effort_level: Some(EffortLevel::Low),
+                skills: None,
+                sandbox: None,
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::MODEL_REQUIRED);
+    }
+
+    #[test]
+    fn create_thread_snapshots_selected_effort_args() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let mut settings = PedelecSettings::default();
+        settings.provider_settings.codex.efforts_args.high =
+            vec!["-m".into(), "gpt-5-high".into()];
+        write_settings_file(&settings_path, &settings).unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(settings_path.clone()),
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("sandboxes")),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: Some(EffortLevel::High),
+                skills: None,
+                sandbox: None,
+            })
+            .unwrap();
+        let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
+        assert_eq!(thread.effort_level, EffortLevel::High);
+        assert_eq!(thread.effort_args, vec!["-m", "gpt-5-high"]);
+
+        settings.provider_settings.codex.efforts_args.high =
+            vec!["-m".into(), "gpt-5-changed".into()];
+        write_settings_file(&settings_path, &settings).unwrap();
+        assert_eq!(thread.effort_args, vec!["-m", "gpt-5-high"]);
+    }
+
+    #[test]
+    fn provider_commands_use_snapshotted_effort_args_for_first_run_and_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let mut settings = PedelecSettings::default();
+        settings.provider_settings.codex.efforts_args.default =
+            vec!["-m".into(), "gpt-snapshot".into()];
+        write_settings_file(&settings_path, &settings).unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(settings_path.clone()),
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("sandboxes")),
+            ..CoreRuntime::default()
+        };
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: None,
+                skills: None,
+                sandbox: None,
+            })
+            .unwrap();
+        let thread_id = output.thread_id.clone();
+
+        settings.provider_settings.codex.efforts_args.default =
+            vec!["-m".into(), "gpt-changed".into()];
+        write_settings_file(&settings_path, &settings).unwrap();
+
+        let first = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.clone(),
+                message: "first".into(),
+            })
+            .unwrap();
+        assert!(first
+            .command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-m", "gpt-snapshot"]));
+        assert!(!first.command.args.windows(2).any(|pair| pair == ["-m", "gpt-changed"]));
+
+        runtime.thread_manager.thread_mut(&thread_id).unwrap().status = ThreadStatus::Idle;
+        runtime
+            .thread_manager
+            .provider_state_mut(&thread_id)
+            .unwrap()
+            .provider_session_id = Some("session-snapshot".into());
+        let resume = runtime
+            .begin_send_text(SendTextInput {
+                thread_id,
+                message: "resume".into(),
+            })
+            .unwrap();
+        assert!(resume
+            .command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-m", "gpt-snapshot"]));
+        assert!(!resume.command.args.windows(2).any(|pair| pair == ["-m", "gpt-changed"]));
     }
 
     #[test]
@@ -3000,7 +3267,8 @@ mod tests {
         let state = ThreadState {
             thread_id: "thread_abc123".into(),
             provider: ProviderCode::Codex,
-            model: Some("gpt-5".into()),
+            effort_level: EffortLevel::Default,
+            effort_args: vec!["-m".into(), "gpt-5".into()],
             sandbox_path: PathBuf::from("C:/tmp/pedelec/thread_abc123"),
             skills: vec![SkillFile {
                 original_url: "https://example.test/tools.md".into(),
@@ -3031,7 +3299,8 @@ mod tests {
         let thread = ThreadState {
             thread_id: "thread_no_tools_md".into(),
             provider: ProviderCode::Codex,
-            model: None,
+            effort_level: EffortLevel::Default,
+            effort_args: Vec::new(),
             sandbox_path: PathBuf::from("sandbox").join("thread_no_tools_md"),
             skills: vec![SkillFile {
                 original_url: "https://example.test/tools.json".into(),
@@ -3060,7 +3329,8 @@ mod tests {
         let thread = ThreadState {
             thread_id: "thread_with_tools_md".into(),
             provider: ProviderCode::Codex,
-            model: None,
+            effort_level: EffortLevel::Default,
+            effort_args: Vec::new(),
             sandbox_path: PathBuf::from("sandbox").join("thread_with_tools_md"),
             skills: vec![],
             status: ThreadStatus::Idle,
@@ -3087,7 +3357,8 @@ mod tests {
         let thread = ThreadState {
             thread_id: "thread_empty_tools".into(),
             provider: ProviderCode::Codex,
-            model: None,
+            effort_level: EffortLevel::Default,
+            effort_args: Vec::new(),
             sandbox_path: PathBuf::from("sandbox").join("thread_empty_tools"),
             skills: vec![],
             status: ThreadStatus::Idle,
@@ -3371,7 +3642,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: Some(sample_skills_input()),
                 sandbox: Some(CreateThreadSandboxInput {
                     path: custom.clone(),
@@ -3403,7 +3674,7 @@ mod tests {
         let first = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: None,
                 sandbox: Some(CreateThreadSandboxInput {
                     path: custom.clone(),
@@ -3413,7 +3684,7 @@ mod tests {
         let second = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Claude,
-                model: None,
+                effort_level: None,
                 skills: None,
                 sandbox: Some(CreateThreadSandboxInput {
                     path: custom.clone(),
@@ -3456,7 +3727,7 @@ mod tests {
 
         let result = runtime.create_thread(CreateThreadInput {
             provider: ProviderCode::Codex,
-            model: None,
+            effort_level: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: "bad".into(),
                 tools: vec![CreateThreadToolInput {
@@ -3494,7 +3765,7 @@ mod tests {
         let custom_thread = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: None,
                 sandbox: Some(CreateThreadSandboxInput {
                     path: custom.clone(),
@@ -4014,7 +4285,7 @@ mod tests {
         };
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
-            model: None,
+            effort_level: None,
             skills: None,
             sandbox: None,
         };
@@ -4043,7 +4314,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: None,
                 sandbox: None,
             })
@@ -4067,7 +4338,8 @@ mod tests {
             ThreadState {
                 thread_id: "t000001".into(),
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: EffortLevel::Default,
+                effort_args: Vec::new(),
                 sandbox_path: sandbox_root.join("t000001"),
                 skills: vec![],
                 status: ThreadStatus::Idle,
@@ -4086,7 +4358,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: None,
                 sandbox: None,
             })
@@ -4107,7 +4379,7 @@ mod tests {
         };
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
-            model: None,
+            effort_level: None,
             skills: None,
             sandbox: None,
         };
@@ -4149,7 +4421,7 @@ mod tests {
         let thread = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: None,
                 sandbox: None,
             })
@@ -4281,7 +4553,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: Some(sample_skills_input()),
                 sandbox: None,
             })
@@ -4321,7 +4593,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: Some(sample_skills_input()),
                 sandbox: None,
             })
@@ -4359,7 +4631,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: Some(sample_skills_input()),
                 sandbox: None,
             })
@@ -4395,7 +4667,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: None,
                 sandbox: None,
             })
@@ -4425,7 +4697,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: Some(sample_skills_input()),
                 sandbox: None,
             })
@@ -4470,7 +4742,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: Some(sample_skills_input()),
                 sandbox: None,
             })
@@ -4512,7 +4784,7 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: None,
                 skills: Some(sample_skills_input()),
                 sandbox: None,
             })
@@ -4684,7 +4956,8 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                model: None,
+                effort_level: EffortLevel::Default,
+                effort_args: Vec::new(),
                 sandbox_path: PathBuf::from("sandbox").join(thread_id),
                 skills: vec![],
                 status,
@@ -4839,6 +5112,7 @@ mod tests {
                         api_key: "ollama_test_key".into(),
                         ..OllamaProviderSettings::default()
                     },
+                    ..ProviderSettings::default()
                 },
                 ..PedelecSettings::default()
             },
@@ -4849,11 +5123,21 @@ mod tests {
         fs::create_dir_all(sandbox_path.join("logs")).unwrap();
         let now = chrono::Utc::now();
         let has_user_message = provider_session_id.is_some();
+        let effort_args = model
+            .map(|model| {
+                let flag = match &provider {
+                    ProviderCode::Codex => "-m",
+                    _ => "--model",
+                };
+                vec![flag.into(), model]
+            })
+            .unwrap_or_default();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
                 provider,
-                model,
+                effort_level: EffortLevel::Default,
+                effort_args,
                 sandbox_path,
                 skills: vec![],
                 status: ThreadStatus::Idle,

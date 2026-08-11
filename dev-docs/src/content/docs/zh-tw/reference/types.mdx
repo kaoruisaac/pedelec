@@ -51,21 +51,21 @@ type CreateSessionInput<
 > =
   | {
       provider: ProviderCode;
-      model?: string;
+      effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
-      model?: never;
+      effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       sandbox?: CreateSessionSandboxInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
-Union 在 TypeScript 阻止只有 `model` 沒有 `provider`。
+`effortLevel` 不依賴 provider，可單獨使用。
 
 ### `CreateSessionSandboxInput`
 
@@ -95,7 +95,6 @@ type ProviderInfo = {
 ```ts
 type PedelecSettings = {
   defaultProvider: ProviderCode | null;
-  defaultModels: Partial<Record<ProviderCode, string>>;
 };
 ```
 
@@ -380,7 +379,7 @@ Root alias 在 compile time 強制 object schema。
 type PedelecEventContext = {
   sessionId: string;
   provider: string;
-  model?: string;
+  effortLevel?: "default" | "low" | "high";
   sessionCreatedAt: number;
   eventReceivedAt?: number;
   eventEmittedAt: number;

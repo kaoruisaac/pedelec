@@ -56,7 +56,7 @@ Native host 是 Chrome 核准的 Extension-to-desktop 橋接。Web page 不會�
 Pedelec Desktop App 擁有 Core Runtime，負責：
 
 - 建立與追蹤 session；
-- 保存 provider 與 model 設定；
+- 保存 provider 設定與三個 effort profile；
 - 為 session 準備 sandbox；
 - 啟動或 resume provider process；
 - 將各 provider 輸出轉換成標準 event；
@@ -75,11 +75,11 @@ Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 
 
 典型的 explicit-provider session 會依序進行：
 
-1. Web App 呼叫 `pedelec.createSession({ provider, model, skills })`。
+1. Web App 呼叫 `pedelec.createSession({ provider, effortLevel, skills })`。
 2. SDK 驗證基本輸入並序列化 skills manifest。Inline handler function 只留在 browser，不會送到 Core。
 3. Extension 檢查 page origin 是否已核准；尚未核准時，request 會等待使用者在 popup 操作。
 4. Extension 在需要時建立 Native Messaging connection。
-5. Desktop Runtime 建立 session 與 sandbox，回傳 `sessionId`。
+5. Desktop Runtime 解析、驗證並 snapshot 選中的 effort argv，建立 session 與 sandbox，回傳 `sessionId`。
 6. Extension 訂閱該 session，並將目前 SDK route 綁定到它。
 7. SDK 回傳 `PedelecSession`。
 
