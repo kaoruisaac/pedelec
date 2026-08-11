@@ -210,7 +210,7 @@ const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupPro
         </Show>
 
         <section class="effort-settings-editor">
-          <h3>Efforts Settings <em>(Optional) (advanced)</em></h3>
+          <h3>Efforts Settings <em>Optional</em></h3>
           <div class="effort-tabs" role="tablist" aria-label="Effort level">
             <For each={EFFORT_LEVELS}>
               {(level) => <button type="button" role="tab" aria-selected={selectedLevel() === level} classList={{ "is-active": selectedLevel() === level }} onClick={() => setSelectedLevel(level)}>{effortLevelLabel(level)}</button>}
