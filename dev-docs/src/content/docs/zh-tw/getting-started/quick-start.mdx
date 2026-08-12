@@ -197,7 +197,7 @@ export async function disconnect() {
 ## Production UI 還需要補什麼
 
 - 不要只 throw generic error，應提供 approval 操作說明；
-- 讓使用者選擇 provider 與 model；
+- 當產品需要本地 override 時，讓使用者選擇 provider 與 provider-independent effort level；
 - 依頁面需求定義 tools；
 - 依 lifecycle 需求保存或刻意丟棄 `sessionId`；
 - 分開處理 Extension、native host、Core 與 provider failure。

@@ -90,7 +90,7 @@ Extension、runtime 與 provider readiness 應分開檢查。Approval status 無
 | Connecting | `createSession()` pending | 保留 popup 操作提示 |
 | Runtime unavailable | Native/Core request 失敗 | 引導啟動或修復 Desktop App |
 | No provider | 沒有 `ProviderInfo.available === true` | 顯示 provider setup |
-| Connected | Session 建立成功 | 顯示 provider、model 與 session status |
+| Connected | Session 建立成功 | 顯示 provider、effort level 與 session status |
 | Disconnected | Active SDK port 中斷 | Disable send；下一個新的 client operation 會 retry port，需繼續的 session 請明確 resume |
 
 ```ts

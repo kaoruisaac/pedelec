@@ -30,6 +30,16 @@ Pedelec is a bridge architecture that lets web frontends call local AI coding ag
 
 Its core goal is: **to let a Web App create agent sessions through the SDK, send user messages, receive streamed agent responses, and safely hand tool calls back to the Web App whenever the agent needs to operate on frontend state.**
 
+### Agent-assisted Web App integration
+
+Coding Agents can use the repository's integration workflow to inspect an existing browser application and connect its SDK, tools, session lifecycle, and required UI:
+
+```bash
+npx skills add kaoruisaac/pedelec
+```
+
+This installs the `pedelec-integration` Agent Skill. It is a developer tool for integrating a Web project; it is not a way to install the Pedelec Desktop App or Chrome Extension for end users.
+
 The overall data flow can be understood as:
 
 ```txt

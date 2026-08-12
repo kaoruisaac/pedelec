@@ -28,7 +28,7 @@ Useful fields:
 - `turnId`: SDK-local active turn;
 - `turnStartedAt`: browser time when the turn began;
 - `eventReceivedAt`: browser time when the event reached the SDK;
-- `provider` and `model`: metadata known by the session handle;
+- `provider` and optional `effortLevel`: metadata known by the session handle;
 - `source`: tool calls are Core-originated.
 
 Use these fields for routing, diagnostics, and correlation. They do not prove that an editor object captured by a closure is still current.

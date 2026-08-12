@@ -28,7 +28,7 @@ type ToolCallContext = PedelecEventContext & {
 - `turnId`：SDK-local active turn；
 - `turnStartedAt`：turn 開始的 browser time；
 - `eventReceivedAt`：event 到達 SDK 的 browser time；
-- `provider`、`model`：session handle 已知 metadata；
+- `provider`、optional `effortLevel`：session handle 已知 metadata；
 - `source`：tool call 來自 Core。
 
 可用於 routing、diagnostics 與 correlation，但不能證明 closure 捕捉的 editor 仍是 current。

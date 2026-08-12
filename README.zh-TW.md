@@ -29,6 +29,16 @@ Pedelec 是一套讓網頁前端可以呼叫本機 AI coding agent 的橋接架�
 
 它的核心目標是：**讓 Web App 透過 SDK 建立 agent session、傳送使用者訊息、接收 agent 串流回應，並在 agent 需要操作前端狀態時，把 tool call 安全地交回 Web App 處理。**
 
+### Coding Agent 協助整合 Web App
+
+Coding Agent 可以使用 repo 提供的 integration workflow，檢查既有 browser application，並接上 SDK、tools、session lifecycle 與必要 UI：
+
+```bash
+npx skills add kaoruisaac/pedelec
+```
+
+這會安裝 `pedelec-integration` Agent Skill。它是協助開發者整合 Web project 的工具，不是終端使用者安裝 Pedelec Desktop App 或 Chrome Extension 的方式。
+
 整體資料流可以想成：
 
 ```txt
