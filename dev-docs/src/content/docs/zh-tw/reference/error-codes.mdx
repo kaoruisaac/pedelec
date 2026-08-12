@@ -67,8 +67,9 @@ try {
 | --- | --- | --- | --- |
 | `DEFAULT_PROVIDER_NOT_SET` | Desktop 沒有 default provider | 請使用者選擇，或 explicit pass provider | 設定後 |
 | `DEFAULT_PROVIDER_UNAVAILABLE` | Configured default unavailable | 選擇/安裝其他 provider | 設定後 |
-| `MODEL_REQUIRED` | Provider（特別是 Ollama）需要 model | 傳 `model` 或設定 default | 加 model 後 |
+| `MODEL_REQUIRED` | Provider（特別是 Ollama）要求選中的 Desktop effort profile 必須有 model | 到 Desktop Settings 為選中的 `default`、`low` 或 `high` profile 設定 model | 加入 model 後 |
 | `INVALID_INPUT` | SDK input invalid | 修正 application code/input shape | 不可原樣重試 |
+| `PROVIDER_PROMPT_TOO_LARGE` | Provider prompt 超過 provider-specific launch limit；目前 Antigravity 會拒絕超過 20,000 UTF-16 code units 的 prompt | 縮短 user message；若是 first turn，也要計入 Pedelec 注入的 guidance/tool metadata 所形成的完整 prompt | 縮短 prompt 後 |
 | `OLLAMA_API_KEY_REQUIRED` | Ollama agent 沒有可用 API key | Desktop Settings：本機填 `ollama`，遠端/Cloud 填有效 key | 設定後 |
 | `OLLAMA_AUTH_FAILED` | Endpoint 拒絕 authentication | 更正 endpoint credentials | 設定後 |
 | `OLLAMA_MODEL_NOT_FOUND` | 找不到 selected Ollama model | 安裝/選擇有效 model | 設定後 |

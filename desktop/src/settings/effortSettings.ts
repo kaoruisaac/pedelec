@@ -11,6 +11,18 @@ export const PROVIDER_NATIVE_EFFORT_VALUES: Record<ProviderCode, readonly string
   ollama: [],
 };
 
+const PROVIDER_EFFORT_SETTINGS_PLACEHOLDERS: Record<Exclude<ProviderCode, "ollama">, string> = {
+  codex: '-m model-name\n-c model_reasoning_effort="high"',
+  antigravity: "--model model-name\n--effort high",
+  claude: "--model model-name\n--effort high",
+  opencode: "--model provider/model-name",
+  cursor: "--model model-name",
+};
+
+export function effortSettingsPlaceholder(provider: ProviderCode): string {
+  return provider === "ollama" ? "" : PROVIDER_EFFORT_SETTINGS_PLACEHOLDERS[provider];
+}
+
 export function emptyEffortsArgs(): Record<EffortLevel, string[]> {
   return { default: [], low: [], high: [] };
 }

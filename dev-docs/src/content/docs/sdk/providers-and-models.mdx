@@ -62,6 +62,19 @@ Ollama is the exception to empty profiles: the selected profile must contain a `
 
 Ollama uses the bundled `pedelec-agent` and the endpoint configured in Desktop Settings. The SDK does not pass an Ollama model string.
 
+## Provider-native skill isolation
+
+Pedelec limits provider-native skill or command discovery so it does not compete with the App-defined Pedelec tool registry. This policy does not remove the provider's normal sandbox/file capabilities or Pedelec App tools.
+
+Current runtime behavior is provider-specific:
+
+- Codex starts with `skills.include_instructions=false`.
+- Antigravity and Claude Code start with `--disable-slash-commands`.
+- OpenCode overlays its permission configuration with `"skill": "deny"` when the existing permission value can be safely parsed as an object; an invalid or non-object parent value is left unchanged instead of being replaced.
+- Cursor and Ollama currently receive no additional provider-native skill override.
+
+These are runtime implementation details rather than SDK configuration. Applications should define the tools they want the agent to use through `skills.tools` and should not depend on provider-native skills being discoverable.
+
 ## Session snapshots
 
 Core resolves the selected profile when a session is created and stores a snapshot of its validated argv tokens. Editing Desktop Settings later does not change commands for that existing or resumed session.

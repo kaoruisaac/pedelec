@@ -7,6 +7,7 @@ import {
   cloneEffortsArgs,
   effortArgsToText,
   effortLevelLabel,
+  effortSettingsPlaceholder,
   effortTextToArgs,
   EFFORT_LEVELS,
   ollamaModelsToEffortsArgs,
@@ -218,8 +219,8 @@ const EditingProviderPopup = forwardPopUp((popup, props: EditingProviderPopupPro
           </div>
           <Show when={props.provider.code === "ollama"} fallback={
             <label class="settings-field">
-              <span>{effortLevelLabel(selectedLevel())} settings <em>one key/value pair per line</em></span>
-              <textarea rows="5" value={editingTexts()[selectedLevel()]} onInput={(event) => setEditingTexts((current) => ({ ...current, [selectedLevel()]: event.currentTarget.value }))} placeholder={'-m model-name\n-c model_reasoning_effort="high"'} />
+              <span>{effortLevelLabel(selectedLevel())} Effort</span>
+              <textarea rows="5" value={editingTexts()[selectedLevel()]} onInput={(event) => setEditingTexts((current) => ({ ...current, [selectedLevel()]: event.currentTarget.value }))} placeholder={effortSettingsPlaceholder(props.provider.code)} />
             </label>
           }>
             <label class="settings-field">

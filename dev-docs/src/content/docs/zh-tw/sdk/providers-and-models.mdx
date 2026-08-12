@@ -51,6 +51,19 @@ type PedelecSettings = {
 
 選中的 Ollama profile 必須包含 `--model` pair。若為空，Core 回傳 `MODEL_REQUIRED`，不會 fallback 到 default；Ollama 被選為 Desktop default provider 時，Default profile 必須有 model，Low/High 則可留空。
 
+## Provider-native skill isolation
+
+Pedelec 會限制 provider 自己的 skill 或 command discovery，避免它和 App 定義的 Pedelec tool registry 競爭。這個 policy 不會移除 provider 原本的 sandbox/file 能力，也不會影響 Pedelec App tools。
+
+目前 runtime 依 provider 採用不同策略：
+
+- Codex 以 `skills.include_instructions=false` 啟動。
+- Antigravity 與 Claude Code 以 `--disable-slash-commands` 啟動。
+- OpenCode 在既有 permission value 能安全 parse 成 object 時，overlay `"skill": "deny"`；若 parent value invalid 或不是 object，則保留原值，不會用新的設定覆蓋。
+- Cursor 與 Ollama 目前沒有額外 provider-native skill override。
+
+這些屬於 runtime implementation detail，不是 SDK configuration。Application 應透過 `skills.tools` 定義希望 agent 使用的工具，不應依賴 provider-native skills 一定能被 discover。
+
 ## Session snapshot
 
 Core 在建立 session 時解析並驗證 profile，將 argv token snapshot 存入 thread。之後修改 Desktop Settings 不會改變既有或可 resume session 的 provider command。

@@ -3,6 +3,7 @@ import {
   cloneEffortsArgs,
   configuredEffortLevels,
   effortArgsToText,
+  effortSettingsPlaceholder,
   effortTextToArgs,
   EFFORT_LEVELS,
   ollamaModelsToEffortsArgs,
@@ -78,6 +79,15 @@ describe("effort settings", () => {
     const empty = { default: "", low: "model-low", high: "" };
     expect(validateOllamaDefaultModelSelection(empty, true)).toContain("Default Ollama model");
     expect(validateOllamaDefaultModelSelection(empty, false)).toBeUndefined();
+  });
+
+  it("uses provider-specific effort settings placeholders", () => {
+    expect(effortSettingsPlaceholder("codex")).toBe('-m model-name\n-c model_reasoning_effort="high"');
+    expect(effortSettingsPlaceholder("antigravity")).toBe("--model model-name\n--effort high");
+    expect(effortSettingsPlaceholder("claude")).toBe("--model model-name\n--effort high");
+    expect(effortSettingsPlaceholder("opencode")).toBe("--model provider/model-name");
+    expect(effortSettingsPlaceholder("cursor")).toBe("--model model-name");
+    expect(effortSettingsPlaceholder("ollama")).toBe("");
   });
 
   it("mirrors provider-native effort value policy", () => {
