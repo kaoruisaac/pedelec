@@ -32,15 +32,19 @@ jobs:
           gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
           gh release create "$TAG_NAME" \
             --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
             --draft \
             --title "Pedelec $TAG_NAME" \
             --notes "Release bundle for Pedelec $TAG_NAME"
 
   verify-versions:
     name: Verify version sync
+    needs: [create-release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -88,10 +92,14 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - name: Package extension zip
+        env:
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG_NAME#v}"
           mkdir -p dist
 
           cd extension
@@ -106,6 +114,126 @@ jobs:
           TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
         run: |
           gh release upload "$TAG_NAME" dist/*.zip --clobber
+
+  integration-guideline:
+    name: Package Pedelec Integration Guideline
+    needs: [create-release, verify-versions]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: sdk/package-lock.json
+
+      - name: Install SDK dependencies
+        working-directory: sdk
+        run: npm ci
+
+      - name: Build SDK declaration
+        working-directory: sdk
+        run: npm run build
+
+      - name: Stage integration guideline bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bundle_dir="dist/pedelec-integration-guideline"
+          rm -rf "$bundle_dir" "dist/pedelec-integration-guideline.zip"
+          mkdir -p "$bundle_dir/skill" "$bundle_dir/docs" "$bundle_dir/sdk"
+
+          cp -R skills/pedelec-integration/. "$bundle_dir/skill/"
+          cp .github/release-assets/pedelec-integration-guideline/START_HERE.md \
+            "$bundle_dir/START_HERE.md"
+          cp -R dev-docs/src/content/docs/. "$bundle_dir/docs/"
+          cp sdk/package.json "$bundle_dir/sdk/package.json"
+          cp sdk/README.md "$bundle_dir/sdk/README.md"
+          cp sdk/dist/index.d.ts "$bundle_dir/sdk/index.d.ts"
+
+      - name: Validate staged integration guideline bundle
+        shell: bash
+        env:
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          bundle_dir="dist/pedelec-integration-guideline"
+          release_version="${TAG_NAME#v}"
+          sdk_version=$(node -p "require('./$bundle_dir/sdk/package.json').version")
+
+          test "$sdk_version" = "$release_version"
+          grep -Fxq 'name: pedelec-integration' "$bundle_dir/skill/SKILL.md"
+
+          required_files=(
+            START_HERE.md
+            skill/SKILL.md
+            skill/references/sdk-integration.md
+            skill/references/session-lifecycle.md
+            skill/references/ui-components.md
+            docs/getting-started/quick-start.mdx
+            docs/sdk/creating-sessions.mdx
+            docs/tools/overview.mdx
+            docs/reference/pedelec.mdx
+            sdk/package.json
+            sdk/README.md
+            sdk/index.d.ts
+          )
+
+          for relative_path in "${required_files[@]}"; do
+            test -f "$bundle_dir/$relative_path" || {
+              echo "Missing required bundle file: $relative_path" >&2
+              exit 1
+            }
+          done
+
+      - name: Create and verify integration guideline zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive_path="dist/pedelec-integration-guideline.zip"
+          (
+            cd dist
+            zip -qr "$(basename "$archive_path")" pedelec-integration-guideline
+          )
+
+          unzip -t "$archive_path"
+          archive_entries=$(unzip -Z1 "$archive_path")
+          printf '%s\n' "$archive_entries"
+
+          for entry in \
+            pedelec-integration-guideline/START_HERE.md \
+            pedelec-integration-guideline/skill/SKILL.md \
+            pedelec-integration-guideline/docs/ \
+            pedelec-integration-guideline/sdk/; do
+            grep -Fxq "$entry" <<<"$archive_entries" || {
+              echo "Missing archive entry: $entry" >&2
+              exit 1
+            }
+          done
+
+          if grep -Eq '(^|/)(node_modules|\.agent_temp|\.astro|dev-docs/dist)(/|$)' <<<"$archive_entries"; then
+            echo "Unexpected build or temporary content found in archive." >&2
+            exit 1
+          fi
+
+      - name: Upload integration guideline zip to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          gh release upload "$TAG_NAME" \
+            dist/pedelec-integration-guideline.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
   tauri:
     name: Build Tauri - ${{ matrix.label }}
@@ -135,6 +263,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -414,6 +544,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - uses: actions/setup-node@v4
         with:

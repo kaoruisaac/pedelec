@@ -39,6 +39,8 @@ npx skills add kaoruisaac/pedelec
 
 這會安裝 `pedelec-integration` Agent Skill。它是協助開發者整合 Web project 的工具，不是終端使用者安裝 Pedelec Desktop App 或 Chrome Extension 的方式。
 
+如果你不使用 Skills CLI，可以從對應的 [GitHub Release](https://github.com/kaoruisaac/pedelec/releases) 下載 `pedelec-integration-guideline.zip`，解壓縮後請 Coding Agent 先讀取 `START_HERE.md`。這是給 Coding Agent 使用的整合 bundle，不是 Pedelec Desktop App 或 Chrome Extension 安裝程式。
+
 整體資料流可以想成：
 
 ```txt

@@ -23,13 +23,19 @@ Package 使用 ESM 並附帶 TypeScript declaration。它不會一起安裝 Chro
 
 ## Optional：使用 integration Agent Skill
 
-如果你要請 Coding Agent 將 Pedelec 接到新的或既有的 browser application，可以安裝 repo 提供的 integration skill：
+如果你要請 Coding Agent 將 Pedelec 接到新的或既有的 browser application，可以選擇以下其中一種開發者 integration path：
+
+**Option A — Skills CLI**
 
 ```bash
 npx skills add kaoruisaac/pedelec
 ```
 
-`pedelec-integration` 會協助 Agent 檢查專案、設計 product tools、實作 browser-side SDK 與 session lifecycle，並補上產品需要的 connection、approval、Provider / effort 與 task feedback UI。這是開發者工具，不會替終端使用者安裝 Pedelec Desktop App 或 Chrome Extension；以下的使用者端安裝仍是 runtime prerequisites。
+**Option B — Release bundle**
+
+從 [GitHub Releases](https://github.com/kaoruisaac/pedelec/releases) 下載 `pedelec-integration-guideline.zip`，解壓縮後告訴 Coding Agent 先讀取 `START_HERE.md`。這是開發者 integration path，不是 runtime prerequisite，也不是 Pedelec Desktop App 或 Chrome Extension 的安裝程式。
+
+`pedelec-integration` 會協助 Agent 檢查專案、設計 product tools、實作 browser-side SDK 與 session lifecycle，並補上產品需要的 connection、approval、Provider / effort 與 task feedback UI。兩種方式都不會替終端使用者安裝 Pedelec Desktop App 或 Chrome Extension；以下的使用者端安裝仍是 runtime prerequisites。
 
 ## 安裝使用者端元件
 

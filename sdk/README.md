@@ -8,7 +8,17 @@
 - [Pedelec documentation](https://kaoruisaac.github.io/pedelec/)
 - [GitHub repository](https://github.com/kaoruisaac/pedelec)
 
+## Agent Skill
 
+If you use an AI coding agent that supports skills, run the following command from the project you want to integrate with Pedelec:
+
+```bash
+npx skills add kaoruisaac/pedelec
+```
+
+This installs the `pedelec-integration` skill, which guides the agent through SDK setup, session lifecycle, frontend tools, Provider and effort selection, connection/recovery UX, and integration verification. For exact SDK APIs and behavior, continue to use the installed SDK declarations and the official documentation as the source of truth.
+
+---
 Pedelec is a browser SDK and local bridge for applications that want to work with AI coding agents such as Codex, Antigravity, OpenCode, Cursor, Claude Code, or an Ollama-backed agent.
 
 A web application can use Pedelec to:

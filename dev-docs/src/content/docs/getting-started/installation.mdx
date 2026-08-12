@@ -23,13 +23,19 @@ The package is ESM and includes its TypeScript declaration file. It does not ins
 
 ## Optional: use the integration Agent Skill
 
-If you are using a Coding Agent to add Pedelec to a new or existing browser application, install the repository's integration skill:
+If you are using a Coding Agent to add Pedelec to a new or existing browser application, choose one of these developer integration paths:
+
+**Option A — Skills CLI**
 
 ```bash
 npx skills add kaoruisaac/pedelec
 ```
 
-The `pedelec-integration` skill helps the agent inspect the application, design product tools, implement browser-side SDK and session lifecycle code, and add the connection, approval, Provider / effort, and task-feedback UI that the product needs. This is a developer tool; it does not install the Pedelec Desktop App or Chrome Extension for end users. Continue with the user-side installation below for those runtime prerequisites.
+**Option B — Release bundle**
+
+Download `pedelec-integration-guideline.zip` from the [GitHub Releases page](https://github.com/kaoruisaac/pedelec/releases), extract it, and tell the Coding Agent to read `START_HERE.md`. This is a developer integration path, not a runtime prerequisite or an installer for the Pedelec Desktop App or Chrome Extension.
+
+The `pedelec-integration` skill helps the agent inspect the application, design product tools, implement browser-side SDK and session lifecycle code, and add the connection, approval, Provider / effort, and task-feedback UI that the product needs. Neither option installs the Pedelec Desktop App or Chrome Extension for end users. Continue with the user-side installation below for those runtime prerequisites.
 
 ## Install the user-side components
 
