@@ -193,7 +193,8 @@ fn activate_macos(app: &AppHandle) -> Result<(), PedelecError> {
         let result = if cancelled_on_main_thread.load(Ordering::Acquire) {
             Err("activation handoff was cancelled".to_string())
         } else if let Some(marker) = MainThreadMarker::new() {
-            NSApplication::sharedApplication(marker).activate();
+            let application = NSApplication::sharedApplication(marker);
+            request_macos_activation(&application);
             Ok(())
         } else {
             Err("activation handoff did not run on the AppKit main thread".to_string())
@@ -220,6 +221,42 @@ fn activate_macos(app: &AppHandle) -> Result<(), PedelecError> {
             cancelled.store(true, Ordering::Release);
             Err(picker_failed("app activation handoff was interrupted"))
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_activation(application: &objc2_app_kit::NSApplication) {
+    use objc2_foundation::NSProcessInfo;
+
+    let major_version = NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion as usize;
+
+    match mac_activation_strategy(major_version) {
+        MacActivationStrategy::Modern => application.activate(),
+        MacActivationStrategy::Legacy => request_legacy_macos_activation(application),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn request_legacy_macos_activation(application: &objc2_app_kit::NSApplication) {
+    application.activateIgnoringOtherApps(true);
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum MacActivationStrategy {
+    Modern,
+    Legacy,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_activation_strategy(major_version: usize) -> MacActivationStrategy {
+    if major_version >= 14 {
+        MacActivationStrategy::Modern
+    } else {
+        MacActivationStrategy::Legacy
     }
 }
 
@@ -320,6 +357,27 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, error_codes::DIRECTORY_PICKER_FAILED);
         assert!(!error.message.contains("example.com"));
+    }
+
+    #[test]
+    fn macos_14_uses_modern_activation() {
+        assert_eq!(mac_activation_strategy(14), MacActivationStrategy::Modern);
+    }
+
+    #[test]
+    fn macos_newer_than_14_uses_modern_activation() {
+        assert_eq!(mac_activation_strategy(15), MacActivationStrategy::Modern);
+    }
+
+    #[test]
+    fn macos_13_uses_legacy_activation() {
+        assert_eq!(mac_activation_strategy(13), MacActivationStrategy::Legacy);
+    }
+
+    #[test]
+    fn macos_older_than_13_uses_legacy_activation() {
+        assert_eq!(mac_activation_strategy(12), MacActivationStrategy::Legacy);
+        assert_eq!(mac_activation_strategy(10), MacActivationStrategy::Legacy);
     }
 
     #[test]
