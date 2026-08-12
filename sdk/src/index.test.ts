@@ -243,6 +243,7 @@ describe("Pedelec SDK", () => {
 
     expect(request).toMatchObject({
       type: "create_session",
+      callerSdkVersion: "0.2.2",
       input: {
         provider: "codex",
         effortLevel: "high",
@@ -1741,28 +1742,61 @@ describe("Pedelec SDK", () => {
     });
   });
 
-  it("directoryPicker sends the picker request and normalizes a selected path", async () => {
+  it("sandboxFolderPicker sends the sandbox picker request and normalizes an empty folder", async () => {
     const pedelec = new Pedelec();
-    const picker = pedelec.directoryPicker();
+    const picker = pedelec.sandboxFolderPicker();
     const request = pageWindow.lastSent();
-    expect(request).toMatchObject({ type: "pick_directory" });
-    respondOk(pageWindow, request, { path: "C:\\workspace\\project" });
+    expect(request).toMatchObject({ type: "pick_sandbox_folder" });
+    respondOk(pageWindow, request, {
+      path: "C:\\workspace\\project",
+      isEmptyFolder: true,
+      hasSandboxConfig: false,
+    });
 
-    await expect(picker).resolves.toBe("C:\\workspace\\project");
+    await expect(picker).resolves.toEqual({
+      path: "C:\\workspace\\project",
+      isEmptyFolder: true,
+      hasSandboxConfig: false,
+    });
   });
 
-  it("directoryPicker resolves cancellation as null", async () => {
+  it("sandboxFolderPicker normalizes an existing sandbox folder", async () => {
     const pedelec = new Pedelec();
-    const picker = pedelec.directoryPicker();
+    const picker = pedelec.sandboxFolderPicker();
+    respondOk(pageWindow, pageWindow.lastSent(), {
+      path: "C:\\workspace\\project",
+      isEmptyFolder: false,
+      hasSandboxConfig: true,
+    });
+
+    await expect(picker).resolves.toEqual({
+      path: "C:\\workspace\\project",
+      isEmptyFolder: false,
+      hasSandboxConfig: true,
+    });
+  });
+
+  it("sandboxFolderPicker resolves cancellation as null", async () => {
+    const pedelec = new Pedelec();
+    const picker = pedelec.sandboxFolderPicker();
     respondOk(pageWindow, pageWindow.lastSent(), { path: null });
 
     await expect(picker).resolves.toBeNull();
   });
 
-  it("directoryPicker rejects malformed responses with SDK_PROTOCOL_ERROR", async () => {
+  it("sandboxFolderPicker rejects malformed responses with SDK_PROTOCOL_ERROR", async () => {
     const pedelec = new Pedelec();
-    for (const result of [{}, { path: 123 }, { path: {} }, { path: [] }, { path: "" }]) {
-      const picker = pedelec.directoryPicker();
+    for (const result of [
+      {},
+      { path: 123, isEmptyFolder: true, hasSandboxConfig: false },
+      { path: "C:\\workspace\\project", hasSandboxConfig: false },
+      { path: "C:\\workspace\\project", isEmptyFolder: "true", hasSandboxConfig: false },
+      { path: "C:\\workspace\\project", isEmptyFolder: false, hasSandboxConfig: "true" },
+      { path: {} , isEmptyFolder: false, hasSandboxConfig: false },
+      { path: [], isEmptyFolder: false, hasSandboxConfig: false },
+      { path: "", isEmptyFolder: false, hasSandboxConfig: false },
+    ]) {
+      const picker = pedelec.sandboxFolderPicker();
       respondOk(pageWindow, pageWindow.lastSent(), result);
       await expect(picker).rejects.toMatchObject({
         code: "SDK_PROTOCOL_ERROR",
@@ -1770,9 +1804,9 @@ describe("Pedelec SDK", () => {
     }
   });
 
-  it("directoryPicker does not use bridgeTimeoutMs while the picker is open", async () => {
+  it("sandboxFolderPicker does not use bridgeTimeoutMs while the picker is open", async () => {
     const pedelec = new Pedelec({ bridgeTimeoutMs: 1 });
-    const picker = pedelec.directoryPicker();
+    const picker = pedelec.sandboxFolderPicker();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     let settled = false;
@@ -1780,13 +1814,17 @@ describe("Pedelec SDK", () => {
       settled = true;
     });
     expect(settled).toBe(false);
-    respondOk(pageWindow, pageWindow.lastSent(), { path: "C:\\workspace\\project" });
-    await expect(picker).resolves.toBe("C:\\workspace\\project");
+    respondOk(pageWindow, pageWindow.lastSent(), {
+      path: "C:\\workspace\\project",
+      isEmptyFolder: true,
+      hasSandboxConfig: false,
+    });
+    await expect(picker).resolves.toMatchObject({ path: "C:\\workspace\\project" });
   });
 
-  it("directoryPicker still rejects when its extension Port disconnects", async () => {
+  it("sandboxFolderPicker still rejects when its extension Port disconnects", async () => {
     const pedelec = new Pedelec({ bridgeTimeoutMs: 1 });
-    const picker = pedelec.directoryPicker();
+    const picker = pedelec.sandboxFolderPicker();
     pageWindow.port.disconnect();
 
     await expect(picker).rejects.toMatchObject({

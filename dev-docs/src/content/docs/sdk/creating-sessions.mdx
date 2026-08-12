@@ -12,15 +12,19 @@ The SDK creates a session handle and Core resolves the provider's Desktop-config
 For an application-managed workspace, let the user choose the folder with the native picker before calling `createSession()`:
 
 ```ts
-const path = await pedelec.directoryPicker();
-if (path === null) return;
+const folder = await pedelec.sandboxFolderPicker();
+if (!folder) return;
+
+if (!folder.isEmptyFolder && !folder.hasSandboxConfig) {
+  // The application decides whether to warn the user.
+}
 
 const session = await pedelec.createSession({
-  sandbox: { path },
+  sandbox: { path: folder.path },
 });
 ```
 
-The picker returns a path or `null` on cancellation. It does not decide whether the folder is a valid Pedelec sandbox or initialize its contents; Core applies the existing sandbox rules during `createSession()`.
+The picker returns a folder result or `null` on cancellation. It is read-only and reports only the root-folder snapshot (`isEmptyFolder`) and whether `.pedelec-sandbox.json` is a regular file (`hasSandboxConfig`). It does not decide whether the folder is a valid Pedelec sandbox or initialize its contents; Core applies the existing sandbox rules during `createSession()`, then creates the marker after successful custom initialization.
 
 ```ts
 const session = await pedelec.createSession();

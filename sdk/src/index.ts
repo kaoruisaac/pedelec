@@ -1,5 +1,7 @@
 import { PEDELEC_EXTENSION_ID } from "./extension-id.js";
 
+import { SDK_VERSION } from "./version.generated.js";
+
 const SDK_EXTERNAL_PORT_NAME = "pedelec-sdk-external";
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 
@@ -156,6 +158,12 @@ export type SerializableSkillsManifest = {
 export type CreateSessionSandboxInput = {
   path: string;
 };
+
+export interface SandboxFolderPickerResult {
+  path: string;
+  isEmptyFolder: boolean;
+  hasSandboxConfig: boolean;
+}
 
 type CreateSessionInputWithProvider<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
@@ -540,13 +548,13 @@ export class Pedelec {
     );
   }
 
-  async directoryPicker(): Promise<string | null> {
+  async sandboxFolderPicker(): Promise<SandboxFolderPickerResult | null> {
     const result = await this.requestWithOptions<unknown>(
-      "pick_directory",
+      "pick_sandbox_folder",
       {},
       { timeoutMs: null },
     );
-    return normalizeDirectoryPickerResponse(result);
+    return normalizeSandboxFolderPickerResponse(result);
   }
 
   async listProviders(): Promise<ProviderInfo[]> {
@@ -608,7 +616,13 @@ export class Pedelec {
     }
 
     const requestId = `sdk_${Date.now()}_${this.nextRequestNumber++}`;
-    const message = { channelId: this.channelId, type, requestId, ...payload };
+    const message = {
+      channelId: this.channelId,
+      type,
+      requestId,
+      ...payload,
+      ...(type === "create_session" ? { callerSdkVersion: SDK_VERSION } : {}),
+    };
 
     return new Promise<T>((resolve, reject) => {
       const timeoutMs = options.timeoutMs === undefined ? this.bridgeTimeoutMs : options.timeoutMs;
@@ -1555,17 +1569,23 @@ function normalizePedelecSettings(value: unknown): PedelecSettings {
   return { defaultProvider: value.defaultProvider };
 }
 
-function normalizeDirectoryPickerResponse(value: unknown): string | null {
+function normalizeSandboxFolderPickerResponse(value: unknown): SandboxFolderPickerResult | null {
   if (!isPlainObject(value) || !("path" in value)) {
-    throw makeError("SDK_PROTOCOL_ERROR", "pick_directory response had an invalid shape");
+    throw makeError("SDK_PROTOCOL_ERROR", "pick_sandbox_folder response had an invalid shape");
   }
 
   const path = value.path;
-  if (path !== null && (typeof path !== "string" || path.length === 0)) {
-    throw makeError("SDK_PROTOCOL_ERROR", "pick_directory response had an invalid shape");
+  if (path === null) return null;
+  if (typeof path !== "string" || path.length === 0 ||
+      typeof value.isEmptyFolder !== "boolean" || typeof value.hasSandboxConfig !== "boolean") {
+    throw makeError("SDK_PROTOCOL_ERROR", "pick_sandbox_folder response had an invalid shape");
   }
 
-  return path;
+  return {
+    path,
+    isEmptyFolder: value.isEmptyFolder,
+    hasSandboxConfig: value.hasSandboxConfig,
+  };
 }
 
 function normalizeProviderInfoList(value: unknown): ProviderInfo[] {

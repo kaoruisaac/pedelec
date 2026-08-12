@@ -18,6 +18,7 @@ import type {
   SandboxAssetPath,
   ReadAssetType,
   CreateSessionSandboxInput,
+  SandboxFolderPickerResult,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -76,6 +77,18 @@ type CreateSessionSandboxInput = {
 ```
 
 `path` is an absolute application-managed workspace path. Pedelec creates missing sandbox subdirectories but never deletes this workspace. It may be shared by multiple active sessions and must not overlap the managed sandbox root.
+
+### `SandboxFolderPickerResult`
+
+```ts
+interface SandboxFolderPickerResult {
+  path: string;
+  isEmptyFolder: boolean;
+  hasSandboxConfig: boolean;
+}
+```
+
+This is the read-only snapshot returned by `sandboxFolderPicker()`. `hasSandboxConfig` only indicates that `.pedelec-sandbox.json` is a regular file; it does not validate the marker contents.
 
 ## Provider and settings
 

@@ -101,24 +101,28 @@ const session = await pedelec.createSession({
 });
 ```
 
-## `directoryPicker()`
+## `sandboxFolderPicker()`
 
 ```ts
-directoryPicker(): Promise<string | null>
+sandboxFolderPicker(): Promise<SandboxFolderPickerResult | null>
 ```
 
-Opens the operating system's native directory-only picker through Pedelec Desktop. A selected folder resolves to its absolute local path; closing or cancelling the picker resolves to `null`.
+Opens the operating system's native directory-only picker through Pedelec Desktop. A selected folder resolves to its path plus a read-only snapshot of whether its root is empty and whether `.pedelec-sandbox.json` is a regular file. Closing or cancelling the picker resolves to `null`.
 
 ```ts
-const path = await pedelec.directoryPicker();
-if (path === null) return;
+const folder = await pedelec.sandboxFolderPicker();
+if (!folder) return;
+
+if (!folder.isEmptyFolder && !folder.hasSandboxConfig) {
+  // The application decides whether to warn the user.
+}
 
 const session = await pedelec.createSession({
-  sandbox: { path },
+  sandbox: { path: folder.path },
 });
 ```
 
-This is a sensitive Desktop API and may trigger the current origin's approval flow. The picker only chooses a path: it does not validate the folder, check whether it is empty, or create Pedelec workspace directories. Existing custom-sandbox validation remains the responsibility of `createSession()`; an invalid selected path returns `SANDBOX_PATH_INVALID` there. Picker failures reject with `DIRECTORY_PICKER_FAILED`; cancellation is not an error.
+This is a sensitive Desktop API and may trigger the current origin's approval flow. The picker only observes the selected folder: it does not validate or initialize the sandbox, create Pedelec workspace directories, parse the marker JSON, or enforce origin/SDK-version compatibility. `hasSandboxConfig` only checks for a regular marker file, even if its contents are invalid. Existing custom-sandbox validation remains the responsibility of `createSession()`; after successful initialization it creates `.pedelec-sandbox.json` with the SDK version and normalized caller origin. Picker failures reject with `DIRECTORY_PICKER_FAILED`; cancellation is not an error.
 
 ## `listProviders()`
 

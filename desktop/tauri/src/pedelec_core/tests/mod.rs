@@ -3663,6 +3663,95 @@ mod tests {
     }
 
     #[test]
+    fn sdk_custom_sandbox_creates_normalized_write_once_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("project");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            ..CoreRuntime::default()
+        };
+        let input = || CreateThreadInput {
+            provider: ProviderCode::Codex,
+            effort_level: None,
+            skills: None,
+            sandbox: Some(CreateThreadSandboxInput {
+                path: custom.clone(),
+            }),
+        };
+
+        runtime
+            .create_sdk_thread(input(), "https://Example.com:443", Some("0.2.2"))
+            .unwrap();
+        let marker = custom.join(".pedelec-sandbox.json");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&marker).unwrap()).unwrap(),
+            json!({
+                "sdk-version": "0.2.2",
+                "origin": "https://example.com",
+            })
+        );
+
+        fs::write(&marker, "not json").unwrap();
+        runtime
+            .create_sdk_thread(input(), "https://other.example", Some("9.9.9"))
+            .unwrap();
+        assert_eq!(fs::read_to_string(marker).unwrap(), "not json");
+    }
+
+    #[test]
+    fn sdk_custom_sandbox_does_not_leave_marker_when_initialization_or_marker_creation_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("project");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            ..CoreRuntime::default()
+        };
+
+        let invalid_skills = CreateThreadInput {
+            provider: ProviderCode::Codex,
+            effort_level: None,
+            skills: Some(CreateThreadSkillsInput {
+                guidance: "bad".into(),
+                tools: vec![CreateThreadToolInput {
+                    name: "bad/name".into(),
+                    description: "Bad.".into(),
+                    args_schema: json!({ "type": "object" }),
+                    timeout_ms: None,
+                }],
+            }),
+            sandbox: Some(CreateThreadSandboxInput {
+                path: custom.clone(),
+            }),
+        };
+        assert_eq!(
+            runtime
+                .create_sdk_thread(invalid_skills, "https://example.com", Some("0.2.2"))
+                .unwrap_err()
+                .code,
+            error_codes::TOOLS_MANIFEST_INVALID
+        );
+        assert!(!custom.join(".pedelec-sandbox.json").exists());
+
+        let marker = custom.join(".pedelec-sandbox.json");
+        fs::create_dir_all(&marker).unwrap();
+        let result = runtime.create_sdk_thread(
+            CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: None,
+                skills: None,
+                sandbox: Some(CreateThreadSandboxInput {
+                    path: custom.clone(),
+                }),
+            },
+            "https://example.com",
+            Some("0.2.2"),
+        );
+        assert_eq!(result.unwrap_err().code, error_codes::SANDBOX_CREATE_FAILED);
+        assert!(marker.is_dir());
+        assert!(runtime.thread_manager.thread("thread_000001").is_err());
+    }
+
+    #[test]
     fn multiple_sessions_share_custom_sandbox_with_unique_event_logs() {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("shared-project");

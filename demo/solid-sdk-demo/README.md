@@ -10,7 +10,7 @@ It demonstrates:
 - `sendText`, streaming chat deltas, session errors, and ended sessions
 - frontend tool handlers and tool result/error display
 - per-session transcript, tool call log, error log, and debug event log
-- selecting an optional application-owned sandbox with `directoryPicker()`
+- selecting an optional application-owned sandbox with `sandboxFolderPicker()`
 - creating sessions with an explicit sandbox workspace
 
 ## Install

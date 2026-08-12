@@ -24,8 +24,11 @@
     "directory": "sdk"
   },
   "scripts": {
+    "prebuild": "node scripts/generate-version.mjs",
     "build": "tsc -p tsconfig.json",
+    "pretest": "node scripts/generate-version.mjs",
     "test": "vitest run",
+    "pretype-test": "node scripts/generate-version.mjs",
     "type-test": "tsc -p tsconfig.type-test.json",
     "prepublishOnly": "npm run test && npm run type-test && npm run build"
   },

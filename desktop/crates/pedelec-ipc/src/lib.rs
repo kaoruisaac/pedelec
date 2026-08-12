@@ -1,9 +1,9 @@
 use encoding_rs::Encoding;
 use pedelec_core::{
-    error_codes, CreateAssetDownloadInput, CreateAssetUploadInput, CreateThreadInput,
-    EndThreadInput, ListAssetsInput, PedelecError, PrepareThreadInput, PrepareThreadOutput,
-    RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime, SubmitToolResultInput,
-    SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolSpecInput,
+    error_codes, inspect_sandbox_folder, CreateAssetDownloadInput, CreateAssetUploadInput,
+    CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError, PrepareThreadInput,
+    PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime,
+    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolSpecInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,6 +63,8 @@ pub struct CoreIpcRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller_origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_sdk_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<Value>,
 }
 
@@ -96,6 +98,7 @@ struct RawCoreIpcRequest {
     r#type: Option<String>,
     payload: Option<Value>,
     caller_origin: Option<String>,
+    caller_sdk_version: Option<String>,
 }
 
 pub fn start_core_ipc_server(
@@ -409,6 +412,7 @@ fn parse_core_ipc_request(value: Value) -> Result<CoreIpcRequest, CoreIpcRespons
         request_id,
         r#type: request_type,
         caller_origin: raw.caller_origin,
+        caller_sdk_version: raw.caller_sdk_version,
         payload: raw.payload,
     })
 }
@@ -424,10 +428,14 @@ fn handle_core_ipc_request_with_services(
     platform_services: Arc<dyn CoreIpcPlatformServices>,
 ) -> CoreIpcResponse {
     match request.r#type.as_str() {
-        "pick_directory" => handle_pick_directory_request(&request, platform_services),
+        "pick_sandbox_folder" => handle_pick_sandbox_folder_request(&request, platform_services),
         "create_thread" => match decode_payload::<CreateThreadInput>(&request) {
             Ok(input) => match match request.caller_origin.as_deref() {
-                Some(origin) => runtime.lock().unwrap().create_sdk_thread(input, origin),
+                Some(origin) => runtime.lock().unwrap().create_sdk_thread(
+                    input,
+                    origin,
+                    request.caller_sdk_version.as_deref(),
+                ),
                 None => runtime.lock().unwrap().create_thread(input),
             } {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
@@ -529,7 +537,7 @@ fn handle_core_ipc_request_with_services(
     }
 }
 
-fn handle_pick_directory_request(
+fn handle_pick_sandbox_folder_request(
     request: &CoreIpcRequest,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
 ) -> CoreIpcResponse {
@@ -551,16 +559,29 @@ fn handle_pick_directory_request(
 
     match platform_services.pick_directory() {
         Ok(None) => ok_response(&request.request_id, serde_json::json!({ "path": null })),
-        Ok(Some(path)) => match path.into_os_string().into_string() {
-            Ok(path) => ok_response(&request.request_id, serde_json::json!({ "path": path })),
-            Err(_) => error_response(
-                &request.request_id,
-                PedelecError::new(
-                    error_codes::DIRECTORY_PICKER_FAILED,
-                    "selected directory path could not be represented as a string",
+        Ok(Some(path)) => {
+            let inspection = match inspect_sandbox_folder(&path) {
+                Ok(inspection) => inspection,
+                Err(err) => return error_response(&request.request_id, err),
+            };
+            match path.into_os_string().into_string() {
+                Ok(path) => ok_response(
+                    &request.request_id,
+                    serde_json::json!({
+                        "path": path,
+                        "isEmptyFolder": inspection.is_empty_folder,
+                        "hasSandboxConfig": inspection.has_sandbox_config,
+                    }),
                 ),
-            ),
-        },
+                Err(_) => error_response(
+                    &request.request_id,
+                    PedelecError::new(
+                        error_codes::DIRECTORY_PICKER_FAILED,
+                        "selected directory path could not be represented as a string",
+                    ),
+                ),
+            }
+        }
         Err(err) => error_response(&request.request_id, err),
     }
 }

@@ -68,6 +68,7 @@ pub fn run_tool_cli_with_runtime_file_path(
                 request_id: next_cli_request_id(),
                 r#type: "tool_call".to_string(),
                 caller_origin: None,
+                caller_sdk_version: None,
                 payload: Some(serde_json::json!(input)),
             };
             send_cli_request(request, runtime_file_path)
@@ -77,6 +78,7 @@ pub fn run_tool_cli_with_runtime_file_path(
                 request_id: next_cli_request_id(),
                 r#type: "tool_spec".to_string(),
                 caller_origin: None,
+                caller_sdk_version: None,
                 payload: Some(serde_json::json!(input)),
             };
             send_cli_request(request, runtime_file_path)

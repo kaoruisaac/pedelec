@@ -171,18 +171,22 @@ Pedelec creates missing `skills/`, `assets/`, `logs/`, and `tmp/` directories an
 
 ## Selecting an Application Workspace
 
-Use `directoryPicker()` when the application wants the user to choose a local workspace before creating a session:
+Use `sandboxFolderPicker()` when the application wants the user to choose a local workspace before creating a session:
 
 ```ts
-const path = await pedelec.directoryPicker();
-if (path === null) return; // The user cancelled the native picker.
+const folder = await pedelec.sandboxFolderPicker();
+if (!folder) return; // The user cancelled the native picker.
+
+if (!folder.isEmptyFolder && !folder.hasSandboxConfig) {
+  // The application decides whether to warn the user.
+}
 
 const session = await pedelec.createSession({
-  sandbox: { path },
+  sandbox: { path: folder.path },
 });
 ```
 
-`directoryPicker()` returns `Promise<string | null>` and does not validate or initialize the selected directory. It requires the same origin approval as other sensitive Desktop APIs. The selected path remains application-managed; existing Core sandbox rules are applied later by `createSession()`, which may return `SANDBOX_PATH_INVALID` for an unacceptable path.
+`sandboxFolderPicker()` returns `Promise<SandboxFolderPickerResult | null>`. It is a read-only snapshot: it does not validate or initialize the selected folder, create workspace directories, or create the sandbox marker. `isEmptyFolder` only reports whether the selected folder root has any filesystem entry. `hasSandboxConfig` is true only when `.pedelec-sandbox.json` exists as a regular file; its JSON is not parsed. The picker requires the same origin approval as other sensitive Desktop APIs, and cancellation returns `null`. `createSession()` still applies the full sandbox rules and creates the marker after successful custom sandbox initialization. The marker currently records the SDK version and normalized caller origin but does not restrict reuse by origin or SDK version.
 
 ---
 

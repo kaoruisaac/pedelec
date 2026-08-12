@@ -4,11 +4,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
-#[cfg(any(target_os = "macos", test))]
-use std::ffi::OsStr;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 #[cfg(any(target_os = "macos", all(test, unix)))]
 use std::process::Stdio;
@@ -32,6 +30,7 @@ const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG: &str = "skills.include_instructi
 const OPENCODE_PERMISSION_ENV: &str = "OPENCODE_PERMISSION";
 const ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS: usize = 20_000;
 const SANDBOX_SUBDIRS: [&str; 4] = ["skills", "assets", "logs", "tmp"];
+const SANDBOX_CONFIG_FILE: &str = ".pedelec-sandbox.json";
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 const THREAD_ID_BASE36_MIN_WIDTH: usize = 6;
 const THREAD_ID_BASE36_MAX_WIDTH: usize = 7;
@@ -650,6 +649,13 @@ pub struct CreateThreadToolInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadOutput {
     pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxFolderInspection {
+    pub is_empty_folder: bool,
+    pub has_sandbox_config: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2276,22 +2282,28 @@ impl CoreRuntime {
         &mut self,
         input: CreateThreadInput,
     ) -> Result<CreateThreadOutput, PedelecError> {
-        self.create_thread_with_sdk_origin(input, None)
+        self.create_thread_with_sdk_origin(input, None, None)
     }
 
     pub fn create_sdk_thread(
         &mut self,
         input: CreateThreadInput,
         caller_origin: &str,
+        caller_sdk_version: Option<&str>,
     ) -> Result<CreateThreadOutput, PedelecError> {
         let origin = normalize_sdk_origin(caller_origin)?;
-        self.create_thread_with_sdk_origin(input, Some(origin))
+        let sdk_version = caller_sdk_version
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .map(ToOwned::to_owned);
+        self.create_thread_with_sdk_origin(input, Some(origin), sdk_version)
     }
 
     fn create_thread_with_sdk_origin(
         &mut self,
         input: CreateThreadInput,
         sdk_origin: Option<String>,
+        sdk_version: Option<String>,
     ) -> Result<CreateThreadOutput, PedelecError> {
         let settings = self.get_settings()?;
         let effort_level = input.effort_level.unwrap_or_default();
@@ -2305,6 +2317,19 @@ impl CoreRuntime {
                     .sandbox_manager
                     .prepare_custom_sandbox(&custom_sandbox.path)?;
                 let initialized = initialize(&sandbox_path)?;
+                if let Some(origin) = sdk_origin.as_deref() {
+                    let sdk_version = sdk_version.as_deref().ok_or_else(|| {
+                        PedelecError::new(
+                            error_codes::SANDBOX_CREATE_FAILED,
+                            "SDK version metadata is required for custom sandbox sessions",
+                        )
+                    })?;
+                    self.sandbox_manager.ensure_custom_sandbox_config(
+                        &sandbox_path,
+                        sdk_version,
+                        origin,
+                    )?;
+                }
                 (sandbox_path, initialized)
             }
             None => self
@@ -3591,6 +3616,100 @@ impl SandboxManager {
         Ok(resolved_custom_path)
     }
 
+    fn ensure_custom_sandbox_config(
+        &self,
+        sandbox_path: &Path,
+        sdk_version: &str,
+        origin: &str,
+    ) -> Result<(), PedelecError> {
+        #[derive(Serialize)]
+        struct SandboxConfig<'a> {
+            #[serde(rename = "sdk-version")]
+            sdk_version: &'a str,
+            origin: &'a str,
+        }
+
+        let config_path = sandbox_path.join(SANDBOX_CONFIG_FILE);
+        let contents = serde_json::to_vec_pretty(&SandboxConfig {
+            sdk_version,
+            origin,
+        })
+        .expect("sandbox config serialization should not fail");
+
+        match fs::symlink_metadata(&config_path) {
+            Ok(metadata) if metadata.is_file() => return Ok(()),
+            Ok(_) => {
+                return Err(sandbox_io_error(
+                    error_codes::SANDBOX_CREATE_FAILED,
+                    "sandbox config path is not a regular file",
+                    &config_path,
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "sandbox config path is occupied",
+                    ),
+                ));
+            }
+            Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                return Err(sandbox_io_error(
+                    error_codes::SANDBOX_CREATE_FAILED,
+                    "cannot inspect sandbox config path",
+                    &config_path,
+                    err,
+                ));
+            }
+            Err(_) => {}
+        }
+
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&config_path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                return match fs::symlink_metadata(&config_path) {
+                    Ok(metadata) if metadata.is_file() => Ok(()),
+                    Ok(_) => Err(sandbox_io_error(
+                        error_codes::SANDBOX_CREATE_FAILED,
+                        "sandbox config path is not a regular file",
+                        &config_path,
+                        io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "sandbox config path is occupied",
+                        ),
+                    )),
+                    Err(metadata_err) => Err(sandbox_io_error(
+                        error_codes::SANDBOX_CREATE_FAILED,
+                        "cannot inspect sandbox config path",
+                        &config_path,
+                        metadata_err,
+                    )),
+                };
+            }
+            Err(err) => {
+                return Err(sandbox_io_error(
+                    error_codes::SANDBOX_CREATE_FAILED,
+                    "cannot create sandbox config",
+                    &config_path,
+                    err,
+                ));
+            }
+        };
+
+        if let Err(err) = file.write_all(&contents).and_then(|_| file.flush()) {
+            drop(file);
+            let _ = fs::remove_file(&config_path);
+            return Err(sandbox_io_error(
+                error_codes::SANDBOX_CREATE_FAILED,
+                "cannot write sandbox config",
+                &config_path,
+                err,
+            ));
+        }
+
+        Ok(())
+    }
+
     fn create_sandbox_subdirectories(&self, sandbox_path: &Path) -> Result<(), PedelecError> {
         for subdir in SANDBOX_SUBDIRS {
             let path = sandbox_path.join(subdir);
@@ -3791,6 +3910,49 @@ fn initialize_generated_skills(
     let registry = ToolRegistry::from_skills_input(skills_input)?;
     let skills = write_generated_tool_specs(&skills_dir, &registry)?;
     Ok((skills, registry))
+}
+
+pub fn inspect_sandbox_folder(path: &Path) -> Result<SandboxFolderInspection, PedelecError> {
+    let entries = fs::read_dir(path).map_err(|err| {
+        sandbox_io_error(
+            error_codes::DIRECTORY_PICKER_FAILED,
+            "cannot inspect selected sandbox folder",
+            path,
+            err,
+        )
+    })?;
+    let mut is_empty_folder = true;
+    let mut has_sandbox_config = false;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            sandbox_io_error(
+                error_codes::DIRECTORY_PICKER_FAILED,
+                "cannot inspect selected sandbox folder entry",
+                path,
+                err,
+            )
+        })?;
+        is_empty_folder = false;
+        if entry.file_name() == OsStr::new(SANDBOX_CONFIG_FILE) {
+            has_sandbox_config = entry
+                .file_type()
+                .map_err(|err| {
+                    sandbox_io_error(
+                        error_codes::DIRECTORY_PICKER_FAILED,
+                        "cannot inspect selected sandbox config entry",
+                        &entry.path(),
+                        err,
+                    )
+                })?
+                .is_file();
+        }
+    }
+
+    Ok(SandboxFolderInspection {
+        is_empty_folder,
+        has_sandbox_config,
+    })
 }
 
 fn thread_event_log_path(sandbox_path: &Path, thread_id: &str) -> PathBuf {

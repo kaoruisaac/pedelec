@@ -1062,11 +1062,11 @@ function createBackground(runtimeChrome, options = {}) {
     return status;
   }
 
-  function sendSdkNativeRequest(context, type, payload = {}) {
+  function sendSdkNativeRequest(context, type, payload = {}, metadata = {}) {
     if (!context?.origin || typeof context.origin !== "string") {
       return Promise.reject({ code: "SDK_ORIGIN_UNAVAILABLE", message: "The SDK caller origin is unavailable." });
     }
-    return sendNativeRequest(type, payload, { callerOrigin: context.origin });
+    return sendNativeRequest(type, payload, { callerOrigin: context.origin, ...metadata });
   }
 
   function projectSdkSettings(value) {
@@ -1155,7 +1155,9 @@ function createBackground(runtimeChrome, options = {}) {
             effortLevel: input.effortLevel,
             skills: input.skills,
             sandbox: input.sandbox,
-          });
+          }, message.callerSdkVersion === undefined
+            ? {}
+            : { callerSdkVersion: message.callerSdkVersion });
           const sessionId = result?.threadId;
           if (!sessionId) {
             throw { code: "SDK_PROTOCOL_ERROR", message: "create_thread response did not include threadId." };
@@ -1199,13 +1201,13 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
-      if (message.type === "pick_directory") {
+      if (message.type === "pick_sandbox_folder") {
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
         }
         const result = await withNativeOperation(() =>
-          sendSdkNativeRequest(context, "pick_directory")
+          sendSdkNativeRequest(context, "pick_sandbox_folder")
         );
         postSdkResponse(port, channelId, requestId, true, result);
         return;

@@ -13,6 +13,7 @@ import {
   type ApprovalStatus,
   type ProviderInfo,
   type CreateSessionSandboxInput,
+  type SandboxFolderPickerResult,
 } from "./index";
 
 function sandboxInputHasPublicType(): CreateSessionSandboxInput {
@@ -174,10 +175,16 @@ async function availabilityHasPublicType() {
   void promise;
 }
 
-async function directoryPickerHasPublicType() {
+async function sandboxFolderPickerHasPublicType() {
   const pedelec = new Pedelec();
-  const path: Promise<string | null> = pedelec.directoryPicker();
-  void path;
+  const result: Promise<SandboxFolderPickerResult | null> = pedelec.sandboxFolderPicker();
+  void result;
+}
+
+function directoryPickerIsRemoved() {
+  const pedelec = new Pedelec();
+  // @ts-expect-error directoryPicker was removed in favor of sandboxFolderPicker
+  pedelec.directoryPicker();
 }
 
 function publicSecurityTypesAreRestricted() {
@@ -199,7 +206,8 @@ void noSkillsFallsBackToString;
 void effortLevelPublicTypeContract;
 void listAssetsHasPublicTypes;
 void availabilityHasPublicType;
-void directoryPickerHasPublicType;
+void sandboxFolderPickerHasPublicType;
+void directoryPickerIsRemoved;
 void publicSecurityTypesAreRestricted;
 
 const baseContext: PedelecEventContext = {

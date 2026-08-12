@@ -283,9 +283,9 @@ export default function App() {
 
     setSandboxPicking(true);
     try {
-      const path = await sdk.directoryPicker();
-      if (path !== null) {
-        setSandboxPath(path);
+      const folder = await sdk.sandboxFolderPicker();
+      if (folder !== null) {
+        setSandboxPath(folder.path);
       }
     } catch (err) {
       recordError(toDemoError(err));

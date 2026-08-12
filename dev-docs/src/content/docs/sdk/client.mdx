@@ -43,7 +43,7 @@ Maximum time a request waits for a response from the extension bridge.
 - It is not the same as a tool's `timeoutMs`.
 - It does not limit the total duration of `sendText()`. `sendText()` first waits for its bridge request and then waits for the active agent turn to finish.
 
-`directoryPicker()` is the exception: while the native picker is open, it intentionally has no SDK bridge wall-clock timeout. Extension/native disconnects and explicit bridge errors still reject it immediately.
+`sandboxFolderPicker()` is the exception: while the native picker is open, it intentionally has no SDK bridge wall-clock timeout. Extension/native disconnects and explicit bridge errors still reject it immediately.
 
 A timeout rejects with `SDK_BRIDGE_TIMEOUT` and includes request metadata in `details`.
 

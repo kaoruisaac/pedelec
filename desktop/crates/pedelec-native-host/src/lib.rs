@@ -184,6 +184,7 @@ fn native_message_to_core_request(
     }
 
     let caller_origin = take_string_field(&mut object, "callerOrigin");
+    let caller_sdk_version = take_string_field(&mut object, "callerSdkVersion");
     let payload = match request_type.as_str() {
         "create_thread"
         | "send_text"
@@ -195,7 +196,7 @@ fn native_message_to_core_request(
         | "list_assets" => Some(Value::Object(object)),
         "list_providers" | "get_settings" => Some(Value::Object(object)),
         // The directory picker deliberately has no caller-controlled payload.
-        "pick_directory" => Some(serde_json::json!({})),
+        "pick_sandbox_folder" => Some(serde_json::json!({})),
         // The connectivity probe deliberately has no caller-controlled payload.
         "ping" => Some(serde_json::json!({})),
         "submit_tool_result" => {
@@ -220,6 +221,7 @@ fn native_message_to_core_request(
         request_id,
         r#type: request_type,
         caller_origin,
+        caller_sdk_version,
         payload,
     })
 }
@@ -649,20 +651,33 @@ mod tests {
     }
 
     #[test]
-    fn native_directory_picker_preserves_origin_without_session_payload() {
+    fn native_sandbox_folder_picker_preserves_metadata_without_session_payload() {
         let request = native_message_to_core_request(json!({
-            "type": "pick_directory",
+            "type": "pick_sandbox_folder",
             "requestId": "req_picker",
-            "callerOrigin": "https://approved.example"
+            "callerOrigin": "https://approved.example",
+            "callerSdkVersion": "0.2.2",
+            "path": "C:\\user-controlled-path",
+            "isEmptyFolder": true
         }))
         .unwrap();
 
-        assert_eq!(request.r#type, "pick_directory");
+        assert_eq!(request.r#type, "pick_sandbox_folder");
         assert_eq!(
             request.caller_origin.as_deref(),
             Some("https://approved.example")
         );
+        assert_eq!(request.caller_sdk_version.as_deref(), Some("0.2.2"));
         assert_eq!(request.payload, Some(json!({})));
+    }
+
+    #[test]
+    fn native_directory_picker_request_is_not_supported() {
+        assert!(native_message_to_core_request(json!({
+            "type": "pick_directory",
+            "requestId": "req_old_picker"
+        }))
+        .is_err());
     }
 
     #[test]
@@ -834,6 +849,7 @@ mod tests {
             request_id: "req_missing_runtime".into(),
             r#type: "send_text".into(),
             caller_origin: None,
+            caller_sdk_version: None,
             payload: Some(json!({
                 "threadId": "thread_1",
                 "message": "hello"

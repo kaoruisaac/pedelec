@@ -18,6 +18,7 @@ import type {
   SandboxAssetPath,
   ReadAssetType,
   CreateSessionSandboxInput,
+  SandboxFolderPickerResult,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -76,6 +77,18 @@ type CreateSessionSandboxInput = {
 ```
 
 `path` 是 absolute、由 application 管理的 workspace path。Pedelec 會建立缺少的 sandbox 子目錄，但永遠不會刪除這個 workspace。它可以由多個 active session 共用，且不得與 managed sandbox root overlap。
+
+### `SandboxFolderPickerResult`
+
+```ts
+interface SandboxFolderPickerResult {
+  path: string;
+  isEmptyFolder: boolean;
+  hasSandboxConfig: boolean;
+}
+```
+
+這是 `sandboxFolderPicker()` 回傳的 read-only snapshot。`hasSandboxConfig` 只表示 `.pedelec-sandbox.json` 是 regular file，不會驗證 marker 內容。
 
 ## Provider 與 settings
 

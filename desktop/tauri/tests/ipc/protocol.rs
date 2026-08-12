@@ -7,6 +7,7 @@ fn public_ipc_wire_types_serialize_with_the_expected_shape() {
         request_id: "request-1".into(),
         r#type: "listProviders".into(),
         caller_origin: None,
+        caller_sdk_version: None,
         payload: Some(json!({})),
     };
     let response = CoreIpcResponse {
