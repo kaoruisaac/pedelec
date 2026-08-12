@@ -43,6 +43,8 @@ SDK request 等待 Extension bridge response 的最長時間。
 - 和 tool 的 `timeoutMs` 不同。
 - 不限制 `sendText()` 的整體 turn 時間；`sendText()` 先等待 bridge request，再等待 active agent turn 結束。
 
+`directoryPicker()` 是例外：原生 picker 開啟並等待使用者操作時，不套用 SDK bridge wall-clock timeout；Extension/native disconnect 或明確的 bridge error 仍會立即 reject。
+
 Timeout 會 reject `SDK_BRIDGE_TIMEOUT`，並在 `details` 附上 request metadata。
 
 ```ts

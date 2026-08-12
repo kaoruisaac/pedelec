@@ -1,3 +1,4 @@
+use crate::directory_picker::TauriCoreIpcPlatformServices;
 use crate::pedelec_binary_install::{
     ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
     install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
@@ -20,8 +21,11 @@ use pedelec_core::{
     ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput,
     UpdateSettingsInput,
 };
-use pedelec_ipc::{prepare_provider_process, start_core_ipc_server, start_provider_process};
+use pedelec_ipc::{
+    prepare_provider_process, start_core_ipc_server_with_services, start_provider_process,
+};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use tauri::menu::{Menu, MenuItem};
 use tauri::path::BaseDirectory;
@@ -47,6 +51,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(runtime_owner)
         .invoke_handler(tauri::generate_handler![
             create_thread,
@@ -132,12 +137,16 @@ pub fn run() {
             })?;
             // A failed data plane must not prevent the desktop/control plane from starting.
             let _asset_upload_server = start_asset_upload_server(runtime_for_setup.clone());
-            let _ipc_handle = start_core_ipc_server(runtime_for_setup.clone()).map_err(|err| {
-                tauri::Error::from(std::io::Error::other(format!(
-                    "cannot start Core IPC server: {}",
-                    err.message
-                )))
-            })?;
+            let platform_services =
+                Arc::new(TauriCoreIpcPlatformServices::new(app.handle().clone()));
+            let _ipc_handle =
+                start_core_ipc_server_with_services(runtime_for_setup.clone(), platform_services)
+                    .map_err(|err| {
+                    tauri::Error::from(std::io::Error::other(format!(
+                        "cannot start Core IPC server: {}",
+                        err.message
+                    )))
+                })?;
             forward_thread_events_to_tauri(app.handle().clone(), runtime_for_setup.clone());
             #[cfg(debug_assertions)]
             eprintln!(

@@ -1741,6 +1741,59 @@ describe("Pedelec SDK", () => {
     });
   });
 
+  it("directoryPicker sends the picker request and normalizes a selected path", async () => {
+    const pedelec = new Pedelec();
+    const picker = pedelec.directoryPicker();
+    const request = pageWindow.lastSent();
+    expect(request).toMatchObject({ type: "pick_directory" });
+    respondOk(pageWindow, request, { path: "C:\\workspace\\project" });
+
+    await expect(picker).resolves.toBe("C:\\workspace\\project");
+  });
+
+  it("directoryPicker resolves cancellation as null", async () => {
+    const pedelec = new Pedelec();
+    const picker = pedelec.directoryPicker();
+    respondOk(pageWindow, pageWindow.lastSent(), { path: null });
+
+    await expect(picker).resolves.toBeNull();
+  });
+
+  it("directoryPicker rejects malformed responses with SDK_PROTOCOL_ERROR", async () => {
+    const pedelec = new Pedelec();
+    for (const result of [{}, { path: 123 }, { path: {} }, { path: [] }, { path: "" }]) {
+      const picker = pedelec.directoryPicker();
+      respondOk(pageWindow, pageWindow.lastSent(), result);
+      await expect(picker).rejects.toMatchObject({
+        code: "SDK_PROTOCOL_ERROR",
+      });
+    }
+  });
+
+  it("directoryPicker does not use bridgeTimeoutMs while the picker is open", async () => {
+    const pedelec = new Pedelec({ bridgeTimeoutMs: 1 });
+    const picker = pedelec.directoryPicker();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    let settled = false;
+    void picker.then(() => {
+      settled = true;
+    });
+    expect(settled).toBe(false);
+    respondOk(pageWindow, pageWindow.lastSent(), { path: "C:\\workspace\\project" });
+    await expect(picker).resolves.toBe("C:\\workspace\\project");
+  });
+
+  it("directoryPicker still rejects when its extension Port disconnects", async () => {
+    const pedelec = new Pedelec({ bridgeTimeoutMs: 1 });
+    const picker = pedelec.directoryPicker();
+    pageWindow.port.disconnect();
+
+    await expect(picker).rejects.toMatchObject({
+      code: "EXTENSION_DISCONNECTED",
+    });
+  });
+
   it("lists assets without changing session state and validates the response", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);

@@ -100,6 +100,25 @@ const session = await pedelec.createSession({
 });
 ```
 
+## `directoryPicker()`
+
+```ts
+directoryPicker(): Promise<string | null>
+```
+
+透過 Pedelec Desktop 開啟作業系統的原生、僅可選取資料夾的 picker。選取資料夾時 resolve absolute local path；關閉或取消時 resolve `null`。
+
+```ts
+const path = await pedelec.directoryPicker();
+if (path === null) return;
+
+const session = await pedelec.createSession({
+  sandbox: { path },
+});
+```
+
+這是敏感的 Desktop API，可能觸發目前 origin 的 approval flow。Picker 只負責選擇 path，不會驗證資料夾、檢查是否為空，或建立 Pedelec workspace 子目錄。既有的 custom-sandbox validation 仍由 `createSession()` 負責；不符合規則的 path 會在該階段回傳 `SANDBOX_PATH_INVALID`。Picker 真正失敗時 reject `DIRECTORY_PICKER_FAILED`；使用者取消不是 error。
+
 ## `listProviders()`
 
 ```ts

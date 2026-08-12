@@ -7,6 +7,21 @@ description: 使用 provider-independent effort level 建立 Pedelec session。
 
 SDK 建立 session handle，Core 再解析 Desktop 設定的 provider effort profile。
 
+## 先選擇 workspace
+
+若 application 使用自己管理的 workspace，請先透過原生 picker 讓使用者選取資料夾，再呼叫 `createSession()`：
+
+```ts
+const path = await pedelec.directoryPicker();
+if (path === null) return;
+
+const session = await pedelec.createSession({
+  sandbox: { path },
+});
+```
+
+Picker 取消時回傳 `null`。它不判斷資料夾是否為有效 Pedelec sandbox，也不初始化內容；Core 會在 `createSession()` 階段套用既有 sandbox 規則。
+
 ```ts
 const session = await pedelec.createSession();
 ```

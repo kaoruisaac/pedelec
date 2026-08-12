@@ -58,6 +58,7 @@ try {
 | `IPC_UNAVAILABLE` | Local Core IPC bind/connect/parse/respond 失敗 | 重啟 Desktop App、查看 local logs | Recovery 後 |
 | `MESSAGE_TOO_LARGE` | Local IPC message 超過 size limit | 縮小 prompt/tool/result payload | 只在資料縮小後 |
 | `SDK_BRIDGE_TIMEOUT` | Extension 未在 `bridgeTimeoutMs` 內回應 | 檢查下游 layers，不要重複 write | 診斷後 |
+| `DIRECTORY_PICKER_FAILED` | 原生 directory picker 無法建立、顯示，或無法轉換成 SDK path result | 請使用者重試並檢查 Desktop/native dialog 支援；取消不是 error | 修復 dialog/runtime 問題後 |
 | `SDK_TRANSPORT_ERROR` | Generic bridge failure | 查看 message/details，驗證 Extension/native/Core | 視 operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape 或 request type 不相容 | 對齊 component versions，回報 reproducible mismatch | 通常修復前不可 |
 

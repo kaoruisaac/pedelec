@@ -51,6 +51,8 @@ type DemoSessionState = {
   sessionId: string;
   provider: string;
   effortLevel?: "default" | "low" | "high";
+  sandboxPath?: string;
+  resumed: boolean;
   status: SessionStatus;
   transcript: DemoChatMessage[];
   errors: DemoError[];
@@ -138,6 +140,8 @@ export default function App() {
   const [providers, setProviders] = createSignal<ProviderInfo[]>([]);
   const [providersLoading, setProvidersLoading] = createSignal(false);
   const [effortLevel, setEffortLevel] = createSignal<"default" | "low" | "high">("default");
+  const [sandboxPath, setSandboxPath] = createSignal("");
+  const [sandboxPicking, setSandboxPicking] = createSignal(false);
   const [resumeId, setResumeId] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [selectedAsset, setSelectedAsset] = createSignal<File | null>(null);
@@ -171,7 +175,7 @@ export default function App() {
     );
   });
   const canCreate = createMemo(() =>
-    Boolean(client() && provider() && !providersLoading() && providers().length > 0),
+    Boolean(client() && provider() && !providersLoading() && providers().length > 0 && !sandboxPicking()),
   );
 
   function resetClient() {
@@ -183,6 +187,8 @@ export default function App() {
     setProviders([]);
     setProvidersLoading(false);
     setProvider("");
+    setSandboxPath("");
+    setSandboxPicking(false);
     setSelectedAsset(null);
     clearAssetFileInput();
     setConnection(initializeClient(setClient));
@@ -228,16 +234,24 @@ export default function App() {
   async function createSession(event: SubmitEvent) {
     event.preventDefault();
     const sdk = client();
-    if (!sdk) return;
+    if (!sdk || sandboxPicking()) return;
+
+    const selectedSandboxPath = sandboxPath();
+    const sandbox = selectedSandboxPath ? { path: selectedSandboxPath } : undefined;
 
     try {
-      appendGlobalEvent("create_session_requested", { provider: provider(), effortLevel: effortLevel() });
+      appendGlobalEvent("create_session_requested", {
+        provider: provider(),
+        effortLevel: effortLevel(),
+        sandboxPath: selectedSandboxPath || undefined,
+      });
       const session = await sdk.createSession({
         provider: provider() as ProviderCode,
         effortLevel: effortLevel(),
         skills: createDemoSkills(),
+        ...(sandbox ? { sandbox } : {}),
       });
-      registerSession(session, provider(), effortLevel());
+      registerSession(session, provider(), effortLevel(), selectedSandboxPath || undefined, false);
       setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
       recordError(toDemoError(err));
@@ -254,12 +268,30 @@ export default function App() {
     try {
       appendGlobalEvent("resume_session_requested", { sessionId });
       const session = await sdk.resumeSession(sessionId);
-      registerSession(session, "resumed", undefined);
+      registerSession(session, "resumed", undefined, undefined, true);
       setResumeId("");
       setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
       recordError(toDemoError(err, sessionId));
       markExtensionError(err);
+    }
+  }
+
+  async function selectSandboxDirectory() {
+    const sdk = client();
+    if (!sdk || sandboxPicking()) return;
+
+    setSandboxPicking(true);
+    try {
+      const path = await sdk.directoryPicker();
+      if (path !== null) {
+        setSandboxPath(path);
+      }
+    } catch (err) {
+      recordError(toDemoError(err));
+      markExtensionError(err);
+    } finally {
+      setSandboxPicking(false);
     }
   }
 
@@ -360,7 +392,13 @@ export default function App() {
     }
   }
 
-  function registerSession(session: PedelecSession, fallbackProvider: string, fallbackEffortLevel?: "default" | "low" | "high") {
+  function registerSession(
+    session: PedelecSession,
+    fallbackProvider: string,
+    fallbackEffortLevel?: "default" | "low" | "high",
+    sandboxPath?: string,
+    resumed = false,
+  ) {
     const existing = sessions().find((item) => item.sessionId === session.sessionId);
     if (existing) {
       setActiveSessionId(session.sessionId);
@@ -398,6 +436,8 @@ export default function App() {
       sessionId: session.sessionId,
       provider: session.provider || fallbackProvider || "unknown",
       effortLevel: session.effortLevel || fallbackEffortLevel,
+      sandboxPath,
+      resumed,
       status: session.getStatus(),
       transcript: [],
       errors: [],
@@ -421,6 +461,7 @@ export default function App() {
       sessionId: session.sessionId,
       provider: state.provider,
       effortLevel: state.effortLevel,
+      sandboxPath: state.sandboxPath,
     });
     appendSessionEvent(session.sessionId, "session_selected", {});
     void refreshSessionAssets(session.sessionId);
@@ -672,6 +713,32 @@ export default function App() {
                   <option value="high">High</option>
                 </select>
               </label>
+              <div class="sandbox-selector">
+                <span class="sandbox-label">Sandbox (optional)</span>
+                <output class="sandbox-path" aria-live="polite">
+                  {sandboxPath() || "Desktop-managed temporary sandbox"}
+                </output>
+                <div class="sandbox-actions">
+                  <button
+                    type="button"
+                    class="secondary"
+                    disabled={!client() || sandboxPicking()}
+                    onClick={() => void selectSandboxDirectory()}
+                  >
+                    {sandboxPicking() ? "Opening..." : "Select directory"}
+                  </button>
+                  <Show when={sandboxPath()}>
+                    <button
+                      type="button"
+                      class="secondary"
+                      disabled={sandboxPicking()}
+                      onClick={() => setSandboxPath("")}
+                    >
+                      Clear
+                    </button>
+                  </Show>
+                </div>
+              </div>
               <button type="submit" disabled={!canCreate()}>Create</button>
             </form>
           </Panel>
@@ -719,6 +786,10 @@ export default function App() {
                     <Info label="Provider" value={session().provider} />
                     <Info label="Effort" value={session().effortLevel || "unknown"} />
                     <Info label="Status" value={session().status} />
+                    <Info
+                      label="Sandbox"
+                      value={session().resumed ? "Unknown / resumed session" : session().sandboxPath || "Desktop managed"}
+                    />
                     <Info label="Created" value={formatTime(session().createdAt)} />
                     <Info label="Updated" value={formatTime(session().updatedAt)} />
                   </div>

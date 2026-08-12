@@ -352,7 +352,7 @@ type PendingRequest = {
   port: RuntimePort;
   resolve: (value: unknown) => void;
   reject: (error: PedelecError) => void;
-  timeoutId: ReturnType<typeof setTimeout>;
+  timeoutId: ReturnType<typeof setTimeout> | null;
 };
 
 type PendingSend = {
@@ -540,6 +540,15 @@ export class Pedelec {
     );
   }
 
+  async directoryPicker(): Promise<string | null> {
+    const result = await this.requestWithOptions<unknown>(
+      "pick_directory",
+      {},
+      { timeoutMs: null },
+    );
+    return normalizeDirectoryPickerResponse(result);
+  }
+
   async listProviders(): Promise<ProviderInfo[]> {
     return normalizeProviderInfoList(await this.request<unknown>("list_providers"));
   }
@@ -583,6 +592,14 @@ export class Pedelec {
   }
 
   request<T>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
+    return this.requestWithOptions<T>(type, payload);
+  }
+
+  private requestWithOptions<T>(
+    type: string,
+    payload: Record<string, unknown> = {},
+    options: { timeoutMs?: number | null } = {},
+  ): Promise<T> {
     let port: RuntimePort;
     try {
       port = this.ensureExtensionPort();
@@ -594,15 +611,18 @@ export class Pedelec {
     const message = { channelId: this.channelId, type, requestId, ...payload };
 
     return new Promise<T>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(
-          makeError("SDK_BRIDGE_TIMEOUT", "Pedelec extension did not respond.", {
-            requestId,
-            type,
-          })
-        );
-      }, this.bridgeTimeoutMs);
+      const timeoutMs = options.timeoutMs === undefined ? this.bridgeTimeoutMs : options.timeoutMs;
+      const timeoutId = timeoutMs === null
+        ? null
+        : setTimeout(() => {
+            this.pendingRequests.delete(requestId);
+            reject(
+              makeError("SDK_BRIDGE_TIMEOUT", "Pedelec extension did not respond.", {
+                requestId,
+                type,
+              })
+            );
+          }, timeoutMs);
 
       this.pendingRequests.set(requestId, {
         port,
@@ -615,7 +635,7 @@ export class Pedelec {
         port.postMessage(message);
       } catch (err) {
         this.pendingRequests.delete(requestId);
-        clearTimeout(timeoutId);
+        if (timeoutId !== null) clearTimeout(timeoutId);
         const error = normalizeError(err, "EXTENSION_DISCONNECTED", "Pedelec extension disconnected.");
         if (this.port === port) {
           this.handleDisconnect(port, error);
@@ -858,7 +878,7 @@ export class Pedelec {
     if (!pending) return;
 
     this.pendingRequests.delete(message.requestId);
-    clearTimeout(pending.timeoutId);
+    if (pending.timeoutId !== null) clearTimeout(pending.timeoutId);
     if (message.ok) {
       pending.resolve(message.result);
     } else {
@@ -893,7 +913,7 @@ export class Pedelec {
     for (const [requestId, pending] of this.pendingRequests) {
       if (pending.port !== port) continue;
       this.pendingRequests.delete(requestId);
-      clearTimeout(pending.timeoutId);
+      if (pending.timeoutId !== null) clearTimeout(pending.timeoutId);
       pending.reject(error);
     }
   }
@@ -1533,6 +1553,19 @@ function normalizePedelecSettings(value: unknown): PedelecSettings {
     throw makeError("SDK_PROTOCOL_ERROR", "get_settings response had invalid shape");
   }
   return { defaultProvider: value.defaultProvider };
+}
+
+function normalizeDirectoryPickerResponse(value: unknown): string | null {
+  if (!isPlainObject(value) || !("path" in value)) {
+    throw makeError("SDK_PROTOCOL_ERROR", "pick_directory response had an invalid shape");
+  }
+
+  const path = value.path;
+  if (path !== null && (typeof path !== "string" || path.length === 0)) {
+    throw makeError("SDK_PROTOCOL_ERROR", "pick_directory response had an invalid shape");
+  }
+
+  return path;
 }
 
 function normalizeProviderInfoList(value: unknown): ProviderInfo[] {

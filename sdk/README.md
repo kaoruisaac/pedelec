@@ -24,6 +24,7 @@ Pedelec is a browser SDK and local bridge for applications that want to work wit
 A web application can use Pedelec to:
 
 - create an agent session on the user's machine;
+- choose an application-managed workspace with the native directory picker;
 - send user instructions and receive streamed assistant text;
 - expose narrowly scoped browser-side tools to the agent;
 - resume or end sessions; and
@@ -167,6 +168,21 @@ const session = await pedelec.createSession({
 ```
 
 Pedelec creates missing `skills/`, `assets/`, `logs/`, and `tmp/` directories and preserves existing files. It never deletes an explicit workspace, and multiple active sessions may share it. Filesystem write conflicts are the application's responsibility. An explicit path must not overlap Pedelec's managed sandbox root.
+
+## Selecting an Application Workspace
+
+Use `directoryPicker()` when the application wants the user to choose a local workspace before creating a session:
+
+```ts
+const path = await pedelec.directoryPicker();
+if (path === null) return; // The user cancelled the native picker.
+
+const session = await pedelec.createSession({
+  sandbox: { path },
+});
+```
+
+`directoryPicker()` returns `Promise<string | null>` and does not validate or initialize the selected directory. It requires the same origin approval as other sensitive Desktop APIs. The selected path remains application-managed; existing Core sandbox rules are applied later by `createSession()`, which may return `SANDBOX_PATH_INVALID` for an unacceptable path.
 
 ---
 

@@ -58,6 +58,7 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `IPC_UNAVAILABLE` | Local Core IPC could not bind, connect, parse, or respond | Restart Desktop App; inspect local logs | After recovery |
 | `MESSAGE_TOO_LARGE` | Local IPC message exceeded its size limit | Reduce prompt/tool/result payload | Only with smaller data |
 | `SDK_BRIDGE_TIMEOUT` | Extension did not answer within `bridgeTimeoutMs` | Check all downstream layers; avoid repeated writes | After diagnosing connection |
+| `DIRECTORY_PICKER_FAILED` | The native directory picker could not be created, shown, or converted to the SDK path result | Ask the user to retry and check Desktop/native dialog support; cancellation is not an error | Usually after the dialog/runtime issue is fixed |
 | `SDK_TRANSPORT_ERROR` | Generic bridge request failure | Inspect `message/details`; verify Extension/native/Core | Depends on operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape or request type did not match SDK expectations | Align component versions; report reproducible mismatch | Usually not until versions/config fixed |
 

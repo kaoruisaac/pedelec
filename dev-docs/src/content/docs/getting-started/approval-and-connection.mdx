@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-Pedelec does not allow any web page to create local agent sessions automatically. The Chrome Extension identifies the page origin and requires user approval before the first `createSession()` or `resumeSession()` from that origin.
+Pedelec does not allow any web page to create local agent sessions or open a native directory picker automatically. The Chrome Extension identifies the page origin and requires user approval before the first `createSession()`, `resumeSession()`, or `directoryPicker()` from that origin.
 
 ## Read approval status
 
@@ -64,14 +64,16 @@ It returns Extension, approval, Desktop, and an optional normalized error. An un
 
 ## What triggers the approval popup
 
-`getApprovalStatus()` only reads status and pings Core. It does not request approval. `getSettings()` and `listProviders()` are sensitive Desktop APIs: they require origin approval and can trigger the approval popup. They respectively expose only defaults, and only `name`/`code`/`available`/`error`; use `appConnected` rather than `listProviders()` for connectivity.
+`getApprovalStatus()` only reads status and pings Core. It does not request approval. `getSettings()`, `listProviders()`, and `directoryPicker()` are sensitive Desktop APIs: they require origin approval and can trigger the approval popup. They expose only defaults, provider summaries, or the explicitly selected directory result; use `appConnected` rather than `listProviders()` for connectivity.
 
-The first operation that creates or resumes a session triggers approval when needed:
+The first operation that creates/resumes a session or opens the directory picker triggers approval when needed:
 
 ```ts
 await pedelec.createSession({ provider: "codex" });
 // or
 await pedelec.resumeSession(savedSessionId);
+// or
+const path = await pedelec.directoryPicker();
 ```
 
 The extension queues the request, opens its popup, and waits for the user to approve or reject the site. After approval, the queued operation continues automatically.

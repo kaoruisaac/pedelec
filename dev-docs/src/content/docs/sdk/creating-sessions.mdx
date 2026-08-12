@@ -7,6 +7,21 @@ description: Create Pedelec sessions with provider-independent effort levels.
 
 The SDK creates a session handle and Core resolves the provider's Desktop-configured effort profile.
 
+## Choose a workspace first
+
+For an application-managed workspace, let the user choose the folder with the native picker before calling `createSession()`:
+
+```ts
+const path = await pedelec.directoryPicker();
+if (path === null) return;
+
+const session = await pedelec.createSession({
+  sandbox: { path },
+});
+```
+
+The picker returns a path or `null` on cancellation. It does not decide whether the folder is a valid Pedelec sandbox or initialize its contents; Core applies the existing sandbox rules during `createSession()`.
+
 ```ts
 const session = await pedelec.createSession();
 ```

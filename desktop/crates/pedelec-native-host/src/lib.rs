@@ -194,6 +194,8 @@ fn native_message_to_core_request(
         | "create_asset_download"
         | "list_assets" => Some(Value::Object(object)),
         "list_providers" | "get_settings" => Some(Value::Object(object)),
+        // The directory picker deliberately has no caller-controlled payload.
+        "pick_directory" => Some(serde_json::json!({})),
         // The connectivity probe deliberately has no caller-controlled payload.
         "ping" => Some(serde_json::json!({})),
         "submit_tool_result" => {
@@ -644,6 +646,23 @@ mod tests {
             "requestId": "req_update_settings"
         }))
         .is_err());
+    }
+
+    #[test]
+    fn native_directory_picker_preserves_origin_without_session_payload() {
+        let request = native_message_to_core_request(json!({
+            "type": "pick_directory",
+            "requestId": "req_picker",
+            "callerOrigin": "https://approved.example"
+        }))
+        .unwrap();
+
+        assert_eq!(request.r#type, "pick_directory");
+        assert_eq!(
+            request.caller_origin.as_deref(),
+            Some("https://approved.example")
+        );
+        assert_eq!(request.payload, Some(json!({})));
     }
 
     #[test]

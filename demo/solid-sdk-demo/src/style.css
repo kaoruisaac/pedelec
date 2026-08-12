@@ -152,6 +152,42 @@ label {
   font-weight: 650;
 }
 
+.sandbox-selector {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sandbox-label {
+  color: #3a4a55;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.sandbox-path {
+  display: block;
+  min-width: 0;
+  border: 1px solid #c3cdd5;
+  border-radius: 6px;
+  padding: 9px 10px;
+  color: #455661;
+  background: #f8fafb;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.sandbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sandbox-actions button {
+  flex: 1 1 130px;
+}
+
 .status-grid,
 .detail-grid {
   display: grid;

@@ -1199,6 +1199,18 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
+      if (message.type === "pick_directory") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        const result = await withNativeOperation(() =>
+          sendSdkNativeRequest(context, "pick_directory")
+        );
+        postSdkResponse(port, channelId, requestId, true, result);
+        return;
+      }
+
       if (message.type === "resume_session") {
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);

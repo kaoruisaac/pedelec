@@ -174,6 +174,12 @@ async function availabilityHasPublicType() {
   void promise;
 }
 
+async function directoryPickerHasPublicType() {
+  const pedelec = new Pedelec();
+  const path: Promise<string | null> = pedelec.directoryPicker();
+  void path;
+}
+
 function publicSecurityTypesAreRestricted() {
   const status: ApprovalStatus = {
     installed: true,
@@ -193,6 +199,7 @@ void noSkillsFallsBackToString;
 void effortLevelPublicTypeContract;
 void listAssetsHasPublicTypes;
 void availabilityHasPublicType;
+void directoryPickerHasPublicType;
 void publicSecurityTypesAreRestricted;
 
 const baseContext: PedelecEventContext = {

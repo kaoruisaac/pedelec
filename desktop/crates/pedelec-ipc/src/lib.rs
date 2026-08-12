@@ -27,6 +27,24 @@ pub const CORE_IPC_PROTOCOL: &str = "pedelec-core-ipc-v1";
 pub const CORE_IPC_HOST: &str = "127.0.0.1";
 pub const MAX_CORE_IPC_MESSAGE_BYTES: usize = 1024 * 1024;
 
+/// Desktop capabilities that Core IPC can invoke without coupling the Core
+/// runtime to a particular desktop toolkit.
+pub trait CoreIpcPlatformServices: Send + Sync + 'static {
+    fn pick_directory(&self) -> Result<Option<PathBuf>, PedelecError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopCoreIpcPlatformServices;
+
+impl CoreIpcPlatformServices for NoopCoreIpcPlatformServices {
+    fn pick_directory(&self) -> Result<Option<PathBuf>, PedelecError> {
+        Err(PedelecError::new(
+            error_codes::DIRECTORY_PICKER_FAILED,
+            "native directory picker is unavailable",
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeFile {
@@ -84,12 +102,40 @@ pub fn start_core_ipc_server(
     runtime: SharedCoreRuntime,
 ) -> Result<CoreIpcServerHandle, PedelecError> {
     let runtime_file_path = default_runtime_file_path()?;
-    start_core_ipc_server_with_runtime_path(runtime, runtime_file_path)
+    start_core_ipc_server_with_runtime_path_and_services(
+        runtime,
+        runtime_file_path,
+        Arc::new(NoopCoreIpcPlatformServices),
+    )
 }
 
 pub fn start_core_ipc_server_with_runtime_path(
     runtime: SharedCoreRuntime,
     runtime_file_path: impl Into<PathBuf>,
+) -> Result<CoreIpcServerHandle, PedelecError> {
+    start_core_ipc_server_with_runtime_path_and_services(
+        runtime,
+        runtime_file_path,
+        Arc::new(NoopCoreIpcPlatformServices),
+    )
+}
+
+pub fn start_core_ipc_server_with_services(
+    runtime: SharedCoreRuntime,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
+) -> Result<CoreIpcServerHandle, PedelecError> {
+    let runtime_file_path = default_runtime_file_path()?;
+    start_core_ipc_server_with_runtime_path_and_services(
+        runtime,
+        runtime_file_path,
+        platform_services,
+    )
+}
+
+pub fn start_core_ipc_server_with_runtime_path_and_services(
+    runtime: SharedCoreRuntime,
+    runtime_file_path: impl Into<PathBuf>,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
 ) -> Result<CoreIpcServerHandle, PedelecError> {
     let listener = TcpListener::bind((CORE_IPC_HOST, 0)).map_err(|err| {
         PedelecError::with_details(
@@ -126,8 +172,9 @@ pub fn start_core_ipc_server_with_runtime_path(
                 continue;
             };
             let runtime = Arc::clone(&runtime);
+            let platform_services = Arc::clone(&platform_services);
             thread::spawn(move || {
-                let _ = handle_core_ipc_connection(stream, runtime);
+                let _ = handle_core_ipc_connection(stream, runtime, platform_services);
             });
         }
     });
@@ -259,7 +306,11 @@ pub fn read_bounded_json_line<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>>
     Ok(output)
 }
 
-fn handle_core_ipc_connection(stream: TcpStream, runtime: SharedCoreRuntime) -> io::Result<()> {
+fn handle_core_ipc_connection(
+    stream: TcpStream,
+    runtime: SharedCoreRuntime,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
+) -> io::Result<()> {
     let reader_stream = stream.try_clone()?;
     let mut reader = BufReader::new(reader_stream);
     let writer = Arc::new(Mutex::new(stream));
@@ -316,7 +367,11 @@ fn handle_core_ipc_connection(stream: TcpStream, runtime: SharedCoreRuntime) -> 
             continue;
         }
 
-        let response = handle_core_ipc_request(request, Arc::clone(&runtime));
+        let response = handle_core_ipc_request_with_services(
+            request,
+            Arc::clone(&runtime),
+            Arc::clone(&platform_services),
+        );
         let mut writer = writer.lock().unwrap();
         write_json_line(&mut *writer, &response)?;
     }
@@ -358,8 +413,18 @@ fn parse_core_ipc_request(value: Value) -> Result<CoreIpcRequest, CoreIpcRespons
     })
 }
 
+#[allow(dead_code)]
 fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) -> CoreIpcResponse {
+    handle_core_ipc_request_with_services(request, runtime, Arc::new(NoopCoreIpcPlatformServices))
+}
+
+fn handle_core_ipc_request_with_services(
+    request: CoreIpcRequest,
+    runtime: SharedCoreRuntime,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
+) -> CoreIpcResponse {
     match request.r#type.as_str() {
+        "pick_directory" => handle_pick_directory_request(&request, platform_services),
         "create_thread" => match decode_payload::<CreateThreadInput>(&request) {
             Ok(input) => match match request.caller_origin.as_deref() {
                 Some(origin) => runtime.lock().unwrap().create_sdk_thread(input, origin),
@@ -461,6 +526,42 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
                 serde_json::json!({ "type": request.r#type }),
             ),
         ),
+    }
+}
+
+fn handle_pick_directory_request(
+    request: &CoreIpcRequest,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
+) -> CoreIpcResponse {
+    if request
+        .caller_origin
+        .as_deref()
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .is_none()
+    {
+        return error_response(
+            &request.request_id,
+            PedelecError::new(
+                error_codes::IPC_UNAUTHORIZED,
+                "directory picker requires an approved caller origin",
+            ),
+        );
+    }
+
+    match platform_services.pick_directory() {
+        Ok(None) => ok_response(&request.request_id, serde_json::json!({ "path": null })),
+        Ok(Some(path)) => match path.into_os_string().into_string() {
+            Ok(path) => ok_response(&request.request_id, serde_json::json!({ "path": path })),
+            Err(_) => error_response(
+                &request.request_id,
+                PedelecError::new(
+                    error_codes::DIRECTORY_PICKER_FAILED,
+                    "selected directory path could not be represented as a string",
+                ),
+            ),
+        },
+        Err(err) => error_response(&request.request_id, err),
     }
 }
 

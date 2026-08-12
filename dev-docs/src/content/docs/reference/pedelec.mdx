@@ -101,6 +101,25 @@ const session = await pedelec.createSession({
 });
 ```
 
+## `directoryPicker()`
+
+```ts
+directoryPicker(): Promise<string | null>
+```
+
+Opens the operating system's native directory-only picker through Pedelec Desktop. A selected folder resolves to its absolute local path; closing or cancelling the picker resolves to `null`.
+
+```ts
+const path = await pedelec.directoryPicker();
+if (path === null) return;
+
+const session = await pedelec.createSession({
+  sandbox: { path },
+});
+```
+
+This is a sensitive Desktop API and may trigger the current origin's approval flow. The picker only chooses a path: it does not validate the folder, check whether it is empty, or create Pedelec workspace directories. Existing custom-sandbox validation remains the responsibility of `createSession()`; an invalid selected path returns `SANDBOX_PATH_INVALID` there. Picker failures reject with `DIRECTORY_PICKER_FAILED`; cancellation is not an error.
+
 ## `listProviders()`
 
 ```ts
