@@ -3680,13 +3680,13 @@ mod tests {
         };
 
         runtime
-            .create_sdk_thread(input(), "https://Example.com:443", Some("0.2.2"))
+            .create_sdk_thread(input(), "https://Example.com:443", Some("mock-sdk-version"))
             .unwrap();
         let marker = custom.join(".pedelec-sandbox.json");
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(&marker).unwrap()).unwrap(),
             json!({
-                "sdk-version": "0.2.2",
+                "sdk-version": "mock-sdk-version",
                 "origin": "https://example.com",
             })
         );
@@ -3725,7 +3725,7 @@ mod tests {
         };
         assert_eq!(
             runtime
-                .create_sdk_thread(invalid_skills, "https://example.com", Some("0.2.2"))
+                .create_sdk_thread(invalid_skills, "https://example.com", Some("mock-sdk-version"))
                 .unwrap_err()
                 .code,
             error_codes::TOOLS_MANIFEST_INVALID
@@ -3744,7 +3744,7 @@ mod tests {
                 }),
             },
             "https://example.com",
-            Some("0.2.2"),
+            Some("mock-sdk-version"),
         );
         assert_eq!(result.unwrap_err().code, error_codes::SANDBOX_CREATE_FAILED);
         assert!(marker.is_dir());

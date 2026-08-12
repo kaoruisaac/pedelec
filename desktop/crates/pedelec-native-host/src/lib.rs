@@ -656,7 +656,7 @@ mod tests {
             "type": "pick_sandbox_folder",
             "requestId": "req_picker",
             "callerOrigin": "https://approved.example",
-            "callerSdkVersion": "0.2.2",
+            "callerSdkVersion": "mock-sdk-version",
             "path": "C:\\user-controlled-path",
             "isEmptyFolder": true
         }))
@@ -667,7 +667,7 @@ mod tests {
             request.caller_origin.as_deref(),
             Some("https://approved.example")
         );
-        assert_eq!(request.caller_sdk_version.as_deref(), Some("0.2.2"));
+        assert_eq!(request.caller_sdk_version.as_deref(), Some("mock-sdk-version"));
         assert_eq!(request.payload, Some(json!({})));
     }
 

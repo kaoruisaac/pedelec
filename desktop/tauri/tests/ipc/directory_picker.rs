@@ -111,7 +111,7 @@ fn ipc_picker_to_custom_session_to_picker_reports_the_created_marker() {
             request_id: "create_custom".into(),
             r#type: "create_thread".into(),
             caller_origin: Some("https://Example.com:443".into()),
-            caller_sdk_version: Some("0.2.2".into()),
+            caller_sdk_version: Some("mock-sdk-version".into()),
             payload: Some(json!({
                 "provider": "codex",
                 "skills": null,
@@ -126,7 +126,7 @@ fn ipc_picker_to_custom_session_to_picker_reports_the_created_marker() {
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&marker).unwrap()).unwrap(),
         json!({
-            "sdk-version": "0.2.2",
+            "sdk-version": "mock-sdk-version",
             "origin": "https://example.com",
         })
     );

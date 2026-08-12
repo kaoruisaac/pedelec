@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PEDELEC_EXTENSION_ID } from "./extension-id";
 import { Pedelec, defineTool, type PedelecAvailability, type ToolCallContext } from "./index";
+import { SDK_VERSION } from "./version.generated";
 
 type Listener<T> = (value: T) => void;
 
@@ -243,7 +244,7 @@ describe("Pedelec SDK", () => {
 
     expect(request).toMatchObject({
       type: "create_session",
-      callerSdkVersion: "0.2.2",
+      callerSdkVersion: SDK_VERSION,
       input: {
         provider: "codex",
         effortLevel: "high",

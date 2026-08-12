@@ -313,14 +313,14 @@ test("create_session forwards SDK version metadata separately from consumer inpu
     channelId: "channel_a",
     requestId: "create_version",
     type: "create_session",
-    callerSdkVersion: "0.2.2",
+    callerSdkVersion: "mock-sdk-version",
     input: {
       provider: "codex",
       sandbox: { path: "C:\\workspace\\project", callerSdkVersion: "consumer-value" },
     },
   });
   const request = await respondToNative(background, native, { threadId: "thread_version" });
-  assert.equal(request.callerSdkVersion, "0.2.2");
+  assert.equal(request.callerSdkVersion, "mock-sdk-version");
   assert.equal(request.sandbox.callerSdkVersion, "consumer-value");
   await respondToNative(background, native, {}, 2);
 });
