@@ -5,6 +5,7 @@ use pedelec_core::{
     PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime,
     SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolSpecInput,
 };
+use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -1031,7 +1032,7 @@ fn provider_start_error_details(
         "threadId": thread_id,
         "program": spec.program,
         "args": spec.args,
-        "cwd": spec.cwd.to_string_lossy(),
+        "cwd": path_for_external_use(&spec.cwd),
         "path": command_env_path(&spec.env)
             .or_else(|| env::var_os("PATH"))
             .map(|path| path.to_string_lossy().to_string())
@@ -1316,4 +1317,31 @@ fn core_unavailable_error(_err: io::Error) -> PedelecError {
         error_codes::CORE_RUNTIME_UNAVAILABLE,
         "pedelec-app is not running",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_start_diagnostics_externalize_cwd_without_changing_the_spec() {
+        let cwd = if cfg!(windows) {
+            PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test")
+        } else {
+            PathBuf::from("/tmp/pedelec-sandbox")
+        };
+        let spec = pedelec_core::CommandSpec {
+            program: "codex".into(),
+            args: vec!["--cd".into(), "external path placeholder".into()],
+            cwd: cwd.clone(),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+
+        let details = provider_start_error_details("thread", &spec, None, None);
+
+        assert_eq!(details["cwd"], path_for_external_use(&cwd));
+        assert_eq!(spec.cwd, cwd);
+    }
 }

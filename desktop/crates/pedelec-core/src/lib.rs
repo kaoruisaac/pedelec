@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -970,7 +971,7 @@ impl ProviderAdapter for CodexProviderAdapter {
         let mut args = vec![
             "exec".to_string(),
             "--cd".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
             "--sandbox".to_string(),
             "danger-full-access".to_string(),
             "--skip-git-repo-check".to_string(),
@@ -1005,7 +1006,7 @@ impl ProviderAdapter for CodexProviderAdapter {
         let mut args = vec![
             "exec".to_string(),
             "--cd".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
             "--sandbox".to_string(),
             "danger-full-access".to_string(),
             "--skip-git-repo-check".to_string(),
@@ -1189,7 +1190,7 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
             "--format".to_string(),
             "json".to_string(),
             "--dir".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
         ];
         args.extend(ctx.thread.effort_args.clone());
         args.push("-".to_string());
@@ -1225,7 +1226,7 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
             "--format".to_string(),
             "json".to_string(),
             "--dir".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
             "--session".to_string(),
             provider_session_id.to_string(),
         ];
@@ -1279,7 +1280,7 @@ impl ProviderAdapter for CursorProviderAdapter {
     ) -> Result<CommandSpec, PedelecError> {
         let mut args = vec![
             "--workspace".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--force".to_string(),
@@ -1312,7 +1313,7 @@ impl ProviderAdapter for CursorProviderAdapter {
 
         let mut args = vec![
             "--workspace".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
             "--resume".to_string(),
             provider_session_id.to_string(),
             "--output-format".to_string(),
@@ -1916,7 +1917,7 @@ impl ProviderAdapter for OllamaProviderAdapter {
         args.extend(ctx.thread.effort_args.clone());
         args.extend([
             "--sandbox".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
         ]);
         let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
         let mut env = build_provider_env(ctx)?;
@@ -1973,7 +1974,7 @@ impl ProviderAdapter for OllamaProviderAdapter {
         args.extend(ctx.thread.effort_args.clone());
         args.extend([
             "--sandbox".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
             "--session-id".to_string(),
             provider_session_id.to_string(),
         ]);
@@ -3522,7 +3523,7 @@ impl SandboxManager {
             return Err(PedelecError::with_details(
                 error_codes::SANDBOX_CREATE_FAILED,
                 "thread sandbox already exists",
-                serde_json::json!({ "sandboxPath": sandbox_path.to_string_lossy() }),
+                serde_json::json!({ "sandboxPath": path_for_external_use(&sandbox_path) }),
             ));
         }
 
@@ -3783,7 +3784,7 @@ impl SandboxManager {
             PedelecError::with_details(
                 error_codes::SANDBOX_REMOVE_FAILED,
                 "cannot remove thread sandbox",
-                serde_json::json!({ "path": sandbox_path.to_string_lossy() }),
+                serde_json::json!({ "path": path_for_external_use(sandbox_path) }),
             )
         }))
     }
@@ -3886,7 +3887,7 @@ impl SandboxManager {
             return Err(PedelecError::with_details(
                 error_codes::SANDBOX_PATH_INVALID,
                 "thread sandbox is outside sandbox root",
-                serde_json::json!({ "sandboxPath": path.to_string_lossy() }),
+                serde_json::json!({ "sandboxPath": path_for_external_use(path) }),
             ));
         }
 
@@ -3970,8 +3971,8 @@ fn sandbox_path_invalid_error(
         error_codes::SANDBOX_PATH_INVALID,
         message,
         serde_json::json!({
-            "sandboxPath": custom_path.to_string_lossy(),
-            "managedSandboxRoot": managed_root.to_string_lossy(),
+            "sandboxPath": path_for_external_use(custom_path),
+            "managedSandboxRoot": path_for_external_use(managed_root),
         }),
     )
 }
@@ -3985,7 +3986,7 @@ fn sandbox_path_invalid_io_error(
         error_codes::SANDBOX_PATH_INVALID,
         message,
         serde_json::json!({
-            "sandboxPath": path.to_string_lossy(),
+            "sandboxPath": path_for_external_use(path),
             "error": err.to_string(),
         }),
     )
@@ -4010,7 +4011,7 @@ fn resolve_path_for_overlap(path: &Path) -> Result<PathBuf, PedelecError> {
             PedelecError::with_details(
                 error_codes::SANDBOX_PATH_INVALID,
                 "cannot resolve sandbox path ancestor",
-                serde_json::json!({ "path": path.to_string_lossy() }),
+                serde_json::json!({ "path": path_for_external_use(path) }),
             )
         })?;
         missing_components.push(component.to_os_string());
@@ -4018,7 +4019,7 @@ fn resolve_path_for_overlap(path: &Path) -> Result<PathBuf, PedelecError> {
             return Err(PedelecError::with_details(
                 error_codes::SANDBOX_PATH_INVALID,
                 "cannot resolve sandbox path ancestor",
-                serde_json::json!({ "path": path.to_string_lossy() }),
+                serde_json::json!({ "path": path_for_external_use(path) }),
             ));
         }
     }
@@ -4041,7 +4042,7 @@ fn normalize_absolute_path(path: &Path) -> Result<PathBuf, PedelecError> {
         return Err(PedelecError::with_details(
             error_codes::SANDBOX_PATH_INVALID,
             "sandbox path must be absolute",
-            serde_json::json!({ "path": path.to_string_lossy() }),
+            serde_json::json!({ "path": path_for_external_use(path) }),
         ));
     }
 
@@ -4815,7 +4816,7 @@ impl EventBus {
                 process_id,
                 program: command.program.clone(),
                 args: command.args.clone(),
-                cwd: command.cwd.to_string_lossy().to_string(),
+                cwd: path_for_external_use(&command.cwd),
                 prompt: command.prompt.clone(),
             },
         );
@@ -6535,7 +6536,7 @@ fn build_provider_env(
         ("PEDELEC_PROVIDER".to_string(), provider),
         (
             "PEDELEC_SANDBOX_PATH".to_string(),
-            ctx.thread.sandbox_path.to_string_lossy().to_string(),
+            path_for_external_use(&ctx.thread.sandbox_path),
         ),
         (
             "PEDELEC_CORE_IPC_ENDPOINT".to_string(),
@@ -6649,7 +6650,7 @@ fn build_provider_instruction(thread: &ThreadState, registry: &ToolRegistry) -> 
 7. Respond to the task in the following [Session Preparation] or [User Message] block.\n\
 [/Pedelec Runtime Rules]\n\n\
 [Pedelec App Tool Configuration]\n{configuration}\n[/Pedelec App Tool Configuration]\n\n------\n\n",
-        thread.sandbox_path.to_string_lossy()
+        path_for_external_use(&thread.sandbox_path)
     )
 }
 
@@ -7664,7 +7665,7 @@ fn sandbox_io_error(
     PedelecError::with_details(
         code,
         message,
-        serde_json::json!({ "path": path.to_string_lossy(), "error": err.to_string() }),
+        serde_json::json!({ "path": path_for_external_use(path), "error": err.to_string() }),
     )
 }
 

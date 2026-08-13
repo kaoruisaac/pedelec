@@ -2859,6 +2859,7 @@ dependencies = [
  "encoding_rs",
  "pedelec-cli",
  "pedelec-core",
+ "pedelec-shared",
  "serde",
  "serde_json",
  "tempfile",

@@ -404,6 +404,152 @@ mod tests {
         assert_provider_instruction_absent(&start.command);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn provider_run_commands_externalize_verbatim_sandbox_paths_and_keep_canonical_cwd() {
+        let cases = [
+            ("codex", ProviderCode::Codex, Some("gpt-5")),
+            (
+                "antigravity",
+                ProviderCode::Antigravity,
+                Some("antigravity-2.5-pro"),
+            ),
+            (
+                "opencode",
+                ProviderCode::OpenCode,
+                Some("ollama/qwen2.5-coder:14b"),
+            ),
+            ("cursor", ProviderCode::Cursor, Some("gpt-5")),
+            ("claude", ProviderCode::Claude, Some("sonnet")),
+            ("ollama", ProviderCode::Ollama, Some("qwen3:8b")),
+        ];
+        let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
+        let external = r"C:\Users\kaoru\OneDrive\桌面\test";
+
+        for (name, provider, model) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let thread_id = format!("thread_externalize_run_{name}");
+            let mut runtime = runtime_with_provider_thread(
+                temp.path(),
+                &thread_id,
+                provider.clone(),
+                None,
+                model.map(str::to_string),
+            );
+            runtime
+                .thread_manager
+                .thread_mut(&thread_id)
+                .unwrap()
+                .sandbox_path = verbatim.clone();
+
+            let start = runtime
+                .begin_send_text(SendTextInput {
+                    thread_id,
+                    message: "hello".into(),
+                })
+                .unwrap();
+
+            assert_eq!(start.command.cwd, verbatim);
+            assert_eq!(
+                env_value(&start.command, "PEDELEC_SANDBOX_PATH"),
+                Some(external)
+            );
+            assert!(!start.command.args.iter().any(|arg| arg.contains(r"\\?\")));
+            assert!(!start.command.prompt.contains(r"\\?\"));
+            assert!(start.command.prompt.contains(external));
+
+            let path_flag = match provider {
+                ProviderCode::Codex => Some("--cd"),
+                ProviderCode::OpenCode => Some("--dir"),
+                ProviderCode::Cursor => Some("--workspace"),
+                ProviderCode::Ollama => Some("--sandbox"),
+                ProviderCode::Antigravity | ProviderCode::Claude => None,
+            };
+            if let Some(path_flag) = path_flag {
+                assert!(start
+                    .command
+                    .args
+                    .windows(2)
+                    .any(|args| args == [path_flag, external]));
+            } else {
+                assert!(!start.command.args.iter().any(|arg| arg == external));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_resume_commands_externalize_verbatim_sandbox_paths_and_keep_canonical_cwd() {
+        let cases = [
+            ("codex", ProviderCode::Codex, Some("gpt-5"), "codex-session"),
+            (
+                "opencode",
+                ProviderCode::OpenCode,
+                Some("ollama/qwen2.5-coder:14b"),
+                "opencode-session",
+            ),
+            (
+                "cursor",
+                ProviderCode::Cursor,
+                Some("gpt-5"),
+                "cursor-session",
+            ),
+            (
+                "ollama",
+                ProviderCode::Ollama,
+                Some("qwen3:8b"),
+                "ollama-session",
+            ),
+        ];
+        let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
+        let external = r"C:\Users\kaoru\OneDrive\桌面\test";
+
+        for (name, provider, model, provider_session_id) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let thread_id = format!("thread_externalize_resume_{name}");
+            let mut runtime = runtime_with_provider_thread(
+                temp.path(),
+                &thread_id,
+                provider.clone(),
+                Some(provider_session_id.into()),
+                model.map(str::to_string),
+            );
+            runtime
+                .thread_manager
+                .thread_mut(&thread_id)
+                .unwrap()
+                .sandbox_path = verbatim.clone();
+
+            let start = runtime
+                .begin_send_text(SendTextInput {
+                    thread_id,
+                    message: "continue".into(),
+                })
+                .unwrap();
+
+            assert_eq!(start.command.cwd, verbatim);
+            assert_eq!(
+                env_value(&start.command, "PEDELEC_SANDBOX_PATH"),
+                Some(external)
+            );
+            assert!(!start.command.args.iter().any(|arg| arg.contains(r"\\?\")));
+            assert!(!start.command.prompt.contains(r"\\?\"));
+
+            let path_flag = match provider {
+                ProviderCode::Codex => "--cd",
+                ProviderCode::OpenCode => "--dir",
+                ProviderCode::Cursor => "--workspace",
+                ProviderCode::Ollama => "--sandbox",
+                ProviderCode::Antigravity | ProviderCode::Claude => unreachable!(),
+            };
+            assert!(start
+                .command
+                .args
+                .windows(2)
+                .any(|args| args == [path_flag, external]));
+        }
+    }
+
     #[test]
     fn antigravity_new_command_passes_prompt_as_an_argument() {
         let temp = tempfile::tempdir().unwrap();
@@ -1550,6 +1696,47 @@ mod tests {
         assert!(payload.contains("pedelec-agent"));
         assert!(!payload.contains("ollama_test_key"));
         assert!(!payload.contains("OLLAMA_API_KEY"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_command_started_event_externalizes_verbatim_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_externalize_command_event";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Ollama,
+            None,
+            Some("qwen3:8b".into()),
+        );
+        let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
+        let external = r"C:\Users\kaoru\OneDrive\桌面\test";
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .sandbox_path = verbatim.clone();
+        let event_rx = runtime.event_bus.subscribe(thread_id);
+        let start = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "hello".into(),
+            })
+            .unwrap();
+
+        runtime.emit_provider_command_started(thread_id, 123, &start.command);
+        let events = collect_available_core_events(&event_rx);
+        let event = events
+            .iter()
+            .find_map(|event| match event {
+                ThreadEvent::ProviderCommandStarted { cwd, args, .. } => Some((cwd, args)),
+                _ => None,
+            })
+            .expect("provider command event should be emitted");
+        assert_eq!(event.0, external);
+        assert!(event.1.iter().any(|arg| arg == external));
+        assert!(!serde_json::to_string(&events).unwrap().contains(r"\\?\"));
     }
 
     #[test]

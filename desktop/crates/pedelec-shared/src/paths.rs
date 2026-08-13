@@ -7,8 +7,49 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(windows)]
+use std::path::{Component, Prefix};
+
 pub const APP_LAUNCH_CONFIG_VERSION: u32 = 1;
 pub const BACKGROUND_LAUNCH_ARG: &str = "--background";
+
+/// Formats an authoritative filesystem path for provider, UI, and diagnostic
+/// representations without changing the path used for filesystem operations.
+pub fn path_for_external_use(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let mut components = path.components();
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return path.to_string_lossy().into_owned();
+        };
+
+        let rest = components.as_path();
+        let external = match prefix.kind() {
+            Prefix::VerbatimDisk(disk) => {
+                let mut external = OsString::new();
+                external.push(format!("{}:", disk as char));
+                external.push(rest.as_os_str());
+                external
+            }
+            Prefix::VerbatimUNC(server, share) => {
+                let mut external = OsString::from(r"\\");
+                external.push(server);
+                external.push(r"\");
+                external.push(share);
+                external.push(rest.as_os_str());
+                external
+            }
+            _ => return path.to_string_lossy().into_owned(),
+        };
+
+        return external.to_string_lossy().into_owned();
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -133,4 +174,61 @@ fn launch_error(reason: impl Into<String>, detail: impl Into<String>) -> Pedelec
         "pedelec-app is not running",
         serde_json::json!({ "reason": reason.into(), "detail": detail.into() }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_for_external_use;
+    use std::path::Path;
+
+    #[cfg(windows)]
+    #[test]
+    fn externalizes_verbatim_drive_path() {
+        assert_eq!(
+            path_for_external_use(Path::new(r"\\?\C:\foo\bar")),
+            r"C:\foo\bar"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn externalizes_verbatim_unc_path() {
+        assert_eq!(
+            path_for_external_use(Path::new(r"\\?\UNC\server\share\foo")),
+            r"\\server\share\foo"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn externalizes_verbatim_drive_path_with_non_ascii_components() {
+        assert_eq!(
+            path_for_external_use(Path::new(r"\\?\C:\Users\kaoru\OneDrive\桌面\test")),
+            r"C:\Users\kaoru\OneDrive\桌面\test"
+        );
+    }
+
+    #[test]
+    fn preserves_normal_path() {
+        let path = if cfg!(windows) {
+            Path::new(r"C:\foo\bar")
+        } else {
+            Path::new("/foo/bar")
+        };
+        assert_eq!(path_for_external_use(path), path.to_string_lossy());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preserves_normal_unc_path() {
+        let path = Path::new(r"\\server\share\foo");
+        assert_eq!(path_for_external_use(path), path.to_string_lossy());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_path_presentation_is_identity() {
+        let path = Path::new("/tmp/桌面/test");
+        assert_eq!(path_for_external_use(path), path.to_string_lossy());
+    }
 }
