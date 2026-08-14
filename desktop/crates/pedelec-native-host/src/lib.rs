@@ -667,7 +667,10 @@ mod tests {
             request.caller_origin.as_deref(),
             Some("https://approved.example")
         );
-        assert_eq!(request.caller_sdk_version.as_deref(), Some("mock-sdk-version"));
+        assert_eq!(
+            request.caller_sdk_version.as_deref(),
+            Some("mock-sdk-version")
+        );
         assert_eq!(request.payload, Some(json!({})));
     }
 

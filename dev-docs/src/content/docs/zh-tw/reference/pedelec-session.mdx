@@ -71,6 +71,7 @@ prepare(): Promise<void>
 - ended 後 reject `SESSION_ENDED`；
 - preparation chat delta 不送到 `onChat()`；
 - 仍可 emit status/error；
+- 只有 Desktop 驗證 provider 回覆 trim 後完全等於 `PEDELEC_PREPARED` 才 resolve（前後 whitespace 允許）；
 - 不是 `sendText()` 必要前置。
 
 ```ts

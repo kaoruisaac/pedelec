@@ -71,6 +71,7 @@ Behavior:
 - rejects with `SESSION_ENDED` after end;
 - hides preparation chat deltas from `onChat()`;
 - can emit status/error events;
+- resolves only after Desktop verifies the provider's exact `PEDELEC_PREPARED` acknowledgment (surrounding whitespace is allowed);
 - is not required before `sendText()`.
 
 ```ts

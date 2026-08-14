@@ -6,6 +6,7 @@ mod tests {
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
     #[cfg(unix)]
@@ -19,6 +20,7 @@ mod tests {
                 path: Some(PathBuf::from("C:/providers/codex.cmd")),
                 version: Some(ProviderVersion(vec![1, 2, 3])),
                 error: None,
+                bootstrap_capabilities: None,
             },
         )]);
 
@@ -39,6 +41,108 @@ mod tests {
 
         let antigravity = provider_info_for(ProviderCode::Antigravity, &scan, None);
         assert!(!antigravity.scanned);
+    }
+
+    #[test]
+    fn provider_bootstrap_modes_cover_internal_defaults_and_probe_fallbacks() {
+        let runtime = CoreRuntime::default();
+        assert_eq!(
+            runtime.provider_bootstrap_mode(&ProviderCode::Ollama),
+            ProviderBootstrapMode::NativeSystemPrompt
+        );
+        assert_eq!(
+            runtime.provider_bootstrap_mode(&ProviderCode::Cursor),
+            ProviderBootstrapMode::UserPromptFallback
+        );
+
+        let scan = ProviderCli {
+            path: Some(PathBuf::from("provider")),
+            version: Some(ProviderVersion(vec![1])),
+            error: None,
+            bootstrap_capabilities: None,
+        };
+        assert_eq!(
+            provider_bootstrap_capability_from_probe(
+                &ProviderCode::Claude,
+                Some(&scan),
+                true,
+                false
+            )
+            .privileged_bootstrap,
+            ProviderBootstrapMode::ClaudeAppendSystemPrompt
+        );
+        assert_eq!(
+            provider_bootstrap_capability_from_probe(
+                &ProviderCode::Claude,
+                Some(&scan),
+                false,
+                false
+            )
+            .privileged_bootstrap,
+            ProviderBootstrapMode::UserPromptFallback
+        );
+        assert_eq!(
+            provider_bootstrap_capability_from_probe(
+                &ProviderCode::OpenCode,
+                Some(&scan),
+                false,
+                true
+            )
+            .privileged_bootstrap,
+            ProviderBootstrapMode::OpenCodeInlineAgent
+        );
+        assert_eq!(
+            provider_bootstrap_capability_from_probe(
+                &ProviderCode::OpenCode,
+                Some(&scan),
+                false,
+                false
+            )
+            .privileged_bootstrap,
+            ProviderBootstrapMode::UserPromptFallback
+        );
+        assert_eq!(
+            provider_bootstrap_capability_from_probe(
+                &ProviderCode::Cursor,
+                Some(&scan),
+                true,
+                true
+            )
+            .privileged_bootstrap,
+            ProviderBootstrapMode::UserPromptFallback
+        );
+    }
+
+    #[test]
+    fn antigravity_custom_agent_version_gate_maps_supported_versions() {
+        for (version, expected) in [
+            (vec![1, 1, 5], ProviderBootstrapMode::UserPromptFallback),
+            (
+                vec![1, 1, 6],
+                ProviderBootstrapMode::AntigravityWorkspaceAgent,
+            ),
+            (
+                vec![1, 2, 0],
+                ProviderBootstrapMode::AntigravityWorkspaceAgent,
+            ),
+        ] {
+            let scan = ProviderCli {
+                path: Some(PathBuf::from("agy")),
+                version: Some(ProviderVersion(version)),
+                error: None,
+                bootstrap_capabilities: None,
+            };
+            assert_eq!(
+                provider_bootstrap_capability_from_probe(
+                    &ProviderCode::Antigravity,
+                    Some(&scan),
+                    false,
+                    false
+                )
+                .privileged_bootstrap,
+                expected
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -273,23 +377,24 @@ mod tests {
 
         assert_eq!(start.command.program, "codex");
         let sandbox_path = temp.path().join("sandbox").join("thread_codex_new");
-        assert_eq!(
-            start.command.args,
-            vec![
-                "exec",
-                "-c",
-                "skills.include_instructions=false",
-                "--cd",
-                sandbox_path.to_str().unwrap(),
-                "--sandbox",
-                "danger-full-access",
-                "--skip-git-repo-check",
-                "--json",
-                "-m",
-                "gpt-5",
-                "-"
-            ]
-        );
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["-c", "skills.include_instructions=false"]));
+        let bootstrap = start
+            .command
+            .args
+            .windows(2)
+            .find(|args| args[0] == "-c" && args[1].starts_with("developer_instructions="))
+            .expect("Codex developer bootstrap");
+        assert!(bootstrap[1].contains("Pedelec is the host application"));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["--cd", sandbox_path.to_str().unwrap()]));
+        assert!(start.command.args.ends_with(&["gpt-5".into(), "-".into()]));
         assert_eq!(start.command.cwd, sandbox_path);
         assert!(!start.command.args.iter().any(|arg| arg == "--last"));
         assert_provider_instruction_present(&start.command);
@@ -325,6 +430,7 @@ mod tests {
                 path: Some(selected_provider.clone()),
                 version: Some(ProviderVersion(vec![1, 2, 3])),
                 error: None,
+                bootstrap_capabilities: None,
             },
         );
 
@@ -377,27 +483,31 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            start.command.args,
-            vec![
-                "exec",
-                "-c",
-                "skills.include_instructions=false",
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["-c", "skills.include_instructions=false"]));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args[0] == "-c" && args[1].starts_with("developer_instructions=")));
+        assert!(start.command.args.windows(2).any(|args| {
+            args == [
                 "--cd",
                 temp.path()
                     .join("sandbox")
                     .join("thread_codex_resume")
                     .to_str()
                     .unwrap(),
-                "--sandbox",
-                "danger-full-access",
-                "--skip-git-repo-check",
-                "--json",
-                "resume",
-                "123e4567-e89b-12d3-a456-426614174000",
-                "-"
             ]
-        );
+        }));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| { args == ["resume", "123e4567-e89b-12d3-a456-426614174000"] }));
         assert!(!start.command.args.iter().any(|arg| arg == "--last"));
         assert_eq!(start.command.prompt, "continue");
         assert_eq!(start.command.stdin, "continue");
@@ -964,22 +1074,25 @@ mod tests {
 
         let sandbox_path = temp.path().join("sandbox").join("thread_opencode_new");
         assert_eq!(start.command.program, "opencode");
-        assert_eq!(
-            start.command.args,
-            vec![
-                "run",
-                "--dangerously-skip-permissions",
-                "--thinking",
-                "--pure",
-                "--format",
-                "json",
-                "--dir",
-                sandbox_path.to_str().unwrap(),
-                "--model",
-                "ollama/qwen2.5-coder:14b",
-                "-"
-            ]
-        );
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| { args == ["--agent", PEDELEC_OPENCODE_AGENT] }));
+        assert_eq!(start.command.args.last().map(String::as_str), Some("-"));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["--dir", sandbox_path.to_str().unwrap()]));
+        let config: Value =
+            serde_json::from_str(env_value(&start.command, OPENCODE_CONFIG_CONTENT_ENV).unwrap())
+                .unwrap();
+        assert_eq!(config["agent"][PEDELEC_OPENCODE_AGENT]["mode"], "primary");
+        assert!(config["agent"][PEDELEC_OPENCODE_AGENT]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Pedelec is the host application"));
         assert_eq!(start.command.cwd, sandbox_path);
         assert!(start.command.stdin.ends_with(message));
         assert_provider_instruction_present(&start.command);
@@ -1047,6 +1160,332 @@ mod tests {
         assert_eq!(defaults.get("skill").and_then(Value::as_str), Some("deny"));
         assert!(build_opencode_permission_overlay(Some("not-json")).is_none());
         assert!(build_opencode_permission_overlay(Some(r#"["allow"]"#)).is_none());
+    }
+
+    #[test]
+    fn opencode_bootstrap_merges_inline_config_and_rejects_invalid_json() {
+        let command = CommandSpec {
+            program: "opencode".into(),
+            args: vec![],
+            cwd: PathBuf::from("."),
+            env: vec![(
+                OPENCODE_CONFIG_CONTENT_ENV.into(),
+                r#"{"theme":"dark","agent":{"custom":{"mode":"subagent"}}}"#.into(),
+            )],
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+        let merged: Value =
+            serde_json::from_str(&merge_opencode_runtime_agent_config(&command).unwrap()).unwrap();
+        assert_eq!(merged["theme"], "dark");
+        assert_eq!(merged["agent"]["custom"]["mode"], "subagent");
+        assert_eq!(merged["agent"][PEDELEC_OPENCODE_AGENT]["mode"], "primary");
+        assert!(merged["agent"][PEDELEC_OPENCODE_AGENT]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Pedelec is the host application"));
+
+        let invalid = CommandSpec {
+            env: vec![(OPENCODE_CONFIG_CONTENT_ENV.into(), "not-json".into())],
+            ..command
+        };
+        assert_eq!(
+            merge_opencode_runtime_agent_config(&invalid)
+                .unwrap_err()
+                .code,
+            error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID
+        );
+    }
+
+    #[test]
+    fn opencode_agent_selector_has_pedelec_precedence_over_effort_args() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_opencode_agent_precedence",
+            ProviderCode::OpenCode,
+            None,
+            Some("model".into()),
+        );
+        runtime
+            .thread_manager
+            .thread_mut("thread_opencode_agent_precedence")
+            .unwrap()
+            .effort_args
+            .extend([
+                "--agent".into(),
+                "user-agent".into(),
+                "--agent=other".into(),
+            ]);
+
+        let command = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: "thread_opencode_agent_precedence".into(),
+                message: "hello".into(),
+            })
+            .unwrap()
+            .command;
+        assert_eq!(
+            command
+                .args
+                .windows(2)
+                .filter(|args| args[0] == "--agent")
+                .count(),
+            1
+        );
+        assert!(command
+            .args
+            .windows(2)
+            .any(|args| args == ["--agent", PEDELEC_OPENCODE_AGENT]));
+    }
+
+    #[test]
+    fn antigravity_supported_version_ensures_reserved_workspace_agent_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_agent_supported";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        runtime.provider_scan.insert(
+            ProviderCode::Antigravity,
+            ProviderCli {
+                path: None,
+                version: Some(ProviderVersion(vec![1, 1, 6])),
+                error: None,
+                bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
+                    privileged_bootstrap: ProviderBootstrapMode::AntigravityWorkspaceAgent,
+                }),
+            },
+        );
+        let sandbox = runtime.thread_sandbox_path(thread_id).unwrap();
+        let agent_path = sandbox
+            .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
+            .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
+        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        fs::write(&agent_path, "stale").unwrap();
+
+        let first = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "hello".into(),
+            })
+            .unwrap()
+            .command;
+        let expected = fs::read_to_string(&agent_path).unwrap();
+        assert!(expected.contains("name: pedelec-runtime"));
+        assert!(expected.contains("mainAgent: true"));
+        assert!(expected.contains("subagent: false"));
+        assert!(expected.contains("Pedelec is the host application"));
+        assert!(first
+            .args
+            .windows(2)
+            .any(|args| args == ["--agent", PEDELEC_OPENCODE_AGENT]));
+
+        runtime.thread_manager.thread_mut(thread_id).unwrap().status = ThreadStatus::Idle;
+        let prepare = runtime
+            .begin_prepare_thread(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(prepare
+            .args
+            .windows(2)
+            .any(|args| args == ["--agent", PEDELEC_OPENCODE_AGENT]));
+        runtime.thread_manager.thread_mut(thread_id).unwrap().status = ThreadStatus::Idle;
+        runtime
+            .thread_manager
+            .provider_state_mut(thread_id)
+            .unwrap()
+            .provider_session_id = Some("agy-session".into());
+        let second = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "again".into(),
+            })
+            .unwrap()
+            .command;
+        assert_eq!(fs::read_to_string(&agent_path).unwrap(), expected);
+        assert_eq!(
+            second
+                .args
+                .windows(2)
+                .filter(|args| args[0] == "--agent")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn antigravity_supported_version_writes_agent_into_custom_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom_workspace = temp.path().join("custom-project");
+        let mut runtime = CoreRuntime {
+            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            ..CoreRuntime::default()
+        };
+        let thread_id = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Antigravity,
+                effort_level: None,
+                skills: Some(sample_skills_input()),
+                sandbox: Some(CreateThreadSandboxInput {
+                    path: custom_workspace.clone(),
+                }),
+            })
+            .unwrap()
+            .thread_id;
+        runtime.provider_scan.insert(
+            ProviderCode::Antigravity,
+            ProviderCli {
+                path: None,
+                version: Some(ProviderVersion(vec![1, 1, 6])),
+                error: None,
+                bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
+                    privileged_bootstrap: ProviderBootstrapMode::AntigravityWorkspaceAgent,
+                }),
+            },
+        );
+
+        let command = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.clone(),
+                message: "hello".into(),
+            })
+            .unwrap()
+            .command;
+        let thread = runtime.thread_manager.thread(&thread_id).unwrap();
+        let agent_path = thread
+            .sandbox_path
+            .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
+            .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
+
+        assert_eq!(
+            thread.sandbox_path,
+            custom_workspace.canonicalize().unwrap()
+        );
+        assert!(agent_path.is_file());
+        assert!(fs::read_to_string(agent_path)
+            .unwrap()
+            .contains("Pedelec is the host application"));
+        assert!(command
+            .args
+            .windows(2)
+            .any(|args| args == ["--agent", PEDELEC_OPENCODE_AGENT]));
+    }
+
+    #[test]
+    fn antigravity_old_version_falls_back_without_workspace_agent_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_agent_old";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        runtime.provider_scan.insert(
+            ProviderCode::Antigravity,
+            ProviderCli {
+                path: None,
+                version: Some(ProviderVersion(vec![1, 1, 5])),
+                error: None,
+                bootstrap_capabilities: None,
+            },
+        );
+        let command = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "hello".into(),
+            })
+            .unwrap()
+            .command;
+        assert!(!command.args.iter().any(|arg| arg == "--agent"));
+        assert!(!runtime
+            .thread_sandbox_path(thread_id)
+            .unwrap()
+            .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
+            .exists());
+        assert!(command.prompt.contains("[Pedelec Host Bootstrap]"));
+        assert!(command.prompt.contains("[Pedelec Host Context]"));
+        assert!(command.prompt.contains("[User Message]"));
+        assert!(command.prompt.contains("PEDELEC_PREPARED"));
+        assert!(!command.prompt.contains("[Pedelec Runtime Rules]"));
+
+        runtime.thread_manager.thread_mut(thread_id).unwrap().status = ThreadStatus::Idle;
+        let prepare = runtime
+            .begin_prepare_thread(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(!prepare.args.iter().any(|arg| arg == "--agent"));
+        assert!(prepare.prompt.contains("[Pedelec Host Bootstrap]"));
+        assert!(prepare.prompt.contains("[Pedelec Host Context]"));
+        assert!(prepare.prompt.contains("PEDELEC_PREPARED"));
+        assert!(prepare.prompt.ends_with("[Session Preparation]"));
+        assert!(!prepare.prompt.contains("After preparation is complete"));
+    }
+
+    #[test]
+    fn antigravity_sessions_sharing_a_sandbox_can_ensure_the_agent_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_id = "thread_antigravity_shared_first";
+        let second_id = "thread_antigravity_shared_second";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            first_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
+        );
+        let first = runtime.thread_manager.thread(first_id).unwrap().clone();
+        let mut second = first.clone();
+        second.thread_id = second_id.into();
+        second.status = ThreadStatus::Idle;
+        second.process_id = None;
+        runtime.thread_manager.insert_thread(
+            second,
+            ProviderAdapterState {
+                provider_session_id: None,
+                last_process_id: None,
+                has_user_message: false,
+            },
+        );
+        runtime.tool_registry.insert(
+            second_id,
+            ToolRegistry::from_skills_input(Some(&sample_skills_input())).unwrap(),
+        );
+
+        runtime
+            .begin_send_text(SendTextInput {
+                thread_id: first_id.into(),
+                message: "first".into(),
+            })
+            .unwrap();
+        runtime.thread_manager.thread_mut(first_id).unwrap().status = ThreadStatus::Idle;
+        runtime
+            .begin_send_text(SendTextInput {
+                thread_id: second_id.into(),
+                message: "second".into(),
+            })
+            .unwrap();
+
+        let agent_path = first
+            .sandbox_path
+            .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
+            .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
+        assert!(agent_path.is_file());
+        assert!(fs::read_to_string(agent_path)
+            .unwrap()
+            .contains("Pedelec is the host application"));
     }
 
     #[test]
@@ -1146,6 +1585,14 @@ mod tests {
         );
         assert_eq!(start.command.cwd, sandbox_path);
         assert!(start.command.stdin.ends_with(message));
+        assert!(start.command.prompt.contains("[Pedelec Host Bootstrap]"));
+        assert!(start.command.prompt.contains("[Pedelec Host Context]"));
+        assert!(start.command.prompt.contains("[User Message]"));
+        assert!(start.command.prompt.contains("PEDELEC_PREPARED"));
+        assert!(!start.command.prompt.contains("[Pedelec Runtime Rules]"));
+        assert!(!sandbox_path.join(".cursor").exists());
+        assert!(!sandbox_path.join("AGENTS.md").exists());
+        assert!(!sandbox_path.join("CLAUDE.md").exists());
         assert_provider_instruction_present(&start.command);
         assert!(!start
             .command
@@ -1191,7 +1638,51 @@ mod tests {
             .any(|args| args == ["--output-format", "stream-json"]));
         assert_eq!(start.command.prompt, "continue");
         assert_eq!(start.command.stdin, "continue");
+        assert!(!start.command.prompt.contains("[Pedelec Host Bootstrap]"));
+        assert!(!start.command.prompt.contains("[Pedelec Host Context]"));
         assert_provider_instruction_absent(&start.command);
+    }
+
+    #[test]
+    fn cursor_prepare_uses_fallback_bootstrap_and_short_prepare_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_cursor_prepare",
+            ProviderCode::Cursor,
+            None,
+            None,
+        );
+
+        let command = runtime
+            .begin_prepare_thread(PrepareThreadInput {
+                thread_id: "thread_cursor_prepare".into(),
+            })
+            .unwrap()
+            .command
+            .unwrap();
+
+        assert!(command.prompt.contains("[Pedelec Host Bootstrap]"));
+        assert!(command.prompt.contains("[Pedelec Host Context]"));
+        assert!(command.prompt.contains("PEDELEC_PREPARED"));
+        assert!(!command.prompt.contains("[Pedelec Runtime Rules]"));
+        assert!(command.prompt.ends_with("[Session Preparation]"));
+        assert!(!command.prompt.contains("After preparation is complete"));
+        assert!(!runtime
+            .thread_sandbox_path("thread_cursor_prepare")
+            .unwrap()
+            .join(".cursor")
+            .exists());
+        assert!(!runtime
+            .thread_sandbox_path("thread_cursor_prepare")
+            .unwrap()
+            .join("AGENTS.md")
+            .exists());
+        assert!(!runtime
+            .thread_sandbox_path("thread_cursor_prepare")
+            .unwrap()
+            .join("CLAUDE.md")
+            .exists());
     }
 
     #[test]
@@ -1298,19 +1789,24 @@ mod tests {
 
         let sandbox_path = temp.path().join("sandbox").join("thread_claude_new");
         assert_eq!(start.command.program, "claude");
-        assert_eq!(
-            start.command.args,
-            vec![
-                "-p",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--model",
-                "sonnet",
-                "--disable-slash-commands",
-            ]
-        );
+        assert!(start.command.args.windows(2).any(|args| {
+            args[0] == "--append-system-prompt" && args[1] == build_pedelec_bootstrap_instruction()
+        }));
+        assert!(!start
+            .command
+            .args
+            .iter()
+            .any(|arg| arg == "--system-prompt"));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["--model", "sonnet"]));
+        assert!(start
+            .command
+            .args
+            .iter()
+            .any(|arg| arg == "--disable-slash-commands"));
         assert_eq!(start.command.cwd, sandbox_path);
         assert!(start.command.stdin.ends_with(message));
         assert_provider_instruction_present(&start.command);
@@ -1338,21 +1834,24 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            start.command.args,
-            vec![
-                "-p",
-                "--resume",
-                "4fab02ca-67b9-489d-8b89-0b1f0b9550e6",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--dangerously-skip-permissions",
-                "--model",
-                "sonnet",
-                "--disable-slash-commands",
-            ]
-        );
+        assert!(start.command.args.windows(2).any(|args| {
+            args[0] == "--append-system-prompt" && args[1] == build_pedelec_bootstrap_instruction()
+        }));
+        assert!(!start
+            .command
+            .args
+            .iter()
+            .any(|arg| arg == "--system-prompt"));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["--resume", "4fab02ca-67b9-489d-8b89-0b1f0b9550e6"]));
+        assert!(start
+            .command
+            .args
+            .iter()
+            .any(|arg| arg == "--disable-slash-commands"));
         assert_eq!(start.command.prompt, "continue");
         assert_eq!(start.command.stdin, "continue");
         assert_provider_instruction_absent(&start.command);
@@ -2063,7 +2562,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(settings.provider_settings.ollama.api_key, "");
-        assert!(settings.provider_settings.ollama.efforts_args.default.is_empty());
+        assert!(settings
+            .provider_settings
+            .ollama
+            .efforts_args
+            .default
+            .is_empty());
     }
 
     #[test]
@@ -2262,7 +2766,12 @@ mod tests {
             })
             .unwrap();
 
-        assert!(saved.provider_settings.codex.efforts_args.default.is_empty());
+        assert!(saved
+            .provider_settings
+            .codex
+            .efforts_args
+            .default
+            .is_empty());
         assert!(saved.provider_settings.codex.efforts_args.low.is_empty());
         assert!(saved.provider_settings.codex.efforts_args.high.is_empty());
     }
@@ -2291,8 +2800,7 @@ mod tests {
     fn update_settings_allows_unavailable_ollama_provider() {
         let temp = tempfile::tempdir().unwrap();
         let mut provider_settings = ProviderSettingsInput::default();
-        provider_settings.ollama.efforts_args.default =
-            vec!["--model".into(), "qwen3:8b".into()];
+        provider_settings.ollama.efforts_args.default = vec!["--model".into(), "qwen3:8b".into()];
         let mut runtime = CoreRuntime {
             settings_file_path: Some(temp.path().join("settings.json")),
             provider_path_value_override: Some(OsString::from("")),
@@ -2315,8 +2823,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "codex");
         let mut provider_settings = ProviderSettingsInput::default();
-        provider_settings.codex.efforts_args.default =
-            vec!["-m".into(), "gpt-5".into()];
+        provider_settings.codex.efforts_args.default = vec!["-m".into(), "gpt-5".into()];
         provider_settings.antigravity.efforts_args.high =
             vec!["--model".into(), "antigravity-2.5-pro".into()];
         let mut runtime = CoreRuntime {
@@ -2401,8 +2908,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "codex");
         let mut provider_settings = ProviderSettingsInput::default();
-        provider_settings.ollama.efforts_args.default =
-            vec!["--model".into(), "qwen3:8b".into()];
+        provider_settings.ollama.efforts_args.default = vec!["--model".into(), "qwen3:8b".into()];
         provider_settings.ollama.api_key = Some(String::new());
         let mut runtime = CoreRuntime {
             settings_file_path: Some(temp.path().join("settings.json")),
@@ -2498,7 +3004,12 @@ mod tests {
         assert!(normalize_efforts_args(
             ProviderCode::Antigravity,
             EffortsArgs {
-                default: vec!["--model".into(), "agy-model".into(), "--effort".into(), "high".into()],
+                default: vec![
+                    "--model".into(),
+                    "agy-model".into(),
+                    "--effort".into(),
+                    "high".into()
+                ],
                 ..EffortsArgs::default()
             },
         )
@@ -2529,7 +3040,11 @@ mod tests {
         )
         .is_err());
 
-        for provider in [ProviderCode::OpenCode, ProviderCode::Cursor, ProviderCode::Ollama] {
+        for provider in [
+            ProviderCode::OpenCode,
+            ProviderCode::Cursor,
+            ProviderCode::Ollama,
+        ] {
             assert!(normalize_efforts_args(
                 provider,
                 EffortsArgs {
@@ -2578,7 +3093,10 @@ mod tests {
                 sandbox: None,
             })
             .unwrap();
-        let low_state = runtime.thread_manager.thread(&low_thread.thread_id).unwrap();
+        let low_state = runtime
+            .thread_manager
+            .thread(&low_thread.thread_id)
+            .unwrap();
         assert_eq!(low_state.effort_level, EffortLevel::Low);
         assert!(low_state.effort_args.is_empty());
     }
@@ -2613,8 +3131,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
         let mut settings = PedelecSettings::default();
-        settings.provider_settings.codex.efforts_args.high =
-            vec!["-m".into(), "gpt-5-high".into()];
+        settings.provider_settings.codex.efforts_args.high = vec!["-m".into(), "gpt-5-high".into()];
         write_settings_file(&settings_path, &settings).unwrap();
         let mut runtime = CoreRuntime {
             settings_file_path: Some(settings_path.clone()),
@@ -2678,9 +3195,17 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair == ["-m", "gpt-snapshot"]));
-        assert!(!first.command.args.windows(2).any(|pair| pair == ["-m", "gpt-changed"]));
+        assert!(!first
+            .command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-m", "gpt-changed"]));
 
-        runtime.thread_manager.thread_mut(&thread_id).unwrap().status = ThreadStatus::Idle;
+        runtime
+            .thread_manager
+            .thread_mut(&thread_id)
+            .unwrap()
+            .status = ThreadStatus::Idle;
         runtime
             .thread_manager
             .provider_state_mut(&thread_id)
@@ -2697,7 +3222,11 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair == ["-m", "gpt-snapshot"]));
-        assert!(!resume.command.args.windows(2).any(|pair| pair == ["-m", "gpt-changed"]));
+        assert!(!resume
+            .command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-m", "gpt-changed"]));
     }
 
     #[test]
@@ -3367,27 +3896,21 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            start.command.args,
-            vec![
-                "exec",
-                "-c",
-                "skills.include_instructions=false",
-                "--cd",
-                temp.path()
-                    .join("sandbox")
-                    .join("thread_codex_started")
-                    .to_str()
-                    .unwrap(),
-                "--sandbox",
-                "danger-full-access",
-                "--skip-git-repo-check",
-                "--json",
-                "resume",
-                "019e91d7-4a21-7ca0-aeef-c27ce6e334c5",
-                "-"
-            ]
-        );
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args == ["-c", "skills.include_instructions=false"]));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| args[0] == "-c" && args[1].starts_with("developer_instructions=")));
+        assert!(start
+            .command
+            .args
+            .windows(2)
+            .any(|args| { args == ["resume", "019e91d7-4a21-7ca0-aeef-c27ce6e334c5"] }));
     }
 
     #[test]
@@ -3505,9 +4028,11 @@ mod tests {
 
         let instruction = build_provider_instruction(&thread, &ToolRegistry::default());
 
+        assert!(instruction.contains("[Pedelec Host Context]"));
+        assert!(instruction.contains("Sandbox Path:"));
+        assert!(!instruction.contains("[Pedelec App Tool Configuration]"));
         assert!(!instruction.contains("tools.md"));
         assert!(!instruction.contains("pedelec-cli tool-call"));
-        assert_eq!(instruction, "");
     }
 
     #[test]
@@ -3530,10 +4055,13 @@ mod tests {
         let registry = ToolRegistry::from_skills_input(Some(&sample_skills_input())).unwrap();
         let instruction = build_provider_instruction(&thread, &registry);
 
-        assert!(instruction.contains("[Pedelec Runtime Rules]"));
+        assert!(instruction.contains("[Pedelec Host Context]"));
         assert!(instruction.contains("[Pedelec App Tool Configuration]"));
         assert!(instruction.contains("pedelec-cli tool-spec get_app_state"));
         assert!(instruction.contains("pedelec-cli tool-call get_app_state '<json_args>'"));
+        assert!(!instruction.contains("[Pedelec Runtime Rules]"));
+        assert!(!instruction
+            .contains("All of the following content is executed under the Pedelec Runtime"));
         assert!(!instruction.contains("tools.md"));
         assert!(!instruction.contains("argsSchema"));
     }
@@ -3912,7 +4440,11 @@ mod tests {
         };
         assert_eq!(
             runtime
-                .create_sdk_thread(invalid_skills, "https://example.com", Some("mock-sdk-version"))
+                .create_sdk_thread(
+                    invalid_skills,
+                    "https://example.com",
+                    Some("mock-sdk-version")
+                )
                 .unwrap_err()
                 .code,
             error_codes::TOOLS_MANIFEST_INVALID
@@ -4987,10 +5519,11 @@ mod tests {
         let command = start.command.unwrap();
 
         assert!(command.stdin.contains("[Session Preparation]"));
-        assert!(command.stdin.contains("PEDELEC_PREPARED"));
-        assert!(command.stdin.contains(
-            "Respond to the task in the following [Session Preparation] or [User Message] block."
-        ));
+        assert!(command
+            .args
+            .iter()
+            .any(|arg| arg.contains("PEDELEC_PREPARED")));
+        assert!(!command.stdin.contains("After preparation is complete"));
         assert!(!command.stdin.contains("\n[User Message]\n"));
         assert!(command
             .args
@@ -5004,6 +5537,145 @@ mod tests {
                 .status,
             ThreadStatus::Running
         );
+    }
+
+    fn complete_prepare_with_codex_output(
+        output: &str,
+        include_session_id: bool,
+    ) -> (CoreRuntime, String, Vec<ThreadEvent>) {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = format!("thread_prepare_ack_{}", Uuid::new_v4().simple());
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), &thread_id, ProviderCode::Codex, None, None);
+        let event_rx = runtime.event_bus.subscribe(&thread_id);
+        runtime
+            .begin_prepare_thread(PrepareThreadInput {
+                thread_id: thread_id.clone(),
+            })
+            .unwrap();
+        runtime.register_provider_process(
+            &thread_id,
+            7,
+            Arc::new(Mutex::new(None)),
+            RunningProviderProcessPurpose::Prepare,
+        );
+        let line = if include_session_id {
+            format!(r#"{{"sessionId":"prepare-session","text":{output:?}}}"#)
+        } else {
+            format!(r#"{{"text":{output:?}}}"#)
+        };
+        runtime.emit_provider_stdout(&thread_id, format!("{line}\n"));
+        runtime.complete_provider_process(&thread_id, 7, success_exit_status());
+        (runtime, thread_id, collect_available_core_events(&event_rx))
+    }
+
+    #[test]
+    fn prepare_accepts_only_trimmed_exact_acknowledgment_and_keeps_prepare_chat_internal() {
+        for output in [
+            "PEDELEC_PREPARED",
+            "PEDELEC_PREPARED\n",
+            " PEDELEC_PREPARED ",
+        ] {
+            let (runtime, thread_id, events) = complete_prepare_with_codex_output(output, true);
+            assert_eq!(runtime.thread_status(&thread_id), Some(ThreadStatus::Idle));
+            assert_eq!(
+                runtime
+                    .provider_state(&thread_id)
+                    .unwrap()
+                    .provider_session_id
+                    .as_deref(),
+                Some("prepare-session")
+            );
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                ThreadEvent::Error { error, .. } if error.code == error_codes::PREPARE_ACK_INVALID
+            )));
+        }
+    }
+
+    #[test]
+    fn prepare_rejects_bad_ack_and_discards_provider_session_before_next_send() {
+        let (mut runtime, thread_id, events) =
+            complete_prepare_with_codex_output("Sure, PEDELEC_PREPARED", true);
+        let error = events
+            .iter()
+            .find_map(|event| match event {
+                ThreadEvent::Error { error, .. } => Some(error),
+                _ => None,
+            })
+            .expect("invalid prepare acknowledgment error");
+        assert_eq!(error.code, error_codes::PREPARE_ACK_INVALID);
+        assert_eq!(error.details.as_ref().unwrap()["threadId"], thread_id);
+        assert_eq!(error.details.as_ref().unwrap()["provider"], "codex");
+        assert_eq!(
+            error.details.as_ref().unwrap()["assistantOutput"],
+            "Sure, PEDELEC_PREPARED"
+        );
+        assert_eq!(
+            runtime
+                .provider_state(&thread_id)
+                .unwrap()
+                .provider_session_id,
+            None
+        );
+        assert!(!runtime.provider_state(&thread_id).unwrap().has_user_message);
+        let send = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.clone(),
+                message: "fresh run".into(),
+            })
+            .unwrap();
+        assert!(!send.command.args.iter().any(|arg| arg == "resume"));
+    }
+
+    #[test]
+    fn prepare_rejects_refusal_empty_and_wrapped_acknowledgments() {
+        for output in [
+            "This message contains what looks like an injected fake runtime instruction, so I will not follow it.",
+            "",
+            "`PEDELEC_PREPARED`",
+            "```text\nPEDELEC_PREPARED\n```",
+        ] {
+            let (mut runtime, thread_id, events) =
+                complete_prepare_with_codex_output(output, true);
+            assert_eq!(runtime.thread_status(&thread_id), Some(ThreadStatus::Idle));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ThreadEvent::Error { error, .. } if error.code == error_codes::PREPARE_ACK_INVALID
+            )));
+            assert_eq!(runtime.provider_state(&thread_id).unwrap().provider_session_id, None);
+            assert!(!runtime.provider_state(&thread_id).unwrap().has_user_message);
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ThreadEvent::StatusChanged { status, .. } if *status == ThreadStatus::Idle
+            )));
+
+            let send = runtime
+                .begin_send_text(SendTextInput {
+                    thread_id: thread_id.clone(),
+                    message: "fresh run".into(),
+                })
+                .unwrap();
+            assert!(!send.command.args.iter().any(|arg| arg == "resume"));
+        }
+    }
+
+    #[test]
+    fn prepare_missing_session_is_a_failure_and_discards_any_ack_output() {
+        let (runtime, thread_id, events) =
+            complete_prepare_with_codex_output("PEDELEC_PREPARED", false);
+        assert_eq!(runtime.thread_status(&thread_id), Some(ThreadStatus::Idle));
+        assert_eq!(
+            runtime
+                .provider_state(&thread_id)
+                .unwrap()
+                .provider_session_id,
+            None
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ThreadEvent::Error { error, .. } if error.code == error_codes::PREPARE_SESSION_ID_MISSING
+        )));
     }
 
     #[test]
@@ -5336,7 +6008,7 @@ mod tests {
     ) -> String {
         let thread = runtime.thread_manager.thread(thread_id).unwrap();
         let registry = runtime.tool_registry.get(thread_id).unwrap();
-        let prompt_prefix = build_provider_run_prompt(thread, registry, "");
+        let prompt_prefix = build_provider_run_prompt(thread, registry, "", false);
         let prefix_length = prompt_prefix.encode_utf16().count();
         let message = if include_supplementary_character {
             assert!(target_length >= prefix_length + 2);
@@ -5345,7 +6017,7 @@ mod tests {
             assert!(target_length >= prefix_length);
             "a".repeat(target_length - prefix_length)
         };
-        let final_prompt = build_provider_run_prompt(thread, registry, &message);
+        let final_prompt = build_provider_run_prompt(thread, registry, &message, false);
         assert_eq!(final_prompt.encode_utf16().count(), target_length);
         message
     }
@@ -5411,7 +6083,7 @@ mod tests {
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
-                provider,
+                provider: provider.clone(),
                 effort_level: EffortLevel::Default,
                 effort_args,
                 sandbox_path,
@@ -5432,6 +6104,27 @@ mod tests {
             thread_id,
             ToolRegistry::from_skills_input(Some(&sample_skills_input())).unwrap(),
         );
+        if provider != ProviderCode::Ollama {
+            let privileged_bootstrap = match provider {
+                ProviderCode::Codex => ProviderBootstrapMode::CodexDeveloperInstructions,
+                ProviderCode::Claude => ProviderBootstrapMode::ClaudeAppendSystemPrompt,
+                ProviderCode::OpenCode => ProviderBootstrapMode::OpenCodeInlineAgent,
+                ProviderCode::Antigravity => ProviderBootstrapMode::AntigravityWorkspaceAgent,
+                ProviderCode::Cursor => ProviderBootstrapMode::UserPromptFallback,
+                ProviderCode::Ollama => unreachable!(),
+            };
+            runtime.provider_scan.insert(
+                provider.clone(),
+                ProviderCli {
+                    path: None,
+                    version: Some(ProviderVersion(vec![9, 9, 9])),
+                    error: None,
+                    bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
+                        privileged_bootstrap,
+                    }),
+                },
+            );
+        }
         runtime
     }
 
@@ -5459,10 +6152,13 @@ mod tests {
 
     fn assert_provider_instruction_present(command: &CommandSpec) {
         for value in [&command.prompt] {
-            assert!(value.contains("[Pedelec Runtime Rules]"));
+            assert!(value.contains("[Pedelec Host Context]"));
             assert!(value.contains("[Pedelec App Tool Configuration]"));
             assert!(value.contains("pedelec-cli tool-spec get_app_state"));
             assert!(value.contains("pedelec-cli tool-call get_app_state '<json_args>'"));
+            assert!(!value.contains("[Pedelec Runtime Rules]"));
+            assert!(!value
+                .contains("All of the following content is executed under the Pedelec Runtime"));
             assert!(!value.contains("[Hard Rules]"));
             assert!(!value.contains("tools.md"));
         }

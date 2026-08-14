@@ -106,6 +106,8 @@ Provider-specific errors 可能描述 authentication、executable startup、mode
 | `THREAD_NOT_FOUND` | Core 已找不到 requested session ID | 移除 stale persistence，或建立另一個 session | 相同 missing ID 不可 |
 | `SESSION_ERROR` | Runtime 回報 error state | 顯示失敗，查看 provider/runtime detail | 需 deliberate recovery |
 | `PREPARE_FAILED` | Preparation request 的 SDK fallback code | 視情況繼續 normal send | 可 deliberate retry |
+| `PREPARE_ACK_INVALID` | Provider preparation output trim 後不完全等於 `PEDELEC_PREPARED` | 保留 normal `sendText()` flow；preparation 只是 optimization | 檢查 provider/runtime state 後可重試 |
+| `PREPARE_SESSION_ID_MISSING` | Provider 完成 preparation 但沒有可 resume 的 session ID | 保留 normal `sendText()` flow；preparation 只是 optimization | Provider recovery 後可重試 |
 | `SEND_TEXT_FAILED` | Send request 的 SDK fallback code | 保留 prompt，檢查 transport/runtime | 確認 state 後 |
 | `END_SESSION_FAILED` | End request 失敗，Core state 不確定 | UI 保持明確，retry 或 verify runtime | 謹慎 |
 | `AUTO_END_SESSION_FAILED` | Extension 無法清理 disconnected auto-end session | 記錄 cleanup warning，檢查 Desktop | 謹慎/manual cleanup |

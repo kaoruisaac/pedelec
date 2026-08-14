@@ -106,6 +106,8 @@ Provider-specific errors can describe authentication, executable startup, model 
 | `THREAD_NOT_FOUND` | Core no longer has the requested session ID | Remove stale persistence or create another session | Not with the same missing ID |
 | `SESSION_ERROR` | Runtime reported error state | Show failure; inspect provider/runtime detail | Usually create/recover deliberately |
 | `PREPARE_FAILED` | SDK fallback code for failed preparation request | Continue normal send path if appropriate | Preparation can be retried deliberately |
+| `PREPARE_ACK_INVALID` | Provider preparation output was not exactly `PEDELEC_PREPARED` after trimming | Keep the normal `sendText()` path available; preparation is an optimization | Yes after inspecting provider/runtime state |
+| `PREPARE_SESSION_ID_MISSING` | Provider exited after preparation without a resumable session ID | Keep the normal `sendText()` path available; preparation is an optimization | Yes after provider recovery |
 | `SEND_TEXT_FAILED` | SDK fallback code for failed send request | Preserve prompt; inspect transport/runtime | Only after state is known |
 | `END_SESSION_FAILED` | End request failed; Core state is uncertain | Keep UI explicit; retry or verify runtime | Carefully |
 | `AUTO_END_SESSION_FAILED` | Extension failed to end a disconnected auto-end session | Surface cleanup warning/log; verify Desktop | Carefully, often manual cleanup |

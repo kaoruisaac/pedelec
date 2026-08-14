@@ -29,6 +29,10 @@ pub const DEFAULT_OLLAMA_TIMEOUT_MS: u64 = 120_000;
 const OLLAMA_CONNECTION_CHECK_TIMEOUT_MS: u64 = 3_000;
 const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
 const OPENCODE_PERMISSION_ENV: &str = "OPENCODE_PERMISSION";
+const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
+const PEDELEC_OPENCODE_AGENT: &str = "pedelec-runtime";
+const PEDELEC_ANTIGRAVITY_AGENT_DIR: &str = ".agents/agents/pedelec-runtime";
+const PEDELEC_ANTIGRAVITY_AGENT_FILE: &str = "agent.md";
 const ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS: usize = 20_000;
 const SANDBOX_SUBDIRS: [&str; 4] = ["skills", "assets", "logs", "tmp"];
 const SANDBOX_CONFIG_FILE: &str = ".pedelec-sandbox.json";
@@ -39,6 +43,7 @@ const THREAD_ID_MAX_COUNTER: u64 = 78_364_164_095;
 pub const MAX_ASSET_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const ASSET_UPLOAD_TICKET_SECONDS: i64 = 5 * 60;
 const MAX_PROVIDER_STDERR_BYTES: usize = 64 * 1024;
+const MAX_PREPARE_ASSISTANT_OUTPUT_BYTES: usize = 64 * 1024;
 const SANDBOX_REMOVE_MAX_ATTEMPTS: usize = 10;
 const SANDBOX_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
@@ -770,6 +775,7 @@ pub struct RunPromptProviderContext {
     pub thread: ThreadState,
     pub tool_registry: ToolRegistry,
     pub provider_state: ProviderAdapterState,
+    include_fallback_bootstrap: bool,
     pub settings: PedelecSettings,
     pub core_ipc_endpoint: String,
     pub core_ipc_runtime_file_path: PathBuf,
@@ -784,6 +790,8 @@ pub(crate) struct RunningProviderProcess {
     stderr: String,
     stderr_truncated: bool,
     had_provider_error: bool,
+    prepare_assistant_output: String,
+    prepare_assistant_output_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -802,6 +810,29 @@ pub enum ThreadEventPartial {
 enum ProviderTurnKind<'a> {
     UserMessage { message: &'a str },
     Prepare,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderBootstrapMode {
+    CodexDeveloperInstructions,
+    ClaudeAppendSystemPrompt,
+    OpenCodeInlineAgent,
+    AntigravityWorkspaceAgent,
+    NativeSystemPrompt,
+    UserPromptFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderBootstrapCapabilities {
+    privileged_bootstrap: ProviderBootstrapMode,
+}
+
+impl Default for ProviderBootstrapCapabilities {
+    fn default() -> Self {
+        Self {
+            privileged_bootstrap: ProviderBootstrapMode::UserPromptFallback,
+        }
+    }
 }
 
 trait ProviderAdapter {
@@ -979,7 +1010,12 @@ impl ProviderAdapter for CodexProviderAdapter {
         ];
         args.extend(ctx.thread.effort_args.clone());
         args.push("-".to_string());
-        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
+        let prompt = build_provider_run_prompt(
+            &ctx.thread,
+            &ctx.tool_registry,
+            message,
+            ctx.include_fallback_bootstrap,
+        );
         Ok(CommandSpec {
             program: "codex".to_string(),
             args,
@@ -1070,7 +1106,12 @@ impl ProviderAdapter for AntigravityProviderAdapter {
         ctx: &RunPromptProviderContext,
         message: &str,
     ) -> Result<CommandSpec, PedelecError> {
-        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
+        let prompt = build_provider_run_prompt(
+            &ctx.thread,
+            &ctx.tool_registry,
+            message,
+            ctx.include_fallback_bootstrap,
+        );
         validate_antigravity_prompt_length(&prompt)?;
         let mut args = vec![
             "-p".to_string(),
@@ -1194,7 +1235,12 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
         ];
         args.extend(ctx.thread.effort_args.clone());
         args.push("-".to_string());
-        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
+        let prompt = build_provider_run_prompt(
+            &ctx.thread,
+            &ctx.tool_registry,
+            message,
+            ctx.include_fallback_bootstrap,
+        );
         Ok(CommandSpec {
             program: "opencode".to_string(),
             args,
@@ -1287,7 +1333,12 @@ impl ProviderAdapter for CursorProviderAdapter {
             "--trust".to_string(),
         ];
         args.extend(ctx.thread.effort_args.clone());
-        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
+        let prompt = build_provider_run_prompt(
+            &ctx.thread,
+            &ctx.tool_registry,
+            message,
+            ctx.include_fallback_bootstrap,
+        );
         Ok(CommandSpec {
             program: "cursor-agent".to_string(),
             args,
@@ -1826,7 +1877,12 @@ impl ProviderAdapter for ClaudeProviderAdapter {
             "--dangerously-skip-permissions".to_string(),
         ];
         args.extend(ctx.thread.effort_args.clone());
-        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
+        let prompt = build_provider_run_prompt(
+            &ctx.thread,
+            &ctx.tool_registry,
+            message,
+            ctx.include_fallback_bootstrap,
+        );
         Ok(CommandSpec {
             program: "claude".to_string(),
             args,
@@ -1910,16 +1966,18 @@ impl ProviderAdapter for OllamaProviderAdapter {
         message: &str,
     ) -> Result<CommandSpec, PedelecError> {
         required_ollama_model(&ctx.thread)?;
-        let mut args = vec![
-            "--provider".to_string(),
-            "ollama".to_string(),
-        ];
+        let mut args = vec!["--provider".to_string(), "ollama".to_string()];
         args.extend(ctx.thread.effort_args.clone());
         args.extend([
             "--sandbox".to_string(),
             path_for_external_use(&ctx.thread.sandbox_path),
         ]);
-        let prompt = build_provider_run_prompt(&ctx.thread, &ctx.tool_registry, message);
+        let prompt = build_provider_run_prompt(
+            &ctx.thread,
+            &ctx.tool_registry,
+            message,
+            ctx.include_fallback_bootstrap,
+        );
         let mut env = build_provider_env(ctx)?;
         env.push((
             "OLLAMA_API_KEY".to_string(),
@@ -1967,10 +2025,7 @@ impl ProviderAdapter for OllamaProviderAdapter {
         }
 
         required_ollama_model(&ctx.thread)?;
-        let mut args = vec![
-            "--provider".to_string(),
-            "ollama".to_string(),
-        ];
+        let mut args = vec!["--provider".to_string(), "ollama".to_string()];
         args.extend(ctx.thread.effort_args.clone());
         args.extend([
             "--sandbox".to_string(),
@@ -2446,6 +2501,10 @@ impl CoreRuntime {
         let path_value = self.resolve_provider_path_value();
         self.provider_resolved_path = Some(path_value.clone());
         self.provider_scan = scan_external_providers(Some(path_value));
+        apply_provider_bootstrap_capabilities(
+            &mut self.provider_scan,
+            self.provider_resolved_path.as_ref(),
+        );
     }
 
     pub fn get_settings(&self) -> Result<PedelecSettings, PedelecError> {
@@ -2703,10 +2762,14 @@ impl CoreRuntime {
                 serde_json::json!({ "threadId": thread_id }),
             )
         })?;
+        let include_fallback_bootstrap = self.provider_bootstrap_mode(&thread.provider)
+            == ProviderBootstrapMode::UserPromptFallback
+            && provider_state.provider_session_id.is_none();
         let ctx = RunPromptProviderContext {
             thread,
             tool_registry,
             provider_state: provider_state.clone(),
+            include_fallback_bootstrap,
             settings,
             core_ipc_endpoint: self.core_ipc_endpoint.clone().unwrap_or_default(),
             core_ipc_runtime_file_path: self
@@ -2755,9 +2818,80 @@ impl CoreRuntime {
             }
         }?;
         let mut command = command;
+        self.apply_provider_bootstrap(&ctx, &mut command)?;
         apply_provider_native_skills_policy(&ctx.thread.provider, &mut command);
         self.apply_scanned_provider_program(&ctx.thread.provider, &mut command)?;
         Ok(command)
+    }
+
+    fn provider_bootstrap_mode(&self, provider: &ProviderCode) -> ProviderBootstrapMode {
+        if let Some(capabilities) = self
+            .provider_scan
+            .get(provider)
+            .and_then(|scan| scan.bootstrap_capabilities)
+        {
+            return capabilities.privileged_bootstrap;
+        }
+
+        // Codex and pedelec-agent expose the required instruction channel as a
+        // stable part of their command/runtime contract. The other external
+        // providers are deliberately conservative until the latest scan has
+        // probed their flag or version capability.
+        match provider {
+            ProviderCode::Codex => ProviderBootstrapMode::CodexDeveloperInstructions,
+            ProviderCode::Ollama => ProviderBootstrapMode::NativeSystemPrompt,
+            ProviderCode::Antigravity
+            | ProviderCode::Claude
+            | ProviderCode::OpenCode
+            | ProviderCode::Cursor => ProviderBootstrapMode::UserPromptFallback,
+        }
+    }
+
+    fn apply_provider_bootstrap(
+        &self,
+        ctx: &RunPromptProviderContext,
+        command: &mut CommandSpec,
+    ) -> Result<(), PedelecError> {
+        let mode = self.provider_bootstrap_mode(&ctx.thread.provider);
+        match mode {
+            ProviderBootstrapMode::CodexDeveloperInstructions => {
+                remove_codex_developer_instruction_override(&mut command.args);
+                let insertion_index = command
+                    .args
+                    .iter()
+                    .position(|arg| arg == "exec")
+                    .map_or(0, |index| index + 1);
+                command.args.splice(
+                    insertion_index..insertion_index,
+                    [
+                        "-c".to_string(),
+                        format!(
+                            "developer_instructions={}",
+                            build_pedelec_bootstrap_instruction()
+                        ),
+                    ],
+                );
+            }
+            ProviderBootstrapMode::ClaudeAppendSystemPrompt => {
+                command.args.retain(|arg| arg != "--append-system-prompt");
+                command.args.push("--append-system-prompt".to_string());
+                command.args.push(build_pedelec_bootstrap_instruction());
+            }
+            ProviderBootstrapMode::OpenCodeInlineAgent => {
+                remove_agent_selector(&mut command.args);
+                command.args = insert_agent_selector(command.args.clone(), PEDELEC_OPENCODE_AGENT);
+                let config = merge_opencode_runtime_agent_config(command)?;
+                set_command_env(command, OPENCODE_CONFIG_CONTENT_ENV, config);
+            }
+            ProviderBootstrapMode::AntigravityWorkspaceAgent => {
+                ensure_antigravity_custom_agent(&ctx.thread.sandbox_path)?;
+                remove_agent_selector(&mut command.args);
+                command.args = insert_agent_selector(command.args.clone(), PEDELEC_OPENCODE_AGENT);
+            }
+            ProviderBootstrapMode::NativeSystemPrompt
+            | ProviderBootstrapMode::UserPromptFallback => {}
+        }
+        Ok(())
     }
 
     fn apply_scanned_provider_program(
@@ -2809,6 +2943,8 @@ impl CoreRuntime {
                 stderr: String::new(),
                 stderr_truncated: false,
                 had_provider_error: false,
+                prepare_assistant_output: String::new(),
+                prepare_assistant_output_truncated: false,
             },
         );
     }
@@ -2821,6 +2957,9 @@ impl CoreRuntime {
     ) {
         self.running_processes.remove(thread_id);
         self.tool_request_broker.clear_thread(thread_id);
+        if purpose == RunningProviderProcessPurpose::Prepare {
+            self.discard_failed_prepare_provider_session(thread_id);
+        }
         let status = match purpose {
             RunningProviderProcessPurpose::UserMessage => ThreadStatus::Error,
             RunningProviderProcessPurpose::Prepare => ThreadStatus::Idle,
@@ -2899,14 +3038,28 @@ impl CoreRuntime {
         };
         let purpose = running.purpose;
         let had_provider_error = running.had_provider_error;
+        let prepare_assistant_output = running.prepare_assistant_output.clone();
+        let prepare_assistant_output_truncated = running.prepare_assistant_output_truncated;
 
         let prepare_missing_provider_session_id = purpose == RunningProviderProcessPurpose::Prepare
-            && !had_provider_error
             && self
                 .thread_manager
                 .provider_state(thread_id)
                 .and_then(|state| state.provider_session_id.as_deref())
                 .is_none();
+        let prepare_ack_invalid = purpose == RunningProviderProcessPurpose::Prepare
+            && !prepare_missing_provider_session_id
+            && (prepare_assistant_output_truncated
+                || prepare_assistant_output.trim() != "PEDELEC_PREPARED");
+
+        if purpose == RunningProviderProcessPurpose::Prepare
+            && (had_provider_error
+                || !status.success()
+                || prepare_missing_provider_session_id
+                || prepare_ack_invalid)
+        {
+            self.discard_failed_prepare_provider_session(thread_id);
+        }
 
         let Ok(thread) = self.thread_manager.thread_mut(thread_id) else {
             return;
@@ -2928,7 +3081,7 @@ impl CoreRuntime {
             }
             thread.status = ThreadStatus::Idle;
             thread.updated_at = Utc::now();
-            if prepare_missing_provider_session_id {
+            if prepare_missing_provider_session_id && !had_provider_error {
                 self.tool_request_broker.clear_thread(thread_id);
                 self.emit_thread_provider_error(
                     thread_id,
@@ -2936,6 +3089,23 @@ impl CoreRuntime {
                         error_codes::PREPARE_SESSION_ID_MISSING,
                         "provider session id was not found after prepare",
                         serde_json::json!({ "threadId": thread_id }),
+                    ),
+                );
+            } else if prepare_ack_invalid && !had_provider_error {
+                let mut details = serde_json::json!({
+                    "threadId": thread_id,
+                    "provider": provider_code_as_str(&thread.provider),
+                    "assistantOutput": prepare_assistant_output
+                });
+                if prepare_assistant_output_truncated {
+                    details["assistantOutputTruncated"] = Value::Bool(true);
+                }
+                self.emit_thread_provider_error(
+                    thread_id,
+                    PedelecError::with_details(
+                        error_codes::PREPARE_ACK_INVALID,
+                        "provider did not acknowledge session preparation",
+                        details,
                     ),
                 );
             }
@@ -3001,6 +3171,9 @@ impl CoreRuntime {
         } else {
             None
         };
+        if purpose == Some(RunningProviderProcessPurpose::Prepare) {
+            self.discard_failed_prepare_provider_session(thread_id);
+        }
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             if thread.process_id == Some(process_id) {
                 thread.process_id = None;
@@ -3060,6 +3233,15 @@ impl CoreRuntime {
         for event in events {
             match event {
                 ThreadEventPartial::AssistantMessage { text } => {
+                    if let Some(running) = self.running_processes.get_mut(thread_id) {
+                        if running.purpose == RunningProviderProcessPurpose::Prepare {
+                            append_prepare_assistant_output(
+                                &mut running.prepare_assistant_output,
+                                &mut running.prepare_assistant_output_truncated,
+                                &text,
+                            );
+                        }
+                    }
                     self.event_bus.emit_assistant_message(thread_id, text);
                 }
                 ThreadEventPartial::ProviderSessionIdUpdated {
@@ -3086,6 +3268,13 @@ impl CoreRuntime {
         };
         self.event_bus
             .emit_provider_error(thread_id, thread.provider.clone(), error);
+    }
+
+    fn discard_failed_prepare_provider_session(&mut self, thread_id: &str) {
+        if let Some(provider_state) = self.thread_manager.provider_state_mut(thread_id) {
+            provider_state.provider_session_id = None;
+            provider_state.has_user_message = false;
+        }
     }
 
     fn stop_running_process(&mut self, thread_id: &str) {
@@ -3362,6 +3551,20 @@ fn append_provider_stderr(stderr: &mut String, truncated: &mut bool, text: &str)
     *truncated = true;
 }
 
+fn append_prepare_assistant_output(output: &mut String, truncated: &mut bool, text: &str) {
+    output.push_str(text);
+    if output.len() <= MAX_PREPARE_ASSISTANT_OUTPUT_BYTES {
+        return;
+    }
+
+    let mut drop_until = output.len() - MAX_PREPARE_ASSISTANT_OUTPUT_BYTES;
+    while !output.is_char_boundary(drop_until) {
+        drop_until += 1;
+    }
+    output.drain(..drop_until);
+    *truncated = true;
+}
+
 /// Scans provider CLIs without holding the shared runtime lock. The completed
 /// scan is installed atomically, so readers see either the prior complete scan
 /// or the new complete scan, never partial results.
@@ -3377,7 +3580,8 @@ pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo
     // Resolve the login shell only after releasing the runtime mutex. A shell
     // profile is user-controlled and may take several seconds to finish.
     let path_value = path_override.unwrap_or_else(resolve_provider_path_value);
-    let provider_scan = scan_external_providers(Some(path_value.clone()));
+    let mut provider_scan = scan_external_providers(Some(path_value.clone()));
+    apply_provider_bootstrap_capabilities(&mut provider_scan, Some(&path_value));
     let mut runtime = runtime.lock().unwrap();
     runtime.provider_resolved_path = Some(path_value);
     runtime.provider_scan = provider_scan;
@@ -5220,6 +5424,9 @@ pub mod error_codes {
     pub const PROVIDER_TERMINAL_LAUNCH_FAILED: &str = "PROVIDER_TERMINAL_LAUNCH_FAILED";
     pub const PROVIDER_PREPARE_UNSUPPORTED: &str = "PROVIDER_PREPARE_UNSUPPORTED";
     pub const PREPARE_SESSION_ID_MISSING: &str = "PREPARE_SESSION_ID_MISSING";
+    pub const PREPARE_ACK_INVALID: &str = "PREPARE_ACK_INVALID";
+    pub const PROVIDER_BOOTSTRAP_CONFIG_INVALID: &str = "PROVIDER_BOOTSTRAP_CONFIG_INVALID";
+    pub const PROVIDER_BOOTSTRAP_ASSET_FAILED: &str = "PROVIDER_BOOTSTRAP_ASSET_FAILED";
     pub const SKILL_URL_INVALID: &str = "SKILL_URL_INVALID";
     pub const SKILL_DOWNLOAD_FAILED: &str = "SKILL_DOWNLOAD_FAILED";
     pub const SANDBOX_CREATE_FAILED: &str = "SANDBOX_CREATE_FAILED";
@@ -5309,6 +5516,7 @@ pub(crate) struct ProviderCli {
     path: Option<PathBuf>,
     version: Option<ProviderVersion>,
     error: Option<String>,
+    bootstrap_capabilities: Option<ProviderBootstrapCapabilities>,
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -5625,6 +5833,110 @@ fn scan_external_providers(path_value: Option<OsString>) -> HashMap<ProviderCode
         .collect()
 }
 
+fn apply_provider_bootstrap_capabilities(
+    provider_scan: &mut HashMap<ProviderCode, ProviderCli>,
+    path_value: Option<&OsString>,
+) {
+    for provider in external_provider_codes() {
+        let capability = provider_bootstrap_capability_for_scan(
+            &provider,
+            provider_scan.get(&provider),
+            path_value,
+        );
+        if let Some(scan) = provider_scan.get_mut(&provider) {
+            scan.bootstrap_capabilities = Some(capability);
+        }
+    }
+}
+
+fn provider_bootstrap_capability_for_scan(
+    provider: &ProviderCode,
+    scan: Option<&ProviderCli>,
+    path_value: Option<&OsString>,
+) -> ProviderBootstrapCapabilities {
+    let claude_flag_supported = scan.is_some_and(|scan| {
+        provider_cli_supports_flag(scan, path_value, "--append-system-prompt", false)
+    });
+    let opencode_flag_supported =
+        scan.is_some_and(|scan| provider_cli_supports_flag(scan, path_value, "--agent", true));
+    provider_bootstrap_capability_from_probe(
+        provider,
+        scan,
+        claude_flag_supported,
+        opencode_flag_supported,
+    )
+}
+
+fn provider_bootstrap_capability_from_probe(
+    provider: &ProviderCode,
+    scan: Option<&ProviderCli>,
+    claude_flag_supported: bool,
+    opencode_flag_supported: bool,
+) -> ProviderBootstrapCapabilities {
+    let privileged_bootstrap = match provider {
+        ProviderCode::Codex => ProviderBootstrapMode::CodexDeveloperInstructions,
+        ProviderCode::Claude => {
+            if claude_flag_supported {
+                ProviderBootstrapMode::ClaudeAppendSystemPrompt
+            } else {
+                ProviderBootstrapMode::UserPromptFallback
+            }
+        }
+        ProviderCode::OpenCode => {
+            if opencode_flag_supported {
+                ProviderBootstrapMode::OpenCodeInlineAgent
+            } else {
+                ProviderBootstrapMode::UserPromptFallback
+            }
+        }
+        ProviderCode::Antigravity => scan
+            .and_then(|scan| scan.version.as_ref())
+            .filter(|version| antigravity_custom_agent_version_supported(version))
+            .map(|_| ProviderBootstrapMode::AntigravityWorkspaceAgent)
+            .unwrap_or(ProviderBootstrapMode::UserPromptFallback),
+        ProviderCode::Cursor | ProviderCode::Ollama => ProviderBootstrapMode::UserPromptFallback,
+    };
+    ProviderBootstrapCapabilities {
+        privileged_bootstrap,
+    }
+}
+
+fn provider_cli_supports_flag(
+    scan: &ProviderCli,
+    path_value: Option<&OsString>,
+    flag: &str,
+    is_opencode_run_flag: bool,
+) -> bool {
+    if scan.path.is_none() || scan.version.is_none() {
+        return false;
+    }
+    #[cfg(test)]
+    {
+        let _ = (path_value, flag, is_opencode_run_flag);
+        true
+    }
+    #[cfg(not(test))]
+    {
+        let Some(path) = scan.path.as_deref() else {
+            return false;
+        };
+        let mut command = provider_version_command(path, path_value);
+        if is_opencode_run_flag {
+            command.arg("run");
+        }
+        let output = command.arg("--help").output().ok();
+        output.is_some_and(|output| {
+            output.status.success()
+                && format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+                .contains(flag)
+        })
+    }
+}
+
 fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCli {
     let Some(path_value) = path_value else {
         return ProviderCli {
@@ -5650,6 +5962,7 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
             path: Some(path),
             version: Some(version),
             error: None,
+            bootstrap_capabilities: None,
         },
         None => ProviderCli {
             path: None,
@@ -5657,6 +5970,7 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
             error: Some(
                 "no provider CLI with a recognizable version was found in PATH".to_string(),
             ),
+            bootstrap_capabilities: None,
         },
     }
 }
@@ -5938,10 +6252,16 @@ fn normalize_provider_settings(
             )?,
         },
         cursor: CommonProviderSettings {
-            efforts_args: normalize_efforts_args(ProviderCode::Cursor, settings.cursor.efforts_args)?,
+            efforts_args: normalize_efforts_args(
+                ProviderCode::Cursor,
+                settings.cursor.efforts_args,
+            )?,
         },
         claude: CommonProviderSettings {
-            efforts_args: normalize_efforts_args(ProviderCode::Claude, settings.claude.efforts_args)?,
+            efforts_args: normalize_efforts_args(
+                ProviderCode::Claude,
+                settings.claude.efforts_args,
+            )?,
         },
         ollama: normalize_ollama_provider_settings(settings.ollama, ollama_validation)?,
     })
@@ -5983,7 +6303,10 @@ fn resolve_thread_effort_args(
     Ok(args)
 }
 
-fn provider_efforts_args<'a>(settings: &'a ProviderSettings, provider: &ProviderCode) -> &'a EffortsArgs {
+fn provider_efforts_args<'a>(
+    settings: &'a ProviderSettings,
+    provider: &ProviderCode,
+) -> &'a EffortsArgs {
     match provider {
         ProviderCode::Codex => &settings.codex.efforts_args,
         ProviderCode::Antigravity => &settings.antigravity.efforts_args,
@@ -6010,7 +6333,11 @@ fn validate_effort_tier(
     args: &[String],
 ) -> Result<(), PedelecError> {
     if args.len() % 2 != 0 {
-        return Err(effort_args_error(provider, level, "effort args must contain key/value pairs"));
+        return Err(effort_args_error(
+            provider,
+            level,
+            "effort args must contain key/value pairs",
+        ));
     }
 
     let mut seen = Vec::new();
@@ -6018,10 +6345,18 @@ fn validate_effort_tier(
         let key = pair[0].as_str();
         let value = pair[1].trim();
         if value.is_empty() {
-            return Err(effort_args_error(provider, level, "effort arg values must not be empty"));
+            return Err(effort_args_error(
+                provider,
+                level,
+                "effort arg values must not be empty",
+            ));
         }
         if seen.iter().any(|candidate| *candidate == key) {
-            return Err(effort_args_error(provider, level, "duplicate effort arg keys are not allowed"));
+            return Err(effort_args_error(
+                provider,
+                level,
+                "duplicate effort arg keys are not allowed",
+            ));
         }
         seen.push(key);
 
@@ -6043,9 +6378,7 @@ fn validate_effort_tier(
                     key == "--effort" && is_supported_antigravity_effort(value)
                 }
                 ProviderCode::Claude => key == "--effort" && is_supported_claude_effort(value),
-                ProviderCode::OpenCode
-                | ProviderCode::Cursor
-                | ProviderCode::Ollama => false,
+                ProviderCode::OpenCode | ProviderCode::Cursor | ProviderCode::Ollama => false,
             }
         };
         if !allowed {
@@ -6061,9 +6394,7 @@ fn validate_effort_tier(
 
 fn parse_codex_reasoning_effort(value: &str) -> Option<&str> {
     let trimmed = value.trim();
-    let remainder = trimmed
-        .strip_prefix("model_reasoning_effort")?
-        .trim_start();
+    let remainder = trimmed.strip_prefix("model_reasoning_effort")?.trim_start();
     let raw = remainder.strip_prefix('=')?.trim();
     if raw.is_empty() {
         return None;
@@ -6444,6 +6775,149 @@ fn required_ollama_model_from_args(args: &[String]) -> Result<String, PedelecErr
         })
 }
 
+fn remove_codex_developer_instruction_override(args: &mut Vec<String>) {
+    let mut index = 0;
+    while index + 1 < args.len() {
+        if args[index] == "-c" && args[index + 1].starts_with("developer_instructions=") {
+            args.drain(index..=index + 1);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn remove_agent_selector(args: &mut Vec<String>) {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--agent" {
+            args.remove(index);
+            if index < args.len() {
+                args.remove(index);
+            }
+        } else if args[index].starts_with("--agent=") {
+            args.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn insert_agent_selector(mut args: Vec<String>, agent: &str) -> Vec<String> {
+    let insertion_index = args.iter().position(|arg| arg == "-").unwrap_or(args.len());
+    args.splice(
+        insertion_index..insertion_index,
+        ["--agent".to_string(), agent.to_string()],
+    );
+    args
+}
+
+fn merge_opencode_runtime_agent_config(command: &CommandSpec) -> Result<String, PedelecError> {
+    let existing = command
+        .env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT_ENV)
+        .map(|(_, value)| value.clone())
+        .or_else(|| env::var(OPENCODE_CONFIG_CONTENT_ENV).ok());
+    let mut config = match existing.as_deref() {
+        Some(existing) => serde_json::from_str::<Value>(existing).map_err(|error| {
+            PedelecError::with_details(
+                error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID,
+                "OPENCODE_CONFIG_CONTENT must be valid JSON",
+                serde_json::json!({
+                    "provider": "opencode",
+                    "key": OPENCODE_CONFIG_CONTENT_ENV,
+                    "error": error.to_string()
+                }),
+            )
+        })?,
+        None => Value::Object(serde_json::Map::new()),
+    };
+    let Some(config_object) = config.as_object_mut() else {
+        return Err(PedelecError::with_details(
+            error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID,
+            "OPENCODE_CONFIG_CONTENT must contain a JSON object",
+            serde_json::json!({
+                "provider": "opencode",
+                "key": OPENCODE_CONFIG_CONTENT_ENV
+            }),
+        ));
+    };
+    let agent_value = config_object
+        .entry("agent")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(agents) = agent_value.as_object_mut() else {
+        return Err(PedelecError::with_details(
+            error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID,
+            "OPENCODE_CONFIG_CONTENT.agent must contain a JSON object",
+            serde_json::json!({
+                "provider": "opencode",
+                "key": OPENCODE_CONFIG_CONTENT_ENV,
+                "field": "agent"
+            }),
+        ));
+    };
+    agents.insert(
+        PEDELEC_OPENCODE_AGENT.to_string(),
+        serde_json::json!({
+            "mode": "primary",
+            "prompt": build_pedelec_bootstrap_instruction()
+        }),
+    );
+    serde_json::to_string(&config).map_err(|error| {
+        PedelecError::with_details(
+            error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID,
+            "failed to serialize OPENCODE_CONFIG_CONTENT",
+            serde_json::json!({
+                "provider": "opencode",
+                "key": OPENCODE_CONFIG_CONTENT_ENV,
+                "error": error.to_string()
+            }),
+        )
+    })
+}
+
+fn insert_antigravity_custom_agent_body(bootstrap: &str) -> String {
+    format!(
+        "---\nname: pedelec-runtime\ndescription: Pedelec host integration bootstrap for Pedelec-managed agent sessions.\nmainAgent: true\nsubagent: false\n---\n\n# System Prompt\n\n{bootstrap}\n"
+    )
+}
+
+fn ensure_antigravity_custom_agent(sandbox_path: &Path) -> Result<(), PedelecError> {
+    let agent_dir = sandbox_path.join(PEDELEC_ANTIGRAVITY_AGENT_DIR);
+    let agent_path = agent_dir.join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
+    let expected = insert_antigravity_custom_agent_body(&build_pedelec_bootstrap_instruction());
+    if fs::read_to_string(&agent_path).ok().as_deref() == Some(expected.as_str()) {
+        return Ok(());
+    }
+    fs::create_dir_all(&agent_dir).map_err(|error| {
+        PedelecError::with_details(
+            error_codes::PROVIDER_BOOTSTRAP_ASSET_FAILED,
+            "failed to create Antigravity custom agent directory",
+            serde_json::json!({
+                "provider": "antigravity",
+                "path": path_for_external_use(&agent_dir),
+                "error": error.to_string()
+            }),
+        )
+    })?;
+    fs::write(&agent_path, expected).map_err(|error| {
+        PedelecError::with_details(
+            error_codes::PROVIDER_BOOTSTRAP_ASSET_FAILED,
+            "failed to write Antigravity custom agent",
+            serde_json::json!({
+                "provider": "antigravity",
+                "path": path_for_external_use(&agent_path),
+                "error": error.to_string()
+            }),
+        )
+    })
+}
+
+fn antigravity_custom_agent_version_supported(version: &ProviderVersion) -> bool {
+    version.0.as_slice() >= &[1, 1, 6]
+}
+
 /// Restrict provider-native skill discovery without changing the provider's
 /// sandbox, native tools, or the Pedelec App tool registry.
 fn apply_provider_native_skills_policy(provider: &ProviderCode, command: &mut CommandSpec) {
@@ -6573,17 +7047,19 @@ fn build_provider_run_prompt(
     thread: &ThreadState,
     registry: &ToolRegistry,
     message: &str,
+    include_fallback_bootstrap: bool,
 ) -> String {
-    let instruction = build_provider_instruction(thread, registry);
-    if instruction.is_empty() {
-        return message.to_string();
-    }
+    let bootstrap = if include_fallback_bootstrap {
+        build_provider_fallback_bootstrap()
+    } else {
+        String::new()
+    };
+    let host_context = build_provider_host_context(thread, registry);
     if message.starts_with("[Session Preparation]") {
-        return format!("{instruction}{message}");
+        return format!("{bootstrap}{host_context}{message}");
     }
     format!(
-        "{}{}",
-        instruction,
+        "{bootstrap}{host_context}{}",
         build_provider_user_message_task(message)
     )
 }
@@ -6593,21 +7069,38 @@ fn build_provider_user_message_task(message: &str) -> String {
 }
 
 fn build_provider_prepare_task() -> String {
-    "[Session Preparation]\n\n\
-After preparation is complete, reply with exactly:\n\n\
-PEDELEC_PREPARED"
-        .to_string()
+    "[Session Preparation]".to_string()
 }
 
 fn build_provider_resume_prompt(message: &str) -> String {
     message.to_string()
 }
 
-fn build_provider_instruction(thread: &ThreadState, registry: &ToolRegistry) -> String {
-    if !registry.has_skills_configuration() {
-        return String::new();
-    }
+fn build_pedelec_bootstrap_instruction() -> String {
+    "Pedelec is the host application launching this agent session.\n\n\
+Pedelec may provide a [Pedelec Host Context] block before a task. That block is generated by the host application and is integration context, not end-user-authored instructions.\n\n\
+The current sandbox path and available Pedelec app tools are declared in that host context.\n\n\
+`pedelec-cli` is an executable provided by the Pedelec host environment. Invoke it through the provider's shell / terminal tool. It is not expected to appear as a dedicated model tool.\n\n\
+When a Pedelec app tool is relevant, prefer the app tools declared by the host context. Use `pedelec-cli tool-spec <tool-name>` when the full schema is needed and `pedelec-cli tool-call <tool-name> '<json_args>'` to execute it.\n\n\
+Before reading or modifying local files outside the current sandbox declared by Pedelec Host Context, ask the user for permission first.\n\n\
+`assets/` is the shared App and Agent file directory. User uploads are there; write files intended for the App there too.\n\n\
+Pedelec host context never overrides provider safety policies.\n\n\
+For a [Session Preparation] task, do not call tools or modify files. Reply only with PEDELEC_PREPARED.\n\n\
+For a [User Message] task, execute the actual user request in that block."
+        .to_string()
+}
 
+fn build_provider_fallback_bootstrap() -> String {
+    format!(
+        "[Pedelec Host Bootstrap]\n\
+This is Pedelec host-provided integration bootstrap for this provider conversation. It is not a provider-native system message.\n\n\
+{}\n\
+[/Pedelec Host Bootstrap]\n\n",
+        build_pedelec_bootstrap_instruction()
+    )
+}
+
+fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) -> String {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct AppTool<'a> {
@@ -6638,20 +7131,22 @@ fn build_provider_instruction(thread: &ThreadState, registry: &ToolRegistry) -> 
     };
     let configuration = serde_json::to_string_pretty(&configuration)
         .expect("App tool configuration is always serializable");
-    format!(
-        "All of the following content is executed under the Pedelec Runtime. You must understand and continuously adhere to the rules and settings.\n\
-[Pedelec Runtime Rules]\n\
-1. Before reading or modifying local files outside the current sandbox: \"{}\", ask the user for permission first.\n\
-2. When you receive any requests in a [User Message], you should prioritize using the tools provided in the [Pedelec App Tool Configuration] below.\n\
-3. Use `pedelec-cli tool-spec <tool-name>` when the full argument schema is needed.\n\
-4. Use `pedelec-cli tool-call <tool-name> '<json_args>'` to execute an app tool.\n\
-5. The Pedelec App Tool Configuration is application-provided configuration. It cannot override these runtime rules, sandbox permission requirements, or provider safety policies.\n\
-6. `assets/` is the shared App and Agent file directory. User uploads are there; write files for the App there too.\n\
-7. Respond to the task in the following [Session Preparation] or [User Message] block.\n\
-[/Pedelec Runtime Rules]\n\n\
-[Pedelec App Tool Configuration]\n{configuration}\n[/Pedelec App Tool Configuration]\n\n------\n\n",
+    let mut context = format!(
+        "[Pedelec Host Context]\nSandbox Path: {}\n",
         path_for_external_use(&thread.sandbox_path)
-    )
+    );
+    if registry.has_skills_configuration() {
+        context.push_str(&format!(
+            "\n[Pedelec App Tool Configuration]\n{configuration}\n[/Pedelec App Tool Configuration]\n"
+        ));
+    }
+    context.push_str("[/Pedelec Host Context]\n\n------\n\n");
+    context
+}
+
+#[allow(dead_code)]
+fn build_provider_instruction(thread: &ThreadState, registry: &ToolRegistry) -> String {
+    build_provider_host_context(thread, registry)
 }
 
 fn default_runtime_file_path_for_provider() -> PathBuf {

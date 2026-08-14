@@ -1089,6 +1089,43 @@ describe("Pedelec SDK", () => {
     await send;
   });
 
+  it("rejects prepare on an invalid acknowledgment before idle and suppresses prepare chat", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const text: string[] = [];
+    session.onChat((delta) => text.push(delta));
+
+    const prepare = session.prepare();
+    const request = pageWindow.lastSent();
+    respondOk(pageWindow, request);
+    emitEvent(pageWindow, request, {
+      type: "chat_delta",
+      sessionId: "thread_1",
+      seq: 1,
+      text: "Sure, PEDELEC_PREPARED",
+    });
+    emitEvent(pageWindow, request, {
+      type: "error",
+      sessionId: "thread_1",
+      seq: 2,
+      error: {
+        code: "PREPARE_ACK_INVALID",
+        message: "provider did not acknowledge session preparation",
+        details: { assistantOutput: "Sure, PEDELEC_PREPARED" },
+      },
+    });
+    emitEvent(pageWindow, request, {
+      type: "status_changed",
+      sessionId: "thread_1",
+      seq: 3,
+      status: "idle",
+    });
+
+    await expect(prepare).rejects.toMatchObject({ code: "PREPARE_ACK_INVALID" });
+    expect(text).toEqual([]);
+    expect(session.getStatus()).toBe("idle");
+  });
+
   it("prepare handles tool calls and includes prepare turn context", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);
