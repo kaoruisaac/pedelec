@@ -94,26 +94,20 @@ function SettingsPage(props: SettingsPageProps) {
       setDraftSettings(cloneSettings(normalizedSettings));
       setHasUnsavedChanges(false);
 
-      if (normalizedSettings.defaultProvider === null) {
-        setRefreshingProviders(true);
-        try {
-          const refreshedProviders = await fetchRefreshedProviders({ checkOllamaConnection: false });
-          await initializeDefaultProviderIfNeeded(normalizedSettings, refreshedProviders);
-        } finally {
-          setRefreshingProviders(false);
-        }
-        return;
-      }
-
-      const ollamaConnection = await checkOllamaConnection(
-        normalizedSettings.providerSettings.ollama.baseUrl,
+      const ollamaConnection = normalizedSettings.defaultProvider === null
+        ? "disconnected"
+        : await checkOllamaConnection(
+          normalizedSettings.providerSettings.ollama.baseUrl,
+        );
+      const providersWithConnectionStatus = withOllamaConnectionStatus(
+        nextProviders,
+        ollamaConnection,
       );
-      setProviders(withOllamaConnectionStatus(nextProviders, ollamaConnection));
-      setRefreshingProviders(true);
-      try {
-        await fetchRefreshedProviders({ checkOllamaConnection: true });
-      } finally {
-        setRefreshingProviders(false);
+      setProviders(providersWithConnectionStatus);
+
+      if (normalizedSettings.defaultProvider === null) {
+        await initializeDefaultProviderIfNeeded(normalizedSettings, providersWithConnectionStatus);
+        return;
       }
     } catch (err) {
       setError(formatError(err));

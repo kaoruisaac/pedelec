@@ -6,11 +6,77 @@ mod tests {
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::thread;
     use std::time::Duration;
     #[cfg(unix)]
     use std::time::Instant;
+
+    #[test]
+    fn provider_readiness_wakes_all_waiters_after_snapshot_install() {
+        let readiness = ProviderReadiness::new_uninitialized();
+        readiness.mark_initial_scanning();
+        let (tx, rx) = mpsc::channel();
+        let barrier = Arc::new(Barrier::new(5));
+
+        for _ in 0..4 {
+            let readiness = readiness.clone();
+            let tx = tx.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                tx.send(readiness.wait()).unwrap();
+            });
+        }
+
+        barrier.wait();
+
+        readiness.mark_ready();
+
+        for _ in 0..4 {
+            assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn provider_readiness_failure_releases_waiters_with_diagnostic_error() {
+        let readiness = ProviderReadiness::new_uninitialized();
+        readiness.mark_initial_scanning();
+        let (tx, rx) = mpsc::channel();
+        let waiter_readiness = readiness.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let waiter_barrier = barrier.clone();
+        thread::spawn(move || {
+            waiter_barrier.wait();
+            tx.send(waiter_readiness.wait()).unwrap();
+        });
+        barrier.wait();
+
+        readiness.mark_failed(PedelecError::new(
+            error_codes::PROVIDER_SCAN_FAILED,
+            "scan failed in test",
+        ));
+
+        let error = rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_SCAN_FAILED);
+        assert_eq!(error.message, "scan failed in test");
+    }
+
+    #[test]
+    fn later_refresh_returns_the_ready_snapshot_while_scan_is_in_progress() {
+        let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime.lock().unwrap().provider_path_value_override = Some(OsString::new());
+        runtime.lock().unwrap().refresh_providers();
+        let previous_snapshot = runtime.lock().unwrap().list_providers();
+        runtime.lock().unwrap().provider_refresh_in_progress = true;
+
+        let during_refresh = refresh_shared_providers(&runtime);
+
+        assert_eq!(during_refresh, previous_snapshot);
+    }
 
     #[test]
     fn provider_info_exposes_scanned_version_without_exposing_ollama_version() {

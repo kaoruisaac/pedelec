@@ -1,9 +1,10 @@
 use encoding_rs::Encoding;
 use pedelec_core::{
-    error_codes, inspect_sandbox_folder, CreateAssetDownloadInput, CreateAssetUploadInput,
-    CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError, PrepareThreadInput,
-    PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime,
-    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolSpecInput,
+    error_codes, inspect_sandbox_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
+    CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError,
+    PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput,
+    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput,
+    ToolSpecInput,
 };
 use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
@@ -444,10 +445,13 @@ fn handle_core_ipc_request_with_services(
             },
             Err(err) => error_response(&request.request_id, err),
         },
-        "list_providers" => ok_response(
-            &request.request_id,
-            serde_json::json!(runtime.lock().unwrap().list_sdk_providers()),
-        ),
+        "list_providers" => match wait_for_provider_readiness(&runtime) {
+            Ok(()) => ok_response(
+                &request.request_id,
+                serde_json::json!(runtime.lock().unwrap().list_sdk_providers()),
+            ),
+            Err(err) => error_response(&request.request_id, err),
+        },
         "get_settings" => match runtime.lock().unwrap().get_sdk_settings() {
             Ok(settings) => ok_response(&request.request_id, serde_json::json!(settings)),
             Err(err) => error_response(&request.request_id, err),
@@ -691,6 +695,7 @@ pub fn start_provider_process(
     runtime: SharedCoreRuntime,
     input: SendTextInput,
 ) -> Result<pedelec_core::SendTextOutput, PedelecError> {
+    wait_for_provider_readiness(&runtime)?;
     let thread_id = input.thread_id.clone();
     let start = runtime.lock().unwrap().begin_send_text(input)?;
     start_provider_process_with_command(
@@ -706,6 +711,7 @@ pub fn prepare_provider_process(
     runtime: SharedCoreRuntime,
     input: PrepareThreadInput,
 ) -> Result<PrepareThreadOutput, PedelecError> {
+    wait_for_provider_readiness(&runtime)?;
     let thread_id = input.thread_id.clone();
     let start = runtime.lock().unwrap().begin_prepare_thread(input)?;
     let Some(command) = start.command else {
@@ -1322,6 +1328,8 @@ fn core_unavailable_error(_err: io::Error) -> PedelecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Barrier};
+    use std::time::Duration;
 
     #[test]
     fn provider_start_diagnostics_externalize_cwd_without_changing_the_spec() {
@@ -1343,5 +1351,201 @@ mod tests {
 
         assert_eq!(details["cwd"], path_for_external_use(&cwd));
         assert_eq!(spec.cwd, cwd);
+    }
+
+    #[test]
+    fn list_providers_waits_for_initial_provider_scan_without_holding_runtime_lock() {
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        runtime.lock().unwrap().provider_path_value_override = Some(OsString::new());
+
+        // Prevent the request from entering the runtime until it has started.
+        // Once released, the request must wait on the readiness primitive
+        // rather than hold this mutex during the wait.
+        let startup_guard = runtime.lock().unwrap();
+        let request_runtime = Arc::clone(&runtime);
+        let (response_tx, response_rx) = mpsc::channel();
+        let barrier = Arc::new(Barrier::new(2));
+        let request_barrier = barrier.clone();
+        let request_thread = thread::spawn(move || {
+            request_barrier.wait();
+            let response = handle_core_ipc_request(
+                CoreIpcRequest {
+                    request_id: "providers_wait".into(),
+                    r#type: "list_providers".into(),
+                    caller_origin: None,
+                    caller_sdk_version: None,
+                    payload: Some(serde_json::json!({})),
+                },
+                request_runtime,
+            );
+            response_tx.send(response).unwrap();
+        });
+
+        barrier.wait();
+        assert!(response_rx.try_recv().is_err());
+        drop(startup_guard);
+
+        let refresh_runtime = Arc::clone(&runtime);
+        let (refresh_tx, refresh_rx) = mpsc::channel();
+        thread::spawn(move || {
+            refresh_runtime.lock().unwrap().refresh_providers();
+            refresh_tx.send(()).unwrap();
+        });
+
+        assert!(refresh_rx.recv_timeout(Duration::from_secs(2)).is_ok());
+        let response = response_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        request_thread.join().unwrap();
+        assert!(response.ok);
+        let providers = response.result.unwrap().as_array().unwrap().clone();
+        assert!(
+            providers
+                .iter()
+                .filter(|provider| provider.get("code") != Some(&serde_json::json!("ollama")))
+                .all(|provider| {
+                    provider.get("error")
+                        != Some(&serde_json::json!("provider scan has not completed"))
+                }),
+            "providers were returned before the completed scan was installed: {providers:?}"
+        );
+    }
+
+    #[test]
+    fn ping_is_not_blocked_by_initial_provider_scan() {
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+
+        let response = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "ping_during_scan".into(),
+                r#type: "ping".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: None,
+            },
+            runtime,
+        );
+
+        assert!(response.ok);
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({ "connected": true }))
+        );
+    }
+
+    #[test]
+    fn send_text_waits_for_initial_provider_readiness_before_starting_process() {
+        let runtime = waiting_provider_runtime("send_text_wait");
+        let request_runtime = Arc::clone(&runtime);
+        let (response_tx, response_rx) = mpsc::channel();
+        let request_thread = thread::spawn(move || {
+            response_tx
+                .send(start_provider_process(
+                    request_runtime,
+                    SendTextInput {
+                        thread_id: "send_text_wait".into(),
+                        message: "hello".into(),
+                    },
+                ))
+                .unwrap();
+        });
+
+        assert!(response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_manager
+                .thread("send_text_wait")
+                .unwrap()
+                .status,
+            pedelec_core::ThreadStatus::Idle
+        );
+
+        runtime
+            .lock()
+            .unwrap()
+            .provider_readiness
+            .mark_ready_for_test();
+
+        let error = response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap_err();
+        request_thread.join().unwrap();
+        assert_eq!(error.code, error_codes::PROVIDER_PROCESS_START_FAILED);
+    }
+
+    #[test]
+    fn prepare_thread_uses_the_same_provider_readiness_gate() {
+        let runtime = waiting_provider_runtime("prepare_thread_wait");
+        let request_runtime = Arc::clone(&runtime);
+        let (response_tx, response_rx) = mpsc::channel();
+        let request_thread = thread::spawn(move || {
+            response_tx
+                .send(prepare_provider_process(
+                    request_runtime,
+                    PrepareThreadInput {
+                        thread_id: "prepare_thread_wait".into(),
+                    },
+                ))
+                .unwrap();
+        });
+
+        assert!(response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        runtime
+            .lock()
+            .unwrap()
+            .provider_readiness
+            .mark_ready_for_test();
+
+        let error = response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap_err();
+        request_thread.join().unwrap();
+        assert_eq!(error.code, error_codes::PROVIDER_PROCESS_START_FAILED);
+    }
+
+    fn waiting_provider_runtime(thread_id: &str) -> SharedCoreRuntime {
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let now = chrono::Utc::now();
+        let mut runtime_guard = runtime.lock().unwrap();
+        runtime_guard
+            .provider_readiness
+            .mark_initial_scanning_for_test();
+        runtime_guard.thread_manager.insert_thread(
+            pedelec_core::ThreadState {
+                thread_id: thread_id.into(),
+                provider: pedelec_core::ProviderCode::Codex,
+                effort_level: pedelec_core::EffortLevel::Default,
+                effort_args: Vec::new(),
+                sandbox_path: PathBuf::from("."),
+                skills: Vec::new(),
+                status: pedelec_core::ThreadStatus::Idle,
+                process_id: None,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: None,
+            },
+            pedelec_core::ProviderAdapterState {
+                provider_session_id: None,
+                last_process_id: None,
+                has_user_message: false,
+            },
+        );
+        runtime_guard.test_provider_command = Some(pedelec_core::CommandSpec {
+            program: "pedelec-provider-readiness-test-command-that-does-not-exist".into(),
+            args: Vec::new(),
+            cwd: PathBuf::from("."),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        });
+        drop(runtime_guard);
+        runtime
     }
 }

@@ -68,6 +68,7 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | --- | --- | --- | --- |
 | `DEFAULT_PROVIDER_NOT_SET` | No Desktop default provider exists | Ask user to choose one or pass `provider` explicitly | After configuration |
 | `DEFAULT_PROVIDER_UNAVAILABLE` | Configured default is currently unavailable | Choose/install another provider | After configuration |
+| `PROVIDER_SCAN_FAILED` | The initial provider availability scan failed | Preserve the error details, inspect Desktop logs, and retry after recovery | After recovery |
 | `MODEL_REQUIRED` | Provider, notably Ollama, requires a model in the selected Desktop effort profile | Configure a model for the selected `default`, `low`, or `high` profile in Desktop Settings | After adding the model |
 | `INVALID_INPUT` | SDK input is invalid | Fix application code/input shape | Not unchanged |
 | `PROVIDER_PROMPT_TOO_LARGE` | Provider prompt exceeds a provider-specific launch limit; currently Antigravity rejects prompts over 20,000 UTF-16 code units | Shorten the user message and, for a first turn, any injected Pedelec guidance/tool metadata that contributes to the constructed prompt | After reducing the prompt |

@@ -246,6 +246,17 @@ fn send_core_request(
     request: &CoreIpcRequest,
     runtime_file_path: Option<&Path>,
 ) -> CoreIpcResponse {
+    send_core_request_with_launcher(request, runtime_file_path, ensure_core_runtime_available)
+}
+
+fn send_core_request_with_launcher<F>(
+    request: &CoreIpcRequest,
+    runtime_file_path: Option<&Path>,
+    launch_core: F,
+) -> CoreIpcResponse
+where
+    F: FnOnce(Option<&Path>) -> Result<(), PedelecError>,
+{
     let first_attempt = match runtime_file_path {
         Some(path) => send_core_ipc_request_with_runtime_path(request, path),
         None => send_core_ipc_request(request),
@@ -253,7 +264,7 @@ fn send_core_request(
     match first_attempt {
         Ok(response) => response,
         Err(err) if err.code == error_codes::CORE_RUNTIME_UNAVAILABLE => {
-            match ensure_core_runtime_available(runtime_file_path) {
+            match launch_core(runtime_file_path) {
                 Ok(()) => match runtime_file_path {
                     Some(path) => send_core_ipc_request_with_runtime_path(request, path),
                     None => send_core_ipc_request(request),
@@ -519,10 +530,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pedelec_core::{error_codes, CoreRuntime, ProviderCode, SharedCoreRuntime};
+    use pedelec_core::{
+        error_codes, refresh_shared_providers, CoreRuntime, ProviderCode, SharedCoreRuntime,
+    };
     use pedelec_ipc::start_core_ipc_server_with_runtime_path;
     use serde_json::json;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn native_create_thread_converts_to_core_payload() {
@@ -900,6 +915,62 @@ mod tests {
         assert_eq!(native.r#type, "response");
         assert_eq!(native.request_id, "req_subscribe");
         assert_eq!(native.result.unwrap(), json!({ "subscribed": true }));
+    }
+
+    #[test]
+    fn native_auto_launch_keeps_list_providers_pending_until_core_readiness() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime: SharedCoreRuntime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime.lock().unwrap().provider_path_value_override = Some(std::ffi::OsString::new());
+        runtime
+            .lock()
+            .unwrap()
+            .provider_readiness
+            .mark_initial_scanning_for_test();
+        let runtime_path = temp.path().join("runtime.json");
+        let request_runtime_path = runtime_path.clone();
+        let request = CoreIpcRequest {
+            request_id: "req_native_providers".into(),
+            r#type: "list_providers".into(),
+            caller_origin: None,
+            caller_sdk_version: None,
+            payload: Some(json!({})),
+        };
+        let (core_connectable_tx, core_connectable_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
+        let launch_runtime = Arc::clone(&runtime);
+        let launch_runtime_path = runtime_path.clone();
+        let request_thread = thread::spawn(move || {
+            let response =
+                send_core_request_with_launcher(&request, Some(&request_runtime_path), move |_| {
+                    start_core_ipc_server_with_runtime_path(launch_runtime, launch_runtime_path)
+                        .map(|_| ())
+                        .map_err(|error| error)
+                        .map(|()| {
+                            core_connectable_tx.send(()).unwrap();
+                        })
+                });
+            response_tx.send(response).unwrap();
+        });
+
+        core_connectable_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("auto-launch did not make Core connectable");
+        assert!(response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        refresh_shared_providers(&runtime);
+
+        let response = response_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("list_providers did not resume after readiness");
+        request_thread.join().unwrap();
+        assert!(response.ok);
+        let providers = response.result.unwrap();
+        assert!(providers.as_array().is_some_and(|providers| {
+            providers.iter().any(|provider| provider["code"] == "codex")
+        }));
     }
 
     fn insert_idle_thread(runtime: &SharedCoreRuntime, thread_id: &str) {

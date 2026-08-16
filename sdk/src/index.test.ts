@@ -1771,6 +1771,26 @@ describe("Pedelec SDK", () => {
     await send;
   });
 
+  it("resolves listProviders after a delayed backend readiness response", async () => {
+    const pedelec = new Pedelec();
+    const providersPromise = pedelec.listProviders();
+    const request = pageWindow.lastSent();
+    let settled = false;
+    void providersPromise.finally(() => {
+      settled = true;
+    });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+
+    respondOk(pageWindow, request, [
+      { name: "Codex", code: "codex", available: true, error: null },
+    ]);
+    await expect(providersPromise).resolves.toEqual([
+      { name: "Codex", code: "codex", available: true, error: null },
+    ]);
+  });
+
   it("times out when the extension does not respond", async () => {
     const pedelec = new Pedelec({ bridgeTimeoutMs: 1 });
     const create = pedelec.createSession({ provider: "codex" });

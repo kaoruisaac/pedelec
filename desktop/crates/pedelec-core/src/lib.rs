@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(any(target_os = "macos", all(test, unix)))]
 use std::process::Stdio;
 use std::process::{Child, Command, ExitStatus};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 #[cfg(any(target_os = "macos", all(test, unix)))]
 use std::time::Instant;
@@ -2076,6 +2076,112 @@ impl ProviderAdapter for OllamaProviderAdapter {
     }
 }
 
+#[derive(Debug, Clone)]
+enum ProviderReadinessState {
+    Uninitialized,
+    InitialScanning,
+    Ready,
+    Failed(PedelecError),
+}
+
+#[derive(Debug)]
+struct ProviderReadinessInner {
+    state: Mutex<ProviderReadinessState>,
+    changed: Condvar,
+}
+
+/// Synchronization for the provider snapshot lifecycle.
+///
+/// This is deliberately separate from `CoreRuntime`'s shared mutex. Waiting
+/// on this value must never keep the runtime mutex held, because the scan
+/// needs that mutex to install its completed snapshot.
+#[derive(Debug, Clone)]
+pub struct ProviderReadiness {
+    inner: Arc<ProviderReadinessInner>,
+}
+
+impl Default for ProviderReadiness {
+    fn default() -> Self {
+        Self::new_uninitialized()
+    }
+}
+
+impl ProviderReadiness {
+    fn new_uninitialized() -> Self {
+        Self::new(ProviderReadinessState::Uninitialized)
+    }
+
+    fn new(state: ProviderReadinessState) -> Self {
+        Self {
+            inner: Arc::new(ProviderReadinessInner {
+                state: Mutex::new(state),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
+    fn is_uninitialized(&self) -> bool {
+        matches!(
+            *self.inner.state.lock().unwrap(),
+            ProviderReadinessState::Uninitialized
+        )
+    }
+
+    fn is_initial_scanning(&self) -> bool {
+        matches!(
+            *self.inner.state.lock().unwrap(),
+            ProviderReadinessState::InitialScanning
+        )
+    }
+
+    fn mark_initial_scanning(&self) {
+        let mut state = self.inner.state.lock().unwrap();
+        if matches!(*state, ProviderReadinessState::Uninitialized) {
+            *state = ProviderReadinessState::InitialScanning;
+        }
+    }
+
+    fn mark_ready(&self) {
+        let mut state = self.inner.state.lock().unwrap();
+        *state = ProviderReadinessState::Ready;
+        self.inner.changed.notify_all();
+    }
+
+    fn mark_failed(&self, error: PedelecError) {
+        let mut state = self.inner.state.lock().unwrap();
+        *state = ProviderReadinessState::Failed(error);
+        self.inner.changed.notify_all();
+    }
+
+    fn wait(&self) -> Result<(), PedelecError> {
+        let mut state = self.inner.state.lock().unwrap();
+        loop {
+            match &*state {
+                ProviderReadinessState::Ready => return Ok(()),
+                ProviderReadinessState::Failed(error) => return Err(error.clone()),
+                ProviderReadinessState::Uninitialized | ProviderReadinessState::InitialScanning => {
+                    state = self.inner.changed.wait(state).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Test-only synchronization seam used by downstream crate tests to hold
+    /// requests behind an in-progress initial scan without starting a real
+    /// provider discovery process.
+    #[doc(hidden)]
+    pub fn mark_initial_scanning_for_test(&self) {
+        self.mark_initial_scanning();
+    }
+
+    /// Test-only synchronization seam used by downstream crate tests to
+    /// release requests after a synthetic provider snapshot is ready.
+    #[doc(hidden)]
+    pub fn mark_ready_for_test(&self) {
+        self.mark_ready();
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CoreRuntime {
     pub thread_manager: ThreadManager,
@@ -2091,6 +2197,7 @@ pub struct CoreRuntime {
     pub provider_scan: HashMap<ProviderCode, ProviderCli>,
     pub provider_resolved_path: Option<OsString>,
     pub provider_refresh_in_progress: bool,
+    pub provider_readiness: ProviderReadiness,
     pub asset_upload_port: Option<u16>,
     pub asset_upload_tickets: HashMap<String, AssetUploadTicket>,
     pub asset_download_tickets: HashMap<String, AssetDownloadTicket>,
@@ -2099,8 +2206,10 @@ pub struct CoreRuntime {
 }
 
 impl CoreRuntime {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub fn new() -> Self {
+        let mut runtime = Self::default();
+        runtime.provider_readiness = ProviderReadiness::new_uninitialized();
+        runtime
     }
 
     pub fn set_core_ipc_runtime(
@@ -2498,6 +2607,10 @@ impl CoreRuntime {
     /// Replaces the complete external-provider scan only after every provider has
     /// been inspected, so concurrent callers never observe a partial refresh.
     pub fn refresh_providers(&mut self) {
+        let is_initial_scan = self.provider_readiness.is_uninitialized();
+        if is_initial_scan {
+            self.provider_readiness.mark_initial_scanning();
+        }
         let path_value = self.resolve_provider_path_value();
         self.provider_resolved_path = Some(path_value.clone());
         self.provider_scan = scan_external_providers(Some(path_value));
@@ -2505,6 +2618,9 @@ impl CoreRuntime {
             &mut self.provider_scan,
             self.provider_resolved_path.as_ref(),
         );
+        if is_initial_scan {
+            self.provider_readiness.mark_ready();
+        }
     }
 
     pub fn get_settings(&self) -> Result<PedelecSettings, PedelecError> {
@@ -2520,7 +2636,7 @@ impl CoreRuntime {
         input: UpdateSettingsInput,
     ) -> Result<PedelecSettings, PedelecError> {
         #[cfg(test)]
-        let settings = if self.provider_scan.is_empty() {
+        let settings = if self.provider_readiness.is_uninitialized() {
             normalize_update_settings_for_test(input, self.provider_path_value().as_ref())?
         } else {
             normalize_update_settings(input, &self.provider_scan)?
@@ -3565,28 +3681,110 @@ fn append_prepare_assistant_output(output: &mut String, truncated: &mut bool, te
     *truncated = true;
 }
 
+/// Waits until the initial provider snapshot has been installed.
+///
+/// The readiness handle is copied while briefly holding the runtime mutex and
+/// the actual wait happens afterwards. This is important because the scan must
+/// reacquire the runtime mutex to atomically install its completed snapshot.
+pub fn wait_for_provider_readiness(runtime: &SharedCoreRuntime) -> Result<(), PedelecError> {
+    let readiness = runtime.lock().unwrap().provider_readiness.clone();
+    readiness.wait()
+}
+
+/// Starts the initial provider scan without blocking desktop startup.
+pub fn start_initial_provider_scan(runtime: SharedCoreRuntime) {
+    let worker_runtime = Arc::clone(&runtime);
+    if let Err(error) = std::thread::Builder::new()
+        .name("pedelec-provider-initial-scan".to_string())
+        .spawn(move || {
+            let _ = refresh_shared_providers(&worker_runtime);
+        })
+    {
+        let failure = PedelecError::with_details(
+            error_codes::PROVIDER_SCAN_FAILED,
+            "initial provider scan could not be started",
+            serde_json::json!({ "error": error.to_string() }),
+        );
+        let mut runtime = runtime.lock().unwrap();
+        runtime.provider_refresh_in_progress = false;
+        runtime.provider_readiness.mark_failed(failure);
+    }
+}
+
 /// Scans provider CLIs without holding the shared runtime lock. The completed
 /// scan is installed atomically, so readers see either the prior complete scan
 /// or the new complete scan, never partial results.
 pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo> {
-    let path_override = {
-        let mut runtime = runtime.lock().unwrap();
-        if runtime.provider_refresh_in_progress {
-            return runtime.list_providers();
+    let (wait_for_initial, path_override) = {
+        let mut runtime_guard = runtime.lock().unwrap();
+        if runtime_guard.provider_refresh_in_progress {
+            if runtime_guard.provider_readiness.is_initial_scanning() {
+                (true, None)
+            } else {
+                return runtime_guard.list_providers();
+            }
+        } else {
+            runtime_guard.provider_refresh_in_progress = true;
+            if runtime_guard.provider_readiness.is_uninitialized() {
+                runtime_guard.provider_readiness.mark_initial_scanning();
+            }
+            (false, runtime_guard.provider_path_value_override.clone())
         }
-        runtime.provider_refresh_in_progress = true;
-        runtime.provider_path_value_override.clone()
     };
+
+    if wait_for_initial {
+        let _ = wait_for_provider_readiness(runtime);
+        return runtime.lock().unwrap().list_providers();
+    }
+
     // Resolve the login shell only after releasing the runtime mutex. A shell
     // profile is user-controlled and may take several seconds to finish.
-    let path_value = path_override.unwrap_or_else(resolve_provider_path_value);
-    let mut provider_scan = scan_external_providers(Some(path_value.clone()));
-    apply_provider_bootstrap_capabilities(&mut provider_scan, Some(&path_value));
-    let mut runtime = runtime.lock().unwrap();
-    runtime.provider_resolved_path = Some(path_value);
-    runtime.provider_scan = provider_scan;
-    runtime.provider_refresh_in_progress = false;
-    runtime.list_providers()
+    let scan_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let path_value = path_override.unwrap_or_else(resolve_provider_path_value);
+        let mut provider_scan = scan_external_providers(Some(path_value.clone()));
+        apply_provider_bootstrap_capabilities(&mut provider_scan, Some(&path_value));
+        (path_value, provider_scan)
+    }));
+
+    match scan_result {
+        Ok((path_value, provider_scan)) => {
+            let mut runtime_guard = runtime.lock().unwrap();
+            runtime_guard.provider_resolved_path = Some(path_value);
+            runtime_guard.provider_scan = provider_scan;
+            runtime_guard.provider_refresh_in_progress = false;
+            let providers = runtime_guard.list_providers();
+            let readiness = runtime_guard.provider_readiness.clone();
+            drop(runtime_guard);
+            readiness.mark_ready();
+            providers
+        }
+        Err(payload) => {
+            let error = PedelecError::with_details(
+                error_codes::PROVIDER_SCAN_FAILED,
+                "provider scan failed",
+                serde_json::json!({
+                    "error": panic_payload_to_string(payload),
+                }),
+            );
+            let mut runtime_guard = runtime.lock().unwrap();
+            let is_initial_scan = runtime_guard.provider_readiness.is_initial_scanning();
+            runtime_guard.provider_refresh_in_progress = false;
+            if is_initial_scan {
+                runtime_guard.provider_readiness.mark_failed(error);
+            }
+            runtime_guard.list_providers()
+        }
+    }
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "provider scan panicked with a non-string payload".to_string()
 }
 
 #[derive(Debug)]
@@ -5420,6 +5618,7 @@ pub mod error_codes {
     pub const PROVIDER_INSTALLER_LAUNCH_FAILED: &str = "PROVIDER_INSTALLER_LAUNCH_FAILED";
     pub const PROVIDER_TERMINAL_UNSUPPORTED: &str = "PROVIDER_TERMINAL_UNSUPPORTED";
     pub const PROVIDER_TERMINAL_UNAVAILABLE: &str = "PROVIDER_TERMINAL_UNAVAILABLE";
+    pub const PROVIDER_SCAN_FAILED: &str = "PROVIDER_SCAN_FAILED";
     pub const PROVIDER_TERMINAL_WORKDIR_FAILED: &str = "PROVIDER_TERMINAL_WORKDIR_FAILED";
     pub const PROVIDER_TERMINAL_LAUNCH_FAILED: &str = "PROVIDER_TERMINAL_LAUNCH_FAILED";
     pub const PROVIDER_PREPARE_UNSUPPORTED: &str = "PROVIDER_PREPARE_UNSUPPORTED";

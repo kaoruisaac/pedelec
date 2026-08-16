@@ -15,7 +15,8 @@ use crate::provider_terminal::{
     open as open_provider_terminal_window, OpenProviderTerminalInput, OpenProviderTerminalOutput,
 };
 use pedelec_core::{
-    error_codes, refresh_shared_providers, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
+    error_codes, refresh_shared_providers, start_initial_provider_scan,
+    wait_for_provider_readiness, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
     CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, ListOllamaModelsInput,
     OllamaModelOption, PedelecError, PedelecSettings, PrepareThreadInput, PrepareThreadOutput,
     ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput,
@@ -135,6 +136,9 @@ pub fn run() {
                     err.message
                 )))
             })?;
+            // Provider detection is part of backend initialization, but it is
+            // intentionally detached from UI/Core IPC startup.
+            start_initial_provider_scan(runtime_for_setup.clone());
             // A failed data plane must not prevent the desktop/control plane from starting.
             let _asset_upload_server = start_asset_upload_server(runtime_for_setup.clone());
             let platform_services =
@@ -363,12 +367,18 @@ fn update_settings(
     state: State<'_, CoreRuntimeOwner>,
     input: UpdateSettingsInput,
 ) -> Result<PedelecSettings, PedelecError> {
-    state.runtime().lock().unwrap().update_settings(input)
+    let runtime = state.runtime();
+    wait_for_provider_readiness(&runtime)?;
+    let settings = runtime.lock().unwrap().update_settings(input);
+    settings
 }
 
 #[tauri::command]
-fn list_providers(state: State<'_, CoreRuntimeOwner>) -> Vec<ProviderInfo> {
-    state.runtime().lock().unwrap().list_providers()
+fn list_providers(state: State<'_, CoreRuntimeOwner>) -> Result<Vec<ProviderInfo>, PedelecError> {
+    let runtime = state.runtime();
+    wait_for_provider_readiness(&runtime)?;
+    let providers = runtime.lock().unwrap().list_providers();
+    Ok(providers)
 }
 
 #[tauri::command]
@@ -383,8 +393,9 @@ fn open_provider_terminal(
     state: State<'_, CoreRuntimeOwner>,
     input: OpenProviderTerminalInput,
 ) -> Result<OpenProviderTerminalOutput, PedelecError> {
-    let executable = state
-        .runtime()
+    let runtime = state.runtime();
+    wait_for_provider_readiness(&runtime)?;
+    let executable = runtime
         .lock()
         .unwrap()
         .provider_executable_path(&input.provider)?;
