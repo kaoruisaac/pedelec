@@ -258,6 +258,10 @@ jobs:
             args: "--target x86_64-apple-darwin"
             helper_target: "x86_64-apple-darwin"
             release_arch: "x86_64"
+          - label: linux-x64
+            platform: ubuntu-22.04
+            args: "--bundles deb --config tauri/tauri.linux.conf.json"
+            helper_target: ""
 
     runs-on: ${{ matrix.platform }}
 
@@ -275,6 +279,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils
 
       - name: Install desktop dependencies
         working-directory: desktop
@@ -413,6 +429,70 @@ jobs:
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
+
+      - name: Build and upload Linux Tauri bundle
+        if: runner.os == 'Linux'
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PEDELEC_HELPER_TARGET: ${{ matrix.helper_target }}
+        with:
+          projectPath: desktop
+          tauriScript: npm run tauri
+          tagName: ${{ inputs.tag_name || github.ref_name }}
+          releaseName: "Pedelec ${{ inputs.tag_name || github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: false
+          args: ${{ matrix.args }}
+          assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
+
+      - name: Verify Linux Debian bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bundle_root="desktop/target/release/bundle"
+          [ -d "$bundle_root" ] || {
+            echo "Bundle directory not found: $bundle_root" >&2
+            exit 1
+          }
+
+          deb_paths=()
+          while IFS= read -r -d '' deb_path; do
+            deb_paths+=("$deb_path")
+          done < <(find "$bundle_root" -type f -name '*.deb' -print0)
+
+          [ "${#deb_paths[@]}" -eq 1 ] || {
+            echo "Expected exactly one Debian bundle, found ${#deb_paths[@]}" >&2
+            printf '%s\n' "${deb_paths[@]}" >&2
+            exit 1
+          }
+
+          deb_path="${deb_paths[0]}"
+          dpkg-deb --info "$deb_path"
+          dpkg-deb --contents "$deb_path" >/dev/null
+
+          forbidden_paths=()
+          while IFS= read -r -d '' forbidden_path; do
+            forbidden_paths+=("$forbidden_path")
+          done < <(find "$bundle_root" -type f \( \
+            -iname '*.AppImage' \
+            -o -iname '*.rpm' \
+            -o -iname '*.sig' \
+            -o -name 'latest.json' \
+          \) -print0)
+
+          [ "${#forbidden_paths[@]}" -eq 0 ] || {
+            echo "Unexpected Linux bundle found:" >&2
+            printf '%s\n' "${forbidden_paths[@]}" >&2
+            exit 1
+          }
+
+          echo "Verified Debian bundle: $deb_path"
 
       # tauri-action uploads first; this release remains a draft and a failed check
       # prevents these assets from being treated as a successful release.

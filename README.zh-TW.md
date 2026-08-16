@@ -6,7 +6,7 @@
 
 ## 請再稍等一下子
 
-Pedelec App 目前還在審核階段， 相信正式的第一版 Windows 跟 MacOS desktop app 可以很快跟大家見面
+Pedelec App 目前還在審核階段，相信正式的第一版 Windows、MacOS 跟 Linux desktop app 可以很快跟大家見面
 在此之前你可以從這裡安裝:
 
 1. Chrome Extension
@@ -17,6 +17,7 @@ Pedelec App 目前還在審核階段， 相信正式的第一版 Windows 跟 Mac
   從 [Rlease](https://github.com/kaoruisaac/pedelec/releases) 下載未簽章的最新版本，
   - Windows: 安裝時選擇 "其他資訊 > 仍要執行"
   - MacOS: 安裝dmg後執行 ``` xattr -dr com.apple.quarantine "/Applications/Pedelec.app" ```
+  - Linux: 安裝 `.deb` 套件
 
 3. Demo Site
   - [Shape Rain](https://shape-rain.isaac-lin.cc/)

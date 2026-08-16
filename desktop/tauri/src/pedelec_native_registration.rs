@@ -154,7 +154,18 @@ fn chrome_native_host_manifest_path() -> Result<PathBuf, PedelecError> {
     Ok(macos_chrome_native_host_manifest_path(&home))
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(target_os = "linux")]
+fn chrome_native_host_manifest_path() -> Result<PathBuf, PedelecError> {
+    let home = dirs::home_dir().ok_or_else(|| {
+        PedelecError::new(
+            error_codes::IPC_UNAVAILABLE,
+            "cannot resolve home directory for Chrome native messaging manifest",
+        )
+    })?;
+    Ok(linux_chrome_native_host_manifest_path(&home))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn chrome_native_host_manifest_path() -> Result<PathBuf, PedelecError> {
     Err(PedelecError::new(
         error_codes::IPC_UNAVAILABLE,
@@ -173,6 +184,14 @@ fn macos_chrome_native_host_manifest_path(home: &Path) -> PathBuf {
         .join("Application Support")
         .join("Google")
         .join("Chrome")
+        .join("NativeMessagingHosts")
+        .join(MANIFEST_FILE_NAME)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn linux_chrome_native_host_manifest_path(home: &Path) -> PathBuf {
+    home.join(".config")
+        .join("google-chrome")
         .join("NativeMessagingHosts")
         .join(MANIFEST_FILE_NAME)
 }
@@ -215,7 +234,12 @@ fn register_manifest_with_platform(_manifest_path: &Path) -> Result<(), PedelecE
     Ok(())
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(target_os = "linux")]
+fn register_manifest_with_platform(_manifest_path: &Path) -> Result<(), PedelecError> {
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn register_manifest_with_platform(_manifest_path: &Path) -> Result<(), PedelecError> {
     Err(PedelecError::new(
         error_codes::IPC_UNAVAILABLE,
@@ -292,6 +316,24 @@ mod tests {
                 .join("NativeMessagingHosts")
                 .join(MANIFEST_FILE_NAME)
         );
+        assert_eq!(
+            linux_chrome_native_host_manifest_path(Path::new("/home/me")),
+            PathBuf::from("/home/me")
+                .join(".config")
+                .join("google-chrome")
+                .join("NativeMessagingHosts")
+                .join(MANIFEST_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn linux_manifest_preserves_absolute_native_host_path() {
+        let native_host_path = PathBuf::from("/home/me/.pedelec/pedelec-native-host");
+
+        let manifest = build_native_host_manifest(CHROME_EXTENSION_ID, &native_host_path);
+        let value = serde_json::to_value(manifest).unwrap();
+
+        assert_eq!(value["path"], "/home/me/.pedelec/pedelec-native-host");
     }
 
     #[test]
