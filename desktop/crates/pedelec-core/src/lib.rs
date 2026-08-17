@@ -1397,6 +1397,7 @@ impl ProviderAdapter for CursorProviderAdapter {
 enum ClaudeStdoutFilterMode {
     Inspecting,
     Passing,
+    RedactingSignature,
     Dropping,
 }
 
@@ -1414,13 +1415,58 @@ enum ClaudeJsonArrayState {
     CommaOrEnd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeJsonObjectKind {
+    RootEvent,
+    Message,
+    ContentItem,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeJsonArrayKind {
+    Content,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeJsonKey {
+    Type,
+    Message,
+    Content,
+    Signature,
+    Other,
+}
+
+impl ClaudeJsonKey {
+    fn from_decoded(value: &str) -> Self {
+        match value {
+            "type" => Self::Type,
+            "message" => Self::Message,
+            "content" => Self::Content,
+            "signature" => Self::Signature,
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeContentItemType {
+    Unknown,
+    Thinking,
+    Other,
+}
+
 #[derive(Debug, Clone)]
 enum ClaudeJsonContainer {
     Object {
+        kind: ClaudeJsonObjectKind,
         state: ClaudeJsonObjectState,
-        key_is_type: bool,
+        key: ClaudeJsonKey,
+        content_item_type: ClaudeContentItemType,
     },
     Array {
+        kind: ClaudeJsonArrayKind,
         state: ClaudeJsonArrayState,
     },
 }
@@ -1431,7 +1477,17 @@ enum ClaudeJsonStringRole {
     Value {
         is_type_value: bool,
         is_root_type_value: bool,
+        is_content_item_type_value: bool,
     },
+    ThinkingSignatureValue,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClaudeJsonValueContext {
+    key: ClaudeJsonKey,
+    is_root_type_value: bool,
+    is_content_item_type_value: bool,
+    is_thinking_signature_value: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1447,6 +1503,8 @@ enum ClaudeStdoutFilterDecision {
     Continue,
     Pass,
     Drop,
+    StartRedaction,
+    EndRedaction,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1457,6 +1515,7 @@ struct ClaudeJsonEventScanner {
     root_started: bool,
     root_complete: bool,
     root_type_is_user: Option<bool>,
+    root_type_is_assistant: Option<bool>,
     saw_tool_result: bool,
 }
 
@@ -1466,7 +1525,9 @@ impl ClaudeJsonEventScanner {
         while let Some(ch) = current.take() {
             if let Some(string) = self.string.as_mut() {
                 if string.escaped {
-                    if !string.too_long {
+                    if !matches!(string.role, ClaudeJsonStringRole::ThinkingSignatureValue)
+                        && !string.too_long
+                    {
                         string.raw.push(ch);
                         string.too_long = string.raw.len() > 128;
                     }
@@ -1475,7 +1536,9 @@ impl ClaudeJsonEventScanner {
                 }
                 match ch {
                     '\\' => {
-                        if !string.too_long {
+                        if !matches!(string.role, ClaudeJsonStringRole::ThinkingSignatureValue)
+                            && !string.too_long
+                        {
                             string.raw.push(ch);
                         }
                         string.escaped = true;
@@ -1483,7 +1546,9 @@ impl ClaudeJsonEventScanner {
                     '"' => return self.finish_string(),
                     ch if ch.is_control() => return ClaudeStdoutFilterDecision::Pass,
                     _ => {
-                        if !string.too_long {
+                        if !matches!(string.role, ClaudeJsonStringRole::ThinkingSignatureValue)
+                            && !string.too_long
+                        {
                             string.raw.push(ch);
                             string.too_long = string.raw.len() > 128;
                         }
@@ -1554,6 +1619,7 @@ impl ClaudeJsonEventScanner {
                         Some(ClaudeJsonContainer::Array {
                             state: ClaudeJsonArrayState::ValueOrEnd
                                 | ClaudeJsonArrayState::CommaOrEnd,
+                            ..
                         })
                     ) {
                         return ClaudeStdoutFilterDecision::Pass;
@@ -1580,7 +1646,7 @@ impl ClaudeJsonEventScanner {
                     {
                         *state = ClaudeJsonObjectState::KeyOrEnd;
                     }
-                    Some(ClaudeJsonContainer::Array { state })
+                    Some(ClaudeJsonContainer::Array { state, .. })
                         if *state == ClaudeJsonArrayState::CommaOrEnd =>
                     {
                         *state = ClaudeJsonArrayState::ValueOrEnd;
@@ -1594,14 +1660,22 @@ impl ClaudeJsonEventScanner {
                             ..
                         }) => ClaudeJsonStringRole::Key,
                         _ => {
-                            let Some((is_type_value, is_root_type_value)) =
-                                self.string_value_context()
-                            else {
+                            let Some(context) = self.string_value_context() else {
                                 return ClaudeStdoutFilterDecision::Pass;
                             };
+                            if context.is_thinking_signature_value {
+                                self.string = Some(ClaudeJsonStringScanner {
+                                    raw: String::new(),
+                                    role: ClaudeJsonStringRole::ThinkingSignatureValue,
+                                    escaped: false,
+                                    too_long: false,
+                                });
+                                return ClaudeStdoutFilterDecision::StartRedaction;
+                            }
                             ClaudeJsonStringRole::Value {
-                                is_type_value,
-                                is_root_type_value,
+                                is_type_value: context.key == ClaudeJsonKey::Type,
+                                is_root_type_value: context.is_root_type_value,
+                                is_content_item_type_value: context.is_content_item_type_value,
                             }
                         }
                     };
@@ -1613,12 +1687,12 @@ impl ClaudeJsonEventScanner {
                     });
                 }
                 '-' | '0'..='9' | 't' | 'f' | 'n' => {
-                    let Some((is_type_value, is_root_type_value)) = self.string_value_context()
-                    else {
+                    let Some(context) = self.string_value_context() else {
                         return ClaudeStdoutFilterDecision::Pass;
                     };
-                    if is_type_value && is_root_type_value {
+                    if context.key == ClaudeJsonKey::Type && context.is_root_type_value {
                         self.root_type_is_user = Some(false);
+                        self.root_type_is_assistant = Some(false);
                         return ClaudeStdoutFilterDecision::Pass;
                     }
                     self.primitive = Some(ch.to_string());
@@ -1642,56 +1716,125 @@ impl ClaudeJsonEventScanner {
 
         self.containers.push(if object {
             ClaudeJsonContainer::Object {
+                kind: self.object_kind_for_next_value(),
                 state: ClaudeJsonObjectState::KeyOrEnd,
-                key_is_type: false,
+                key: ClaudeJsonKey::Other,
+                content_item_type: ClaudeContentItemType::Unknown,
             }
         } else {
             ClaudeJsonContainer::Array {
+                kind: self.array_kind_for_next_value(),
                 state: ClaudeJsonArrayState::ValueOrEnd,
             }
         });
         true
     }
 
-    fn string_value_context(&self) -> Option<(bool, bool)> {
+    fn object_kind_for_next_value(&self) -> ClaudeJsonObjectKind {
+        if self.containers.is_empty() {
+            return ClaudeJsonObjectKind::RootEvent;
+        }
+
+        match self.containers.last() {
+            Some(ClaudeJsonContainer::Object {
+                kind: ClaudeJsonObjectKind::RootEvent,
+                key: ClaudeJsonKey::Message,
+                ..
+            }) => ClaudeJsonObjectKind::Message,
+            Some(ClaudeJsonContainer::Array {
+                kind: ClaudeJsonArrayKind::Content,
+                ..
+            }) => ClaudeJsonObjectKind::ContentItem,
+            _ => ClaudeJsonObjectKind::Other,
+        }
+    }
+
+    fn array_kind_for_next_value(&self) -> ClaudeJsonArrayKind {
+        match self.containers.last() {
+            Some(ClaudeJsonContainer::Object {
+                kind: ClaudeJsonObjectKind::Message,
+                key: ClaudeJsonKey::Content,
+                ..
+            }) => ClaudeJsonArrayKind::Content,
+            _ => ClaudeJsonArrayKind::Other,
+        }
+    }
+
+    fn string_value_context(&self) -> Option<ClaudeJsonValueContext> {
         match self.containers.last()? {
             ClaudeJsonContainer::Object {
                 state: ClaudeJsonObjectState::Value,
-                key_is_type,
-            } => Some((*key_is_type, *key_is_type && self.containers.len() == 1)),
+                kind,
+                key,
+                content_item_type,
+            } => Some(ClaudeJsonValueContext {
+                key: *key,
+                is_root_type_value: *kind == ClaudeJsonObjectKind::RootEvent
+                    && *key == ClaudeJsonKey::Type,
+                is_content_item_type_value: *kind == ClaudeJsonObjectKind::ContentItem
+                    && *key == ClaudeJsonKey::Type,
+                // Claude's stream-json events emit the root `type`, and content blocks
+                // emit their `type`, before block-specific fields. Keeping that contract
+                // lets us redact without buffering a potentially unbounded signature
+                // before its event/block kind is known.
+                is_thinking_signature_value: *kind == ClaudeJsonObjectKind::ContentItem
+                    && *content_item_type == ClaudeContentItemType::Thinking
+                    && *key == ClaudeJsonKey::Signature
+                    && self.root_type_is_assistant == Some(true),
+            }),
             ClaudeJsonContainer::Array {
                 state: ClaudeJsonArrayState::ValueOrEnd,
-            } => Some((false, false)),
+                ..
+            } => Some(ClaudeJsonValueContext {
+                key: ClaudeJsonKey::Other,
+                is_root_type_value: false,
+                is_content_item_type_value: false,
+                is_thinking_signature_value: false,
+            }),
             _ => None,
         }
     }
 
     fn finish_string(&mut self) -> ClaudeStdoutFilterDecision {
         let string = self.string.take().expect("string scanner exists");
+        if matches!(string.role, ClaudeJsonStringRole::ThinkingSignatureValue) {
+            if !self.complete_scalar_value() {
+                return ClaudeStdoutFilterDecision::Pass;
+            }
+            return ClaudeStdoutFilterDecision::EndRedaction;
+        }
+
         if string.escaped || string.too_long {
             return match string.role {
                 _ if string.escaped => ClaudeStdoutFilterDecision::Pass,
                 ClaudeJsonStringRole::Key => match self.containers.last_mut() {
-                    Some(ClaudeJsonContainer::Object { state, key_is_type })
+                    Some(ClaudeJsonContainer::Object { state, key, .. })
                         if *state == ClaudeJsonObjectState::KeyOrEnd =>
                     {
                         *state = ClaudeJsonObjectState::Colon;
-                        *key_is_type = false;
+                        *key = ClaudeJsonKey::Other;
                         self.decision()
                     }
                     _ => ClaudeStdoutFilterDecision::Pass,
                 },
                 ClaudeJsonStringRole::Value {
-                    is_root_type_value, ..
+                    is_root_type_value,
+                    is_content_item_type_value,
+                    ..
                 } => {
+                    if is_content_item_type_value {
+                        self.set_content_item_type(ClaudeContentItemType::Other);
+                    }
                     if !self.complete_scalar_value() {
                         return ClaudeStdoutFilterDecision::Pass;
                     }
                     if is_root_type_value {
                         self.root_type_is_user = Some(false);
+                        self.root_type_is_assistant = Some(false);
                     }
                     self.decision()
                 }
+                ClaudeJsonStringRole::ThinkingSignatureValue => ClaudeStdoutFilterDecision::Pass,
             };
         }
         let encoded = format!("\"{}\"", string.raw);
@@ -1701,18 +1844,26 @@ impl ClaudeJsonEventScanner {
 
         match string.role {
             ClaudeJsonStringRole::Key => match self.containers.last_mut() {
-                Some(ClaudeJsonContainer::Object { state, key_is_type })
+                Some(ClaudeJsonContainer::Object { state, key, .. })
                     if *state == ClaudeJsonObjectState::KeyOrEnd =>
                 {
                     *state = ClaudeJsonObjectState::Colon;
-                    *key_is_type = value == "type";
+                    *key = ClaudeJsonKey::from_decoded(&value);
                 }
                 _ => return ClaudeStdoutFilterDecision::Pass,
             },
             ClaudeJsonStringRole::Value {
                 is_type_value,
                 is_root_type_value,
+                is_content_item_type_value,
             } => {
+                if is_content_item_type_value {
+                    self.set_content_item_type(if value == "thinking" {
+                        ClaudeContentItemType::Thinking
+                    } else {
+                        ClaudeContentItemType::Other
+                    });
+                }
                 if !self.complete_scalar_value() {
                     return ClaudeStdoutFilterDecision::Pass;
                 }
@@ -1720,11 +1871,26 @@ impl ClaudeJsonEventScanner {
                     self.saw_tool_result |= value == "tool_result";
                     if is_root_type_value {
                         self.root_type_is_user = Some(value == "user");
+                        self.root_type_is_assistant = Some(value == "assistant");
                     }
                 }
             }
+            ClaudeJsonStringRole::ThinkingSignatureValue => {
+                return ClaudeStdoutFilterDecision::Pass;
+            }
         }
         self.decision()
+    }
+
+    fn set_content_item_type(&mut self, content_item_type: ClaudeContentItemType) {
+        if let Some(ClaudeJsonContainer::Object {
+            kind: ClaudeJsonObjectKind::ContentItem,
+            content_item_type: current,
+            ..
+        }) = self.containers.last_mut()
+        {
+            *current = content_item_type;
+        }
     }
 
     fn finish_primitive(&mut self) -> bool {
@@ -1737,14 +1903,14 @@ impl ClaudeJsonEventScanner {
 
     fn complete_scalar_value(&mut self) -> bool {
         match self.containers.last_mut() {
-            Some(ClaudeJsonContainer::Object { state, key_is_type })
+            Some(ClaudeJsonContainer::Object { state, key, .. })
                 if *state == ClaudeJsonObjectState::Value =>
             {
                 *state = ClaudeJsonObjectState::CommaOrEnd;
-                *key_is_type = false;
+                *key = ClaudeJsonKey::Other;
                 true
             }
-            Some(ClaudeJsonContainer::Array { state })
+            Some(ClaudeJsonContainer::Array { state, .. })
                 if *state == ClaudeJsonArrayState::ValueOrEnd =>
             {
                 *state = ClaudeJsonArrayState::CommaOrEnd;
@@ -1791,6 +1957,8 @@ impl Default for ClaudeStdoutFilter {
 }
 
 impl ClaudeStdoutFilter {
+    const SIGNATURE_REPLACEMENT: &'static str = "\"[omitted]\"";
+
     fn preprocess_chunk(&mut self, chunk: &str) -> Vec<String> {
         let mut retained = String::new();
         for ch in chunk.chars() {
@@ -1801,6 +1969,7 @@ impl ClaudeStdoutFilter {
                         retained.push_str(&self.pending);
                     }
                     ClaudeStdoutFilterMode::Passing => retained.push(ch),
+                    ClaudeStdoutFilterMode::RedactingSignature => retained.push(ch),
                     ClaudeStdoutFilterMode::Dropping => {}
                 }
                 self.reset_event();
@@ -1808,7 +1977,24 @@ impl ClaudeStdoutFilter {
             }
 
             match self.mode {
-                ClaudeStdoutFilterMode::Passing => retained.push(ch),
+                ClaudeStdoutFilterMode::Passing => match self.scanner.scan_char(ch) {
+                    ClaudeStdoutFilterDecision::StartRedaction => {
+                        retained.push_str(Self::SIGNATURE_REPLACEMENT);
+                        self.mode = ClaudeStdoutFilterMode::RedactingSignature;
+                    }
+                    ClaudeStdoutFilterDecision::Continue
+                    | ClaudeStdoutFilterDecision::Pass
+                    | ClaudeStdoutFilterDecision::Drop
+                    | ClaudeStdoutFilterDecision::EndRedaction => retained.push(ch),
+                },
+                ClaudeStdoutFilterMode::RedactingSignature => {
+                    if matches!(
+                        self.scanner.scan_char(ch),
+                        ClaudeStdoutFilterDecision::EndRedaction
+                    ) {
+                        self.mode = ClaudeStdoutFilterMode::Passing;
+                    }
+                }
                 ClaudeStdoutFilterMode::Dropping => {}
                 ClaudeStdoutFilterMode::Inspecting => {
                     self.pending.push(ch);
@@ -1823,6 +2009,14 @@ impl ClaudeStdoutFilter {
                             self.pending.clear();
                             self.mode = ClaudeStdoutFilterMode::Dropping;
                         }
+                        ClaudeStdoutFilterDecision::StartRedaction => {
+                            self.pending.pop();
+                            retained.push_str(&self.pending);
+                            retained.push_str(Self::SIGNATURE_REPLACEMENT);
+                            self.pending.clear();
+                            self.mode = ClaudeStdoutFilterMode::RedactingSignature;
+                        }
+                        ClaudeStdoutFilterDecision::EndRedaction => {}
                     }
                 }
             }

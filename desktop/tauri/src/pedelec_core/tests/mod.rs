@@ -12,6 +12,27 @@ mod tests {
     #[cfg(unix)]
     use std::time::Instant;
 
+    fn claude_raw_stdout(events: &[ThreadEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadEvent::RawStdout { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn emit_claude_in_chunks(
+        runtime: &mut CoreRuntime,
+        thread_id: &str,
+        input: &str,
+        chunk_size: usize,
+    ) {
+        for chunk in input.as_bytes().chunks(chunk_size) {
+            runtime.emit_provider_stdout(thread_id, String::from_utf8(chunk.to_vec()).unwrap());
+        }
+    }
+
     #[test]
     fn provider_readiness_wakes_all_waiters_after_snapshot_install() {
         let readiness = ProviderReadiness::new_uninitialized();
@@ -2034,6 +2055,208 @@ mod tests {
         assert!(!raw_stdout.contains("BASE64_PAYLOAD_MARKER"));
         assert!(events.iter().any(
             |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "after image")
+        ));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
+    }
+
+    #[test]
+    fn claude_stdout_filter_redacts_large_chunked_thinking_signature_and_keeps_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_thinking_signature",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_claude_thinking_signature");
+        let payload = "SIGNATURE_PAYLOAD_MARKER".repeat(8 * 1024);
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"","signature":"{payload}"}},{{"type":"text","text":"visible answer"}}]}}}}"#
+        ) + "\n";
+
+        emit_claude_in_chunks(&mut runtime, "thread_claude_thinking_signature", &line, 257);
+
+        assert_eq!(
+            runtime.thread_status("thread_claude_thinking_signature"),
+            Some(ThreadStatus::Idle)
+        );
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = claude_raw_stdout(&events);
+        assert!(!raw_stdout.contains("SIGNATURE_PAYLOAD_MARKER"));
+        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
+        assert!(serde_json::from_str::<serde_json::Value>(raw_stdout.trim()).is_ok());
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "visible answer")
+        ));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
+    }
+
+    #[test]
+    fn claude_stdout_filter_redacts_signature_key_split_across_chunks() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_signature_key_split",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_claude_signature_key_split");
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","signature":"SIGNATURE_KEY_SPLIT_MARKER","thinking":""}]}}"#.to_string() + "\n";
+        let key_start = line.find(r#""signature""#).unwrap();
+        let split = key_start + 4;
+        runtime.emit_provider_stdout(
+            "thread_claude_signature_key_split",
+            line[..split].to_string(),
+        );
+        runtime.emit_provider_stdout(
+            "thread_claude_signature_key_split",
+            line[split..].to_string(),
+        );
+
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = claude_raw_stdout(&events);
+        assert!(!raw_stdout.contains("SIGNATURE_KEY_SPLIT_MARKER"));
+        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
+        assert!(serde_json::from_str::<serde_json::Value>(raw_stdout.trim()).is_ok());
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
+    }
+
+    #[test]
+    fn claude_stdout_filter_redacts_signature_when_value_quotes_split_across_chunks() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_signature_value_split",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_claude_signature_value_split");
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","signature":"SIGNATURE_VALUE_SPLIT_MARKER","thinking":""}]}}"#.to_string() + "\n";
+        let key_start = line.find(r#""signature":"#).unwrap();
+        let value_quote = key_start + r#""signature":"#.len();
+        let payload_start = value_quote + 1;
+        let payload_end = payload_start + "SIGNATURE_VALUE_SPLIT_MARKER".len();
+        for part in [
+            &line[..value_quote],
+            &line[value_quote..payload_end],
+            &line[payload_end..],
+        ] {
+            runtime
+                .emit_provider_stdout("thread_claude_signature_value_split", (*part).to_string());
+        }
+
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = claude_raw_stdout(&events);
+        assert!(!raw_stdout.contains("SIGNATURE_VALUE_SPLIT_MARKER"));
+        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
+        assert!(serde_json::from_str::<serde_json::Value>(raw_stdout.trim()).is_ok());
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
+    }
+
+    #[test]
+    fn claude_stdout_filter_handles_escaped_signature_characters() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_signature_escapes",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_claude_signature_escapes");
+        let signature = r#"prefix \ and " quote SIGNATURE_ESCAPED_MARKER suffix"#;
+        let encoded_signature = serde_json::to_string(signature).unwrap();
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"thinking","signature":{encoded_signature},"thinking":""}},{{"type":"text","text":"visible after escape"}}]}}}}"#
+        ) + "\n";
+        emit_claude_in_chunks(&mut runtime, "thread_claude_signature_escapes", &line, 3);
+
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = claude_raw_stdout(&events);
+        assert!(!raw_stdout.contains("SIGNATURE_ESCAPED_MARKER"));
+        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
+        assert!(serde_json::from_str::<serde_json::Value>(raw_stdout.trim()).is_ok());
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "visible after escape")
+        ));
+    }
+
+    #[test]
+    fn claude_stdout_filter_preserves_literal_signature_text_and_non_thinking_signature() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_signature_false_positives",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_claude_signature_false_positives");
+        let literal_text = r#"example: "signature":"foo""#;
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{}}},{{"type":"text","signature":"SHOULD_BE_KEPT","text":"hello"}}]}}}}"#,
+            serde_json::to_string(literal_text).unwrap()
+        ) + "\n";
+        runtime.emit_provider_stdout("thread_claude_signature_false_positives", line.clone());
+
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = claude_raw_stdout(&events);
+        assert_eq!(raw_stdout, line);
+        assert!(raw_stdout.contains("SHOULD_BE_KEPT"));
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == literal_text)
+        ));
+    }
+
+    #[test]
+    fn claude_stdout_filter_redacts_multiple_events_in_one_chunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_claude_multiple_signature_events",
+            ProviderCode::Claude,
+            None,
+            None,
+        );
+        let event_rx = runtime
+            .event_bus
+            .subscribe("thread_claude_multiple_signature_events");
+        let first = r#"{"type":"assistant","message":{"content":[{"type":"thinking","signature":"SIGNATURE_FIRST_MARKER","thinking":""}]}}"#;
+        let second =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second event"}]}}"#;
+        runtime.emit_provider_stdout(
+            "thread_claude_multiple_signature_events",
+            format!("{first}\n{second}\n"),
+        );
+
+        let events = collect_available_core_events(&event_rx);
+        let raw_stdout = claude_raw_stdout(&events);
+        assert!(!raw_stdout.contains("SIGNATURE_FIRST_MARKER"));
+        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
+        assert!(raw_stdout.contains(second));
+        assert!(events.iter().any(
+            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "second event")
         ));
         assert!(events
             .iter()
