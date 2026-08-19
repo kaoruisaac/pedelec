@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 1,
+  "providers": {
+    "codex": {
+      "revision": 1,
+      "profiles": {
+        "low": [
+          "-m",
+          "gpt-5.6-luna",
+          "-c",
+          "model_reasoning_effort=\"high\""
+        ],
+        "default": [
+          "-m",
+          "gpt-5.6-luna",
+          "-c",
+          "model_reasoning_effort=\"xhigh\""
+        ],
+        "high": [
+          "-m",
+          "gpt-5.6-sol",
+          "-c",
+          "model_reasoning_effort=\"high\""
+        ]
+      },
+      "entryProbe": "premium",
+      "probes": [
+        {
+          "id": "premium",
+          "args": [
+            "-m",
+            "gpt-5.6-sol",
+            "-c",
+            "model_reasoning_effort=\"high\""
+          ],
+          "onSupported": {
+            "confirms": ["high"],
+            "nextProbe": "baseline"
+          },
+          "onNotEntitled": {
+            "confirms": [],
+            "nextProbe": "baseline"
+          }
+        },
+        {
+          "id": "baseline",
+          "args": [
+            "-m",
+            "gpt-5.6-luna",
+            "-c",
+            "model_reasoning_effort=\"xhigh\""
+          ],
+          "onSupported": {
+            "confirms": ["low", "default"]
+          },
+          "onNotEntitled": {
+            "confirms": []
+          }
+        }
+      ]
+    },
+    "claude": {
+      "revision": 1,
+      "profiles": {
+        "low": [
+          "--model",
+          "claude-sonnet-5",
+          "--effort",
+          "low"
+        ],
+        "default": [
+          "--model",
+          "claude-opus-4-8",
+          "--effort",
+          "medium"
+        ],
+        "high": [
+          "--model",
+          "claude-fable-5",
+          "--effort",
+          "medium"
+        ]
+      },
+      "entryProbe": "premium",
+      "probes": [
+        {
+          "id": "premium",
+          "args": [
+            "--model",
+            "claude-fable-5",
+            "--effort",
+            "medium"
+          ],
+          "onSupported": {
+            "confirms": ["high"],
+            "nextProbe": "baseline"
+          },
+          "onNotEntitled": {
+            "confirms": [],
+            "nextProbe": "baseline"
+          }
+        },
+        {
+          "id": "baseline",
+          "args": [
+            "--model",
+            "claude-opus-4-8",
+            "--effort",
+            "medium"
+          ],
+          "onSupported": {
+            "confirms": ["low", "default"]
+          },
+          "onNotEntitled": {
+            "confirms": []
+          }
+        }
+      ]
+    },
+    "cursor": {
+      "revision": 1,
+      "profiles": {
+        "low": [
+          "--model",
+          "gpt-5.6-luna-high"
+        ],
+        "default": [
+          "--model",
+          "gpt-5.6-luna-max"
+        ],
+        "high": [
+          "--model",
+          "claude-opus-5-high"
+        ]
+      },
+      "entryProbe": "premium",
+      "probes": [
+        {
+          "id": "premium",
+          "args": [
+            "--model",
+            "claude-opus-5-high"
+          ],
+          "onSupported": {
+            "confirms": ["high"],
+            "nextProbe": "baseline"
+          },
+          "onNotEntitled": {
+            "confirms": [],
+            "nextProbe": "baseline"
+          }
+        },
+        {
+          "id": "baseline",
+          "args": [
+            "--model",
+            "gpt-5.6-luna-max"
+          ],
+          "onSupported": {
+            "confirms": ["low", "default"]
+          },
+          "onNotEntitled": {
+            "confirms": []
+          }
+        }
+      ]
+    },
+    "antigravity": {
+      "revision": 1,
+      "profiles": {
+        "low": [
+          "--model",
+          "gemini-3.7-flash-low",
+          "--effort",
+          "low"
+        ],
+        "default": [
+          "--model",
+          "gemini-3.7-flash-high",
+          "--effort",
+          "high"
+        ],
+        "high": [
+          "--model",
+          "gemini-3.1-pro-high",
+          "--effort",
+          "high"
+        ]
+      },
+      "entryProbe": "premium",
+      "probes": [
+        {
+          "id": "premium",
+          "args": [
+            "--model",
+            "gemini-3.1-pro-high",
+            "--effort",
+            "high"
+          ],
+          "onSupported": {
+            "confirms": ["high"],
+            "nextProbe": "baseline"
+          },
+          "onNotEntitled": {
+            "confirms": [],
+            "nextProbe": "baseline"
+          }
+        },
+        {
+          "id": "baseline",
+          "args": [
+            "--model",
+            "gemini-3.7-flash-high",
+            "--effort",
+            "high"
+          ],
+          "onSupported": {
+            "confirms": ["low", "default"]
+          },
+          "onNotEntitled": {
+            "confirms": []
+          }
+        }
+      ]
+    }
+  }
+}

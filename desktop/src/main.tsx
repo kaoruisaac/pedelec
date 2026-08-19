@@ -6,6 +6,9 @@ import { updateStore } from "./updater/updateStore";
 import { EventMonitorApp } from "./event-monitor/EventMonitorApp";
 import HomePage from "./home/HomePage";
 import SettingsPage from "./settings/SettingsPage";
+import EffortWizardPage from "./effort-wizard/EffortWizardPage";
+import { createEffortWizardStore } from "./effort-wizard/effortWizardStore";
+import type { EffortWizardEntryOrigin } from "./effort-wizard/types";
 import "./style.css";
 import "./event-monitor/event-monitor.css";
 import PopUpProvider from "./services/PopUpProvider";
@@ -20,15 +23,23 @@ const PAGES: Record<string, string> = {
   ...(IS_DEV ? { monitor: "Event Monitor" } : {}),
 };
 
-function AppShell() {
+export function AppShell() {
   const [page, setPage] = createSignal("home");
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [appVersion, setAppVersion] = createSignal<string | null>(null);
+  const effortWizard = createEffortWizardStore();
+
+  async function openEffortWizard(origin: EffortWizardEntryOrigin): Promise<void> {
+    await effortWizard.openWizard(origin);
+    setPage("wizard");
+  }
 
   onMount(() => {
     let disposed = false;
     let unlistenFocus: (() => void) | undefined;
     let pendingForegroundCheck = false;
+
+    void effortWizard.initialize();
 
     void getVersion().then((version) => {
       if (disposed) return;
@@ -62,6 +73,7 @@ function AppShell() {
     window.addEventListener("keydown", handleKeyDown);
     onCleanup(() => {
       disposed = true;
+      effortWizard.dispose();
       unlistenFocus?.();
       window.removeEventListener("keydown", handleKeyDown);
     });
@@ -160,10 +172,22 @@ function AppShell() {
 
         <section class="app-page">
           <div hidden={page() !== "home"}>
-            <HomePage />
+            <HomePage wizard={effortWizard} onOpenWizard={(origin) => void openEffortWizard(origin)} />
           </div>
           <div hidden={page() !== "settings"}>
-            <SettingsPage onNavigateToSettings={() => setPage("settings")} />
+            <SettingsPage
+              onNavigateToSettings={() => setPage("settings")}
+              effortWizard={effortWizard}
+              onOpenEffortWizard={(origin) => void openEffortWizard(origin)}
+              onProvidersRefreshed={async () => { await effortWizard.refreshBootstrap(); }}
+            />
+          </div>
+          <div hidden={page() !== "wizard"}>
+            <EffortWizardPage
+              wizard={effortWizard}
+              onNavigate={(nextPage) => setPage(nextPage)}
+              onDone={() => void effortWizard.finish().then(() => setPage("settings"))}
+            />
           </div>
           <div hidden={page() !== "monitor"}>
             <EventMonitorApp />
@@ -174,8 +198,12 @@ function AppShell() {
   );
 }
 
-const dispose = render(() => <AppShell />, document.getElementById("root")!);
-
-if (import.meta.hot) {
-  import.meta.hot.dispose(dispose);
+if (typeof document !== "undefined") {
+  const root = document.getElementById("root");
+  if (root) {
+    const dispose = render(() => <AppShell />, root);
+    if (import.meta.hot) {
+      import.meta.hot.dispose(dispose);
+    }
+  }
 }

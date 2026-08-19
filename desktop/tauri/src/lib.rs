@@ -1,4 +1,5 @@
 pub mod directory_picker;
+pub mod effort_wizard;
 pub mod pedelec_app;
 pub mod pedelec_binary_install;
 pub mod pedelec_native_registration;

@@ -197,10 +197,17 @@ pre {
 
 .settings-header {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 18px;
+}
+
+.settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
 }
 
 .settings-header h1 {
@@ -212,12 +219,38 @@ pre {
 .settings-header p {
   margin: 6px 0 0;
   color: #5f6f82;
+  font-size: 14px;
 }
 
 .settings-panel {
   max-width: 920px;
   display: grid;
   gap: 18px;
+}
+
+.settings-effort-wizard-card {
+  max-width: 920px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid #b9cdef;
+  border-radius: 8px;
+  background: #f5f8ff;
+}
+
+.settings-effort-wizard-card h2 {
+  margin: 0;
+  color: #1f2933;
+  font-size: 16px;
+}
+
+.settings-effort-wizard-card p {
+  margin: 5px 0 0;
+  color: #53657d;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .settings-section {
@@ -470,6 +503,9 @@ pre {
   background: #2f6fed;
   color: #ffffff;
 }
+.settings-secondary-button {
+  white-space: nowrap;
+}
 
 .settings-alert {
   max-width: 920px;
@@ -618,6 +654,15 @@ pre {
   }
 
   .settings-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-header-actions {
+    justify-content: flex-start;
+  }
+
+  .settings-effort-wizard-card {
     align-items: stretch;
     flex-direction: column;
   }

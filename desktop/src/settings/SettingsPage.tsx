@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { EffortsArgs, Provider, ProviderCode, ProviderSettings, Settings } from "./types";
 import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_TIMEOUT_MS } from "./constants";
@@ -12,6 +12,10 @@ import {
 import { canSaveSettings } from "./settingsValidation";
 import { cloneEffortsArgs, configuredEffortLevels, emptyEffortsArgs, EFFORT_LEVELS, effortLevelLabel } from "./effortSettings";
 import { OcTerminal2 } from "solid-icons/oc";
+import ExistingSettingsWarningPopup from "../effort-wizard/ExistingSettingsWarningPopup";
+import UnsavedSettingsWizardPopup from "../effort-wizard/UnsavedSettingsWizardPopup";
+import type { EffortWizardEntryOrigin } from "../effort-wizard/types";
+import type { EffortWizardStore } from "../effort-wizard/effortWizardStore";
 import {
   isProviderInstallerSupported,
   openProviderInstaller as openProviderInstallerCommand,
@@ -40,6 +44,9 @@ const emptySettings: Settings = {
 
 interface SettingsPageProps {
   onNavigateToSettings: () => void;
+  effortWizard?: EffortWizardStore;
+  onOpenEffortWizard?: (origin: EffortWizardEntryOrigin) => void;
+  onProvidersRefreshed?: () => Promise<void>;
 }
 
 function SettingsPage(props: SettingsPageProps) {
@@ -59,6 +66,8 @@ function SettingsPage(props: SettingsPageProps) {
   const [missingProviderPopupShown, setMissingProviderPopupShown] = createSignal(false);
 
   const { pop } = usePopUp();
+  let settingsLoaded = false;
+  let lastSettingsRefreshRevision = props.effortWizard?.store.settingsRefreshRevision ?? 0;
 
   const selectedProviderInfo = createMemo(() =>
     providers().find((provider) => provider.code === draftSettings().defaultProvider),
@@ -77,7 +86,17 @@ function SettingsPage(props: SettingsPageProps) {
   });
 
   onMount(() => {
-    loadSettings();
+    void loadSettings().finally(() => {
+      settingsLoaded = true;
+      lastSettingsRefreshRevision = props.effortWizard?.store.settingsRefreshRevision ?? lastSettingsRefreshRevision;
+    });
+  });
+
+  createEffect(() => {
+    const revision = props.effortWizard?.store.settingsRefreshRevision;
+    if (!settingsLoaded || revision === undefined || revision === lastSettingsRefreshRevision) return;
+    lastSettingsRefreshRevision = revision;
+    void loadSettings();
   });
 
   async function loadSettings(): Promise<void> {
@@ -226,6 +245,7 @@ function SettingsPage(props: SettingsPageProps) {
     setError("");
     try {
       await fetchRefreshedProviders({ checkOllamaConnection: true });
+      await props.onProvidersRefreshed?.();
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -335,6 +355,37 @@ function SettingsPage(props: SettingsPageProps) {
     return openProviderInstallerCommand(provider);
   }
 
+  function discardDraftAndContinue(): void {
+    setDraftSettings(cloneSettings(settings()));
+    setHasUnsavedChanges(false);
+    setSavedMessage("");
+    openEffortWizardAfterSafety();
+  }
+
+  function openEffortWizardAfterSafety(): void {
+    if (!props.onOpenEffortWizard) return;
+    if (props.effortWizard?.hasResumableRun()) {
+      props.onOpenEffortWizard("settings");
+      return;
+    }
+    if (!hasExistingWizardEffortSettings(draftSettings())) {
+      props.onOpenEffortWizard("settings");
+      return;
+    }
+    pop(ExistingSettingsWarningPopup, {
+      onContinue: () => props.onOpenEffortWizard?.("settings"),
+    });
+  }
+
+  function requestEffortWizard(): void {
+    if (!props.onOpenEffortWizard) return;
+    if (hasUnsavedChanges()) {
+      pop(UnsavedSettingsWizardPopup, { onDiscardAndContinue: discardDraftAndContinue });
+      return;
+    }
+    openEffortWizardAfterSafety();
+  }
+
   return (
     <main class="settings-page">
       <header class="settings-header">
@@ -342,11 +393,17 @@ function SettingsPage(props: SettingsPageProps) {
           <h1>Settings</h1>
           <p>Choose the default provider and optional effort profiles used by SDK sessions.</p>
         </div>
-        <button type="button" class="settings-secondary-button" onClick={refreshProviders} disabled={loading() || refreshingProviders()}>
-          {refreshingProviders() ? "Refreshing..." : "Refresh"}
-        </button>
+        <div class="settings-header-actions">
+          <Show when={props.onOpenEffortWizard}>
+            <button type="button" class="settings-secondary-button settings-effort-wizard-button" onClick={requestEffortWizard} disabled={loading() || refreshingProviders()}>
+              Effort Wizard
+            </button>
+          </Show>
+          <button type="button" class="settings-secondary-button" onClick={refreshProviders} disabled={loading() || refreshingProviders()}>
+            {refreshingProviders() ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
       </header>
-
       <Show when={error()}>
         <div class="settings-alert is-error">{error()}</div>
       </Show>
@@ -464,6 +521,18 @@ function SettingsPage(props: SettingsPageProps) {
           </div>
         </section>
 
+        <Show when={props.onOpenEffortWizard}>
+          <section class="settings-effort-wizard-card">
+            <div>
+              <h2>Effort Setting Wizard</h2>
+              <p>Check available providers against Pedelec-maintained recommendations, then review before applying.</p>
+            </div>
+            <button type="button" class="settings-secondary-button" onClick={requestEffortWizard} disabled={loading() || refreshingProviders()}>
+              Check recommendations
+            </button>
+          </section>
+        </Show>
+
         <Show when={hasUnsavedChanges()}>
           <div class="settings-alert is-warning">
             You have unsaved changes. Click Save to apply your settings.
@@ -521,6 +590,13 @@ function providerStatusLabel(provider: Provider): string {
 
 function isProviderSelectable(provider: Provider): boolean {
   return provider.code === "ollama" || provider.available;
+}
+
+function hasExistingWizardEffortSettings(settings: Settings): boolean {
+  return (["codex", "claude", "cursor", "antigravity"] as const).some((provider) => {
+    const efforts = settings.providerSettings[provider].effortsArgs;
+    return (["low", "default", "high"] as const).some((level) => efforts[level].length > 0);
+  });
 }
 
 function formatError(err: unknown): string {

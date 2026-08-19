@@ -1,4 +1,5 @@
 use crate::directory_picker::TauriCoreIpcPlatformServices;
+use crate::effort_wizard::{cleanup_stale_probe_runs, EffortWizardOwner};
 use crate::pedelec_binary_install::{
     ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
     install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
@@ -42,6 +43,8 @@ pub fn run() {
     let runtime = runtime_owner.runtime();
     let runtime_for_setup = runtime.clone();
     let runtime_for_exit = runtime.clone();
+    let effort_wizard_owner = EffortWizardOwner::new();
+    let effort_wizard_for_exit = effort_wizard_owner.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -54,6 +57,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(runtime_owner)
+        .manage(effort_wizard_owner)
         .invoke_handler(tauri::generate_handler![
             create_thread,
             get_settings,
@@ -69,7 +73,12 @@ pub fn run() {
             send_text,
             prepare_thread,
             submit_tool_result,
-            end_thread
+            end_thread,
+            crate::effort_wizard::get_effort_wizard_bootstrap,
+            crate::effort_wizard::get_effort_wizard_state,
+            crate::effort_wizard::start_effort_wizard,
+            crate::effort_wizard::apply_effort_wizard_settings,
+            crate::effort_wizard::reset_effort_wizard
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -138,6 +147,7 @@ pub fn run() {
             })?;
             // Provider detection is part of backend initialization, but it is
             // intentionally detached from UI/Core IPC startup.
+            cleanup_stale_probe_runs();
             start_initial_provider_scan(runtime_for_setup.clone());
             // A failed data plane must not prevent the desktop/control plane from starting.
             let _asset_upload_server = start_asset_upload_server(runtime_for_setup.clone());
@@ -252,6 +262,7 @@ pub fn run() {
                 if code.is_none() {
                     api.prevent_exit();
                 } else {
+                    effort_wizard_for_exit.cancel_active();
                     let _errors = runtime_for_exit.lock().unwrap().cleanup_for_app_exit();
                     #[cfg(debug_assertions)]
                     for err in _errors {

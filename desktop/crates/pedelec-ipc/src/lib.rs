@@ -21,10 +21,12 @@ use std::net::{TcpListener, TcpStream};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -1122,6 +1124,219 @@ fn build_provider_process_command(
     command
 }
 
+/// Captured output from a one-shot provider invocation.
+///
+/// This runner is intentionally separate from the normal SDK thread process
+/// lifecycle. It is used by desktop-only capability probes and never creates
+/// a Core thread or emits ThreadEvents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedProviderProcessOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub timed_out: bool,
+    pub cancelled: bool,
+}
+
+const MAX_CAPTURED_PROVIDER_OUTPUT_BYTES: usize = 1024 * 1024;
+const CAPTURE_READ_BUFFER_BYTES: usize = 16 * 1024;
+
+/// Runs one provider command with bounded output capture and a hard timeout.
+///
+/// The exact executable path supplied by a provider scan is passed through the
+/// existing resolver. In particular, Windows `.cmd`/`.bat` scripts continue to
+/// use the existing `cmd.exe /d /c call` wrapper.
+pub fn run_provider_command_captured(
+    command_spec: pedelec_core::CommandSpec,
+    timeout: Duration,
+) -> Result<CapturedProviderProcessOutput, PedelecError> {
+    run_provider_command_captured_with_cancel(
+        command_spec,
+        timeout,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+/// Cancellable form used by the desktop wizard when a run is reset or the app
+/// is shutting down.
+pub fn run_provider_command_captured_with_cancel(
+    command_spec: pedelec_core::CommandSpec,
+    timeout: Duration,
+    cancellation: Arc<AtomicBool>,
+) -> Result<CapturedProviderProcessOutput, PedelecError> {
+    let resolved_program = resolve_provider_program(&command_spec.program, &command_spec.env)
+        .map_err(|error| {
+            PedelecError::with_details(
+                error_codes::PROVIDER_PROCESS_START_FAILED,
+                "provider program could not be found",
+                serde_json::json!({
+                    "program": command_spec.program,
+                    "cwd": path_for_external_use(&command_spec.cwd),
+                    "error": error.error,
+                    "programLookupCandidates": error.candidates.iter()
+                        .map(|candidate| candidate.to_string_lossy().to_string())
+                        .collect::<Vec<_>>(),
+                }),
+            )
+        })?;
+
+    let mut command = build_provider_process_command(&command_spec, &resolved_program);
+    let mut child = command.spawn().map_err(|error| {
+        PedelecError::with_details(
+            error_codes::PROVIDER_PROCESS_START_FAILED,
+            "provider process could not be started",
+            serde_json::json!({
+                "program": command_spec.program,
+                "cwd": path_for_external_use(&command_spec.cwd),
+                "error": error.to_string(),
+            }),
+        )
+    })?;
+
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        PedelecError::new(
+            error_codes::PROVIDER_STDIN_CLOSED,
+            "provider stdin was not available",
+        )
+    })?;
+    if let Err(error) = stdin.write_all(command_spec.stdin.as_bytes()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(PedelecError::with_details(
+            error_codes::PROVIDER_STDIN_CLOSED,
+            "provider stdin closed before probe prompt was written",
+            serde_json::json!({ "error": error.to_string() }),
+        ));
+    }
+    drop(stdin);
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        PedelecError::new(
+            error_codes::PROVIDER_PROCESS_START_FAILED,
+            "provider stdout was not available",
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        PedelecError::new(
+            error_codes::PROVIDER_PROCESS_START_FAILED,
+            "provider stderr was not available",
+        )
+    })?;
+    let stdout_reader = thread::spawn(move || capture_provider_output(stdout));
+    let stderr_reader = thread::spawn(move || capture_provider_output(stderr));
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let mut cancelled = false;
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if cancellation.load(Ordering::Acquire) => {
+                cancelled = true;
+                let _ = child.kill();
+                break child.wait().map_err(|error| {
+                    PedelecError::with_details(
+                        error_codes::PROVIDER_PROCESS_STOP_FAILED,
+                        "cancelled provider process could not be reaped",
+                        serde_json::json!({ "error": error.to_string() }),
+                    )
+                })?;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                timed_out = true;
+                let _ = child.kill();
+                break child.wait().map_err(|error| {
+                    PedelecError::with_details(
+                        error_codes::PROVIDER_PROCESS_STOP_FAILED,
+                        "timed-out provider process could not be reaped",
+                        serde_json::json!({ "error": error.to_string() }),
+                    )
+                })?;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PedelecError::with_details(
+                    error_codes::PROVIDER_PROCESS_STOP_FAILED,
+                    "provider process status could not be read",
+                    serde_json::json!({ "error": error.to_string() }),
+                ));
+            }
+        }
+    };
+
+    let stdout = stdout_reader.join().map_err(|_| {
+        PedelecError::new(
+            error_codes::PROVIDER_PROCESS_STOP_FAILED,
+            "provider stdout capture thread panicked",
+        )
+    })?;
+    let stderr = stderr_reader.join().map_err(|_| {
+        PedelecError::new(
+            error_codes::PROVIDER_PROCESS_STOP_FAILED,
+            "provider stderr capture thread panicked",
+        )
+    })?;
+
+    Ok(CapturedProviderProcessOutput {
+        exit_code: exit_status.code(),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        stdout_truncated: stdout.truncated,
+        stderr_truncated: stderr.truncated,
+        timed_out,
+        cancelled,
+    })
+}
+
+#[derive(Debug)]
+struct CapturedProviderStream {
+    text: String,
+    truncated: bool,
+}
+
+fn capture_provider_output<R: Read>(mut reader: R) -> CapturedProviderStream {
+    let mut output = Vec::with_capacity(MAX_CAPTURED_PROVIDER_OUTPUT_BYTES.min(64 * 1024));
+    let mut buffer = [0u8; CAPTURE_READ_BUFFER_BYTES];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                if output.len() < MAX_CAPTURED_PROVIDER_OUTPUT_BYTES {
+                    let remaining = MAX_CAPTURED_PROVIDER_OUTPUT_BYTES - output.len();
+                    output.extend_from_slice(&buffer[..read.min(remaining)]);
+                    if read > remaining {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    CapturedProviderStream {
+        text: bounded_capture_text(&output),
+        truncated,
+    }
+}
+
+fn bounded_capture_text(bytes: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if text.len() > MAX_CAPTURED_PROVIDER_OUTPUT_BYTES {
+        let mut end = MAX_CAPTURED_PROVIDER_OUTPUT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
 fn command_env_path(command_env: &[(String, String)]) -> Option<OsString> {
     command_env
         .iter()
@@ -1649,6 +1864,208 @@ mod tests {
             .unwrap()
             .unwrap_err();
         request_thread.join().unwrap();
+        assert_eq!(error.code, error_codes::PROVIDER_PROCESS_START_FAILED);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_runner_reuses_exact_program_cwd_env_and_stdin() {
+        let temp = tempfile::tempdir().unwrap();
+        let spec = pedelec_core::CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '%s|%s|' \"$PEDELEC_RUNNER_TEST\" \"$(pwd)\"; cat".into(),
+            ],
+            cwd: temp.path().to_path_buf(),
+            env: vec![("PEDELEC_RUNNER_TEST".into(), "env-value".into())],
+            prompt: String::new(),
+            stdin: "stdin-value\n".into(),
+        };
+
+        let output = run_provider_command_captured(spec, Duration::from_secs(2)).unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(
+            output.stdout,
+            format!("env-value|{}|stdin-value\n", temp.path().display())
+        );
+        assert!(output.stderr.is_empty());
+        assert!(!output.timed_out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_runner_returns_non_zero_output_for_classification() {
+        let spec = pedelec_core::CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf 'stdout'; printf 'stderr' >&2; exit 7".into(),
+            ],
+            cwd: PathBuf::from("."),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+
+        let output = run_provider_command_captured(spec, Duration::from_secs(2)).unwrap();
+        assert_eq!(output.exit_code, Some(7));
+        assert_eq!(output.stdout, "stdout");
+        assert_eq!(output.stderr, "stderr");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_runner_bounds_stdout_and_stderr() {
+        let spec = pedelec_core::CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "dd if=/dev/zero bs=1024 count=2048 2>/dev/null; dd if=/dev/zero bs=1024 count=2048 1>&2 2>/dev/null".into(),
+            ],
+            cwd: PathBuf::from("."),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+
+        let output = run_provider_command_captured(spec, Duration::from_secs(2)).unwrap();
+        assert_eq!(output.stdout.len(), MAX_CAPTURED_PROVIDER_OUTPUT_BYTES);
+        assert_eq!(output.stderr.len(), MAX_CAPTURED_PROVIDER_OUTPUT_BYTES);
+        assert!(output.stdout_truncated);
+        assert!(output.stderr_truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_runner_timeout_kills_and_reaps_child() {
+        let spec = pedelec_core::CommandSpec {
+            program: "/bin/sleep".into(),
+            args: vec!["10".into()],
+            cwd: PathBuf::from("."),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+
+        let started = std::time::Instant::now();
+        let output = run_provider_command_captured(spec, Duration::from_millis(50)).unwrap();
+        assert!(output.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn captured_runner_reuses_cmd_script_wrapper() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("probe.cmd");
+        fs::write(&script, "@echo off\r\necho wrapper-ok\r\n").unwrap();
+        let spec = pedelec_core::CommandSpec {
+            program: script.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+
+        let output = run_provider_command_captured(spec, Duration::from_secs(2)).unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stdout.contains("wrapper-ok"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn captured_runner_captures_windows_stdin_and_environment() {
+        let comspec = std::env::var_os("ComSpec").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let spec = pedelec_core::CommandSpec {
+            program: comspec.to_string_lossy().into_owned(),
+            args: vec!["/d".into(), "/c".into(), "more".into()],
+            cwd: temp.path().to_path_buf(),
+            env: vec![("PEDELEC_RUNNER_TEST".into(), "env-value".into())],
+            prompt: String::new(),
+            stdin: "stdin-value\r\n".into(),
+        };
+
+        let output = run_provider_command_captured(spec, Duration::from_secs(2)).unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stdout.contains("stdin-value"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn captured_runner_timeout_kills_windows_child() {
+        let powershell_exe = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        if !powershell_exe.is_file() {
+            return;
+        }
+        let spec = pedelec_core::CommandSpec {
+            program: powershell_exe.to_string_lossy().into_owned(),
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 10".into(),
+            ],
+            cwd: PathBuf::from("."),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+
+        let output = run_provider_command_captured(spec, Duration::from_millis(50)).unwrap();
+        assert!(output.timed_out);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn captured_runner_bounds_windows_output() {
+        let powershell_exe = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        if !powershell_exe.is_file() {
+            return;
+        }
+        let spec = pedelec_core::CommandSpec {
+            program: powershell_exe.to_string_lossy().into_owned(),
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                "$s='x'*2097152; [Console]::Out.Write($s); [Console]::Error.Write($s)".into(),
+            ],
+            cwd: PathBuf::from("."),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+
+        let output = run_provider_command_captured(spec, Duration::from_secs(5)).unwrap();
+        assert_eq!(output.stdout.len(), MAX_CAPTURED_PROVIDER_OUTPUT_BYTES);
+        assert_eq!(output.stderr.len(), MAX_CAPTURED_PROVIDER_OUTPUT_BYTES);
+        assert!(output.stdout_truncated);
+        assert!(output.stderr_truncated);
+    }
+
+    #[test]
+    fn captured_runner_reports_spawn_failure() {
+        let spec = pedelec_core::CommandSpec {
+            program: "pedelec-runner-program-that-does-not-exist".into(),
+            args: Vec::new(),
+            cwd: PathBuf::from("."),
+            env: Vec::new(),
+            prompt: String::new(),
+            stdin: String::new(),
+        };
+
+        let error = run_provider_command_captured(spec, Duration::from_secs(1)).unwrap_err();
         assert_eq!(error.code, error_codes::PROVIDER_PROCESS_START_FAILED);
     }
 

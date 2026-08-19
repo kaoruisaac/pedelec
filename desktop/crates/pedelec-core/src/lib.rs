@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
 
+pub mod effort_wizard;
+pub use effort_wizard::*;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -307,6 +310,8 @@ pub struct ProviderInfo {
 pub struct PedelecSettings {
     pub default_provider: Option<ProviderCode>,
     pub provider_settings: ProviderSettings,
+    #[serde(default)]
+    pub wizard_metadata: EffortWizardMetadata,
 }
 
 /// The settings contract exposed through the SDK/Core IPC boundary. Keep this
@@ -353,6 +358,7 @@ impl Default for PedelecSettings {
         Self {
             default_provider: None,
             provider_settings: ProviderSettings::default(),
+            wizard_metadata: EffortWizardMetadata::default(),
         }
     }
 }
@@ -2896,6 +2902,7 @@ impl CoreRuntime {
         &mut self,
         input: UpdateSettingsInput,
     ) -> Result<PedelecSettings, PedelecError> {
+        let existing_settings = read_settings_file(&self.resolved_settings_file_path()?)?;
         #[cfg(test)]
         let settings = if self.provider_readiness.is_uninitialized() {
             normalize_update_settings_for_test(input, self.provider_path_value().as_ref())?
@@ -2904,6 +2911,8 @@ impl CoreRuntime {
         };
         #[cfg(not(test))]
         let settings = normalize_update_settings(input, &self.provider_scan)?;
+        let mut settings = settings;
+        settings.wizard_metadata = existing_settings.wizard_metadata;
         write_settings_file(&self.resolved_settings_file_path()?, &settings)?;
         Ok(settings)
     }
@@ -6123,6 +6132,9 @@ pub mod error_codes {
     pub const MODEL_REQUIRED: &str = "MODEL_REQUIRED";
     pub const SETTINGS_READ_FAILED: &str = "SETTINGS_READ_FAILED";
     pub const SETTINGS_WRITE_FAILED: &str = "SETTINGS_WRITE_FAILED";
+    pub const EFFORT_WIZARD_PRESET_INVALID: &str = "EFFORT_WIZARD_PRESET_INVALID";
+    pub const EFFORT_WIZARD_SETTINGS_CHANGED: &str = "EFFORT_WIZARD_SETTINGS_CHANGED";
+    pub const EFFORT_WIZARD_APPLY_INVALID: &str = "EFFORT_WIZARD_APPLY_INVALID";
     pub const OLLAMA_API_KEY_REQUIRED: &str = "OLLAMA_API_KEY_REQUIRED";
     pub const OLLAMA_AUTH_FAILED: &str = "OLLAMA_AUTH_FAILED";
     pub const OLLAMA_MODEL_NOT_FOUND: &str = "OLLAMA_MODEL_NOT_FOUND";
@@ -6883,6 +6895,7 @@ fn normalize_update_settings(
     Ok(PedelecSettings {
         default_provider: Some(input.default_provider),
         provider_settings,
+        wizard_metadata: EffortWizardMetadata::default(),
     })
 }
 
@@ -7083,7 +7096,7 @@ fn parse_codex_reasoning_effort(value: &str) -> Option<&str> {
 }
 
 fn is_supported_codex_effort(value: &str) -> bool {
-    matches!(value, "low" | "medium" | "high" | "xhigh")
+    matches!(value, "low" | "medium" | "high" | "xhigh" | "max")
 }
 
 fn is_supported_antigravity_effort(value: &str) -> bool {

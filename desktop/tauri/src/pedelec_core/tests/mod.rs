@@ -2822,6 +2822,7 @@ mod tests {
         let mut settings = PedelecSettings {
             default_provider: Some(ProviderCode::Ollama),
             provider_settings: ProviderSettings::default(),
+            wizard_metadata: EffortWizardMetadata::default(),
         };
         settings.provider_settings.ollama.base_url = "http://127.0.0.1:11434".into();
         settings.provider_settings.ollama.timeout_ms = 120_000;
