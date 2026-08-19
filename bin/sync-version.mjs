@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// node bin/sync-version.mjs 0.2.1
+// node bin/sync-version.mjs 0.2.7
 // node bin/sync-version.mjs --check 0.2.1
 // node bin/sync-version.mjs --help
 
