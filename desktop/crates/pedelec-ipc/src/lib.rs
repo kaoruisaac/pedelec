@@ -2,13 +2,16 @@ use encoding_rs::Encoding;
 use pedelec_core::{
     error_codes, inspect_sandbox_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
     CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError,
-    PrepareThreadInput, PrepareThreadOutput, RunningProviderProcessPurpose, SendTextInput,
-    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput,
-    ToolSpecInput,
+    PrepareThreadInput, PrepareThreadOutput, ProviderProcessTermination,
+    RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime, SubmitToolResultInput,
+    SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolInvocationOutcome,
+    ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput,
 };
 use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -18,9 +21,10 @@ use std::net::{TcpListener, TcpStream};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -101,6 +105,35 @@ struct RawCoreIpcRequest {
     payload: Option<Value>,
     caller_origin: Option<String>,
     caller_sdk_version: Option<String>,
+}
+
+struct HandledCoreIpcResponse {
+    response: CoreIpcResponse,
+    tool_delivery_request_id: Option<String>,
+}
+
+#[cfg(test)]
+static FORCED_TOOL_RESPONSE_WRITE_FAILURES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Forces one actual Core IPC tool response write to fail in tests. The
+/// request still runs through the socket handler and terminalizes normally,
+/// so tests can verify the delivery acknowledgment contract.
+#[cfg(test)]
+pub fn force_tool_response_write_failure_for_test(request_id: impl Into<String>) {
+    FORCED_TOOL_RESPONSE_WRITE_FAILURES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(request_id.into());
+}
+
+#[cfg(test)]
+fn should_force_tool_response_write_failure(request_id: &str) -> bool {
+    FORCED_TOOL_RESPONSE_WRITE_FAILURES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .remove(request_id)
 }
 
 pub fn start_core_ipc_server(
@@ -372,14 +405,56 @@ fn handle_core_ipc_connection(
             continue;
         }
 
-        let response = handle_core_ipc_request_with_services(
-            request,
-            Arc::clone(&runtime),
-            Arc::clone(&platform_services),
-        );
+        let handled = if request.r#type == "tool_call" {
+            handle_tool_call_request_with_metadata(&request, Arc::clone(&runtime))
+        } else {
+            HandledCoreIpcResponse {
+                response: handle_core_ipc_request_with_services(
+                    request,
+                    Arc::clone(&runtime),
+                    Arc::clone(&platform_services),
+                ),
+                tool_delivery_request_id: None,
+            }
+        };
         let mut writer = writer.lock().unwrap();
-        write_json_line(&mut *writer, &response)?;
+        let write_succeeded = write_tool_delivery_response(
+            &mut *writer,
+            &handled.response,
+            handled.tool_delivery_request_id.as_deref(),
+        )
+        .is_ok();
+        drop(writer);
+        if write_succeeded {
+            if let Some(request_id) = handled.tool_delivery_request_id {
+                runtime
+                    .lock()
+                    .unwrap()
+                    .tool_request_broker
+                    .acknowledge_tool_delivery(&request_id);
+            }
+        } else {
+            return Ok(());
+        }
     }
+}
+
+fn write_tool_delivery_response<W: Write>(
+    writer: &mut W,
+    response: &CoreIpcResponse,
+    _tool_delivery_request_id: Option<&str>,
+) -> io::Result<()> {
+    #[cfg(test)]
+    if _tool_delivery_request_id.is_some()
+        && should_force_tool_response_write_failure(&response.request_id)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "test-forced Core IPC tool response write failure",
+        ));
+    }
+
+    write_json_line(writer, response)
 }
 
 fn parse_core_ipc_request(value: Value) -> Result<CoreIpcRequest, CoreIpcResponse> {
@@ -645,18 +720,52 @@ fn handle_tool_call_request(
     request: &CoreIpcRequest,
     runtime: SharedCoreRuntime,
 ) -> CoreIpcResponse {
+    handle_tool_call_request_with_metadata(request, runtime).response
+}
+
+fn handle_tool_call_request_with_metadata(
+    request: &CoreIpcRequest,
+    runtime: SharedCoreRuntime,
+) -> HandledCoreIpcResponse {
     let input = match decode_payload::<ToolCallInput>(request) {
         Ok(input) => input,
-        Err(err) => return error_response(&request.request_id, err),
+        Err(err) => {
+            return HandledCoreIpcResponse {
+                response: error_response(&request.request_id, err),
+                tool_delivery_request_id: None,
+            }
+        }
     };
 
-    let (request_id, timeout_ms, result_rx) = match runtime.lock().unwrap().begin_tool_call(input) {
-        Ok(wait) => wait,
-        Err(err) => return error_response(&request.request_id, err),
+    let registration = match runtime.lock().unwrap().begin_tool_call(input) {
+        Ok(registration) => registration,
+        Err(err) => {
+            return HandledCoreIpcResponse {
+                response: error_response(&request.request_id, err),
+                tool_delivery_request_id: None,
+            }
+        }
     };
+    let tool_delivery_request_id = match &registration {
+        ToolInvocationRegistration::Created(wait)
+        | ToolInvocationRegistration::Joined(wait)
+        | ToolInvocationRegistration::Replayed(wait) => Some(wait.request_id.clone()),
+    };
+    let wait = match registration {
+        ToolInvocationRegistration::Created(wait)
+        | ToolInvocationRegistration::Joined(wait)
+        | ToolInvocationRegistration::Replayed(wait) => wait,
+    };
+    let ToolInvocationWait {
+        request_id,
+        remaining_timeout,
+        result_rx,
+        ..
+    } = wait;
 
-    match result_rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-        Ok(result) => ok_response(&request.request_id, result),
+    let response = match result_rx.recv_timeout(remaining_timeout) {
+        Ok(ToolInvocationOutcome::Result(result)) => ok_response(&request.request_id, result),
+        Ok(ToolInvocationOutcome::CoreError(error)) => error_response(&request.request_id, error),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             runtime.lock().unwrap().timeout_tool_call(&request_id);
             error_response(
@@ -668,9 +777,13 @@ fn handle_tool_call_request(
             runtime.lock().unwrap().timeout_tool_call(&request_id);
             error_response(
                 &request.request_id,
-                PedelecError::new(error_codes::TOOL_TIMEOUT, "tool result channel closed"),
+                PedelecError::new(error_codes::TOOL_TIMEOUT, "tool timeout"),
             )
         }
+    };
+    HandledCoreIpcResponse {
+        response,
+        tool_delivery_request_id,
     }
 }
 
@@ -819,7 +932,7 @@ fn start_provider_process_with_command(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let child = Arc::new(Mutex::new(Some(child)));
-    runtime.lock().unwrap().register_provider_process(
+    let termination = runtime.lock().unwrap().register_provider_process(
         &thread_id,
         process_id,
         Arc::clone(&child),
@@ -832,6 +945,7 @@ fn start_provider_process_with_command(
             thread_id.clone(),
             stdout,
             ProviderStream::Stdout,
+            Arc::clone(&termination),
         )
     });
     let stderr_reader = stderr.map(|stderr| {
@@ -840,6 +954,7 @@ fn start_provider_process_with_command(
             thread_id.clone(),
             stderr,
             ProviderStream::Stderr,
+            Arc::clone(&termination),
         )
     });
     spawn_provider_waiter(
@@ -847,6 +962,7 @@ fn start_provider_process_with_command(
         thread_id,
         process_id,
         child,
+        termination,
         stdout_reader,
         stderr_reader,
     );
@@ -1080,6 +1196,7 @@ fn spawn_provider_reader<R>(
     thread_id: String,
     mut reader: R,
     stream: ProviderStream,
+    termination: Arc<ProviderProcessTermination>,
 ) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -1094,29 +1211,45 @@ where
                     let Some(text) = decoder.decode_chunk(&buffer[..bytes_read]) else {
                         continue;
                     };
-                    if let Ok(mut runtime) = runtime.lock() {
-                        match stream {
-                            ProviderStream::Stdout => {
-                                runtime.emit_provider_stdout(&thread_id, text)
-                            }
-                            ProviderStream::Stderr => {
-                                runtime.emit_provider_stderr(&thread_id, text)
-                            }
-                        }
-                    }
+                    emit_provider_reader_text(&runtime, &thread_id, stream, text, &termination);
                 }
                 Err(_) => break,
             }
         }
         if let Some(text) = decoder.flush() {
-            if let Ok(mut runtime) = runtime.lock() {
-                match stream {
-                    ProviderStream::Stdout => runtime.emit_provider_stdout(&thread_id, text),
-                    ProviderStream::Stderr => runtime.emit_provider_stderr(&thread_id, text),
-                }
-            }
+            emit_provider_reader_text(&runtime, &thread_id, stream, text, &termination);
         }
     })
+}
+
+fn emit_provider_reader_text(
+    runtime: &SharedCoreRuntime,
+    thread_id: &str,
+    stream: ProviderStream,
+    text: String,
+    termination: &ProviderProcessTermination,
+) {
+    let mut text = Some(text);
+    loop {
+        if termination.is_cancelled() {
+            return;
+        }
+        match runtime.try_lock() {
+            Ok(mut runtime) => {
+                if termination.is_cancelled() {
+                    return;
+                }
+                let text = text.take().expect("provider reader text is present");
+                match stream {
+                    ProviderStream::Stdout => runtime.emit_provider_stdout(thread_id, text),
+                    ProviderStream::Stderr => runtime.emit_provider_stderr(thread_id, text),
+                }
+                return;
+            }
+            Err(std::sync::TryLockError::WouldBlock) => thread::yield_now(),
+            Err(std::sync::TryLockError::Poisoned(_)) => return,
+        }
+    }
 }
 
 struct ProviderOutputDecoder {
@@ -1221,36 +1354,45 @@ fn spawn_provider_waiter(
     thread_id: String,
     process_id: u32,
     child: Arc<Mutex<Option<std::process::Child>>>,
+    termination: Arc<ProviderProcessTermination>,
     stdout_reader: Option<thread::JoinHandle<()>>,
     stderr_reader: Option<thread::JoinHandle<()>>,
 ) {
     thread::spawn(move || {
         let child = {
             let Ok(mut child) = child.lock() else {
+                termination.mark_completed();
                 return;
             };
             child.take()
         };
 
         let Some(mut child) = child else {
+            termination.mark_completed();
             return;
         };
 
-        match child.wait() {
+        let wait_result = child.wait();
+        if let Some(reader) = stdout_reader {
+            let _ = reader.join();
+        }
+        if let Some(reader) = stderr_reader {
+            let _ = reader.join();
+        }
+        termination.mark_completed();
+        match wait_result {
             Ok(status) => {
-                if let Some(reader) = stdout_reader {
-                    let _ = reader.join();
-                }
-                if let Some(reader) = stderr_reader {
-                    let _ = reader.join();
-                }
-                if let Ok(mut runtime) = runtime.lock() {
-                    runtime.complete_provider_process(&thread_id, process_id, status);
+                if !termination.is_cancelled() {
+                    if let Ok(mut runtime) = runtime.lock() {
+                        runtime.complete_provider_process(&thread_id, process_id, status);
+                    }
                 }
             }
             Err(err) => {
-                if let Ok(mut runtime) = runtime.lock() {
-                    runtime.fail_provider_process_wait(&thread_id, process_id, err.to_string());
+                if !termination.is_cancelled() {
+                    if let Ok(mut runtime) = runtime.lock() {
+                        runtime.fail_provider_process_wait(&thread_id, process_id, err.to_string());
+                    }
                 }
             }
         }
@@ -1549,3 +1691,7 @@ mod tests {
         runtime
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tauri/src/pedelec_ipc/tests/mod.rs"]
+mod tauri_ipc_tests;

@@ -12,10 +12,9 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(any(target_os = "macos", all(test, unix)))]
 use std::process::Stdio;
 use std::process::{Child, Command, ExitStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
-use std::time::Duration;
-#[cfg(any(target_os = "macos", all(test, unix)))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
 
@@ -37,6 +36,8 @@ const ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS: usize = 20_000;
 const SANDBOX_SUBDIRS: [&str; 4] = ["skills", "assets", "logs", "tmp"];
 const SANDBOX_CONFIG_FILE: &str = ".pedelec-sandbox.json";
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
+pub const TOOL_RESULT_REPLAY_WINDOW: Duration = Duration::from_secs(10);
+pub const TOOL_RESULT_REPLAY_MAX_ENTRIES: usize = 256;
 const THREAD_ID_BASE36_MIN_WIDTH: usize = 6;
 const THREAD_ID_BASE36_MAX_WIDTH: usize = 7;
 const THREAD_ID_MAX_COUNTER: u64 = 78_364_164_095;
@@ -714,6 +715,27 @@ pub struct ToolCallInput {
     pub args: Value,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolInvocationOutcome {
+    Result(Value),
+    CoreError(PedelecError),
+}
+
+#[derive(Debug)]
+pub struct ToolInvocationWait {
+    pub request_id: String,
+    pub timeout_ms: u64,
+    pub remaining_timeout: Duration,
+    pub result_rx: mpsc::Receiver<ToolInvocationOutcome>,
+}
+
+#[derive(Debug)]
+pub enum ToolInvocationRegistration {
+    Created(ToolInvocationWait),
+    Joined(ToolInvocationWait),
+    Replayed(ToolInvocationWait),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolSpecInput {
@@ -786,12 +808,57 @@ pub struct RunPromptProviderContext {
 pub(crate) struct RunningProviderProcess {
     process_id: u32,
     child: Arc<Mutex<Option<Child>>>,
+    termination: Arc<ProviderProcessTermination>,
     purpose: RunningProviderProcessPurpose,
     stderr: String,
     stderr_truncated: bool,
     had_provider_error: bool,
     prepare_assistant_output: String,
     prepare_assistant_output_truncated: bool,
+}
+
+/// Coordinates provider child termination with the Core lifecycle operation.
+///
+/// The provider waiter owns the child handle and is responsible for waiting
+/// and reaping it. `end_thread()` can request termination while holding the
+/// runtime mutex, but must then wait for the waiter to finish without making
+/// the waiter reacquire that mutex on the cancellation path.
+#[derive(Debug)]
+pub struct ProviderProcessTermination {
+    cancelled: AtomicBool,
+    completed: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl ProviderProcessTermination {
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            completed: Mutex::new(false),
+            changed: Condvar::new(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn mark_completed(&self) {
+        let mut completed = self.completed.lock().unwrap();
+        *completed = true;
+        self.changed.notify_all();
+    }
+
+    pub fn wait_completed(&self) {
+        let mut completed = self.completed.lock().unwrap();
+        while !*completed {
+            completed = self.changed.wait(completed).unwrap();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3236,7 +3303,8 @@ impl CoreRuntime {
         process_id: u32,
         child: Arc<Mutex<Option<Child>>>,
         purpose: RunningProviderProcessPurpose,
-    ) {
+    ) -> Arc<ProviderProcessTermination> {
+        let termination = Arc::new(ProviderProcessTermination::new());
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             thread.process_id = Some(process_id);
             thread.updated_at = Utc::now();
@@ -3249,6 +3317,7 @@ impl CoreRuntime {
             RunningProviderProcess {
                 process_id,
                 child,
+                termination: Arc::clone(&termination),
                 purpose,
                 stderr: String::new(),
                 stderr_truncated: false,
@@ -3257,6 +3326,7 @@ impl CoreRuntime {
                 prepare_assistant_output_truncated: false,
             },
         );
+        termination
     }
 
     pub fn fail_provider_process_start(
@@ -3346,6 +3416,10 @@ impl CoreRuntime {
         let Some(running) = running else {
             return;
         };
+        // A completed provider process means the provider turn is over. This
+        // is distinct from a provider's child shell timing out while the
+        // provider process remains alive, which does not reach this path.
+        self.tool_request_broker.clear_thread(thread_id);
         let purpose = running.purpose;
         let had_provider_error = running.had_provider_error;
         let prepare_assistant_output = running.prepare_assistant_output.clone();
@@ -3484,6 +3558,9 @@ impl CoreRuntime {
         if purpose == Some(RunningProviderProcessPurpose::Prepare) {
             self.discard_failed_prepare_provider_session(thread_id);
         }
+        if purpose.is_some() {
+            self.tool_request_broker.clear_thread(thread_id);
+        }
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             if thread.process_id == Some(process_id) {
                 thread.process_id = None;
@@ -3592,16 +3669,20 @@ impl CoreRuntime {
             return;
         };
 
-        if let Ok(mut child) = running.child.lock() {
-            if let Some(child) = child.as_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return;
-            }
+        // The provider waiter owns the child wait/reap path. Mark the
+        // cancellation before terminating it so reader/waiter workers skip
+        // callbacks that would otherwise need Core's runtime mutex.
+        running.termination.cancel();
+        let killed_directly = running
+            .child
+            .lock()
+            .ok()
+            .and_then(|mut child| child.as_mut().map(|child| child.kill().is_ok()))
+            .unwrap_or(false);
+        if !killed_directly {
+            let _ = kill_process_by_id(running.process_id);
         }
-
-        let _ = kill_process_by_id(running.process_id);
-        std::thread::sleep(Duration::from_millis(100));
+        running.termination.wait_completed();
     }
 
     pub fn end_thread(&mut self, input: EndThreadInput) -> Result<(), PedelecError> {
@@ -3677,17 +3758,10 @@ impl CoreRuntime {
     pub fn begin_tool_call(
         &mut self,
         input: ToolCallInput,
-    ) -> Result<(String, u64, mpsc::Receiver<Value>), PedelecError> {
-        let thread = self.thread_manager.thread_mut(&input.thread_id)?;
-        match thread.status {
-            ThreadStatus::Running => {}
-            ThreadStatus::WaitingToolResult => {
-                return Err(PedelecError::with_details(
-                    error_codes::PENDING_TOOL_REQUEST_EXISTS,
-                    "thread already has a pending tool request",
-                    serde_json::json!({ "threadId": input.thread_id }),
-                ));
-            }
+    ) -> Result<ToolInvocationRegistration, PedelecError> {
+        let thread_status = self.thread_manager.thread(&input.thread_id)?.status.clone();
+        match &thread_status {
+            ThreadStatus::Running | ThreadStatus::WaitingToolResult => {}
             ThreadStatus::Ended => {
                 return Err(PedelecError::with_details(
                     error_codes::THREAD_ENDED,
@@ -3704,17 +3778,6 @@ impl CoreRuntime {
             }
         }
 
-        if self
-            .tool_request_broker
-            .has_pending_for_thread(&input.thread_id)
-        {
-            return Err(PedelecError::with_details(
-                error_codes::PENDING_TOOL_REQUEST_EXISTS,
-                "thread already has a pending tool request",
-                serde_json::json!({ "threadId": input.thread_id }),
-            ));
-        }
-
         let registry = self.tool_registry.get(&input.thread_id).ok_or_else(|| {
             PedelecError::with_details(
                 error_codes::TOOLS_MANIFEST_INVALID,
@@ -3723,25 +3786,40 @@ impl CoreRuntime {
             )
         })?;
         let normalized = registry.normalize_tool_call(&input.tool_name, &input.args)?;
-        let (request_id, receiver) = self.tool_request_broker.create_pending(
+        let has_pending = self
+            .tool_request_broker
+            .has_pending_for_thread(&input.thread_id);
+        if (thread_status == ThreadStatus::WaitingToolResult && !has_pending)
+            || (thread_status == ThreadStatus::Running && has_pending)
+        {
+            return Err(PedelecError::with_details(
+                error_codes::PENDING_TOOL_REQUEST_EXISTS,
+                "thread already has a pending tool request",
+                serde_json::json!({ "threadId": input.thread_id }),
+            ));
+        }
+        let registration = self.tool_request_broker.begin_or_join(
             input.thread_id.clone(),
             input.tool_name.clone(),
             normalized.args.clone(),
             normalized.timeout_ms,
         )?;
 
-        thread.status = ThreadStatus::WaitingToolResult;
-        thread.updated_at = Utc::now();
-        self.event_bus
-            .emit_status_changed(&input.thread_id, ThreadStatus::WaitingToolResult);
-        self.event_bus.emit_tool_call(
-            &input.thread_id,
-            &request_id,
-            &input.tool_name,
-            normalized.args,
-        );
+        if let ToolInvocationRegistration::Created(wait) = &registration {
+            let thread = self.thread_manager.thread_mut(&input.thread_id)?;
+            thread.status = ThreadStatus::WaitingToolResult;
+            thread.updated_at = Utc::now();
+            self.event_bus
+                .emit_status_changed(&input.thread_id, ThreadStatus::WaitingToolResult);
+            self.event_bus.emit_tool_call(
+                &input.thread_id,
+                &wait.request_id,
+                &input.tool_name,
+                normalized.args,
+            );
+        }
 
-        Ok((request_id, normalized.timeout_ms, receiver))
+        Ok(registration)
     }
 
     pub fn tool_spec(&self, input: ToolSpecInput) -> Result<ToolDefinition, PedelecError> {
@@ -3762,9 +3840,17 @@ impl CoreRuntime {
     }
 
     pub fn timeout_tool_call(&mut self, request_id: &str) {
-        let Some(pending) = self.tool_request_broker.remove(request_id) else {
+        let timeout = ToolInvocationOutcome::CoreError(PedelecError::new(
+            error_codes::TOOL_TIMEOUT,
+            "tool timeout",
+        ));
+        let Some(mut pending) = self
+            .tool_request_broker
+            .terminalize(request_id, timeout.clone())
+        else {
             return;
         };
+        pending.broadcast(timeout);
         if let Ok(thread) = self.thread_manager.thread_mut(&pending.request.thread_id) {
             if thread.status == ThreadStatus::WaitingToolResult {
                 thread.status = ThreadStatus::Running;
@@ -3801,9 +3887,10 @@ impl CoreRuntime {
             ));
         }
 
-        let pending = self
+        let outcome = ToolInvocationOutcome::Result(input.result.clone());
+        let mut pending = self
             .tool_request_broker
-            .remove(&input.request_id)
+            .terminalize(&input.request_id, outcome.clone())
             .ok_or_else(|| {
                 PedelecError::with_details(
                     error_codes::PENDING_TOOL_REQUEST_NOT_FOUND,
@@ -3815,7 +3902,7 @@ impl CoreRuntime {
                 )
             })?;
 
-        let _ = pending.result_tx.send(input.result.clone());
+        pending.broadcast(outcome);
         if let Ok(thread) = self.thread_manager.thread_mut(&input.thread_id) {
             if thread.status == ThreadStatus::WaitingToolResult {
                 thread.status = ThreadStatus::Running;
@@ -5192,25 +5279,110 @@ fn tool_schema_defines_top_level_property(args_schema: &Value, property_name: &s
 }
 
 #[derive(Debug)]
-pub struct PendingToolWait {
+pub struct PendingToolInvocation {
     pub request: PendingToolRequest,
-    result_tx: mpsc::Sender<Value>,
+    pub deadline: Instant,
+    waiters: Vec<mpsc::Sender<ToolInvocationOutcome>>,
+}
+
+impl PendingToolInvocation {
+    fn broadcast(&mut self, outcome: ToolInvocationOutcome) {
+        for waiter in self.waiters.drain(..) {
+            let _ = waiter.send(outcome.clone());
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ReplayableToolInvocation {
+    request: PendingToolRequest,
+    outcome: ToolInvocationOutcome,
+    completed_at: Instant,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Default)]
 pub struct ToolRequestBroker {
-    pending: HashMap<String, PendingToolWait>,
+    pending: HashMap<String, PendingToolInvocation>,
+    replayable: HashMap<String, ReplayableToolInvocation>,
     next_request_number: u64,
 }
 
 impl ToolRequestBroker {
+    pub fn begin_or_join(
+        &mut self,
+        thread_id: String,
+        tool_name: String,
+        args: Value,
+        timeout_ms: u64,
+    ) -> Result<ToolInvocationRegistration, PedelecError> {
+        self.purge_expired_replay_candidates(Instant::now());
+        let pending_id = self
+            .pending
+            .iter()
+            .find(|(_, pending)| pending.request.thread_id == thread_id)
+            .map(|(request_id, _)| request_id.clone());
+
+        if let Some(pending_id) = pending_id {
+            let pending = self
+                .pending
+                .get_mut(&pending_id)
+                .expect("pending request exists");
+            if pending.request.tool_name != tool_name || pending.request.args != args {
+                return Err(PedelecError::with_details(
+                    error_codes::PENDING_TOOL_REQUEST_EXISTS,
+                    "thread already has a pending tool request",
+                    serde_json::json!({ "threadId": thread_id }),
+                ));
+            }
+
+            let (result_tx, result_rx) = mpsc::channel();
+            pending.waiters.push(result_tx);
+            return Ok(ToolInvocationRegistration::Joined(ToolInvocationWait {
+                request_id: pending.request.request_id.clone(),
+                timeout_ms: pending.request.timeout_ms,
+                remaining_timeout: remaining_timeout(pending.deadline),
+                result_rx,
+            }));
+        }
+
+        let replay_id = self
+            .replayable
+            .values()
+            .find(|candidate| {
+                candidate.request.thread_id == thread_id
+                    && candidate.request.tool_name == tool_name
+                    && candidate.request.args == args
+            })
+            .map(|candidate| candidate.request.request_id.clone());
+        if let Some(replay_id) = replay_id {
+            let candidate = self
+                .replayable
+                .get(&replay_id)
+                .expect("replay candidate exists");
+            let (result_tx, result_rx) = mpsc::channel();
+            let outcome = candidate.outcome.clone();
+            let _ = result_tx.send(outcome);
+            return Ok(ToolInvocationRegistration::Replayed(ToolInvocationWait {
+                request_id: candidate.request.request_id.clone(),
+                timeout_ms: candidate.request.timeout_ms,
+                remaining_timeout: Duration::ZERO,
+                result_rx,
+            }));
+        }
+
+        Ok(ToolInvocationRegistration::Created(
+            self.create_new(thread_id, tool_name, args, timeout_ms),
+        ))
+    }
+
     pub fn create_pending(
         &mut self,
         thread_id: String,
         tool_name: String,
         args: Value,
         timeout_ms: u64,
-    ) -> Result<(String, mpsc::Receiver<Value>), PedelecError> {
+    ) -> Result<(String, mpsc::Receiver<ToolInvocationOutcome>), PedelecError> {
         if self.has_pending_for_thread(&thread_id) {
             return Err(PedelecError::with_details(
                 error_codes::PENDING_TOOL_REQUEST_EXISTS,
@@ -5219,6 +5391,17 @@ impl ToolRequestBroker {
             ));
         }
 
+        let wait = self.create_new(thread_id, tool_name, args, timeout_ms);
+        Ok((wait.request_id, wait.result_rx))
+    }
+
+    fn create_new(
+        &mut self,
+        thread_id: String,
+        tool_name: String,
+        args: Value,
+        timeout_ms: u64,
+    ) -> ToolInvocationWait {
         self.next_request_number += 1;
         let request_id = format!(
             "toolreq_{}_{}",
@@ -5226,6 +5409,7 @@ impl ToolRequestBroker {
             self.next_request_number
         );
         let (result_tx, result_rx) = mpsc::channel();
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let request = PendingToolRequest {
             request_id: request_id.clone(),
             thread_id,
@@ -5235,10 +5419,21 @@ impl ToolRequestBroker {
             timeout_ms,
         };
 
-        self.pending
-            .insert(request_id.clone(), PendingToolWait { request, result_tx });
+        self.pending.insert(
+            request_id.clone(),
+            PendingToolInvocation {
+                request,
+                deadline,
+                waiters: vec![result_tx],
+            },
+        );
 
-        Ok((request_id, result_rx))
+        ToolInvocationWait {
+            request_id,
+            timeout_ms,
+            remaining_timeout: remaining_timeout(deadline),
+            result_rx,
+        }
     }
 
     pub fn has_pending_for_thread(&self, thread_id: &str) -> bool {
@@ -5247,18 +5442,100 @@ impl ToolRequestBroker {
             .any(|pending| pending.request.thread_id == thread_id)
     }
 
-    pub fn get(&self, request_id: &str) -> Option<&PendingToolWait> {
+    pub fn get(&self, request_id: &str) -> Option<&PendingToolInvocation> {
         self.pending.get(request_id)
     }
 
-    pub fn remove(&mut self, request_id: &str) -> Option<PendingToolWait> {
+    pub fn remove(&mut self, request_id: &str) -> Option<PendingToolInvocation> {
         self.pending.remove(request_id)
+    }
+
+    fn terminalize(
+        &mut self,
+        request_id: &str,
+        outcome: ToolInvocationOutcome,
+    ) -> Option<PendingToolInvocation> {
+        let pending = self.pending.remove(request_id)?;
+        self.remember_replay_candidate(pending.request.clone(), outcome);
+        Some(pending)
+    }
+
+    fn remember_replay_candidate(
+        &mut self,
+        request: PendingToolRequest,
+        outcome: ToolInvocationOutcome,
+    ) {
+        let now = Instant::now();
+        self.purge_expired_replay_candidates(now);
+        self.replayable.insert(
+            request.request_id.clone(),
+            ReplayableToolInvocation {
+                request,
+                outcome,
+                completed_at: now,
+                expires_at: now + TOOL_RESULT_REPLAY_WINDOW,
+            },
+        );
+        while self.replayable.len() > TOOL_RESULT_REPLAY_MAX_ENTRIES {
+            let oldest_id = self
+                .replayable
+                .iter()
+                .min_by_key(|(_, candidate)| {
+                    (candidate.completed_at, &candidate.request.request_id)
+                })
+                .map(|(request_id, _)| request_id.clone());
+            if let Some(oldest_id) = oldest_id {
+                self.replayable.remove(&oldest_id);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn purge_expired_replay_candidates(&mut self, now: Instant) {
+        self.replayable
+            .retain(|_, candidate| candidate.expires_at > now);
+    }
+
+    pub fn acknowledge_tool_delivery(&mut self, request_id: &str) {
+        self.replayable.remove(request_id);
+    }
+
+    pub fn replay_candidate_count(&mut self) -> usize {
+        self.purge_expired_replay_candidates(Instant::now());
+        self.replayable.len()
+    }
+
+    pub fn purge_expired_replay_candidates_at(&mut self, now: Instant) {
+        self.purge_expired_replay_candidates(now);
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn waiter_count(&self, request_id: &str) -> Option<usize> {
+        self.pending
+            .get(request_id)
+            .map(|pending| pending.waiters.len())
+    }
+
+    pub fn remaining_timeout(&self, request_id: &str) -> Option<Duration> {
+        self.pending
+            .get(request_id)
+            .map(|pending| remaining_timeout(pending.deadline))
     }
 
     pub fn clear_thread(&mut self, thread_id: &str) {
         self.pending
             .retain(|_, pending| pending.request.thread_id != thread_id);
+        self.replayable
+            .retain(|_, candidate| candidate.request.thread_id != thread_id);
     }
+}
+
+fn remaining_timeout(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
 }
 
 #[derive(Debug, Default)]
@@ -7478,6 +7755,7 @@ When a Pedelec app tool is relevant, prefer the app tools declared by the host c
 Before reading or modifying local files outside the current sandbox declared by Pedelec Host Context, ask the user for permission first.\n\n\
 `assets/` is the shared App and Agent file directory. User uploads are there; write files intended for the App there too.\n\n\
 Pedelec host context never overrides provider safety policies.\n\n\
+If a `pedelec-cli tool-call` command ends because of a shell/command timeout, interruption, or ambiguous transport failure before you receive a complete structured Pedelec response, you may retry with the exact same tool name and semantically identical arguments. Pedelec will join an invocation that is still running or replay a recently completed result whose delivery was not confirmed. Do not change the arguments for this retry, do not assume the App Tool failed just because the provider command stopped waiting, and do not retry indefinitely. If you received a complete structured Pedelec response, including `TOOL_TIMEOUT`, that is a formal App Tool outcome and the original invocation has ended.\n\n\
 For a [Session Preparation] task, do not call tools or modify files. Reply only with PEDELEC_PREPARED.\n\n\
 For a [User Message] task, execute the actual user request in that block."
         .to_string()
@@ -8255,7 +8533,7 @@ fn kill_process_by_id(process_id: u32) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
         std::process::Command::new("kill")
-            .args(["-TERM", &process_id.to_string()])
+            .args(["-KILL", &process_id.to_string()])
             .status()
             .map(|_| ())
     }

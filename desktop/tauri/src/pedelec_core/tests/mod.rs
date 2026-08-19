@@ -8,9 +8,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::thread;
-    use std::time::Duration;
-    #[cfg(unix)]
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn claude_raw_stdout(events: &[ThreadEvent]) -> String {
         events
@@ -31,6 +29,17 @@ mod tests {
         for chunk in input.as_bytes().chunks(chunk_size) {
             runtime.emit_provider_stdout(thread_id, String::from_utf8(chunk.to_vec()).unwrap());
         }
+    }
+
+    #[test]
+    fn bootstrap_instruction_explains_exact_retry_and_formal_timeout() {
+        let instruction = build_pedelec_bootstrap_instruction();
+        assert!(instruction.contains("ambiguous transport failure"));
+        assert!(instruction.contains("exact same tool name"));
+        assert!(
+            instruction.contains("complete structured Pedelec response, including `TOOL_TIMEOUT`")
+        );
+        assert!(instruction.contains("do not retry indefinitely"));
     }
 
     #[test]
@@ -5153,15 +5162,21 @@ mod tests {
         );
         let event_rx = runtime.event_bus.subscribe("thread_normalized");
 
-        let (request_id, timeout_ms, _result_rx) = runtime
+        let wait = match runtime
             .begin_tool_call(ToolCallInput {
                 thread_id: "thread_normalized".into(),
                 tool_name: "get_app_state".into(),
                 args: json!({ "timeoutMs": 25 }),
             })
-            .unwrap();
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let request_id = wait.request_id;
 
-        assert_eq!(timeout_ms, 25);
+        assert_eq!(wait.timeout_ms, 25);
         assert_eq!(
             runtime
                 .tool_request_broker
@@ -5187,6 +5202,918 @@ mod tests {
     }
 
     #[test]
+    fn exact_tool_call_retry_joins_existing_invocation_without_emitting_event() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_join",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": { "value": { "type": "integer" } },
+                        "required": ["value"],
+                        "additionalProperties": false
+                    },
+                    "timeoutMs": 1000
+                }]
+            }"#,
+        );
+        let event_rx = runtime.event_bus.subscribe("thread_join");
+
+        let first = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_join".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 1 }),
+            })
+            .unwrap();
+        let first_wait = match first {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let first_request_id = first_wait.request_id.clone();
+
+        let second = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_join".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 1 }),
+            })
+            .unwrap();
+        let second_wait = match second {
+            ToolInvocationRegistration::Joined(wait) => wait,
+            ToolInvocationRegistration::Created(_) => panic!("retry created a new tool call"),
+            ToolInvocationRegistration::Replayed(_) => panic!("retry replayed a result"),
+        };
+
+        assert_eq!(second_wait.request_id, first_request_id);
+        assert_eq!(runtime.tool_request_broker.pending_count(), 1);
+        assert_eq!(
+            runtime
+                .tool_request_broker
+                .waiter_count(&second_wait.request_id),
+            Some(2)
+        );
+        assert!(matches!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+                .count(),
+            1
+        ));
+
+        drop(first_wait);
+        drop(second_wait);
+    }
+
+    #[test]
+    fn normalized_args_define_identity_and_preserve_original_timeout() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_normalized_join",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {
+                            "a": { "type": "integer" },
+                            "b": { "type": "integer" }
+                        },
+                        "required": ["a", "b"],
+                        "additionalProperties": false
+                    },
+                    "timeoutMs": 1000
+                }]
+            }"#,
+        );
+
+        let first = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_normalized_join".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "a": 1, "b": 2, "timeoutMs": 1000 }),
+            })
+            .unwrap();
+        let first_wait = match first {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let first_request_id = first_wait.request_id.clone();
+        let first_remaining = first_wait.remaining_timeout;
+
+        let second = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_normalized_join".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "timeoutMs": 2000, "b": 2, "a": 1 }),
+            })
+            .unwrap();
+        let second_wait = match second {
+            ToolInvocationRegistration::Joined(wait) => wait,
+            ToolInvocationRegistration::Created(_) => {
+                panic!("normalized retry created a new tool call")
+            }
+            ToolInvocationRegistration::Replayed(_) => panic!("normalized retry replayed"),
+        };
+
+        assert_eq!(second_wait.request_id, first_request_id);
+        assert_eq!(second_wait.timeout_ms, 1000);
+        assert!(second_wait.remaining_timeout <= first_remaining);
+        assert_eq!(
+            runtime
+                .tool_request_broker
+                .get(&second_wait.request_id)
+                .unwrap()
+                .request
+                .args,
+            json!({ "a": 1, "b": 2 })
+        );
+    }
+
+    #[test]
+    fn same_tool_with_different_normalized_args_is_rejected() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_different_args",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": { "value": { "type": "integer" } },
+                        "required": ["value"],
+                        "additionalProperties": false
+                    }
+                }]
+            }"#,
+        );
+        let first = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_different_args".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 1 }),
+            })
+            .unwrap();
+        let first_request_id = match first {
+            ToolInvocationRegistration::Created(wait) => wait.request_id,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+
+        let error = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_different_args".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 2 }),
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code, error_codes::PENDING_TOOL_REQUEST_EXISTS);
+        assert_eq!(runtime.tool_request_broker.pending_count(), 1);
+        assert_eq!(
+            runtime
+                .tool_request_broker
+                .get(&first_request_id)
+                .unwrap()
+                .request
+                .args,
+            json!({ "value": 1 })
+        );
+    }
+
+    #[test]
+    fn different_tool_with_same_args_is_rejected() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_different_tool",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [
+                    {
+                        "name": "tool_a",
+                        "description": "Test tool.",
+                        "argsSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    {
+                        "name": "tool_b",
+                        "description": "Test tool.",
+                        "argsSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    }
+                ]
+            }"#,
+        );
+        runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_different_tool".into(),
+                tool_name: "tool_a".into(),
+                args: json!({}),
+            })
+            .unwrap();
+
+        let error = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_different_tool".into(),
+                tool_name: "tool_b".into(),
+                args: json!({}),
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code, error_codes::PENDING_TOOL_REQUEST_EXISTS);
+        assert_eq!(runtime.tool_request_broker.pending_count(), 1);
+    }
+
+    #[test]
+    fn same_tool_and_args_on_different_threads_create_separate_invocations() {
+        let tools_json = r#"{
+            "tools": [{
+                "name": "tool_x",
+                "description": "Test tool.",
+                "argsSchema": {
+                    "type": "object",
+                    "properties": { "value": { "type": "integer" } },
+                    "required": ["value"],
+                    "additionalProperties": false
+                }
+            }]
+        }"#;
+        let mut runtime = runtime_with_tool_thread("thread_one", ThreadStatus::Running, tools_json);
+        add_tool_thread(
+            &mut runtime,
+            "thread_two",
+            ThreadStatus::Running,
+            tools_json,
+        );
+
+        let first = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_one".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 1 }),
+            })
+            .unwrap();
+        let first_request_id = match first {
+            ToolInvocationRegistration::Created(wait) => wait.request_id,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let second = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_two".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 1 }),
+            })
+            .unwrap();
+        let second_request_id = match second {
+            ToolInvocationRegistration::Created(wait) => wait.request_id,
+            ToolInvocationRegistration::Joined(_) => panic!("different thread joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("different thread replayed"),
+        };
+
+        assert_ne!(first_request_id, second_request_id);
+        assert_eq!(runtime.tool_request_broker.pending_count(), 2);
+    }
+
+    #[test]
+    fn multiple_waiters_receive_the_same_result_and_one_tool_result_event() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_broadcast",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                }]
+            }"#,
+        );
+        let event_rx = runtime.event_bus.subscribe("thread_broadcast");
+        let first = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_broadcast".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap();
+        let first_wait = match first {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let request_id = first_wait.request_id.clone();
+        let second_wait = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_broadcast".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Joined(wait) => wait,
+            ToolInvocationRegistration::Created(_) => panic!("retry created a new tool call"),
+            ToolInvocationRegistration::Replayed(_) => panic!("retry replayed a result"),
+        };
+
+        runtime
+            .submit_tool_result(SubmitToolResultInput {
+                thread_id: "thread_broadcast".into(),
+                request_id,
+                result: json!({ "answer": 42 }),
+            })
+            .unwrap();
+
+        let expected = ToolInvocationOutcome::Result(json!({ "answer": 42 }));
+        assert_eq!(first_wait.result_rx.recv().unwrap(), expected);
+        assert_eq!(second_wait.result_rx.recv().unwrap(), expected);
+        assert_eq!(runtime.tool_request_broker.pending_count(), 0);
+        assert_eq!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolResult { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dropped_waiter_does_not_affect_later_waiter() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_dropped_waiter",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                }]
+            }"#,
+        );
+        let event_rx = runtime.event_bus.subscribe("thread_dropped_waiter");
+        let first = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_dropped_waiter".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap();
+        let first_wait = match first {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let request_id = first_wait.request_id.clone();
+        drop(first_wait.result_rx);
+
+        let second_wait = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_dropped_waiter".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Joined(wait) => wait,
+            ToolInvocationRegistration::Created(_) => panic!("retry created a new tool call"),
+            ToolInvocationRegistration::Replayed(_) => panic!("retry replayed a result"),
+        };
+
+        runtime
+            .submit_tool_result(SubmitToolResultInput {
+                thread_id: "thread_dropped_waiter".into(),
+                request_id,
+                result: json!({ "ok": true }),
+            })
+            .unwrap();
+
+        assert_eq!(
+            second_wait.result_rx.recv().unwrap(),
+            ToolInvocationOutcome::Result(json!({ "ok": true }))
+        );
+        assert_eq!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolResult { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn joining_does_not_reset_the_original_invocation_deadline() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_deadline",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                }]
+            }"#,
+        );
+        let first = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_deadline".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "timeoutMs": 300 }),
+            })
+            .unwrap();
+        let first_wait = match first {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let first_request_id = first_wait.request_id.clone();
+        thread::sleep(Duration::from_millis(80));
+
+        let second_wait = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_deadline".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "timeoutMs": 9999 }),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Joined(wait) => wait,
+            ToolInvocationRegistration::Created(_) => panic!("retry created a new tool call"),
+            ToolInvocationRegistration::Replayed(_) => panic!("retry replayed a result"),
+        };
+
+        assert!(second_wait.remaining_timeout < first_wait.remaining_timeout);
+        assert!(second_wait.remaining_timeout < Duration::from_millis(250));
+        runtime.timeout_tool_call(&first_request_id);
+
+        let timeout = ToolInvocationOutcome::CoreError(PedelecError::new(
+            error_codes::TOOL_TIMEOUT,
+            "tool timeout",
+        ));
+        assert_eq!(first_wait.result_rx.recv().unwrap(), timeout);
+        assert_eq!(second_wait.result_rx.recv().unwrap(), timeout);
+        assert_eq!(runtime.tool_request_broker.pending_count(), 0);
+        assert_eq!(
+            runtime.thread_status("thread_deadline"),
+            Some(ThreadStatus::Running)
+        );
+    }
+
+    #[test]
+    fn clear_thread_drops_all_pending_waiters() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_clear_waiters",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                }]
+            }"#,
+        );
+        let first = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_clear_waiters".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap();
+        let first_wait = match first {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let request_id = first_wait.request_id.clone();
+        let second_wait = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_clear_waiters".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Joined(wait) => wait,
+            ToolInvocationRegistration::Created(_) => panic!("retry created a new tool call"),
+            ToolInvocationRegistration::Replayed(_) => panic!("retry replayed a result"),
+        };
+
+        runtime
+            .tool_request_broker
+            .clear_thread("thread_clear_waiters");
+
+        assert_eq!(runtime.tool_request_broker.pending_count(), 0);
+        assert!(!runtime
+            .tool_request_broker
+            .has_pending_for_thread("thread_clear_waiters"));
+        assert!(runtime.tool_request_broker.get(&request_id).is_none());
+        assert_eq!(
+            first_wait.result_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        assert_eq!(
+            second_wait
+                .result_rx
+                .recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn undelivered_completed_result_replays_until_delivery_is_acknowledged() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_replay_result",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+                }]
+            }"#,
+        );
+        let event_rx = runtime.event_bus.subscribe("thread_replay_result");
+        let first = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_result".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            _ => panic!("first call did not create an invocation"),
+        };
+        let request_id = first.request_id.clone();
+        drop(first);
+
+        runtime
+            .submit_tool_result(SubmitToolResultInput {
+                thread_id: "thread_replay_result".into(),
+                request_id: request_id.clone(),
+                result: json!({ "structured": [1, { "ok": true }] }),
+            })
+            .unwrap();
+        assert_eq!(runtime.tool_request_broker.replay_candidate_count(), 1);
+
+        let replay = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_result".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Replayed(wait) => wait,
+            _ => panic!("expected a replayed invocation"),
+        };
+        assert_eq!(replay.request_id, request_id);
+        assert_eq!(
+            replay.result_rx.recv().unwrap(),
+            ToolInvocationOutcome::Result(json!({ "structured": [1, { "ok": true }] }))
+        );
+        assert_eq!(runtime.tool_request_broker.replay_candidate_count(), 1);
+
+        runtime
+            .tool_request_broker
+            .acknowledge_tool_delivery(&request_id);
+        assert_eq!(runtime.tool_request_broker.replay_candidate_count(), 0);
+
+        let next = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_result".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap();
+        assert!(matches!(next, ToolInvocationRegistration::Created(_)));
+        assert_eq!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn completed_replay_identity_includes_thread_tool_and_normalized_args() {
+        let tools_json = r#"{
+            "tools": [
+                {
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": { "value": { "type": "integer" } },
+                        "required": ["value"],
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "tool_a",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "tool_b",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                }
+            ]
+        }"#;
+        let mut runtime = runtime_with_tool_thread(
+            "thread_replay_identity_a",
+            ThreadStatus::Running,
+            tools_json,
+        );
+        add_tool_thread(
+            &mut runtime,
+            "thread_replay_identity_b",
+            ThreadStatus::Running,
+            tools_json,
+        );
+
+        let original = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_identity_a".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 1 }),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            _ => panic!("original call did not create an invocation"),
+        };
+        let original_request_id = original.request_id.clone();
+        runtime
+            .submit_tool_result(SubmitToolResultInput {
+                thread_id: "thread_replay_identity_a".into(),
+                request_id: original_request_id.clone(),
+                result: json!({ "value": 1 }),
+            })
+            .unwrap();
+        assert_eq!(
+            original.result_rx.recv().unwrap(),
+            ToolInvocationOutcome::Result(json!({ "value": 1 }))
+        );
+
+        let different_args = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_identity_a".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 2 }),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            _ => panic!("different args replayed the old result"),
+        };
+        assert_ne!(different_args.request_id, original_request_id);
+        runtime.timeout_tool_call(&different_args.request_id);
+        drop(different_args);
+
+        let different_tool = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_identity_a".into(),
+                tool_name: "tool_a".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            _ => panic!("different tool replayed the old result"),
+        };
+        assert_ne!(different_tool.request_id, original_request_id);
+        runtime.timeout_tool_call(&different_tool.request_id);
+        drop(different_tool);
+
+        let different_thread = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_identity_b".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "value": 1 }),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            _ => panic!("different thread replayed the old result"),
+        };
+        assert_ne!(different_thread.request_id, original_request_id);
+    }
+
+    #[test]
+    fn completed_replay_uses_normalized_args_and_original_timeout() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_replay_normalized",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {
+                            "a": { "type": "integer" },
+                            "b": { "type": "integer" }
+                        },
+                        "required": ["a", "b"],
+                        "additionalProperties": false
+                    },
+                    "timeoutMs": 1000
+                }]
+            }"#,
+        );
+        let original = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_normalized".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "a": 1, "b": 2, "timeoutMs": 1000 }),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            _ => panic!("original call did not create an invocation"),
+        };
+        let original_request_id = original.request_id.clone();
+        let original_timeout_ms = original.timeout_ms;
+        runtime
+            .submit_tool_result(SubmitToolResultInput {
+                thread_id: "thread_replay_normalized".into(),
+                request_id: original_request_id.clone(),
+                result: json!({ "ok": true }),
+            })
+            .unwrap();
+        assert_eq!(
+            original.result_rx.recv().unwrap(),
+            ToolInvocationOutcome::Result(json!({ "ok": true }))
+        );
+
+        let replay = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_normalized".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "timeoutMs": 5000, "b": 2, "a": 1 }),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Replayed(wait) => wait,
+            _ => panic!("normalized retry did not replay the completed result"),
+        };
+        assert_eq!(replay.request_id, original_request_id);
+        assert_eq!(replay.timeout_ms, original_timeout_ms);
+        assert_eq!(
+            replay.result_rx.recv().unwrap(),
+            ToolInvocationOutcome::Result(json!({ "ok": true }))
+        );
+    }
+
+    #[test]
+    fn formal_timeout_is_replayable_only_when_delivery_is_unconfirmed() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_replay_timeout",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "tool_x",
+                    "description": "Test tool.",
+                    "argsSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+                }]
+            }"#,
+        );
+        let first = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_timeout".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            _ => panic!("first call did not create an invocation"),
+        };
+        let request_id = first.request_id.clone();
+        drop(first);
+        runtime.timeout_tool_call(&request_id);
+
+        let replay = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_replay_timeout".into(),
+                tool_name: "tool_x".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Replayed(wait) => wait,
+            _ => panic!("expected timeout replay"),
+        };
+        assert_eq!(
+            replay.result_rx.recv().unwrap(),
+            ToolInvocationOutcome::CoreError(PedelecError::new(
+                error_codes::TOOL_TIMEOUT,
+                "tool timeout"
+            ))
+        );
+        runtime
+            .tool_request_broker
+            .acknowledge_tool_delivery(&request_id);
+        assert!(matches!(
+            runtime
+                .begin_tool_call(ToolCallInput {
+                    thread_id: "thread_replay_timeout".into(),
+                    tool_name: "tool_x".into(),
+                    args: json!({}),
+                })
+                .unwrap(),
+            ToolInvocationRegistration::Created(_)
+        ));
+    }
+
+    #[test]
+    fn replay_candidates_expire_and_are_bounded_by_oldest_eviction() {
+        let mut runtime = CoreRuntime::default();
+        for index in 0..(TOOL_RESULT_REPLAY_MAX_ENTRIES + 1) {
+            let thread_id = format!("replay_cap_{index}");
+            let (request_id, result_rx) = runtime
+                .tool_request_broker
+                .create_pending(thread_id, "tool_x".into(), json!({ "index": index }), 1000)
+                .unwrap();
+            drop(result_rx);
+            runtime.timeout_tool_call(&request_id);
+        }
+
+        assert_eq!(
+            runtime.tool_request_broker.replay_candidate_count(),
+            TOOL_RESULT_REPLAY_MAX_ENTRIES
+        );
+        assert!(matches!(
+            runtime
+                .tool_request_broker
+                .begin_or_join(
+                    format!("replay_cap_{}", TOOL_RESULT_REPLAY_MAX_ENTRIES),
+                    "tool_x".into(),
+                    json!({ "index": TOOL_RESULT_REPLAY_MAX_ENTRIES }),
+                    1000,
+                )
+                .unwrap(),
+            ToolInvocationRegistration::Replayed(_)
+        ));
+        assert!(matches!(
+            runtime
+                .tool_request_broker
+                .begin_or_join(
+                    "replay_cap_0".into(),
+                    "tool_x".into(),
+                    json!({ "index": 0 }),
+                    1000,
+                )
+                .unwrap(),
+            ToolInvocationRegistration::Created(_)
+        ));
+
+        runtime
+            .tool_request_broker
+            .purge_expired_replay_candidates_at(
+                Instant::now() + TOOL_RESULT_REPLAY_WINDOW + Duration::from_millis(1),
+            );
+        assert_eq!(runtime.tool_request_broker.replay_candidate_count(), 0);
+    }
+
+    #[test]
     fn submit_tool_result_with_wrong_thread_does_not_remove_pending_request() {
         let mut runtime = runtime_with_tool_thread(
             "thread_submit",
@@ -5203,13 +6130,20 @@ mod tests {
                 }]
             }"#,
         );
-        let (request_id, _timeout_ms, result_rx) = runtime
+        let wait = match runtime
             .begin_tool_call(ToolCallInput {
                 thread_id: "thread_submit".into(),
                 tool_name: "get_app_state".into(),
                 args: json!({}),
             })
-            .unwrap();
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("first tool call joined"),
+            ToolInvocationRegistration::Replayed(_) => panic!("first tool call replayed"),
+        };
+        let request_id = wait.request_id.clone();
+        let result_rx = wait.result_rx;
 
         let err = runtime
             .submit_tool_result(SubmitToolResultInput {
@@ -5230,7 +6164,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            json!({ "value": 2 })
+            ToolInvocationOutcome::Result(json!({ "value": 2 }))
         );
     }
 
@@ -5527,9 +6461,20 @@ mod tests {
         let sentinel_path = sandbox_path.join("assets").join("sentinel.txt");
         fs::write(&sentinel_path, "preserve me").unwrap();
         let event_rx = runtime.event_bus.subscribe(&thread.thread_id);
-        runtime
+        let (request_id, result_rx) = runtime
             .tool_request_broker
             .create_pending(thread.thread_id.clone(), "echo".into(), json!({}), 1000)
+            .unwrap();
+        drop(result_rx);
+        runtime.timeout_tool_call(&request_id);
+        runtime
+            .tool_request_broker
+            .create_pending(
+                thread.thread_id.clone(),
+                "echo".into(),
+                json!({ "new": true }),
+                1000,
+            )
             .unwrap();
 
         runtime
@@ -5547,6 +6492,7 @@ mod tests {
         assert!(!runtime
             .tool_request_broker
             .has_pending_for_thread(&thread.thread_id));
+        assert_eq!(runtime.tool_request_broker.replay_candidate_count(), 0);
         assert!(runtime.tool_registry.get(&thread.thread_id).is_none());
         assert!(event_rx
             .try_iter()
@@ -6188,6 +7134,16 @@ mod tests {
         tools_json: &str,
     ) -> CoreRuntime {
         let mut runtime = CoreRuntime::default();
+        add_tool_thread(&mut runtime, thread_id, status, tools_json);
+        runtime
+    }
+
+    fn add_tool_thread(
+        runtime: &mut CoreRuntime,
+        thread_id: &str,
+        status: ThreadStatus,
+        tools_json: &str,
+    ) {
         let now = chrono::Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
@@ -6213,7 +7169,6 @@ mod tests {
             thread_id,
             ToolRegistry::from_tools_json_str(tools_json).unwrap(),
         );
-        runtime
     }
 
     #[test]

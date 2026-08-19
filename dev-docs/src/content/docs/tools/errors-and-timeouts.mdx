@@ -110,6 +110,12 @@ If a handler resolves late:
 
 Design handlers to settle before the deadline and implement application-side cancellation/cleanup.
 
+### Provider command timeout versus App Tool timeout
+
+A provider shell or terminal can stop waiting for `pedelec-cli tool-call` before Core's `timeoutMs` deadline. That provider command timeout is an ambiguous transport failure; it does not prove that the App Tool failed. If the agent did not receive a complete structured Pedelec response, it may retry with the exact same tool name and semantically identical arguments. Core can join the still-running invocation or replay a recently completed result whose delivery was not confirmed. Do not change the arguments or retry indefinitely.
+
+When Core reaches the App Tool's `timeoutMs`, it returns the formal `TOOL_TIMEOUT` structured error. A received `TOOL_TIMEOUT` means the original invocation has ended; it is not an instruction to continue the same invocation. A result whose IPC delivery was not confirmed may be replayed briefly, but a successfully delivered result is not retained as a general deduplication cache.
+
 ## Serialization failures
 
 Return plain JSON-compatible values. Problematic values include:
@@ -173,7 +179,8 @@ session.onTool("move_shape", (raw) => {
 | User cancelled | No unless user explicitly requests again |
 | Handler threw before any side effect | Possibly, if operation is known idempotent |
 | Result submission failed after mutation | Usually no; reconcile state first |
-| Tool timeout | No automatic retry; the original handler may still complete |
+| Ambiguous provider command/transport timeout before a complete Pedelec response | An exact retry is allowed; Core joins or replays the same logical invocation |
+| Received formal `TOOL_TIMEOUT` | Do not treat it as an in-flight retry; reconcile possible side effects |
 | Stale UI lifecycle | No; agent should read current state first |
 
 Include idempotency keys or expected-version fields in tools that can safely support retries.

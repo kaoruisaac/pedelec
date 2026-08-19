@@ -5,17 +5,16 @@ mod tests {
     use super::*;
     use pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
     use pedelec_core::{
-        CommandSpec, CoreRuntime, CreateThreadOutput, CreateThreadSkillsInput, EffortLevel,
-        CreateThreadToolInput, OllamaProviderSettings, PedelecSettings, ProviderAdapterState,
-        ProviderCode, ProviderSettings, SandboxManager, ThreadErrorSource, ThreadState,
-        ThreadStatus, ToolRegistry,
+        CommandSpec, CoreRuntime, CreateThreadOutput, CreateThreadSkillsInput,
+        CreateThreadToolInput, EffortLevel, PedelecSettings, ProviderAdapterState, ProviderCode,
+        SandboxManager, ThreadErrorSource, ThreadState, ThreadStatus, ToolRegistry,
     };
-    use serde_json::json;
-    use std::collections::HashMap;
+    use serde_json::{json, Value};
     use std::env;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::Duration;
 
     #[cfg(windows)]
     #[test]
@@ -234,6 +233,11 @@ mod tests {
     #[test]
     fn list_providers_core_ipc_returns_opencode_entry() {
         let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        runtime
+            .lock()
+            .unwrap()
+            .provider_readiness
+            .mark_ready_for_test();
 
         let response = handle_core_ipc_request(
             CoreIpcRequest {
@@ -445,6 +449,11 @@ mod tests {
             sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
             ..CoreRuntime::default()
         }));
+        runtime
+            .lock()
+            .unwrap()
+            .provider_readiness
+            .mark_ready_for_test();
         start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
         let create = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
@@ -644,7 +653,10 @@ mod tests {
             )
         }));
         assert!(sandbox_path.exists());
-        assert_eq!(std::fs::read_to_string(&sentinel_path).unwrap(), "preserve me");
+        assert_eq!(
+            std::fs::read_to_string(&sentinel_path).unwrap(),
+            "preserve me"
+        );
         assert!(runtime.lock().unwrap().cleanup_for_app_exit().is_empty());
         assert!(!sandbox_path.exists());
     }
@@ -764,6 +776,320 @@ mod tests {
         let tool_response = tool_handle.join().unwrap();
         assert!(tool_response.ok);
         assert_eq!(tool_response.result.unwrap(), json!({ "value": 123 }));
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            0
+        );
+
+        let second_path = runtime_path.clone();
+        let second_handle = thread::spawn(move || {
+            send_core_ipc_request_with_runtime_path(
+                &CoreIpcRequest {
+                    request_id: "tool_2".into(),
+                    r#type: "tool_call".into(),
+                    caller_origin: None,
+                    caller_sdk_version: None,
+                    payload: Some(json!({
+                        "threadId": "thread_tool",
+                        "toolName": "get_app_state",
+                        "args": {}
+                    })),
+                },
+                second_path,
+            )
+            .unwrap()
+        });
+        let second_request_id = loop {
+            match read_thread_event(&mut subscription).event {
+                ThreadEvent::ToolCall { request_id, .. } => break request_id,
+                _ => continue,
+            }
+        };
+        assert_ne!(second_request_id, request_id);
+        send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "submit_2".into(),
+                r#type: "submit_tool_result".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "threadId": "thread_tool",
+                    "requestId": second_request_id,
+                    "result": { "value": 456 }
+                })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+        assert_eq!(
+            second_handle.join().unwrap().result,
+            Some(json!({ "value": 456 }))
+        );
+    }
+
+    #[test]
+    fn ipc_failed_first_delivery_replays_completed_result_and_acknowledges_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_ipc_replay_failure",
+            ThreadStatus::Running,
+            1000,
+        );
+        let event_rx = runtime
+            .lock()
+            .unwrap()
+            .event_bus
+            .subscribe("thread_ipc_replay_failure");
+
+        force_tool_response_write_failure_for_test("ipc_original_failure");
+        let first = spawn_tool_call(
+            runtime_path.clone(),
+            "ipc_original_failure",
+            "thread_ipc_replay_failure",
+            "get_app_state",
+            json!({}),
+        );
+        let request_id = next_tool_call_request_id(&event_rx);
+        submit_tool_result_over_ipc(
+            &runtime_path,
+            "ipc_submit_original_failure",
+            "thread_ipc_replay_failure",
+            &request_id,
+            json!({ "value": 123 }),
+        );
+
+        assert!(first.join().unwrap().is_err());
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            1
+        );
+
+        let replay = send_core_ipc_request_with_runtime_path(
+            &tool_call_request(
+                "ipc_replay_success",
+                "thread_ipc_replay_failure",
+                "get_app_state",
+                json!({}),
+            ),
+            &runtime_path,
+        )
+        .unwrap();
+        assert_eq!(replay.result, Some(json!({ "value": 123 })));
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            0
+        );
+        assert_eq!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn ipc_replay_delivery_failure_keeps_candidate_until_later_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_ipc_replay_retry",
+            ThreadStatus::Running,
+            1000,
+        );
+        let event_rx = runtime
+            .lock()
+            .unwrap()
+            .event_bus
+            .subscribe("thread_ipc_replay_retry");
+
+        force_tool_response_write_failure_for_test("ipc_retry_original");
+        let first = spawn_tool_call(
+            runtime_path.clone(),
+            "ipc_retry_original",
+            "thread_ipc_replay_retry",
+            "get_app_state",
+            json!({}),
+        );
+        let request_id = next_tool_call_request_id(&event_rx);
+        submit_tool_result_over_ipc(
+            &runtime_path,
+            "ipc_retry_submit_original",
+            "thread_ipc_replay_retry",
+            &request_id,
+            json!({ "value": 456 }),
+        );
+        assert!(first.join().unwrap().is_err());
+
+        force_tool_response_write_failure_for_test("ipc_retry_failed_replay");
+        let failed_replay = send_core_ipc_request_with_runtime_path(
+            &tool_call_request(
+                "ipc_retry_failed_replay",
+                "thread_ipc_replay_retry",
+                "get_app_state",
+                json!({}),
+            ),
+            &runtime_path,
+        );
+        assert!(failed_replay.is_err());
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            1
+        );
+
+        let successful_replay = send_core_ipc_request_with_runtime_path(
+            &tool_call_request(
+                "ipc_retry_successful_replay",
+                "thread_ipc_replay_retry",
+                "get_app_state",
+                json!({}),
+            ),
+            &runtime_path,
+        )
+        .unwrap();
+        assert_eq!(successful_replay.result, Some(json!({ "value": 456 })));
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            0
+        );
+        assert_eq!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn ipc_multiple_waiters_clear_replay_after_any_successful_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_ipc_waiters",
+            ThreadStatus::Running,
+            1000,
+        );
+        let event_rx = runtime
+            .lock()
+            .unwrap()
+            .event_bus
+            .subscribe("thread_ipc_waiters");
+
+        force_tool_response_write_failure_for_test("ipc_waiter_one");
+        let first = spawn_tool_call(
+            runtime_path.clone(),
+            "ipc_waiter_one",
+            "thread_ipc_waiters",
+            "get_app_state",
+            json!({}),
+        );
+        let request_id = next_tool_call_request_id(&event_rx);
+        let second = spawn_tool_call(
+            runtime_path.clone(),
+            "ipc_waiter_two",
+            "thread_ipc_waiters",
+            "get_app_state",
+            json!({}),
+        );
+        for _ in 0..1000 {
+            if runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .waiter_count(&request_id)
+                == Some(2)
+            {
+                break;
+            }
+            // Wait only for the second real IPC handler to register its
+            // waiter; the response outcome itself is controlled by the
+            // deterministic write-failure seam above.
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .waiter_count(&request_id),
+            Some(2)
+        );
+
+        submit_tool_result_over_ipc(
+            &runtime_path,
+            "ipc_waiter_submit",
+            "thread_ipc_waiters",
+            &request_id,
+            json!({ "value": 789 }),
+        );
+        assert!(first.join().unwrap().is_err());
+        assert_eq!(
+            second.join().unwrap().unwrap().result,
+            Some(json!({ "value": 789 }))
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            0
+        );
+
+        let third = spawn_tool_call(
+            runtime_path.clone(),
+            "ipc_waiter_three",
+            "thread_ipc_waiters",
+            "get_app_state",
+            json!({}),
+        );
+        let third_request_id = next_tool_call_request_id(&event_rx);
+        assert_ne!(third_request_id, request_id);
+        submit_tool_result_over_ipc(
+            &runtime_path,
+            "ipc_waiter_submit_three",
+            "thread_ipc_waiters",
+            &third_request_id,
+            json!({ "value": 101 }),
+        );
+        assert_eq!(
+            third.join().unwrap().unwrap().result,
+            Some(json!({ "value": 101 }))
+        );
     }
 
     #[test]
@@ -800,7 +1126,147 @@ mod tests {
     }
 
     #[test]
-    fn second_tool_call_is_rejected_while_pending_exists() {
+    fn ipc_failed_timeout_delivery_replays_formal_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_ipc_timeout_replay",
+            ThreadStatus::Running,
+            20,
+        );
+        let event_rx = runtime
+            .lock()
+            .unwrap()
+            .event_bus
+            .subscribe("thread_ipc_timeout_replay");
+
+        force_tool_response_write_failure_for_test("ipc_timeout_original");
+        let first = spawn_tool_call(
+            runtime_path.clone(),
+            "ipc_timeout_original",
+            "thread_ipc_timeout_replay",
+            "get_app_state",
+            json!({}),
+        );
+        let original_request_id = next_tool_call_request_id(&event_rx);
+        assert!(first.join().unwrap().is_err());
+        assert_eq!(
+            runtime.lock().unwrap().tool_request_broker.pending_count(),
+            0
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            1
+        );
+
+        let replay = send_core_ipc_request_with_runtime_path(
+            &tool_call_request(
+                "ipc_timeout_replay",
+                "thread_ipc_timeout_replay",
+                "get_app_state",
+                json!({}),
+            ),
+            &runtime_path,
+        )
+        .unwrap();
+        assert!(!replay.ok);
+        assert_eq!(replay.error.unwrap().code, error_codes::TOOL_TIMEOUT);
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            0
+        );
+        assert_eq!(
+            runtime.lock().unwrap().tool_request_broker.pending_count(),
+            0
+        );
+        assert!(!original_request_id.is_empty());
+        assert_eq!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn ipc_successful_timeout_delivery_allows_a_new_exact_call() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_ipc_timeout_new",
+            ThreadStatus::Running,
+            20,
+        );
+        let event_rx = runtime
+            .lock()
+            .unwrap()
+            .event_bus
+            .subscribe("thread_ipc_timeout_new");
+
+        let first = spawn_tool_call(
+            runtime_path.clone(),
+            "ipc_timeout_success_original",
+            "thread_ipc_timeout_new",
+            "get_app_state",
+            json!({}),
+        );
+        let first_request_id = next_tool_call_request_id(&event_rx);
+        let first_response = first.join().unwrap().unwrap();
+        assert!(!first_response.ok);
+        assert_eq!(
+            first_response.error.unwrap().code,
+            error_codes::TOOL_TIMEOUT
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count(),
+            0
+        );
+
+        let second = spawn_tool_call(
+            runtime_path.clone(),
+            "ipc_timeout_new_call",
+            "thread_ipc_timeout_new",
+            "get_app_state",
+            json!({}),
+        );
+        let second_request_id = next_tool_call_request_id(&event_rx);
+        assert_ne!(second_request_id, first_request_id);
+        submit_tool_result_over_ipc(
+            &runtime_path,
+            "ipc_timeout_new_submit",
+            "thread_ipc_timeout_new",
+            &second_request_id,
+            json!({ "recovered": true }),
+        );
+        assert_eq!(
+            second.join().unwrap().unwrap().result,
+            Some(json!({ "recovered": true }))
+        );
+    }
+
+    #[test]
+    fn exact_second_tool_call_joins_while_pending_exists() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
         let runtime_path = temp.path().join("runtime.json");
@@ -843,24 +1309,43 @@ mod tests {
             other => panic!("expected status_changed/tool_call event, got {other:?}"),
         };
 
-        let second = send_core_ipc_request_with_runtime_path(
-            &CoreIpcRequest {
-                request_id: "tool_second".into(),
-                r#type: "tool_call".into(),
-                caller_origin: None,
-                caller_sdk_version: None,
-                payload: Some(json!({
-                    "threadId": "thread_pending",
-                    "toolName": "get_app_state",
-                    "args": {}
-                })),
-            },
-            &runtime_path,
-        )
-        .unwrap();
+        let second_path = runtime_path.clone();
+        let second_handle = thread::spawn(move || {
+            send_core_ipc_request_with_runtime_path(
+                &CoreIpcRequest {
+                    request_id: "tool_second".into(),
+                    r#type: "tool_call".into(),
+                    caller_origin: None,
+                    caller_sdk_version: None,
+                    payload: Some(json!({
+                        "threadId": "thread_pending",
+                        "toolName": "get_app_state",
+                        "args": {}
+                    })),
+                },
+                second_path,
+            )
+            .unwrap()
+        });
+        for _ in 0..100 {
+            if runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .waiter_count(&request_id)
+                == Some(2)
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(
-            second.error.unwrap().code,
-            error_codes::PENDING_TOOL_REQUEST_EXISTS
+            runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .waiter_count(&request_id),
+            Some(2)
         );
 
         send_core_ipc_request_with_runtime_path(
@@ -878,7 +1363,13 @@ mod tests {
             &runtime_path,
         )
         .unwrap();
-        assert!(first_handle.join().unwrap().ok);
+        assert_eq!(first_handle.join().unwrap().result, Some(json!({})));
+        let second_response = second_handle.join().unwrap();
+        assert!(
+            second_response.ok,
+            "unexpected second response: {second_response:?}"
+        );
+        assert_eq!(second_response.result, Some(json!({})));
     }
 
     #[test]
@@ -1148,7 +1639,6 @@ mod tests {
                 thread_id: "thread_end".into(),
             })
             .unwrap();
-
         let events = collect_events_until(&event_rx, |events| {
             events
                 .iter()
@@ -1167,7 +1657,10 @@ mod tests {
         );
         assert_eq!(runtime.lock().unwrap().running_process_count(), 0);
         assert!(sandbox_path.exists());
-        assert_eq!(std::fs::read_to_string(&sentinel_path).unwrap(), "preserve me");
+        assert_eq!(
+            std::fs::read_to_string(&sentinel_path).unwrap(),
+            "preserve me"
+        );
         assert!(runtime.lock().unwrap().cleanup_for_app_exit().is_empty());
         assert!(!sandbox_path.exists());
     }
@@ -1180,6 +1673,7 @@ mod tests {
         timeout_ms: u64,
     ) {
         let mut runtime = runtime.lock().unwrap();
+        runtime.provider_readiness.mark_ready_for_test();
         let now = chrono::Utc::now();
         let sandbox_root = temp.join("sandbox");
         runtime.sandbox_manager = SandboxManager::with_sandbox_root(&sandbox_root);
@@ -1197,6 +1691,7 @@ mod tests {
                 process_id: None,
                 created_at: now,
                 updated_at: now,
+                sdk_origin: None,
             },
             ProviderAdapterState {
                 provider_session_id: None,
@@ -1397,6 +1892,72 @@ exit 0
         let response: CoreIpcResponse = serde_json::from_slice(&response_line).unwrap();
         assert!(response.ok);
         reader
+    }
+
+    fn tool_call_request(
+        request_id: &str,
+        thread_id: &str,
+        tool_name: &str,
+        args: Value,
+    ) -> CoreIpcRequest {
+        CoreIpcRequest {
+            request_id: request_id.into(),
+            r#type: "tool_call".into(),
+            caller_origin: None,
+            caller_sdk_version: None,
+            payload: Some(json!({
+                "threadId": thread_id,
+                "toolName": tool_name,
+                "args": args,
+            })),
+        }
+    }
+
+    fn spawn_tool_call(
+        runtime_path: PathBuf,
+        request_id: &str,
+        thread_id: &str,
+        tool_name: &str,
+        args: Value,
+    ) -> thread::JoinHandle<Result<CoreIpcResponse, pedelec_core::PedelecError>> {
+        let request = tool_call_request(request_id, thread_id, tool_name, args);
+        thread::spawn(move || send_core_ipc_request_with_runtime_path(&request, runtime_path))
+    }
+
+    fn next_tool_call_request_id(event_rx: &std::sync::mpsc::Receiver<ThreadEvent>) -> String {
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("timed out waiting for tool_call event");
+            if let ThreadEvent::ToolCall { request_id, .. } = event {
+                return request_id;
+            }
+        }
+    }
+
+    fn submit_tool_result_over_ipc(
+        runtime_path: &Path,
+        request_id: &str,
+        thread_id: &str,
+        tool_request_id: &str,
+        result: Value,
+    ) {
+        let response = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: request_id.into(),
+                r#type: "submit_tool_result".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "threadId": thread_id,
+                    "requestId": tool_request_id,
+                    "result": result,
+                })),
+            },
+            runtime_path,
+        )
+        .expect("submit_tool_result IPC request failed");
+        assert!(response.ok, "unexpected submit response: {response:?}");
     }
 
     fn test_command_spec(program: &str, cwd: &Path, args: Vec<String>) -> CommandSpec {

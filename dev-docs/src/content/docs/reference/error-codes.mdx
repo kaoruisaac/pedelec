@@ -122,7 +122,7 @@ Underlying structured errors are preserved when available, so fallback codes may
 | `TOOL_HANDLER_NOT_FOUND` | No named, inline, or generic handler matched | Error result sent to agent | Restore/register handler; fix name/lifecycle |
 | `TOOL_NOT_FOUND` | Core ToolRegistry has no tool requested by the agent | Core/runtime error | Verify the tool manifest and agent request |
 | `TOOL_ARGS_INVALID` | Agent arguments are not an object or do not match the tool schema | Core/runtime error | Correct the tool call/schema |
-| `TOOL_TIMEOUT` | Core timed out while waiting for a tool result | Core/runtime error | Avoid automatic retry; reconcile possible side effects |
+| `TOOL_TIMEOUT` | Core reached the App Tool's formal timeout while waiting for a tool result | Core/runtime error | A received structured error means the invocation ended; reconcile possible side effects rather than treating it as an in-flight retry |
 | `TOOL_HANDLER_ERROR` | Handler threw or rejected | Error result sent to agent | Log unexpected exception; return domain errors for expected cases |
 | `SUBMIT_TOOL_RESULT_FAILED` | SDK could not deliver handler result | `session.onError()` SDK event | Reconcile side effects; inspect disconnect/timeout/serialization |
 
