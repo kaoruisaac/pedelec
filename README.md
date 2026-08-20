@@ -2,29 +2,6 @@
 
 English | [繁體中文](./README.zh-TW.md)
 
----
-
-## Thanks for your patience — just a little longer.
-
-The Pedelec App is still under review, but we expect the first official Windows, macOS, and Linux desktop versions to be available very soon.
-
-In the meantime, you can install:
-
-1. **Chrome Extension**
-   Install the [Pedelec Chrome Extension](https://chromewebstore.google.com/detail/pedelec/ogccgaminlphbkeghldidiiimajfdpag).
-
-2. **Desktop App**
-   Because the app is not yet code-signed, you may see a security warning. It has been submitted to the Microsoft Store, and the macOS version will be submitted next.
-   Download the latest unsigned release from [Releases](https://github.com/kaoruisaac/pedelec/releases).
-   - Windows: During installation, select **More info** > **Run anyway**.
-   - macOS: After installing the DMG, run `xattr -dr com.apple.quarantine \"/Applications/Pedelec.app\"`.
-   - Linux: Install the `.deb` package.
-
-3. **Demo Site**
-   - [Shape Rain](https://shape-rain.isaac-lin.cc/)
-
----
-
 ### ➡️ [Pedelec Document](https://kaoruisaac.github.io/pedelec) 🔗
 
 Pedelec is a bridge architecture that lets web frontends call local AI coding agents.
