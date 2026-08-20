@@ -813,6 +813,24 @@ pub fn start_provider_process(
     wait_for_provider_readiness(&runtime)?;
     let thread_id = input.thread_id.clone();
     let start = runtime.lock().unwrap().begin_send_text(input)?;
+    start_provider_process_from_start(runtime, thread_id, start)
+}
+
+pub fn start_debug_provider_process(
+    runtime: SharedCoreRuntime,
+    input: SendTextInput,
+) -> Result<pedelec_core::SendTextOutput, PedelecError> {
+    wait_for_provider_readiness(&runtime)?;
+    let thread_id = input.thread_id.clone();
+    let start = runtime.lock().unwrap().begin_debug_send_text(input)?;
+    start_provider_process_from_start(runtime, thread_id, start)
+}
+
+fn start_provider_process_from_start(
+    runtime: SharedCoreRuntime,
+    thread_id: String,
+    start: pedelec_core::SendTextStart,
+) -> Result<pedelec_core::SendTextOutput, PedelecError> {
     start_provider_process_with_command(
         runtime,
         thread_id,

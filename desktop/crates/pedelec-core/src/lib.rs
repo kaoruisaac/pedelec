@@ -3000,52 +3000,135 @@ impl CoreRuntime {
     }
 
     pub fn begin_send_text(&mut self, input: SendTextInput) -> Result<SendTextStart, PedelecError> {
-        {
-            let thread = self.thread_manager.thread(&input.thread_id)?;
-            match thread.status {
-                ThreadStatus::Running | ThreadStatus::WaitingToolResult => {
-                    return Err(PedelecError::with_details(
-                        error_codes::THREAD_BUSY,
-                        "thread is already running",
-                        serde_json::json!({ "threadId": input.thread_id }),
-                    ));
-                }
-                ThreadStatus::Ended => {
-                    return Err(PedelecError::with_details(
-                        error_codes::THREAD_ENDED,
-                        "thread has ended",
-                        serde_json::json!({ "threadId": input.thread_id }),
-                    ));
-                }
-                ThreadStatus::Error => {
-                    return Err(PedelecError::with_details(
-                        error_codes::PROVIDER_COMMAND_FAILED,
-                        "thread is in error state",
-                        serde_json::json!({ "threadId": input.thread_id }),
-                    ));
-                }
-                ThreadStatus::Stopping => {
-                    return Err(PedelecError::with_details(
-                        error_codes::THREAD_BUSY,
-                        "thread is stopping",
-                        serde_json::json!({ "threadId": input.thread_id }),
-                    ));
-                }
-                _ => {}
-            }
+        self.validate_normal_send_text_status(&input.thread_id)?;
+        self.begin_send_text_start(input, None)
+    }
+
+    /// Starts a user turn from the trusted desktop diagnostic boundary.
+    ///
+    /// Unlike the normal send entry point, this deliberately accepts an ended
+    /// thread. It restores only the in-memory resources that `end_thread`
+    /// discarded, then reuses the normal provider command and process-start
+    /// path. Normal SDK/Core callers must continue using `begin_send_text`.
+    pub fn begin_debug_send_text(
+        &mut self,
+        input: SendTextInput,
+    ) -> Result<SendTextStart, PedelecError> {
+        let reactivate = self.validate_debug_send_text_status(&input.thread_id)?;
+        if !reactivate {
+            return self.begin_send_text_start(input, None);
         }
 
+        let thread_id = input.thread_id.clone();
+        let event_log_path = self.restore_ended_thread_runtime(&thread_id)?;
+        let result = self.begin_send_text_start(input, Some(event_log_path));
+        if result.is_err() {
+            // The command builder can still reject a prompt (for example, if
+            // provider configuration is unavailable). Keep a failed retry in
+            // the original ended state instead of leaving a partial registry.
+            self.tool_registry.remove(&thread_id);
+        }
+        result
+    }
+
+    fn validate_normal_send_text_status(&self, thread_id: &str) -> Result<(), PedelecError> {
+        let thread = self.thread_manager.thread(thread_id)?;
+        match thread.status {
+            ThreadStatus::Running | ThreadStatus::WaitingToolResult => {
+                Err(PedelecError::with_details(
+                    error_codes::THREAD_BUSY,
+                    "thread is already running",
+                    serde_json::json!({ "threadId": thread_id }),
+                ))
+            }
+            ThreadStatus::Ended => Err(PedelecError::with_details(
+                error_codes::THREAD_ENDED,
+                "thread has ended",
+                serde_json::json!({ "threadId": thread_id }),
+            )),
+            ThreadStatus::Error => Err(PedelecError::with_details(
+                error_codes::PROVIDER_COMMAND_FAILED,
+                "thread is in error state",
+                serde_json::json!({ "threadId": thread_id }),
+            )),
+            ThreadStatus::Stopping => Err(PedelecError::with_details(
+                error_codes::THREAD_BUSY,
+                "thread is stopping",
+                serde_json::json!({ "threadId": thread_id }),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_debug_send_text_status(&self, thread_id: &str) -> Result<bool, PedelecError> {
+        let thread = self.thread_manager.thread(thread_id)?;
+        match thread.status {
+            ThreadStatus::Idle => Ok(false),
+            ThreadStatus::Ended => Ok(true),
+            ThreadStatus::Running | ThreadStatus::WaitingToolResult => {
+                Err(PedelecError::with_details(
+                    error_codes::THREAD_BUSY,
+                    "thread is already running",
+                    serde_json::json!({ "threadId": thread_id }),
+                ))
+            }
+            ThreadStatus::Stopping => Err(PedelecError::with_details(
+                error_codes::THREAD_BUSY,
+                "thread is stopping",
+                serde_json::json!({ "threadId": thread_id }),
+            )),
+            ThreadStatus::Error => Err(PedelecError::with_details(
+                error_codes::PROVIDER_COMMAND_FAILED,
+                "thread is in error state",
+                serde_json::json!({ "threadId": thread_id }),
+            )),
+            ThreadStatus::Starting => Err(PedelecError::with_details(
+                error_codes::THREAD_BUSY,
+                "thread is already starting",
+                serde_json::json!({ "threadId": thread_id }),
+            )),
+        }
+    }
+
+    fn restore_ended_thread_runtime(&mut self, thread_id: &str) -> Result<PathBuf, PedelecError> {
+        let sandbox_path = self.thread_manager.thread(thread_id)?.sandbox_path.clone();
+        let registry = ToolRegistry::load_from_skills_dir(sandbox_skills_root(&sandbox_path))?;
+        self.tool_registry.insert(thread_id.to_string(), registry);
+        Ok(thread_event_log_path(&sandbox_path, thread_id))
+    }
+
+    fn begin_send_text_start(
+        &mut self,
+        input: SendTextInput,
+        reactivated_event_log_path: Option<PathBuf>,
+    ) -> Result<SendTextStart, PedelecError> {
         let test_command = self.test_provider_command.clone();
 
         let command = if let Some(command) = test_command {
             command
         } else {
-            self.build_send_text_command(&input)?
+            match self.build_send_text_command(&input) {
+                Ok(command) => command,
+                Err(error) => {
+                    if reactivated_event_log_path.is_some() {
+                        self.tool_registry.remove(&input.thread_id);
+                    }
+                    return Err(error);
+                }
+            }
         };
 
-        let thread = self.thread_manager.thread_mut(&input.thread_id)?;
-        thread.status = ThreadStatus::Running;
-        thread.updated_at = Utc::now();
+        {
+            let thread = self.thread_manager.thread_mut(&input.thread_id)?;
+            thread.status = ThreadStatus::Running;
+            thread.updated_at = Utc::now();
+        }
+        if let Some(event_log_path) = reactivated_event_log_path {
+            // Register before emitting Running so the complete revived turn,
+            // including its first lifecycle event, is written to a fresh log.
+            self.event_bus
+                .register_thread_log(&input.thread_id, event_log_path);
+        }
         if let Some(provider_state) = self.thread_manager.provider_state_mut(&input.thread_id) {
             provider_state.has_user_message = true;
         }
@@ -5089,9 +5172,109 @@ impl ToolRegistry {
     }
 
     pub fn load_from_skills_dir(skills_dir: impl AsRef<Path>) -> Result<Self, PedelecError> {
-        let tools_json_path = skills_dir.as_ref().join("tools.json");
+        let skills_dir = skills_dir.as_ref();
+        let tools_json_path = skills_dir.join("tools.json");
         if !tools_json_path.exists() {
-            return Ok(Self::default());
+            let mut generated_paths = Vec::new();
+            let entries = match fs::read_dir(skills_dir) {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    return Ok(Self::default());
+                }
+                Err(err) => {
+                    return Err(PedelecError::with_details(
+                        error_codes::TOOLS_JSON_INVALID,
+                        "cannot read generated tool specs directory",
+                        serde_json::json!({
+                            "path": skills_dir.to_string_lossy(),
+                            "error": err.to_string()
+                        }),
+                    ));
+                }
+            };
+            for entry in entries {
+                let entry = entry.map_err(|err| {
+                    PedelecError::with_details(
+                        error_codes::TOOLS_JSON_INVALID,
+                        "cannot read generated tool spec entry",
+                        serde_json::json!({
+                            "path": skills_dir.to_string_lossy(),
+                            "error": err.to_string()
+                        }),
+                    )
+                })?;
+                let path = entry.path();
+                if entry
+                    .file_type()
+                    .map_err(|err| {
+                        PedelecError::with_details(
+                            error_codes::TOOLS_JSON_INVALID,
+                            "cannot inspect generated tool spec entry",
+                            serde_json::json!({
+                                "path": path.to_string_lossy(),
+                                "error": err.to_string()
+                            }),
+                        )
+                    })?
+                    .is_file()
+                    && path.extension().and_then(OsStr::to_str) == Some("json")
+                    && path
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .is_some_and(|name| name.starts_with("tools-"))
+                {
+                    generated_paths.push(path);
+                }
+            }
+            generated_paths.sort();
+
+            let mut tools = HashMap::with_capacity(generated_paths.len());
+            for path in generated_paths {
+                let contents = fs::read_to_string(&path).map_err(|err| {
+                    PedelecError::with_details(
+                        error_codes::TOOLS_JSON_INVALID,
+                        "cannot read generated tool spec",
+                        serde_json::json!({
+                            "path": path.to_string_lossy(),
+                            "error": err.to_string()
+                        }),
+                    )
+                })?;
+                let tool: ToolDefinition = serde_json::from_str(&contents).map_err(|err| {
+                    PedelecError::with_details(
+                        error_codes::TOOLS_JSON_INVALID,
+                        "generated tool spec is not valid JSON",
+                        serde_json::json!({
+                            "path": path.to_string_lossy(),
+                            "error": err.to_string()
+                        }),
+                    )
+                })?;
+                validate_tool_name_legacy(&tool.name)?;
+                validate_tool_args_schema_legacy(&tool.name, &tool.args_schema)?;
+                if tool.timeout_ms == 0 {
+                    return Err(PedelecError::with_details(
+                        error_codes::TOOLS_JSON_INVALID,
+                        "generated tool timeoutMs must be a positive integer",
+                        serde_json::json!({ "toolName": tool.name }),
+                    ));
+                }
+                if tools.insert(tool.name.clone(), tool).is_some() {
+                    return Err(PedelecError::with_details(
+                        error_codes::TOOLS_JSON_INVALID,
+                        "duplicate generated tool name",
+                        serde_json::json!({ "path": path.to_string_lossy() }),
+                    ));
+                }
+            }
+
+            return Ok(Self {
+                // Generated specs do not persist the original guidance text,
+                // but a non-None marker keeps the provider tool configuration
+                // visible when this registry is used for a revived turn.
+                guidance: (!tools.is_empty()).then_some(String::new()),
+                tools,
+            });
         }
 
         let tools_json = fs::read_to_string(&tools_json_path).map_err(|err| {

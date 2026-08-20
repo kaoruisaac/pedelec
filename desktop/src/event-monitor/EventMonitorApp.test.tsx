@@ -49,7 +49,7 @@ describe("EventMonitorApp Debug Prompt", () => {
     document.body.innerHTML = "";
   });
 
-  it("enables Send only for an idle thread with non-whitespace prompt", async () => {
+  it("enables Send for idle and ended threads with non-whitespace prompt", async () => {
     const container = mountMonitor();
     emitThread("t000123", "idle");
     await tick();
@@ -66,10 +66,34 @@ describe("EventMonitorApp Debug Prompt", () => {
     await tick();
     expect(send.disabled).toBe(false);
 
-    emitStatus("t000123", "running");
+    for (const status of ["running", "waitingToolResult", "stopping", "error"]) {
+      emitStatus("t000123", status);
+      await tick();
+      expect(send.disabled).toBe(true);
+      expect(textarea.disabled).toBe(true);
+    }
+
+    emitStatus("t000123", "ended");
     await tick();
-    expect(send.disabled).toBe(true);
-    expect(textarea.disabled).toBe(true);
+    expect(send.disabled).toBe(false);
+    expect(textarea.disabled).toBe(false);
+  });
+
+  it("submits an ended thread through the same guarded path", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "ended");
+    await tick();
+
+    const textarea = promptTextarea(container);
+    setPrompt(textarea, "  What happened before the thread ended?  ");
+    sendButton(container).click();
+    await tick();
+
+    expect(mocks.sendThreadText).toHaveBeenCalledWith(
+      "t000123",
+      "What happened before the thread ended?",
+    );
+    expect(textarea.value).toBe("");
   });
 
   it("submits the selected thread and trimmed message, then clears on success", async () => {

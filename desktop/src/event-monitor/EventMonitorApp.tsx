@@ -55,7 +55,7 @@ export function EventMonitorApp() {
       !trimmedMessage ||
       isSubmittingDebugPrompt() ||
       store.selectedThreadId !== threadId ||
-      selectedThread?.status !== "idle"
+      !isDebugPromptAvailable(selectedThread?.status)
     ) {
       return;
     }
@@ -309,6 +309,10 @@ function ThreadDetail(props: {
   );
 }
 
+function isDebugPromptAvailable(status: string | undefined): boolean {
+  return status === "idle" || status === "ended";
+}
+
 export function DebugPrompt(props: {
   thread: ThreadViewModel;
   prompt: string;
@@ -319,7 +323,7 @@ export function DebugPrompt(props: {
   const thread = () => props.thread;
   const trimmedPrompt = () => props.prompt.trim();
   const canSubmit = () =>
-    thread().status === "idle" && trimmedPrompt().length > 0 && !props.isSubmitting;
+    isDebugPromptAvailable(thread().status) && trimmedPrompt().length > 0 && !props.isSubmitting;
 
   async function submit(): Promise<void> {
     if (!canSubmit()) {
@@ -348,7 +352,7 @@ export function DebugPrompt(props: {
           placeholder="Ask the provider agent about this session…"
           rows="4"
           value={props.prompt}
-          disabled={thread().status !== "idle" || props.isSubmitting}
+          disabled={!isDebugPromptAvailable(thread().status) || props.isSubmitting}
           onInput={(event) => props.onPromptChange(event.currentTarget.value)}
           onKeyDown={(event) => {
             if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -361,8 +365,8 @@ export function DebugPrompt(props: {
           <p class="event-monitor-debug-prompt-hint" role="status">
             {props.isSubmitting
               ? "Sending prompt…"
-              : thread().status === "idle"
-                ? "Available when this thread is idle."
+              : isDebugPromptAvailable(thread().status)
+                ? "Available when this thread is idle or ended."
                 : `Unavailable while this thread is ${statusLabel(thread().status)}.`}
           </p>
           <button type="submit" disabled={!canSubmit()}>

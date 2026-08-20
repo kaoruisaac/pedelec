@@ -24,7 +24,8 @@ use pedelec_core::{
     UpdateSettingsInput,
 };
 use pedelec_ipc::{
-    prepare_provider_process, start_core_ipc_server_with_services, start_provider_process,
+    prepare_provider_process, start_core_ipc_server_with_services, start_debug_provider_process,
+    start_provider_process,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -71,7 +72,6 @@ pub fn run() {
             open_thread_sandbox,
             restart_app,
             send_text,
-            #[cfg(debug_assertions)]
             debug_send_text,
             prepare_thread,
             submit_tool_result,
@@ -519,7 +519,6 @@ fn send_text(
     start_provider_process(state.runtime(), input)
 }
 
-#[cfg(debug_assertions)]
 #[tauri::command]
 fn debug_send_text(
     state: State<'_, CoreRuntimeOwner>,
@@ -528,12 +527,11 @@ fn debug_send_text(
     debug_start_provider_process(state.runtime(), input)
 }
 
-#[cfg(debug_assertions)]
 fn debug_start_provider_process(
     runtime: SharedCoreRuntime,
     input: SendTextInput,
 ) -> Result<SendTextOutput, PedelecError> {
-    start_provider_process(runtime, input)
+    start_debug_provider_process(runtime, input)
 }
 
 #[tauri::command]
@@ -636,7 +634,7 @@ mod sandbox_open_tests {
     }
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 mod debug_send_text_tests {
     use super::*;
     use pedelec_core::{

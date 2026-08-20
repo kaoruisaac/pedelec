@@ -7107,6 +7107,201 @@ mod tests {
         assert_eq!(second_send.command.stdin, "again");
     }
 
+    #[test]
+    fn normal_send_text_still_rejects_ended_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_normal_send_ended";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Codex,
+            Some("session_existing".into()),
+            None,
+        );
+
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+
+        let error = runtime
+            .begin_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "normal send must remain rejected".into(),
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code, error_codes::THREAD_ENDED);
+    }
+
+    #[test]
+    fn debug_send_text_reactivates_ended_thread_resources_and_resumes_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_debug_reactivate";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Codex,
+            Some("session_existing".into()),
+            None,
+        );
+        let sandbox_path = runtime.thread_sandbox_path(thread_id).unwrap();
+        let initial_log_path = sandbox_logs_root(&sandbox_path).join("initial.jsonl");
+        let skills_dir = sandbox_skills_root(&sandbox_path);
+        fs::create_dir_all(&skills_dir).unwrap();
+        fs::write(
+            skills_dir.join("tools-get_app_state.json"),
+            serde_json::to_string(&json!({
+                "name": "get_app_state",
+                "description": "Read state.",
+                "argsSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                },
+                "timeoutMs": 30000
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        runtime
+            .event_bus
+            .register_thread_log(thread_id, initial_log_path.clone());
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .sdk_origin = Some("https://example.com".into());
+
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Ended));
+        assert!(runtime.tool_registry.get(thread_id).is_none());
+        assert!(runtime.event_log_path(thread_id).is_none());
+
+        let start = runtime
+            .begin_debug_send_text(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "What did you just change?".into(),
+            })
+            .unwrap();
+
+        assert_eq!(start.output.thread_id, thread_id);
+        assert_eq!(
+            runtime.thread_status(thread_id),
+            Some(ThreadStatus::Running)
+        );
+        assert_eq!(
+            runtime
+                .provider_state(thread_id)
+                .unwrap()
+                .provider_session_id
+                .as_deref(),
+            Some("session_existing")
+        );
+        assert_eq!(
+            runtime
+                .thread_manager
+                .thread(thread_id)
+                .unwrap()
+                .sdk_origin
+                .as_deref(),
+            Some("https://example.com")
+        );
+        assert!(runtime
+            .tool_registry
+            .get(thread_id)
+            .unwrap()
+            .get("get_app_state")
+            .is_some());
+        assert!(runtime.event_log_path(thread_id).is_some());
+        assert_ne!(runtime.event_log_path(thread_id), Some(initial_log_path));
+        assert!(start.command.args.iter().any(|arg| arg == "resume"));
+        assert!(start
+            .command
+            .args
+            .iter()
+            .any(|arg| arg == "session_existing"));
+        assert!(runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: thread_id.into(),
+                tool_name: "get_app_state".into(),
+                args: json!({}),
+            })
+            .is_ok());
+
+        runtime.register_provider_process(
+            thread_id,
+            7,
+            Arc::new(Mutex::new(None)),
+            RunningProviderProcessPurpose::UserMessage,
+        );
+        runtime.complete_provider_process(thread_id, 7, success_exit_status());
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+    }
+
+    #[test]
+    fn debug_send_text_accepts_only_idle_or_ended_threads() {
+        for status in [
+            ThreadStatus::Idle,
+            ThreadStatus::Ended,
+            ThreadStatus::Running,
+            ThreadStatus::WaitingToolResult,
+            ThreadStatus::Stopping,
+            ThreadStatus::Error,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let thread_id = format!("thread_debug_status_{status:?}");
+            let mut runtime = runtime_with_provider_thread(
+                temp.path(),
+                &thread_id,
+                ProviderCode::Codex,
+                Some("session_existing".into()),
+                None,
+            );
+            runtime.test_provider_command = Some(CommandSpec {
+                program: "provider-test".into(),
+                args: Vec::new(),
+                cwd: temp.path().into(),
+                env: Vec::new(),
+                prompt: String::new(),
+                stdin: "debug".into(),
+            });
+            runtime
+                .thread_manager
+                .thread_mut(&thread_id)
+                .unwrap()
+                .status = status.clone();
+
+            let result = runtime.begin_debug_send_text(SendTextInput {
+                thread_id: thread_id.clone(),
+                message: "debug".into(),
+            });
+            match status {
+                ThreadStatus::Idle | ThreadStatus::Ended => {
+                    assert!(result.is_ok(), "status {status:?} should be accepted");
+                }
+                ThreadStatus::Running
+                | ThreadStatus::WaitingToolResult
+                | ThreadStatus::Stopping => {
+                    assert_eq!(result.unwrap_err().code, error_codes::THREAD_BUSY);
+                }
+                ThreadStatus::Error => {
+                    assert_eq!(
+                        result.unwrap_err().code,
+                        error_codes::PROVIDER_COMMAND_FAILED
+                    );
+                }
+                ThreadStatus::Starting => unreachable!(),
+            }
+        }
+    }
+
     fn sample_skills_input() -> CreateThreadSkillsInput {
         CreateThreadSkillsInput {
             guidance: "Use get_app_state.".into(),
