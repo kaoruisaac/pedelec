@@ -1,4 +1,4 @@
-import { createMemo, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import { FaRegularFolderOpen } from "solid-icons/fa";
@@ -12,13 +12,16 @@ import {
   toolCallDetails,
   toolResultDetails,
 } from "./eventMonitorFormatters";
-import { openThreadSandbox } from "./eventMonitorActions";
+import { openThreadSandbox, sendThreadText } from "./eventMonitorActions";
 import { createEventMonitorStore } from "./eventMonitorStore";
 import type { MonitorEvent, ThreadViewModel } from "./eventMonitorStore";
 
 export function EventMonitorApp() {
   const monitor = createEventMonitorStore();
   const { store, selectThread, setGlobalError, upsertThreadEvent } = monitor;
+  const [debugPrompt, setDebugPrompt] = createSignal("");
+  const [isSubmittingDebugPrompt, setIsSubmittingDebugPrompt] = createSignal(false);
+  let previousSelectedThreadId = store.selectedThreadId;
 
   const threadList = createMemo(() =>
     store.threadOrder.map((threadId) => store.threadsById[threadId]).filter(Boolean),
@@ -28,11 +31,45 @@ export function EventMonitorApp() {
   );
   const hasEvents = createMemo(() => store.totalEventCount > 0);
 
+  createEffect(() => {
+    const selectedThreadId = store.selectedThreadId;
+    if (selectedThreadId !== previousSelectedThreadId) {
+      setDebugPrompt("");
+      previousSelectedThreadId = selectedThreadId;
+    }
+  });
+
   async function handleOpenThreadSandbox(threadId: string): Promise<void> {
     try {
       await openThreadSandbox(threadId);
     } catch (error) {
       setGlobalError(error);
+    }
+  }
+
+  async function handleSendDebugPrompt(threadId: string, message: string): Promise<void> {
+    const trimmedMessage = message.trim();
+    const selectedThread = store.threadsById[threadId];
+
+    if (
+      !trimmedMessage ||
+      isSubmittingDebugPrompt() ||
+      store.selectedThreadId !== threadId ||
+      selectedThread?.status !== "idle"
+    ) {
+      return;
+    }
+
+    setIsSubmittingDebugPrompt(true);
+    try {
+      await sendThreadText(threadId, trimmedMessage);
+      if (store.selectedThreadId === threadId) {
+        setDebugPrompt("");
+      }
+    } catch (error) {
+      setGlobalError(error instanceof Error ? error.message : error);
+    } finally {
+      setIsSubmittingDebugPrompt(false);
     }
   }
 
@@ -150,6 +187,10 @@ export function EventMonitorApp() {
             {(thread) => (
               <ThreadDetail
                 thread={thread()}
+                debugPrompt={debugPrompt()}
+                isSubmittingDebugPrompt={isSubmittingDebugPrompt()}
+                onDebugPromptChange={setDebugPrompt}
+                onSendDebugPrompt={handleSendDebugPrompt}
                 onOpenSandbox={handleOpenThreadSandbox}
               />
             )}
@@ -171,6 +212,10 @@ function Metric(props: { label: string; value: unknown; status?: string }) {
 
 function ThreadDetail(props: {
   thread: ThreadViewModel;
+  debugPrompt: string;
+  isSubmittingDebugPrompt: boolean;
+  onDebugPromptChange: (value: string) => void;
+  onSendDebugPrompt: (threadId: string, message: string) => Promise<void>;
   onOpenSandbox: (threadId: string) => Promise<void>;
 }) {
   const thread = () => props.thread;
@@ -201,6 +246,14 @@ function ThreadDetail(props: {
           <SummaryItem label="Last Seq" value={thread().lastSeq} />
         </div>
       </section>
+
+      <DebugPrompt
+        thread={thread()}
+        prompt={props.debugPrompt}
+        isSubmitting={props.isSubmittingDebugPrompt}
+        onPromptChange={props.onDebugPromptChange}
+        onSubmit={props.onSendDebugPrompt}
+      />
 
       <div class="event-monitor-block-grid">
         <MonitorBlock title="Events" empty={thread().events.length === 0}>
@@ -253,6 +306,71 @@ function ThreadDetail(props: {
         </MonitorBlock>
       </div>
     </div>
+  );
+}
+
+export function DebugPrompt(props: {
+  thread: ThreadViewModel;
+  prompt: string;
+  isSubmitting: boolean;
+  onPromptChange: (value: string) => void;
+  onSubmit: (threadId: string, message: string) => Promise<void>;
+}) {
+  const thread = () => props.thread;
+  const trimmedPrompt = () => props.prompt.trim();
+  const canSubmit = () =>
+    thread().status === "idle" && trimmedPrompt().length > 0 && !props.isSubmitting;
+
+  async function submit(): Promise<void> {
+    if (!canSubmit()) {
+      return;
+    }
+
+    const threadId = thread().threadId;
+    const message = trimmedPrompt();
+    await props.onSubmit(threadId, message);
+  }
+
+  return (
+    <section class="event-monitor-debug-prompt">
+      <div class="event-monitor-debug-prompt-header">
+        <h2>Debug Prompt</h2>
+      </div>
+      <form
+        class="event-monitor-debug-prompt-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        <textarea
+          aria-label="Debug prompt"
+          placeholder="Ask the provider agent about this session…"
+          rows="4"
+          value={props.prompt}
+          disabled={thread().status !== "idle" || props.isSubmitting}
+          onInput={(event) => props.onPromptChange(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+        />
+        <div class="event-monitor-debug-prompt-footer">
+          <p class="event-monitor-debug-prompt-hint" role="status">
+            {props.isSubmitting
+              ? "Sending prompt…"
+              : thread().status === "idle"
+                ? "Available when this thread is idle."
+                : `Unavailable while this thread is ${statusLabel(thread().status)}.`}
+          </p>
+          <button type="submit" disabled={!canSubmit()}>
+            {props.isSubmitting ? "Sending…" : "Send"}
+          </button>
+        </div>
+      </form>
+    </section>
   );
 }
 

@@ -71,6 +71,8 @@ pub fn run() {
             open_thread_sandbox,
             restart_app,
             send_text,
+            #[cfg(debug_assertions)]
+            debug_send_text,
             prepare_thread,
             submit_tool_result,
             end_thread,
@@ -517,6 +519,23 @@ fn send_text(
     start_provider_process(state.runtime(), input)
 }
 
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn debug_send_text(
+    state: State<'_, CoreRuntimeOwner>,
+    input: SendTextInput,
+) -> Result<SendTextOutput, PedelecError> {
+    debug_start_provider_process(state.runtime(), input)
+}
+
+#[cfg(debug_assertions)]
+fn debug_start_provider_process(
+    runtime: SharedCoreRuntime,
+    input: SendTextInput,
+) -> Result<SendTextOutput, PedelecError> {
+    start_provider_process(runtime, input)
+}
+
 #[tauri::command]
 fn prepare_thread(
     state: State<'_, CoreRuntimeOwner>,
@@ -614,5 +633,160 @@ mod sandbox_open_tests {
         let file_error = validated_thread_sandbox_path("t000123", Some(file_path)).unwrap_err();
 
         assert_eq!(file_error.code, error_codes::SANDBOX_PATH_INVALID);
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod debug_send_text_tests {
+    use super::*;
+    use pedelec_core::{
+        CommandSpec, CoreRuntime, EffortLevel, ProviderAdapterState, ProviderCode, SandboxManager,
+        ThreadState, ThreadStatus,
+    };
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn normal_thread_access_still_requires_the_matching_sdk_origin() {
+        let (runtime, _temp) = runtime_with_sdk_thread(ThreadStatus::Idle);
+        let runtime = runtime.lock().unwrap();
+
+        assert!(runtime
+            .authorize_thread_access("t000001", Some("https://example.com"))
+            .is_ok());
+        assert_eq!(
+            runtime
+                .authorize_thread_access("t000001", Some("https://other.example"))
+                .unwrap_err()
+                .code,
+            error_codes::THREAD_ACCESS_DENIED
+        );
+        assert_eq!(
+            runtime
+                .authorize_thread_access("t000001", None)
+                .unwrap_err()
+                .code,
+            error_codes::THREAD_ACCESS_DENIED
+        );
+    }
+
+    #[test]
+    fn debug_send_text_skips_origin_authorization_but_uses_normal_send_start() {
+        let (runtime, _temp) = runtime_with_sdk_thread(ThreadStatus::Idle);
+        let sandbox_path = runtime
+            .lock()
+            .unwrap()
+            .thread_sandbox_path("t000001")
+            .unwrap();
+        runtime.lock().unwrap().test_provider_command = Some(test_provider_command(
+            sandbox_path,
+            "What did you just change?",
+        ));
+
+        let output = debug_start_provider_process(
+            Arc::clone(&runtime),
+            SendTextInput {
+                thread_id: "t000001".into(),
+                message: "What did you just change?".into(),
+            },
+        )
+        .expect("debug send should reach the provider start path");
+
+        assert_eq!(output.thread_id, "t000001");
+        assert_eq!(
+            runtime.lock().unwrap().thread_status("t000001"),
+            Some(ThreadStatus::Running)
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_manager
+                .thread("t000001")
+                .unwrap()
+                .sdk_origin
+                .as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn debug_send_text_keeps_busy_thread_protection() {
+        let (runtime, _temp) = runtime_with_sdk_thread(ThreadStatus::Running);
+
+        let error = debug_start_provider_process(
+            runtime,
+            SendTextInput {
+                thread_id: "t000001".into(),
+                message: "This must be rejected while running.".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, error_codes::THREAD_BUSY);
+    }
+
+    fn runtime_with_sdk_thread(
+        status: ThreadStatus,
+    ) -> (Arc<Mutex<CoreRuntime>>, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox_root = temp.path().join("sandboxes");
+        let sandbox_path = sandbox_root.join("t000001");
+        std::fs::create_dir_all(&sandbox_path).unwrap();
+
+        let mut runtime = CoreRuntime::default();
+        runtime.provider_readiness.mark_ready_for_test();
+        runtime.sandbox_manager = SandboxManager::with_sandbox_root(&sandbox_root);
+        let now = chrono::Utc::now();
+        runtime.thread_manager.insert_thread(
+            ThreadState {
+                thread_id: "t000001".into(),
+                provider: ProviderCode::Codex,
+                effort_level: EffortLevel::Default,
+                effort_args: Vec::new(),
+                sandbox_path,
+                skills: Vec::new(),
+                status,
+                process_id: None,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: Some("https://example.com".into()),
+            },
+            ProviderAdapterState {
+                provider_session_id: None,
+                last_process_id: None,
+                has_user_message: false,
+            },
+        );
+
+        (Arc::new(Mutex::new(runtime)), temp)
+    }
+
+    fn test_provider_command(cwd: PathBuf, message: &str) -> CommandSpec {
+        #[cfg(windows)]
+        let (program, args) = (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                "[Console]::In.ReadToEnd() | Out-Null; Start-Sleep -Seconds 1".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = (
+            "sh".to_string(),
+            vec!["-c".to_string(), "cat >/dev/null; sleep 1".to_string()],
+        );
+
+        CommandSpec {
+            program,
+            args,
+            cwd,
+            env: Vec::new(),
+            prompt: message.to_string(),
+            stdin: message.to_string(),
+        }
     }
 }

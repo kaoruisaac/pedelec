@@ -65,7 +65,7 @@ export function AppShell() {
     });
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey && event.key.toLowerCase() === "m") {
+      if (IS_DEV && event.ctrlKey && event.key.toLowerCase() === "m") {
         setPage("monitor");
       }
     };
@@ -189,9 +189,11 @@ export function AppShell() {
               onDone={() => void effortWizard.finish().then(() => setPage("settings"))}
             />
           </div>
-          <div hidden={page() !== "monitor"}>
-            <EventMonitorApp />
-          </div>
+          <Show when={IS_DEV}>
+            <div hidden={page() !== "monitor"}>
+              <EventMonitorApp />
+            </div>
+          </Show>
         </section>
       </div>
     </PopUpProvider>
