@@ -78,7 +78,7 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 - 只有 `model`：invalid。
 - `autoEndOnDisconnect`：預設 `true`。
 
-Explicit `sandbox.path` 可以是新目錄或既有目錄。Core 會建立必要的 `skills/`、`assets/`、`logs/`、`tmp/` 子目錄，但不清空既有內容。Pedelec 永遠不會刪除 explicit workspace，多個 active session 也可以共用它。Path 不得與 Pedelec managed sandbox root overlap；無效 path 回傳 `SANDBOX_PATH_INVALID`。
+Explicit `sandbox.path` 可以是新目錄或既有目錄。Core 會建立 Pedelec 擁有的 `.pedelec-sandbox/{skills,assets,logs,tmp}/` runtime 結構，但不清空既有 project 內容。Pedelec 永遠不會刪除 explicit workspace，多個 active session 也可以共用它。Path 不得與 Pedelec managed sandbox root overlap；無效 path 回傳 `SANDBOX_PATH_INVALID`。
 
 ### Returns
 
@@ -106,7 +106,7 @@ const session = await pedelec.createSession({
 sandboxFolderPicker(): Promise<SandboxFolderPickerResult | null>
 ```
 
-透過 Pedelec Desktop 開啟作業系統的原生、僅可選取資料夾的 picker。選取資料夾時回傳 path、根目錄是否為空，以及 `.pedelec-sandbox.json` 是否為 regular file；關閉或取消時 resolve `null`。
+透過 Pedelec Desktop 開啟作業系統的原生、僅可選取資料夾的 picker。選取資料夾時回傳 path、根目錄是否為空，以及 `.pedelec-lock.json` 是否為 regular file；關閉或取消時 resolve `null`。
 
 ```ts
 const folder = await pedelec.sandboxFolderPicker();
@@ -121,7 +121,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-這是敏感的 Desktop API，可能觸發目前 origin 的 approval flow。Picker 只做 read-only observation，不會驗證或初始化 sandbox、建立 workspace 子目錄、parse marker JSON，也不限制 origin 或 SDK version。`isEmptyFolder` 只反映根目錄當下是否有任何 entry；`hasSandboxConfig` 只判斷 marker 是否為 regular file，即使內容不是合法 JSON 也算存在。既有的 custom-sandbox validation 仍由 `createSession()` 負責；成功初始化後才建立含 SDK version 與 normalized caller origin 的 `.pedelec-sandbox.json`。Picker 真正失敗時 reject `DIRECTORY_PICKER_FAILED`；使用者取消不是 error。
+這是敏感的 Desktop API，可能觸發目前 origin 的 approval flow。Picker 只做 read-only observation，不會驗證或初始化 sandbox、建立 workspace 子目錄、parse marker JSON，也不限制 origin 或 SDK version。`isEmptyFolder` 只反映根目錄當下是否有任何 entry；`hasSandboxConfig` 只判斷 `.pedelec-lock.json` 是否為 regular file，即使內容不是合法 JSON 也算存在。既有的 custom-sandbox validation 仍由 `createSession()` 負責；成功初始化後才建立含 SDK version 與 normalized caller origin 的 `.pedelec-lock.json`。Picker 真正失敗時 reject `DIRECTORY_PICKER_FAILED`；使用者取消不是 error。
 
 ## `listProviders()`
 

@@ -107,7 +107,7 @@ uploadAsset(file: File): Promise<SandboxAssetPath>
 uploadAsset(file: File, targetPath: SandboxAssetPath): Promise<SandboxAssetPath>
 ```
 
-Uploads one browser `File` until session end. It can run alongside prepare, send, and provider execution, but only one upload may run per session. A file is limited to 100 MiB and returns a `/...` path rooted implicitly in `assets/`. Pass `targetPath` to write exactly to a nested path, creating missing parent directories and replacing an existing regular file.
+Uploads one browser `File` until session end. It can run alongside prepare, send, and provider execution, but only one upload may run per session. A file is limited to 100 MiB and is stored physically under `.pedelec-sandbox/assets/`; the SDK returns a `/...` path rooted implicitly in `assets/`. Pass `targetPath` to write exactly to a nested path, creating missing parent directories and replacing an existing regular file.
 
 The content is transferred through Desktop's internal `127.0.0.1` loopback asset transfer server, rather than extension, Native Messaging, or Core IPC message bodies. See [Error Codes](./error-codes/) for request, upload `PUT`, and ticket failures.
 
@@ -117,7 +117,7 @@ The content is transferred through Desktop's internal `127.0.0.1` loopback asset
 listAssets(): Promise<SandboxAsset[]>
 ```
 
-Returns completed regular files from every level of the shared `assets/` directory as a flat array. Files created by either the App or Agent can appear. Results are ordered by filesystem modification time newest first, then by `name` when timestamps are equal. Directory entries and file or directory symlinks are not returned or followed. At every level, entries whose basename starts with `.pedelec-` are excluded; other dotfiles and files inside dot-directories are included.
+Returns completed regular files from every level of the physical `.pedelec-sandbox/assets/` directory as a flat array. Files created by either the App or Agent can appear. Results are ordered by filesystem modification time newest first, then by `name` when timestamps are equal. Directory entries and file or directory symlinks are not returned or followed. At every level, entries whose basename starts with `.pedelec-` are excluded; other dotfiles and files inside dot-directories are included.
 
 `name` is the basename, while `path` is the complete public path relative to `assets/`, such as `/results/report.json`. `modifiedAt` is the filesystem modification time rather than a guaranteed write-completion timestamp. Listing is allowed while the agent runs; an ending or ended session rejects with `SESSION_ENDED`. Pagination, deletion, rename, and move are not supported.
 
@@ -129,7 +129,7 @@ readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>
 readAsset(path: SandboxAssetPath, type: "file"): Promise<File>
 ```
 
-Reads a known file from the shared session `assets/` directory, including a nested public path such as `/results/report.json`. The path must begin with `/`, use forward slashes, and contain no empty, `.` or `..` segments.
+Reads a known file from the physical shared session `.pedelec-sandbox/assets/` directory, using a public path such as `/results/report.json`. The path must begin with `/`, use forward slashes, and contain no empty, `.` or `..` segments.
 
 The read limit is 100 MiB. Reads are allowed while prepare, send, or provider execution is active, but an ending or ended session rejects with `SESSION_ENDED`. If the Agent may still be writing the same path, coordinate completion in your application or agent workflow before reading it.
 

@@ -40,6 +40,9 @@ mod tests {
             instruction.contains("complete structured Pedelec response, including `TOOL_TIMEOUT`")
         );
         assert!(instruction.contains("do not retry indefinitely"));
+        assert!(instruction
+            .contains("`.pedelec-sandbox/assets/` is the shared App and Agent file directory"));
+        assert!(!instruction.contains("`assets/` is the shared App and Agent file directory"));
     }
 
     #[test]
@@ -4554,8 +4557,16 @@ mod tests {
         let sandbox = manager.create_thread_sandbox("thread_abc123").unwrap();
 
         assert!(sandbox.exists());
-        for subdir in SANDBOX_SUBDIRS {
-            assert!(sandbox.join(subdir).is_dir(), "missing subdir {subdir}");
+        assert!(sandbox_private_data_root(&sandbox).is_dir());
+        assert!(sandbox_skills_root(&sandbox).is_dir());
+        assert!(sandbox_assets_root(&sandbox).is_dir());
+        assert!(sandbox_logs_root(&sandbox).is_dir());
+        assert!(sandbox_tmp_root(&sandbox).is_dir());
+        for subdir in ["skills", "assets", "logs", "tmp"] {
+            assert!(
+                !sandbox.join(subdir).exists(),
+                "unexpected root subdir {subdir}"
+            );
         }
 
         manager.remove_thread_sandbox(&sandbox).unwrap();
@@ -4570,7 +4581,7 @@ mod tests {
         let bad_urls = vec!["http://example.com/tools.md".to_string()];
 
         let result = manager.create_thread_sandbox_with("thread_rollback", |sandbox| {
-            skill_manager.download_skills(sandbox.join("skills"), &bad_urls)
+            skill_manager.download_skills(sandbox_skills_root(sandbox), &bad_urls)
         });
 
         assert_eq!(result.unwrap_err().code, error_codes::SKILL_URL_INVALID);
@@ -4585,15 +4596,21 @@ mod tests {
         let custom = temp.path().join("project");
         fs::create_dir_all(custom.join("skills")).unwrap();
         fs::create_dir_all(custom.join("assets")).unwrap();
+        fs::create_dir_all(custom.join("logs")).unwrap();
+        fs::create_dir_all(custom.join("tmp")).unwrap();
+        fs::create_dir_all(sandbox_private_data_root(&custom).join("skills")).unwrap();
+        fs::write(sandbox_private_data_root(&custom).join("keep.txt"), "keep").unwrap();
         fs::write(custom.join("source.txt"), "keep").unwrap();
         fs::write(custom.join("skills").join("keep.txt"), "keep").unwrap();
         fs::write(custom.join("assets").join("existing.bin"), b"keep").unwrap();
 
         let resolved = manager.prepare_custom_sandbox(&custom).unwrap();
         assert_eq!(resolved, custom.canonicalize().unwrap());
-        for subdir in SANDBOX_SUBDIRS {
-            assert!(resolved.join(subdir).is_dir(), "missing subdir {subdir}");
-        }
+        assert!(sandbox_private_data_root(&resolved).is_dir());
+        assert!(sandbox_skills_root(&resolved).is_dir());
+        assert!(sandbox_assets_root(&resolved).is_dir());
+        assert!(sandbox_logs_root(&resolved).is_dir());
+        assert!(sandbox_tmp_root(&resolved).is_dir());
         assert_eq!(
             fs::read_to_string(resolved.join("source.txt")).unwrap(),
             "keep"
@@ -4606,6 +4623,16 @@ mod tests {
             fs::read(resolved.join("assets").join("existing.bin")).unwrap(),
             b"keep"
         );
+        assert_eq!(
+            fs::read_to_string(sandbox_private_data_root(&resolved).join("keep.txt")).unwrap(),
+            "keep"
+        );
+        for subdir in ["skills", "assets", "logs", "tmp"] {
+            assert!(
+                resolved.join(subdir).is_dir(),
+                "existing root directory {subdir} was not preserved"
+            );
+        }
 
         let file_path = temp.path().join("not-a-directory");
         fs::write(&file_path, "file").unwrap();
@@ -4638,16 +4665,39 @@ mod tests {
     }
 
     #[test]
+    fn custom_sandbox_rejects_a_private_data_path_that_is_not_a_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed_root = temp.path().join("managed");
+        let manager = SandboxManager::with_sandbox_root(&managed_root);
+        let custom = temp.path().join("project");
+        fs::create_dir_all(&custom).unwrap();
+        fs::write(sandbox_private_data_root(&custom), "not a directory").unwrap();
+        fs::write(custom.join("keep.txt"), "keep").unwrap();
+
+        let error = manager.prepare_custom_sandbox(&custom).unwrap_err();
+
+        assert_eq!(error.code, error_codes::SANDBOX_CREATE_FAILED);
+        assert!(sandbox_private_data_root(&custom).is_file());
+        assert_eq!(fs::read_to_string(custom.join("keep.txt")).unwrap(), "keep");
+    }
+
+    #[test]
     fn custom_sandbox_generated_skills_merge_and_overwrite_collisions() {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("project");
         fs::create_dir_all(custom.join("skills")).unwrap();
         fs::write(
             custom.join("skills").join("tools-get_app_state.json"),
+            "ROOT",
+        )
+        .unwrap();
+        fs::create_dir_all(sandbox_skills_root(&custom)).unwrap();
+        fs::write(
+            sandbox_skills_root(&custom).join("tools-get_app_state.json"),
             "OLD",
         )
         .unwrap();
-        fs::write(custom.join("skills").join("unrelated.txt"), "KEEP").unwrap();
+        fs::write(sandbox_skills_root(&custom).join("unrelated.txt"), "KEEP").unwrap();
         let mut runtime = CoreRuntime {
             sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
             ..CoreRuntime::default()
@@ -4667,12 +4717,17 @@ mod tests {
         let sandbox = runtime.thread_sandbox_path(&output.thread_id).unwrap();
         assert_eq!(sandbox, custom.canonicalize().unwrap());
         let generated =
-            fs::read_to_string(sandbox.join("skills").join("tools-get_app_state.json")).unwrap();
+            fs::read_to_string(sandbox_skills_root(&sandbox).join("tools-get_app_state.json"))
+                .unwrap();
         assert!(generated.contains("get_app_state"));
         assert_ne!(generated, "OLD");
         assert_eq!(
-            fs::read_to_string(sandbox.join("skills").join("unrelated.txt")).unwrap(),
+            fs::read_to_string(sandbox_skills_root(&sandbox).join("unrelated.txt")).unwrap(),
             "KEEP"
+        );
+        assert_eq!(
+            fs::read_to_string(sandbox.join("skills").join("tools-get_app_state.json")).unwrap(),
+            "ROOT"
         );
     }
 
@@ -4696,7 +4751,7 @@ mod tests {
         runtime
             .create_sdk_thread(input(), "https://Example.com:443", Some("mock-sdk-version"))
             .unwrap();
-        let marker = custom.join(".pedelec-sandbox.json");
+        let marker = sandbox_lock_path(&custom);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(&marker).unwrap()).unwrap(),
             json!({
@@ -4704,6 +4759,7 @@ mod tests {
                 "origin": "https://example.com",
             })
         );
+        assert!(!custom.join(".pedelec-sandbox.json").exists());
 
         fs::write(&marker, "not json").unwrap();
         runtime
@@ -4748,9 +4804,9 @@ mod tests {
                 .code,
             error_codes::TOOLS_MANIFEST_INVALID
         );
-        assert!(!custom.join(".pedelec-sandbox.json").exists());
+        assert!(!sandbox_lock_path(&custom).exists());
 
-        let marker = custom.join(".pedelec-sandbox.json");
+        let marker = sandbox_lock_path(&custom);
         fs::create_dir_all(&marker).unwrap();
         let result = runtime.create_sdk_thread(
             CreateThreadInput {
@@ -4817,6 +4873,7 @@ mod tests {
             .to_string_lossy()
             .contains(&second.thread_id));
         assert!(!custom.join("logs").join("events.jsonl").exists());
+        assert!(sandbox_logs_root(&custom).is_dir());
         assert!(fs::read_to_string(first_log).unwrap().contains("created"));
         assert!(fs::read_to_string(second_log).unwrap().contains("created"));
     }
@@ -6204,7 +6261,10 @@ mod tests {
             None,
             None,
         );
-        let assets = temp.path().join("sandbox/thread_assets/assets");
+        let sandbox = temp.path().join("sandbox/thread_assets");
+        let assets = sandbox_assets_root(&sandbox);
+        fs::create_dir_all(sandbox.join("assets")).unwrap();
+        fs::write(sandbox.join("assets/root-only.txt"), b"user project file").unwrap();
         fs::create_dir_all(assets.join("nested/previews")).unwrap();
         fs::create_dir_all(assets.join(".cache")).unwrap();
         fs::create_dir_all(assets.join(".pedelec-cache")).unwrap();
@@ -6289,12 +6349,41 @@ mod tests {
             .assets
             .iter()
             .all(|asset| !asset.path.contains(temp.path().to_string_lossy().as_ref())));
+        assert!(!output
+            .assets
+            .iter()
+            .any(|asset| asset.path == "/root-only.txt"));
+    }
+
+    #[test]
+    fn read_asset_does_not_fall_back_to_a_root_level_assets_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = temp.path().join("sandbox/thread_asset_isolation");
+        fs::create_dir_all(sandbox.join("assets")).unwrap();
+        fs::write(sandbox.join("assets/result.json"), b"user project file").unwrap();
+        let now = chrono::Utc::now();
+        let thread = ThreadState {
+            thread_id: "thread_asset_isolation".into(),
+            provider: ProviderCode::Codex,
+            effort_level: EffortLevel::Default,
+            effort_args: vec![],
+            sandbox_path: sandbox,
+            skills: vec![],
+            status: ThreadStatus::Idle,
+            process_id: None,
+            created_at: now,
+            updated_at: now,
+            sdk_origin: None,
+        };
+
+        let error = resolve_asset_file(&thread, "/result.json").unwrap_err();
+        assert_eq!(error.code, error_codes::ASSET_NOT_FOUND);
     }
 
     #[test]
     fn list_assets_fails_when_a_nested_directory_cannot_be_read() {
         let temp = tempfile::tempdir().unwrap();
-        let assets_root = temp.path().join("assets");
+        let assets_root = sandbox_assets_root(&temp.path().join("sandbox/thread_assets"));
         fs::create_dir_all(&assets_root).unwrap();
         let missing_nested_directory = assets_root.join("nested");
         let mut assets = Vec::new();
@@ -6459,7 +6548,7 @@ mod tests {
             })
             .unwrap();
         let sandbox_path = runtime.thread_sandbox_path(&thread.thread_id).unwrap();
-        let sentinel_path = sandbox_path.join("assets").join("sentinel.txt");
+        let sentinel_path = sandbox_assets_root(&sandbox_path).join("sentinel.txt");
         fs::write(&sentinel_path, "preserve me").unwrap();
         let event_rx = runtime.event_bus.subscribe(&thread.thread_id);
         let (request_id, result_rx) = runtime
@@ -6509,7 +6598,7 @@ mod tests {
     fn cleanup_for_app_exit_removes_orphan_sandbox_directories() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox_root = temp.path().join("sandbox");
-        fs::create_dir_all(sandbox_root.join("t000999").join("logs")).unwrap();
+        fs::create_dir_all(sandbox_logs_root(&sandbox_root.join("t000999"))).unwrap();
         fs::write(sandbox_root.join("keep.txt"), "not a sandbox").unwrap();
         let mut runtime = CoreRuntime {
             sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
@@ -6527,12 +6616,9 @@ mod tests {
     fn startup_cleanup_removes_stale_sandbox_directories_without_touching_files() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox_root = temp.path().join("sandbox");
-        fs::create_dir_all(sandbox_root.join("t000999").join("assets")).unwrap();
+        fs::create_dir_all(sandbox_assets_root(&sandbox_root.join("t000999"))).unwrap();
         fs::write(
-            sandbox_root
-                .join("t000999")
-                .join("assets")
-                .join("stale.txt"),
+            sandbox_assets_root(&sandbox_root.join("t000999")).join("stale.txt"),
             "stale",
         )
         .unwrap();
@@ -6604,7 +6690,7 @@ mod tests {
             .unwrap();
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
-        let skills_dir = thread.sandbox_path.join("skills");
+        let skills_dir = sandbox_skills_root(&thread.sandbox_path);
         let spec = fs::read_to_string(skills_dir.join("tools-get_app_state.json")).unwrap();
 
         assert!(!skills_dir.join("tools.md").exists());
@@ -6643,9 +6729,7 @@ mod tests {
             })
             .unwrap();
         fs::write(
-            sandbox_root
-                .join(&output.thread_id)
-                .join("skills")
+            sandbox_skills_root(&sandbox_root.join(&output.thread_id))
                 .join("tools-get_app_state.json"),
             "{}",
         )
@@ -6721,7 +6805,7 @@ mod tests {
         assert_eq!(thread.status, ThreadStatus::Idle);
         assert_eq!(thread.process_id, None);
         assert_eq!(runtime.running_process_count(), 0);
-        let skills_dir = thread.sandbox_path.join("skills");
+        let skills_dir = sandbox_skills_root(&thread.sandbox_path);
         assert!(skills_dir.exists());
         assert!(skills_dir.is_dir());
         assert!(!skills_dir.join("tools.md").exists());
@@ -7313,7 +7397,7 @@ mod tests {
         .unwrap();
         runtime.set_core_ipc_runtime("127.0.0.1:12345", temp.join("runtime.json"));
         let sandbox_path = temp.join("sandbox").join(thread_id);
-        fs::create_dir_all(sandbox_path.join("logs")).unwrap();
+        fs::create_dir_all(sandbox_logs_root(&sandbox_path)).unwrap();
         let now = chrono::Utc::now();
         let has_user_message = provider_session_id.is_some();
         let effort_args = model

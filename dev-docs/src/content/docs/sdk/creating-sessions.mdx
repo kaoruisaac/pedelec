@@ -24,7 +24,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-The picker returns a folder result or `null` on cancellation. It is read-only and reports only the root-folder snapshot (`isEmptyFolder`) and whether `.pedelec-sandbox.json` is a regular file (`hasSandboxConfig`). It does not decide whether the folder is a valid Pedelec sandbox or initialize its contents; Core applies the existing sandbox rules during `createSession()`, then creates the marker after successful custom initialization.
+The picker returns a folder result or `null` on cancellation. It is read-only and reports only the root-folder snapshot (`isEmptyFolder`) and whether `.pedelec-lock.json` is a regular file (`hasSandboxConfig`). It does not decide whether the folder is a valid Pedelec sandbox or initialize its contents; Core applies the sandbox rules during `createSession()`, then creates the marker after successful custom initialization.
 
 ```ts
 const session = await pedelec.createSession();

@@ -5,9 +5,10 @@ mod tests {
     use super::*;
     use pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
     use pedelec_core::{
-        CommandSpec, CoreRuntime, CreateThreadOutput, CreateThreadSkillsInput,
-        CreateThreadToolInput, EffortLevel, PedelecSettings, ProviderAdapterState, ProviderCode,
-        SandboxManager, ThreadErrorSource, ThreadState, ThreadStatus, ToolRegistry,
+        sandbox_assets_root, sandbox_logs_root, CommandSpec, CoreRuntime, CreateThreadOutput,
+        CreateThreadSkillsInput, CreateThreadToolInput, EffortLevel, PedelecSettings,
+        ProviderAdapterState, ProviderCode, SandboxManager, ThreadErrorSource, ThreadState,
+        ThreadStatus, ToolRegistry,
     };
     use serde_json::{json, Value};
     use std::env;
@@ -623,7 +624,7 @@ mod tests {
             .thread_sandbox_path(&output.thread_id)
             .unwrap();
         assert!(sandbox_path.exists());
-        let sentinel_path = sandbox_path.join("assets").join("end-sentinel.txt");
+        let sentinel_path = sandbox_assets_root(&sandbox_path).join("end-sentinel.txt");
         std::fs::write(&sentinel_path, "preserve me").unwrap();
         let end = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
@@ -1629,7 +1630,7 @@ mod tests {
             .thread_sandbox_path("thread_end")
             .unwrap();
         assert!(sandbox_path.exists());
-        let sentinel_path = sandbox_path.join("logs").join("end-sentinel.txt");
+        let sentinel_path = sandbox_logs_root(&sandbox_path).join("end-sentinel.txt");
         std::fs::write(&sentinel_path, "preserve me").unwrap();
 
         runtime
@@ -1678,7 +1679,7 @@ mod tests {
         let sandbox_root = temp.join("sandbox");
         runtime.sandbox_manager = SandboxManager::with_sandbox_root(&sandbox_root);
         let sandbox_path = sandbox_root.join(thread_id);
-        std::fs::create_dir_all(sandbox_path.join("logs")).unwrap();
+        std::fs::create_dir_all(sandbox_logs_root(&sandbox_path)).unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),

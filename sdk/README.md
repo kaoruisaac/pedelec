@@ -146,7 +146,7 @@ const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
 ```
 
-`assets/` is shared by uploads and files written by the agent. `listAssets()` recursively lists regular files at every level as a flat array, ordered by filesystem modification time (newest first) and then by name; nested paths such as `/results/report.json` are returned in full. Directory entries and symlinks are excluded, as are `.pedelec-*` entries at every level; other dotfiles are included. It may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
+The physical shared App/Agent directory is `.pedelec-sandbox/assets/`. In the SDK contract, `assets/` is its implicit root: `listAssets()` recursively lists regular files at every level as a flat array, ordered by filesystem modification time (newest first) and then by name; nested paths such as `/results/report.json` are returned in full. Directory entries and symlinks are excluded, as are `.pedelec-*` entries at every level; other dotfiles are included. It may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
 
 ```ts
 const text = await session.readAsset("/report.txt", "text");
@@ -167,7 +167,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-Pedelec creates missing `skills/`, `assets/`, `logs/`, and `tmp/` directories and preserves existing files. It never deletes an explicit workspace, and multiple active sessions may share it. Filesystem write conflicts are the application's responsibility. An explicit path must not overlap Pedelec's managed sandbox root.
+Pedelec creates `.pedelec-sandbox/` with missing `assets/`, `logs/`, `skills/`, and `tmp/` subdirectories, preserving existing project files and existing private data. It never deletes an explicit workspace, and multiple active sessions may share it. Filesystem write conflicts are the application's responsibility. An explicit path must not overlap Pedelec's managed sandbox root.
 
 ## Selecting an Application Workspace
 
@@ -186,7 +186,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-`sandboxFolderPicker()` returns `Promise<SandboxFolderPickerResult | null>`. It is a read-only snapshot: it does not validate or initialize the selected folder, create workspace directories, or create the sandbox marker. `isEmptyFolder` only reports whether the selected folder root has any filesystem entry. `hasSandboxConfig` is true only when `.pedelec-sandbox.json` exists as a regular file; its JSON is not parsed. The picker requires the same origin approval as other sensitive Desktop APIs, and cancellation returns `null`. `createSession()` still applies the full sandbox rules and creates the marker after successful custom sandbox initialization. The marker currently records the SDK version and normalized caller origin but does not restrict reuse by origin or SDK version.
+`sandboxFolderPicker()` returns `Promise<SandboxFolderPickerResult | null>`. It is a read-only snapshot: it does not validate or initialize the selected folder, create workspace directories, or create the sandbox marker. `isEmptyFolder` only reports whether the selected folder root has any filesystem entry. `hasSandboxConfig` is true only when `.pedelec-lock.json` exists as a regular file; its JSON is not parsed. The picker requires the same origin approval as other sensitive Desktop APIs, and cancellation returns `null`. `createSession()` still applies the full sandbox rules and creates the marker after successful custom sandbox initialization. The marker currently records the SDK version and normalized caller origin but does not restrict reuse by origin or SDK version.
 
 ---
 

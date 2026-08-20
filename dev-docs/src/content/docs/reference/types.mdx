@@ -88,7 +88,7 @@ interface SandboxFolderPickerResult {
 }
 ```
 
-This is the read-only snapshot returned by `sandboxFolderPicker()`. `hasSandboxConfig` only indicates that `.pedelec-sandbox.json` is a regular file; it does not validate the marker contents.
+This is the read-only snapshot returned by `sandboxFolderPicker()`. `hasSandboxConfig` only indicates that `.pedelec-lock.json` is a regular file; it does not validate the marker contents.
 
 ## Provider and settings
 
@@ -146,7 +146,7 @@ type PedelecAvailability = {
 type SandboxAssetPath = `/${string}`;
 ```
 
-A sandbox-relative path in the session's shared `assets/` directory. Runtime validation also rejects backslashes, empty path segments, `.` and `..`.
+The SDK public path for an asset in the session's shared store. Physically, the Agent-visible shared store is `<sandbox.path>/.pedelec-sandbox/assets/`; the `.pedelec-sandbox` directory is private runtime layout and is not exposed in SDK values. For example, `/images/photo.png` refers to `<sandbox.path>/.pedelec-sandbox/assets/images/photo.png`. Runtime validation also rejects backslashes, empty path segments, `.` and `..`.
 
 ### `ReadAssetType`
 

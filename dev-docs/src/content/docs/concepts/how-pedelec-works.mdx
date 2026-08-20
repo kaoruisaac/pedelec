@@ -87,7 +87,7 @@ Creating a session does not necessarily launch a long-running provider process i
 
 ### Sandbox ownership
 
-Without `sandbox.path`, the desktop runtime creates a temporary managed sandbox under `~/.pedelec/sandbox/<threadId>` and owns its cleanup. An application can instead pass an absolute `sandbox.path` to select an application-managed workspace. Pedelec creates missing `skills/`, `assets/`, `logs/`, and `tmp/` directories, preserves existing content, and never deletes an explicit workspace. Multiple active sessions may share one explicit path; filesystem write coordination remains the application's responsibility. Explicit paths cannot overlap the managed sandbox root.
+Without `sandbox.path`, the desktop runtime creates a temporary managed sandbox under `~/.pedelec/sandbox/<threadId>` and owns its cleanup. An application can instead pass an absolute `sandbox.path` to select an application-managed workspace. Pedelec creates `.pedelec-sandbox/{assets,logs,skills,tmp}/`, preserves existing project content and private data, and never deletes an explicit workspace. Multiple active sessions may share one explicit path; filesystem write coordination remains the application's responsibility. Explicit paths cannot overlap the managed sandbox root.
 
 ## What happens during `sendText()`
 
@@ -140,7 +140,7 @@ Web App → SDK → Chrome Extension → Native Host → Core IPC → Desktop Ru
 Asset bodies use a separate internal data path:
 
 ```text
-Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session sandbox assets/
+Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session `.pedelec-sandbox/assets/`
 ```
 
 The SDK obtains and uses upload and download tickets internally through `session.uploadAsset()` and `session.readAsset()`. Applications must not create a localhost server or depend on transfer URLs, ports, tokens, or ticket lifecycles. Asset bodies do not pass through the Extension message body, Native Messaging payload, or Core IPC message body.

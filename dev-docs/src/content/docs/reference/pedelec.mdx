@@ -77,7 +77,7 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 - `sandbox.path`: optionally use an absolute application-managed workspace instead of a temporary managed sandbox.
 - `autoEndOnDisconnect`: defaults to `true`.
 
-An explicit `sandbox.path` may be new or existing. Core creates the required `skills/`, `assets/`, `logs/`, and `tmp/` directories without clearing existing contents. Pedelec never deletes an explicit workspace, and multiple active sessions may share it. The path must not overlap Pedelec's managed sandbox root; invalid paths return `SANDBOX_PATH_INVALID`.
+An explicit `sandbox.path` may be new or existing. Core creates the Pedelec-owned runtime structure `.pedelec-sandbox/{skills,assets,logs,tmp}/` without clearing existing project contents. Pedelec never deletes an explicit workspace, and multiple active sessions may share it. The path must not overlap Pedelec's managed sandbox root; invalid paths return `SANDBOX_PATH_INVALID`.
 
 ### Returns
 
@@ -107,7 +107,7 @@ const session = await pedelec.createSession({
 sandboxFolderPicker(): Promise<SandboxFolderPickerResult | null>
 ```
 
-Opens the operating system's native directory-only picker through Pedelec Desktop. A selected folder resolves to its path plus a read-only snapshot of whether its root is empty and whether `.pedelec-sandbox.json` is a regular file. Closing or cancelling the picker resolves to `null`.
+Opens the operating system's native directory-only picker through Pedelec Desktop. A selected folder resolves to its path plus a read-only snapshot of whether its root is empty and whether `.pedelec-lock.json` is a regular file. Closing or cancelling the picker resolves to `null`.
 
 ```ts
 const folder = await pedelec.sandboxFolderPicker();
@@ -122,7 +122,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-This is a sensitive Desktop API and may trigger the current origin's approval flow. The picker only observes the selected folder: it does not validate or initialize the sandbox, create Pedelec workspace directories, parse the marker JSON, or enforce origin/SDK-version compatibility. `hasSandboxConfig` only checks for a regular marker file, even if its contents are invalid. Existing custom-sandbox validation remains the responsibility of `createSession()`; after successful initialization it creates `.pedelec-sandbox.json` with the SDK version and normalized caller origin. Picker failures reject with `DIRECTORY_PICKER_FAILED`; cancellation is not an error.
+This is a sensitive Desktop API and may trigger the current origin's approval flow. The picker only observes the selected folder: it does not validate or initialize the sandbox, create Pedelec workspace directories, parse the marker JSON, or enforce origin/SDK-version compatibility. `hasSandboxConfig` only checks for a regular `.pedelec-lock.json` file, even if its contents are invalid. Existing custom-sandbox validation remains the responsibility of `createSession()`; after successful initialization it creates `.pedelec-lock.json` with the SDK version and normalized caller origin. Picker failures reject with `DIRECTORY_PICKER_FAILED`; cancellation is not an error.
 
 ## `listProviders()`
 

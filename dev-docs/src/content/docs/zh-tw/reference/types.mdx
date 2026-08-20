@@ -88,7 +88,7 @@ interface SandboxFolderPickerResult {
 }
 ```
 
-這是 `sandboxFolderPicker()` 回傳的 read-only snapshot。`hasSandboxConfig` 只表示 `.pedelec-sandbox.json` 是 regular file，不會驗證 marker 內容。
+這是 `sandboxFolderPicker()` 回傳的 read-only snapshot。`hasSandboxConfig` 只表示 `.pedelec-lock.json` 是 regular file，不會驗證 marker 內容。
 
 ## Provider 與 settings
 
@@ -146,7 +146,7 @@ type PedelecAvailability = {
 type SandboxAssetPath = `/${string}`;
 ```
 
-Session shared `assets/` 目錄中的 sandbox-relative path。Runtime validation 也會拒絕 backslash、空 path segment、`.` 與 `..`。
+Session shared store 中 asset 的 SDK public path。Agent 可見的 shared store 實際位於 `<sandbox.path>/.pedelec-sandbox/assets/`；`.pedelec-sandbox` 是 private runtime layout，不會出現在 SDK value 中。例如 `/images/photo.png` 對應到 `<sandbox.path>/.pedelec-sandbox/assets/images/photo.png`。Runtime validation 也會拒絕 backslash、空 path segment、`.` 與 `..`。
 
 ### `ReadAssetType`
 

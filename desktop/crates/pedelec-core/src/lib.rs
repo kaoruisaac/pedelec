@@ -36,8 +36,8 @@ const PEDELEC_OPENCODE_AGENT: &str = "pedelec-runtime";
 const PEDELEC_ANTIGRAVITY_AGENT_DIR: &str = ".agents/agents/pedelec-runtime";
 const PEDELEC_ANTIGRAVITY_AGENT_FILE: &str = "agent.md";
 const ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS: usize = 20_000;
-const SANDBOX_SUBDIRS: [&str; 4] = ["skills", "assets", "logs", "tmp"];
-const SANDBOX_CONFIG_FILE: &str = ".pedelec-sandbox.json";
+pub const SANDBOX_PRIVATE_DATA_DIR: &str = ".pedelec-sandbox";
+pub const SANDBOX_LOCK_FILE: &str = ".pedelec-lock.json";
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 pub const TOOL_RESULT_REPLAY_WINDOW: Duration = Duration::from_secs(10);
 pub const TOOL_RESULT_REPLAY_MAX_ENTRIES: usize = 256;
@@ -50,6 +50,36 @@ const MAX_PROVIDER_STDERR_BYTES: usize = 64 * 1024;
 const MAX_PREPARE_ASSISTANT_OUTPUT_BYTES: usize = 64 * 1024;
 const SANDBOX_REMOVE_MAX_ATTEMPTS: usize = 10;
 const SANDBOX_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// Returns the root of Pedelec-owned runtime data inside a session workspace.
+pub fn sandbox_private_data_root(sandbox_path: &Path) -> PathBuf {
+    sandbox_path.join(SANDBOX_PRIVATE_DATA_DIR)
+}
+
+/// Returns the physical root used for App/Agent-shared assets.
+pub fn sandbox_assets_root(sandbox_path: &Path) -> PathBuf {
+    sandbox_private_data_root(sandbox_path).join("assets")
+}
+
+/// Returns the physical root used for generated Pedelec skill/tool specs.
+pub fn sandbox_skills_root(sandbox_path: &Path) -> PathBuf {
+    sandbox_private_data_root(sandbox_path).join("skills")
+}
+
+/// Returns the physical root used for thread/session event logs.
+pub fn sandbox_logs_root(sandbox_path: &Path) -> PathBuf {
+    sandbox_private_data_root(sandbox_path).join("logs")
+}
+
+/// Returns the physical root used for upload temporary files.
+pub fn sandbox_tmp_root(sandbox_path: &Path) -> PathBuf {
+    sandbox_private_data_root(sandbox_path).join("tmp")
+}
+
+/// Returns the custom-sandbox marker path.
+pub fn sandbox_lock_path(sandbox_path: &Path) -> PathBuf {
+    sandbox_path.join(SANDBOX_LOCK_FILE)
+}
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -2599,7 +2629,7 @@ impl CoreRuntime {
                 "thread has ended",
             ));
         }
-        let input_path = thread.sandbox_path.join("assets");
+        let input_path = sandbox_assets_root(&thread.sandbox_path);
         if !input_path.exists() {
             return Ok(ListAssetsOutput { assets: Vec::new() });
         }
@@ -4322,7 +4352,7 @@ impl SandboxManager {
             origin: &'a str,
         }
 
-        let config_path = sandbox_path.join(SANDBOX_CONFIG_FILE);
+        let config_path = sandbox_lock_path(sandbox_path);
         let contents = serde_json::to_vec_pretty(&SandboxConfig {
             sdk_version,
             origin,
@@ -4404,16 +4434,18 @@ impl SandboxManager {
     }
 
     fn create_sandbox_subdirectories(&self, sandbox_path: &Path) -> Result<(), PedelecError> {
-        for subdir in SANDBOX_SUBDIRS {
-            let path = sandbox_path.join(subdir);
-            fs::create_dir_all(&path).map_err(|err| {
-                sandbox_io_error(
-                    error_codes::SANDBOX_CREATE_FAILED,
-                    "cannot create thread sandbox subdirectory",
-                    &path,
-                    err,
-                )
-            })?;
+        let private_data_root = sandbox_private_data_root(sandbox_path);
+        ensure_sandbox_directory(
+            &private_data_root,
+            "cannot create Pedelec sandbox data directory",
+        )?;
+        for path in [
+            sandbox_skills_root(sandbox_path),
+            sandbox_assets_root(sandbox_path),
+            sandbox_logs_root(sandbox_path),
+            sandbox_tmp_root(sandbox_path),
+        ] {
+            ensure_sandbox_directory(&path, "cannot create thread sandbox subdirectory")?;
         }
         Ok(())
     }
@@ -4591,7 +4623,7 @@ fn initialize_generated_skills(
     sandbox: &Path,
     skills_input: Option<&CreateThreadSkillsInput>,
 ) -> Result<(Vec<SkillFile>, ToolRegistry), PedelecError> {
-    let skills_dir = sandbox.join("skills");
+    let skills_dir = sandbox_skills_root(sandbox);
     fs::create_dir_all(&skills_dir).map_err(|err| {
         skill_download_error(
             "cannot create skills directory",
@@ -4627,7 +4659,7 @@ pub fn inspect_sandbox_folder(path: &Path) -> Result<SandboxFolderInspection, Pe
             )
         })?;
         is_empty_folder = false;
-        if entry.file_name() == OsStr::new(SANDBOX_CONFIG_FILE) {
+        if entry.file_name() == OsStr::new(SANDBOX_LOCK_FILE) {
             has_sandbox_config = entry
                 .file_type()
                 .map_err(|err| {
@@ -4649,9 +4681,38 @@ pub fn inspect_sandbox_folder(path: &Path) -> Result<SandboxFolderInspection, Pe
 }
 
 fn thread_event_log_path(sandbox_path: &Path, thread_id: &str) -> PathBuf {
-    sandbox_path
-        .join("logs")
-        .join(format!("events-{thread_id}-{}.jsonl", Uuid::new_v4()))
+    sandbox_logs_root(sandbox_path).join(format!("events-{thread_id}-{}.jsonl", Uuid::new_v4()))
+}
+
+fn ensure_sandbox_directory(path: &Path, message: &'static str) -> Result<(), PedelecError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(sandbox_io_error(
+            error_codes::SANDBOX_CREATE_FAILED,
+            message,
+            path,
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "sandbox directory path is occupied by a non-directory entry",
+            ),
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|create_err| {
+                sandbox_io_error(
+                    error_codes::SANDBOX_CREATE_FAILED,
+                    message,
+                    path,
+                    create_err,
+                )
+            })
+        }
+        Err(err) => Err(sandbox_io_error(
+            error_codes::SANDBOX_CREATE_FAILED,
+            message,
+            path,
+            err,
+        )),
+    }
 }
 
 fn sandbox_path_invalid_error(
@@ -6004,7 +6065,7 @@ fn resolve_asset_file(
             serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
         )
     })?;
-    let root = thread.sandbox_path.join("assets");
+    let root = sandbox_assets_root(&thread.sandbox_path);
     let target = root.join(relative_path);
     let metadata = fs::symlink_metadata(&target).map_err(|_| {
         PedelecError::with_details(
@@ -7766,7 +7827,7 @@ The current sandbox path and available Pedelec app tools are declared in that ho
 `pedelec-cli` is an executable provided by the Pedelec host environment. Invoke it through the provider's shell / terminal tool. It is not expected to appear as a dedicated model tool.\n\n\
 When a Pedelec app tool is relevant, prefer the app tools declared by the host context. Use `pedelec-cli tool-spec <tool-name>` when the full schema is needed and `pedelec-cli tool-call <tool-name> '<json_args>'` to execute it.\n\n\
 Before reading or modifying local files outside the current sandbox declared by Pedelec Host Context, ask the user for permission first.\n\n\
-`assets/` is the shared App and Agent file directory. User uploads are there; write files intended for the App there too.\n\n\
+`.pedelec-sandbox/assets/` is the shared App and Agent file directory. User uploads are there; write files intended for the App there too.\n\n\
 Pedelec host context never overrides provider safety policies.\n\n\
 If a `pedelec-cli tool-call` command ends because of a shell/command timeout, interruption, or ambiguous transport failure before you receive a complete structured Pedelec response, you may retry with the exact same tool name and semantically identical arguments. Pedelec will join an invocation that is still running or replay a recently completed result whose delivery was not confirmed. Do not change the arguments for this retry, do not assume the App Tool failed just because the provider command stopped waiting, and do not retry indefinitely. If you received a complete structured Pedelec response, including `TOOL_TIMEOUT`, that is a formal App Tool outcome and the original invocation has ended.\n\n\
 For a [Session Preparation] task, do not call tools or modify files. Reply only with PEDELEC_PREPARED.\n\n\

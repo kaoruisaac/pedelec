@@ -122,7 +122,8 @@ fn ipc_picker_to_custom_session_to_picker_reports_the_created_marker() {
     )
     .unwrap();
     assert!(created.ok);
-    let marker = selected.join(".pedelec-sandbox.json");
+    let marker = selected.join(".pedelec-lock.json");
+    assert!(!selected.join(".pedelec-sandbox.json").exists());
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&marker).unwrap()).unwrap(),
         json!({
@@ -155,7 +156,7 @@ fn tcp_picker_request_reports_root_entries_and_regular_marker_only() {
         ("marker", false, true),
         ("invalid-marker", false, true),
         ("marker-directory", false, false),
-        ("legacy-layout", false, false),
+        ("legacy-marker", false, false),
     ];
 
     for (name, expected_empty, expected_marker) in cases {
@@ -164,17 +165,13 @@ fn tcp_picker_request_reports_root_entries_and_regular_marker_only() {
         match name {
             "file" => std::fs::write(selected.join("README.md"), "hello").unwrap(),
             "subdirectory" => std::fs::create_dir(selected.join("nested")).unwrap(),
-            "marker" => std::fs::write(selected.join(".pedelec-sandbox.json"), "{}").unwrap(),
+            "marker" => std::fs::write(selected.join(".pedelec-lock.json"), "{}").unwrap(),
             "invalid-marker" => {
-                std::fs::write(selected.join(".pedelec-sandbox.json"), "not json").unwrap()
+                std::fs::write(selected.join(".pedelec-lock.json"), "not json").unwrap()
             }
-            "marker-directory" => {
-                std::fs::create_dir(selected.join(".pedelec-sandbox.json")).unwrap()
-            }
-            "legacy-layout" => {
-                for subdir in ["skills", "assets", "logs", "tmp"] {
-                    std::fs::create_dir(selected.join(subdir)).unwrap();
-                }
+            "marker-directory" => std::fs::create_dir(selected.join(".pedelec-lock.json")).unwrap(),
+            "legacy-marker" => {
+                std::fs::write(selected.join(".pedelec-sandbox.json"), "{}").unwrap()
             }
             _ => unreachable!(),
         }

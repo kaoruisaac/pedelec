@@ -24,7 +24,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-Picker 取消時回傳 `null`。它是 read-only snapshot，只提供根目錄是否為空的 `isEmptyFolder`，以及 `.pedelec-sandbox.json` 是否為 regular file 的 `hasSandboxConfig`；不判斷資料夾是否為有效 Pedelec sandbox，也不初始化內容。Core 會在 `createSession()` 階段套用既有 sandbox 規則，成功初始化 custom sandbox 後才建立 marker。
+Picker 取消時回傳 `null`。它是 read-only snapshot，只提供根目錄是否為空的 `isEmptyFolder`，以及 `.pedelec-lock.json` 是否為 regular file 的 `hasSandboxConfig`；不判斷資料夾是否為有效 Pedelec sandbox，也不初始化內容。Core 會在 `createSession()` 階段套用 sandbox 規則，成功初始化 custom sandbox 後才建立 marker。
 
 ```ts
 const session = await pedelec.createSession();
