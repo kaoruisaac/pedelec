@@ -36,7 +36,9 @@ vi.mock("./services/PopUpProvider", () => ({
   default: (props: { children: unknown }) => props.children,
 }));
 
-vi.mock("./event-monitor/EventMonitorApp", () => ({ EventMonitorApp: () => null }));
+vi.mock("./event-monitor/EventMonitorApp", () => ({
+  EventMonitorApp: () => <div class="mock-event-monitor">Event Monitor</div>,
+}));
 vi.mock("./home/HomePage", () => ({
   default: (props: { onOpenWizard: (origin: "home-initial" | "home-update") => void }) => (
     <button type="button" class="mock-home-open" onClick={() => props.onOpenWizard("home-initial")}>
@@ -176,5 +178,59 @@ describe("AppShell Wizard navigation", () => {
     expect(container.textContent).toContain("Review");
     expect(mocks.unlisten).not.toHaveBeenCalled();
     expect(mocks.reset).not.toHaveBeenCalled();
+  });
+});
+
+describe("AppShell Event Monitor shortcut", () => {
+  let dispose: (() => void) | undefined;
+
+  beforeEach(() => {
+    document.body.innerHTML = "<div id=\"root\"></div>";
+  });
+
+  afterEach(() => {
+    dispose?.();
+    dispose = undefined;
+    document.body.innerHTML = "";
+  });
+
+  function monitorPage(container: HTMLElement): HTMLElement {
+    return container.querySelector<HTMLElement>(".mock-event-monitor")!.parentElement!;
+  }
+
+  it.each([
+    ["Ctrl+M", { ctrlKey: true }],
+    ["Meta+M", { metaKey: true }],
+  ])("opens Event Monitor with %s", async (_label, modifiers) => {
+    const container = document.getElementById("root")!;
+    dispose = render(() => <AppShell />, container);
+
+    expect(monitorPage(container).hidden).toBe(true);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "m", ...modifiers, bubbles: true }));
+    await tick();
+
+    expect(monitorPage(container).hidden).toBe(false);
+  });
+
+  it("does not open Event Monitor for M without Ctrl or Meta", async () => {
+    const container = document.getElementById("root")!;
+    dispose = render(() => <AppShell />, container);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "m", bubbles: true }));
+    await tick();
+
+    expect(monitorPage(container).hidden).toBe(true);
+  });
+
+  it("removes the shortcut listener when AppShell is disposed", async () => {
+    const container = document.getElementById("root")!;
+    dispose = render(() => <AppShell />, container);
+    dispose();
+    dispose = undefined;
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "m", ctrlKey: true, bubbles: true }));
+    await tick();
+
+    expect(container.querySelector(".mock-event-monitor")).toBeNull();
   });
 });
