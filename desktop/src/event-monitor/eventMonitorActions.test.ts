@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { openThreadSandbox, sendThreadText } from "./eventMonitorActions";
+import { monitorEndThread, openThreadSandbox, sendThreadText } from "./eventMonitorActions";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -46,5 +46,15 @@ describe("event monitor actions", () => {
     vi.mocked(invoke).mockRejectedValueOnce(error);
 
     await expect(sendThreadText("t000123", "Please explain the last change.")).rejects.toBe(error);
+  });
+
+  it("stops a thread through the Monitor-only command payload", async () => {
+    await monitorEndThread("t000123");
+
+    expect(invoke).toHaveBeenCalledWith("monitor_end_thread", {
+      input: {
+        threadId: "t000123",
+      },
+    });
   });
 });

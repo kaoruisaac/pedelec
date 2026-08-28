@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   eventHandler: undefined as ((event: { payload: unknown }) => void) | undefined,
   unlisten: vi.fn(),
+  monitorEndThread: vi.fn(),
   openThreadSandbox: vi.fn(),
   sendThreadText: vi.fn(),
   listen: vi.fn(),
@@ -17,9 +18,12 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("solid-icons/fa", () => ({
   FaRegularFolderOpen: () => null,
+  FaSolidStop: () => null,
+  FaSolidTrash: () => null,
 }));
 
 vi.mock("./eventMonitorActions", () => ({
+  monitorEndThread: mocks.monitorEndThread,
   openThreadSandbox: mocks.openThreadSandbox,
   sendThreadText: mocks.sendThreadText,
 }));
@@ -33,6 +37,8 @@ describe("EventMonitorApp Debug Prompt", () => {
     document.body.innerHTML = "";
     mocks.eventHandler = undefined;
     mocks.unlisten.mockReset();
+    mocks.monitorEndThread.mockReset();
+    mocks.monitorEndThread.mockResolvedValue(undefined);
     mocks.openThreadSandbox.mockReset();
     mocks.sendThreadText.mockReset();
     mocks.sendThreadText.mockResolvedValue({ threadId: "t000123" });
@@ -190,6 +196,179 @@ describe("EventMonitorApp Debug Prompt", () => {
     await tick();
     expect(promptTextarea(container).value).toBe("");
   });
+
+  it("renders a Stop session control for the selected thread", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "running");
+    await tick();
+
+    const stop = stopButton(container);
+    expect(stop).not.toBeNull();
+    expect(stop.title).toBe("Stop session");
+    expect(stop.disabled).toBe(false);
+
+    stop.click();
+    await tick();
+    expect(mocks.monitorEndThread).toHaveBeenCalledWith("t000123");
+  });
+
+  it("allows stopping every non-terminal Monitor state", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "idle");
+    await tick();
+
+    for (const status of ["idle", "running", "waitingToolResult", "error"]) {
+      emitStatus("t000123", status);
+      await tick();
+      mocks.monitorEndThread.mockClear();
+
+      const stop = stopButton(container);
+      expect(stop.disabled).toBe(false);
+      stop.click();
+      await tick();
+      expect(mocks.monitorEndThread).toHaveBeenCalledWith("t000123");
+    }
+  });
+
+  it("disables Stop for stopping and ended threads", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "idle");
+    await tick();
+
+    for (const status of ["stopping", "ended"]) {
+      emitStatus("t000123", status);
+      await tick();
+      expect(stopButton(container).disabled).toBe(true);
+    }
+  });
+
+  it("keeps Stop locked until the selected thread request settles", async () => {
+    let resolveStop!: () => void;
+    mocks.monitorEndThread.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveStop = resolve;
+      }),
+    );
+
+    const container = mountMonitor();
+    emitThread("t000123", "idle");
+    await tick();
+
+    stopButton(container).click();
+    stopButton(container).click();
+    expect(mocks.monitorEndThread).toHaveBeenCalledTimes(1);
+    expect(stopButton(container).disabled).toBe(true);
+
+    resolveStop();
+    await tick();
+    expect(stopButton(container).disabled).toBe(false);
+  });
+
+  it("surfaces Stop failures and unlocks the action for retry", async () => {
+    mocks.monitorEndThread.mockRejectedValueOnce(new Error("thread cannot be stopped"));
+
+    const container = mountMonitor();
+    emitThread("t000123", "idle");
+    await tick();
+    stopButton(container).click();
+    await tick();
+
+    expect(container.querySelector(".event-monitor-global-error")?.textContent).toContain(
+      "thread cannot be stopped",
+    );
+    expect(stopButton(container).disabled).toBe(false);
+  });
+
+  it("does not apply one thread's pending Stop state to another selection", async () => {
+    let resolveFirstStop!: () => void;
+    mocks.monitorEndThread.mockImplementation((threadId: string) => {
+      if (threadId === "t000123") {
+        return new Promise<void>((resolve) => {
+          resolveFirstStop = resolve;
+        });
+      }
+      return Promise.resolve();
+    });
+
+    const container = mountMonitor();
+    emitThread("t000123", "idle");
+    emitThread("t000456", "idle");
+    await tick();
+
+    stopButton(container).click();
+    expect(mocks.monitorEndThread).toHaveBeenCalledWith("t000123");
+
+    threadButtons(container).find((button) => button.textContent?.includes("t000456"))!.click();
+    await tick();
+    expect(stopButton(container).disabled).toBe(false);
+
+    stopButton(container).click();
+    await tick();
+    expect(mocks.monitorEndThread).toHaveBeenCalledWith("t000456");
+
+    threadButtons(container).find((button) => button.textContent?.includes("t000123"))!.click();
+    await tick();
+    expect(stopButton(container).disabled).toBe(true);
+
+    resolveFirstStop();
+    await tick();
+  });
+
+  it("keeps the clear-ended control disabled when no ended threads exist", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "running");
+    await tick();
+
+    expect(clearEndedButton(container).disabled).toBe(true);
+  });
+
+  it("clears all ended threads and keeps metrics for retained threads", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "running");
+    emitThread("t000456", "ended");
+    emitThread("t000789", "ended");
+    await tick();
+
+    expect(clearEndedButton(container).disabled).toBe(false);
+    clearEndedButton(container).click();
+    await tick();
+
+    expect(threadButtons(container)).toHaveLength(1);
+    expect(threadButtons(container)[0].textContent).toContain("t000123");
+    expect(metricValue(container, "Total sessions")).toBe("1");
+    expect(metricValue(container, "Total events")).toBe("2");
+    expect(clearEndedButton(container).disabled).toBe(true);
+  });
+
+  it("falls back to the first remaining thread when the selected ended thread is cleared", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "ended");
+    emitThread("t000456", "running");
+    await tick();
+
+    clearEndedButton(container).click();
+    await tick();
+
+    expect(threadButtons(container)).toHaveLength(1);
+    expect(container.querySelector(".event-monitor-summary")?.textContent).toContain("t000456");
+  });
+
+  it("shows the empty Monitor state when all ended threads are cleared", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "ended");
+    emitThread("t000456", "ended");
+    await tick();
+
+    clearEndedButton(container).click();
+    await tick();
+
+    expect(threadButtons(container)).toHaveLength(0);
+    expect(container.querySelector(".event-monitor-empty-state")?.textContent).toContain(
+      "No App Thread events yet.",
+    );
+    expect(metricValue(container, "Total sessions")).toBe("0");
+    expect(metricValue(container, "Total events")).toBe("0");
+  });
 });
 
 function mountMonitor(): HTMLElement {
@@ -214,6 +393,21 @@ function promptTextarea(container: HTMLElement): HTMLTextAreaElement {
 
 function sendButton(container: HTMLElement): HTMLButtonElement {
   return container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+}
+
+function stopButton(container: HTMLElement): HTMLButtonElement {
+  return container.querySelector<HTMLButtonElement>('button[aria-label="Stop session"]')!;
+}
+
+function clearEndedButton(container: HTMLElement): HTMLButtonElement {
+  return container.querySelector<HTMLButtonElement>('button[aria-label="Clear ended sessions"]')!;
+}
+
+function metricValue(container: HTMLElement, label: string): string {
+  const metric = [...container.querySelectorAll<HTMLElement>(".event-monitor-metric")].find(
+    (item) => item.querySelector("span")?.textContent === label,
+  );
+  return metric?.querySelector("strong")?.textContent || "";
 }
 
 function threadButtons(container: HTMLElement): HTMLButtonElement[] {

@@ -48,18 +48,22 @@ export interface EventMonitorStore {
   selectThread: (threadId: string) => void;
   setGlobalError: (error: unknown) => void;
   upsertThreadEvent: (event: unknown) => void;
+  clearEndedThreads: () => void;
 }
 
-const EMPTY_STORE: EventMonitorState = {
-  selectedThreadId: null,
-  threadsById: {},
-  threadOrder: [],
-  totalEventCount: 0,
-  globalError: null,
-};
+function createEmptyStore(): EventMonitorState {
+  return {
+    selectedThreadId: null,
+    threadsById: {},
+    threadOrder: [],
+    totalEventCount: 0,
+    globalError: null,
+  };
+}
 
 export function createEventMonitorStore(): EventMonitorStore {
-  const [store, setStore] = createStore<EventMonitorState>(EMPTY_STORE);
+  const [store, setStore] = createStore<EventMonitorState>(createEmptyStore());
+  const dismissedThreadIds = new Set<string>();
 
   function selectThread(threadId: string): void {
     setStore("selectedThreadId", threadId);
@@ -81,6 +85,10 @@ export function createEventMonitorStore(): EventMonitorStore {
         message: "Ignored thread_event without threadId",
         event: eventWithReceivedAt,
       });
+      return;
+    }
+
+    if (dismissedThreadIds.has(eventWithReceivedAt.threadId)) {
       return;
     }
 
@@ -117,11 +125,54 @@ export function createEventMonitorStore(): EventMonitorStore {
     );
   }
 
+  function clearEndedThreads(): void {
+    const endedThreadIds = store.threadOrder.filter(
+      (threadId) => store.threadsById[threadId]?.status === "ended",
+    );
+
+    if (endedThreadIds.length === 0) {
+      return;
+    }
+
+    for (const threadId of endedThreadIds) {
+      dismissedThreadIds.add(threadId);
+    }
+
+    setStore(
+      produce((draft) => {
+        let removedEventCount = 0;
+
+        for (const threadId of endedThreadIds) {
+          const thread = draft.threadsById[threadId];
+          if (!thread || thread.status !== "ended") {
+            continue;
+          }
+
+          removedEventCount += thread.eventCount;
+          delete draft.threadsById[threadId];
+        }
+
+        draft.threadOrder = draft.threadOrder.filter(
+          (threadId) => !endedThreadIds.includes(threadId),
+        );
+        draft.totalEventCount -= removedEventCount;
+
+        if (
+          draft.selectedThreadId !== null &&
+          !draft.threadsById[draft.selectedThreadId]
+        ) {
+          draft.selectedThreadId = draft.threadOrder[0] || null;
+        }
+      }),
+    );
+  }
+
   return {
     store,
     selectThread,
     setGlobalError,
     upsertThreadEvent,
+    clearEndedThreads,
   };
 }
 

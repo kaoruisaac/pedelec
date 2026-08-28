@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
-import { FaRegularFolderOpen } from "solid-icons/fa";
+import { FaRegularFolderOpen, FaSolidStop, FaSolidTrash } from "solid-icons/fa";
 import {
   commandDetails,
   errorTitle,
@@ -12,15 +12,22 @@ import {
   toolCallDetails,
   toolResultDetails,
 } from "./eventMonitorFormatters";
-import { openThreadSandbox, sendThreadText } from "./eventMonitorActions";
+import { monitorEndThread, openThreadSandbox, sendThreadText } from "./eventMonitorActions";
 import { createEventMonitorStore } from "./eventMonitorStore";
 import type { MonitorEvent, ThreadViewModel } from "./eventMonitorStore";
 
 export function EventMonitorApp() {
   const monitor = createEventMonitorStore();
-  const { store, selectThread, setGlobalError, upsertThreadEvent } = monitor;
+  const {
+    store,
+    clearEndedThreads,
+    selectThread,
+    setGlobalError,
+    upsertThreadEvent,
+  } = monitor;
   const [debugPrompt, setDebugPrompt] = createSignal("");
   const [isSubmittingDebugPrompt, setIsSubmittingDebugPrompt] = createSignal(false);
+  const [stoppingThreadIds, setStoppingThreadIds] = createSignal<Set<string>>(new Set());
   let previousSelectedThreadId = store.selectedThreadId;
 
   const threadList = createMemo(() =>
@@ -30,6 +37,9 @@ export function EventMonitorApp() {
     store.selectedThreadId ? store.threadsById[store.selectedThreadId] : null,
   );
   const hasEvents = createMemo(() => store.totalEventCount > 0);
+  const hasEndedThreads = createMemo(() =>
+    threadList().some((thread) => thread.status === "ended"),
+  );
 
   createEffect(() => {
     const selectedThreadId = store.selectedThreadId;
@@ -44,6 +54,30 @@ export function EventMonitorApp() {
       await openThreadSandbox(threadId);
     } catch (error) {
       setGlobalError(error);
+    }
+  }
+
+  async function handleStopThread(threadId: string): Promise<void> {
+    const thread = store.threadsById[threadId];
+    if (
+      !thread ||
+      !isThreadStoppable(thread.status) ||
+      stoppingThreadIds().has(threadId)
+    ) {
+      return;
+    }
+
+    setStoppingThreadIds((current) => new Set(current).add(threadId));
+    try {
+      await monitorEndThread(threadId);
+    } catch (error) {
+      setGlobalError(error instanceof Error ? error.message : error);
+    } finally {
+      setStoppingThreadIds((current) => {
+        const next = new Set(current);
+        next.delete(threadId);
+        return next;
+      });
     }
   }
 
@@ -118,7 +152,19 @@ export function EventMonitorApp() {
         <aside class="event-monitor-sidebar" aria-label="App Threads">
           <div class="event-monitor-sidebar-header">
             <h2>App Threads</h2>
-            <span>{threadList().length}</span>
+            <div class="event-monitor-sidebar-header-controls">
+              <span>{threadList().length}</span>
+              <button
+                type="button"
+                class="event-monitor-icon-button"
+                title="Clear ended sessions"
+                aria-label="Clear ended sessions"
+                disabled={!hasEndedThreads()}
+                onClick={clearEndedThreads}
+              >
+                <FaSolidTrash size={14} />
+              </button>
+            </div>
           </div>
 
           <Show
@@ -192,6 +238,8 @@ export function EventMonitorApp() {
                 onDebugPromptChange={setDebugPrompt}
                 onSendDebugPrompt={handleSendDebugPrompt}
                 onOpenSandbox={handleOpenThreadSandbox}
+                isStopPending={stoppingThreadIds().has(thread().threadId)}
+                onStopThread={handleStopThread}
               />
             )}
           </Show>
@@ -217,6 +265,8 @@ function ThreadDetail(props: {
   onDebugPromptChange: (value: string) => void;
   onSendDebugPrompt: (threadId: string, message: string) => Promise<void>;
   onOpenSandbox: (threadId: string) => Promise<void>;
+  isStopPending: boolean;
+  onStopThread: (threadId: string) => Promise<void>;
 }) {
   const thread = () => props.thread;
 
@@ -225,15 +275,27 @@ function ThreadDetail(props: {
       <section class="event-monitor-summary">
         <div class="event-monitor-summary-header">
           <h2>Thread Summary</h2>
-          <button
-            type="button"
-            class="event-monitor-summary-folder-button"
-            title="Open sandbox folder"
-            aria-label="Open sandbox folder"
-            onClick={() => void props.onOpenSandbox(thread().threadId)}
-          >
-            <FaRegularFolderOpen size={16} />
-          </button>
+          <div class="event-monitor-summary-actions">
+            <button
+              type="button"
+              class="event-monitor-icon-button"
+              title="Open sandbox folder"
+              aria-label="Open sandbox folder"
+              onClick={() => void props.onOpenSandbox(thread().threadId)}
+            >
+              <FaRegularFolderOpen size={16} />
+            </button>
+            <button
+              type="button"
+              class="event-monitor-icon-button"
+              title="Stop session"
+              aria-label="Stop session"
+              disabled={!isThreadStoppable(thread().status) || props.isStopPending}
+              onClick={() => void props.onStopThread(thread().threadId)}
+            >
+              <FaSolidStop size={14} />
+            </button>
+          </div>
         </div>
         <div class="event-monitor-summary-grid">
           <SummaryItem label="Thread ID" value={thread().threadId} />
@@ -311,6 +373,10 @@ function ThreadDetail(props: {
 
 function isDebugPromptAvailable(status: string | undefined): boolean {
   return status === "idle" || status === "ended";
+}
+
+function isThreadStoppable(status: string | undefined): boolean {
+  return status !== undefined && status !== "stopping" && status !== "ended";
 }
 
 export function DebugPrompt(props: {

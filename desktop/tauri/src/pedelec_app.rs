@@ -76,6 +76,7 @@ pub fn run() {
             prepare_thread,
             submit_tool_result,
             end_thread,
+            monitor_end_thread,
             crate::effort_wizard::get_effort_wizard_bootstrap,
             crate::effort_wizard::get_effort_wizard_state,
             crate::effort_wizard::start_effort_wizard,
@@ -573,6 +574,21 @@ fn end_thread(
     state.runtime().lock().unwrap().end_thread(input)
 }
 
+#[tauri::command]
+fn monitor_end_thread(
+    state: State<'_, CoreRuntimeOwner>,
+    input: EndThreadInput,
+) -> Result<(), PedelecError> {
+    end_thread_from_monitor(&state.runtime(), input)
+}
+
+fn end_thread_from_monitor(
+    runtime: &SharedCoreRuntime,
+    input: EndThreadInput,
+) -> Result<(), PedelecError> {
+    runtime.lock().unwrap().end_thread(input)
+}
+
 fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRuntime) {
     let event_rx = runtime.lock().unwrap().subscribe_all_threads();
     thread::spawn(move || {
@@ -665,6 +681,24 @@ mod debug_send_text_tests {
                 .unwrap_err()
                 .code,
             error_codes::THREAD_ACCESS_DENIED
+        );
+    }
+
+    #[test]
+    fn monitor_thread_stop_bypasses_sdk_origin_authorization() {
+        let (runtime, _temp) = runtime_with_sdk_thread(ThreadStatus::Idle);
+
+        end_thread_from_monitor(
+            &runtime,
+            EndThreadInput {
+                thread_id: "t000001".into(),
+            },
+        )
+        .expect("Monitor stop should end an SDK-owned thread");
+
+        assert_eq!(
+            runtime.lock().unwrap().thread_status("t000001"),
+            Some(ThreadStatus::Ended)
         );
     }
 
