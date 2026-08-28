@@ -8,13 +8,13 @@
           "-m",
           "gpt-5.6-luna",
           "-c",
-          "model_reasoning_effort=\"high\""
+          "model_reasoning_effort=\"max\""
         ],
         "default": [
           "-m",
-          "gpt-5.6-luna",
+          "gpt-5.6-sol",
           "-c",
-          "model_reasoning_effort=\"xhigh\""
+          "model_reasoning_effort=\"medium\""
         ],
         "high": [
           "-m",
@@ -34,7 +34,7 @@
             "model_reasoning_effort=\"high\""
           ],
           "onSupported": {
-            "confirms": ["high"],
+            "confirms": ["high", "default"],
             "nextProbe": "baseline"
           },
           "onNotEntitled": {
@@ -51,7 +51,7 @@
             "model_reasoning_effort=\"xhigh\""
           ],
           "onSupported": {
-            "confirms": ["low", "default"]
+            "confirms": ["low"]
           },
           "onNotEntitled": {
             "confirms": []

@@ -3,7 +3,7 @@ import { EffortLevel, EffortsArgs, ProviderCode } from "./types";
 export const EFFORT_LEVELS: EffortLevel[] = ["default", "low", "high"];
 
 export const PROVIDER_NATIVE_EFFORT_VALUES: Record<ProviderCode, readonly string[]> = {
-  codex: ["low", "medium", "high", "xhigh"],
+  codex: ["low", "medium", "high", "xhigh", "max"],
   antigravity: ["low", "medium", "high"],
   claude: ["low", "medium", "high", "xhigh", "max"],
   opencode: [],

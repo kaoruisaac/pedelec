@@ -92,6 +92,7 @@ describe("effort settings", () => {
 
   it("mirrors provider-native effort value policy", () => {
     expect(validateEffortArgs("codex", ["-m", "gpt-5", "-c", 'model_reasoning_effort="xhigh"'])).toBeUndefined();
+    expect(validateEffortArgs("codex", ["-m", "gpt-5", "-c", 'model_reasoning_effort="max"'])).toBeUndefined();
     expect(validateEffortArgs("codex", ["-c", "model_reasoning_effort=banana"])).toContain("not supported");
     expect(validateEffortArgs("codex", ["-c", "skills.include_instructions=true"])).toContain("not supported");
     expect(validateEffortArgs("antigravity", ["--effort", "high"])).toBeUndefined();
