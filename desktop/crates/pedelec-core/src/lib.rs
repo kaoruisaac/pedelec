@@ -36,8 +36,8 @@ const PEDELEC_OPENCODE_AGENT: &str = "pedelec-runtime";
 const PEDELEC_ANTIGRAVITY_AGENT_DIR: &str = ".agents/agents/pedelec-runtime";
 const PEDELEC_ANTIGRAVITY_AGENT_FILE: &str = "agent.md";
 const ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS: usize = 20_000;
-pub const SANDBOX_PRIVATE_DATA_DIR: &str = ".pedelec-sandbox";
-pub const SANDBOX_LOCK_FILE: &str = ".pedelec-lock.json";
+pub const PEDELEC_RUNTIME_DATA_DIR: &str = ".pedelec-runtime";
+pub const PEDELEC_WORKSPACE_FILE: &str = ".pedelec-workspace.json";
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 pub const TOOL_RESULT_REPLAY_WINDOW: Duration = Duration::from_secs(10);
 pub const TOOL_RESULT_REPLAY_MAX_ENTRIES: usize = 256;
@@ -48,37 +48,37 @@ pub const MAX_ASSET_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const ASSET_UPLOAD_TICKET_SECONDS: i64 = 5 * 60;
 const MAX_PROVIDER_STDERR_BYTES: usize = 64 * 1024;
 const MAX_PREPARE_ASSISTANT_OUTPUT_BYTES: usize = 64 * 1024;
-const SANDBOX_REMOVE_MAX_ATTEMPTS: usize = 10;
-const SANDBOX_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
+const WORKSPACE_REMOVE_MAX_ATTEMPTS: usize = 10;
+const WORKSPACE_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Returns the root of Pedelec-owned runtime data inside a session workspace.
-pub fn sandbox_private_data_root(sandbox_path: &Path) -> PathBuf {
-    sandbox_path.join(SANDBOX_PRIVATE_DATA_DIR)
+pub fn workspace_runtime_data_root(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(PEDELEC_RUNTIME_DATA_DIR)
 }
 
 /// Returns the physical root used for App/Agent-shared assets.
-pub fn sandbox_assets_root(sandbox_path: &Path) -> PathBuf {
-    sandbox_private_data_root(sandbox_path).join("assets")
+pub fn workspace_assets_root(workspace_path: &Path) -> PathBuf {
+    workspace_runtime_data_root(workspace_path).join("assets")
 }
 
 /// Returns the physical root used for generated Pedelec skill/tool specs.
-pub fn sandbox_skills_root(sandbox_path: &Path) -> PathBuf {
-    sandbox_private_data_root(sandbox_path).join("skills")
+pub fn workspace_skills_root(workspace_path: &Path) -> PathBuf {
+    workspace_runtime_data_root(workspace_path).join("skills")
 }
 
 /// Returns the physical root used for thread/session event logs.
-pub fn sandbox_logs_root(sandbox_path: &Path) -> PathBuf {
-    sandbox_private_data_root(sandbox_path).join("logs")
+pub fn workspace_logs_root(workspace_path: &Path) -> PathBuf {
+    workspace_runtime_data_root(workspace_path).join("logs")
 }
 
 /// Returns the physical root used for upload temporary files.
-pub fn sandbox_tmp_root(sandbox_path: &Path) -> PathBuf {
-    sandbox_private_data_root(sandbox_path).join("tmp")
+pub fn workspace_tmp_root(workspace_path: &Path) -> PathBuf {
+    workspace_runtime_data_root(workspace_path).join("tmp")
 }
 
-/// Returns the custom-sandbox marker path.
-pub fn sandbox_lock_path(sandbox_path: &Path) -> PathBuf {
-    sandbox_path.join(SANDBOX_LOCK_FILE)
+/// Returns the workspace marker path.
+pub fn workspace_metadata_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(PEDELEC_WORKSPACE_FILE)
 }
 
 #[cfg(windows)]
@@ -143,7 +143,7 @@ pub struct ListAssetsInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SandboxAsset {
+pub struct Asset {
     pub name: String,
     pub path: String,
     pub size_bytes: u64,
@@ -153,13 +153,13 @@ pub struct SandboxAsset {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListAssetsOutput {
-    pub assets: Vec<SandboxAsset>,
+    pub assets: Vec<Asset>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AssetUploadTicket {
     pub thread_id: String,
-    pub sandbox_path: PathBuf,
+    pub workspace_path: PathBuf,
     pub public_path: String,
     pub relative_path: PathBuf,
     pub filename: String,
@@ -182,7 +182,7 @@ pub enum AssetUploadState {
 #[derive(Debug, Clone)]
 pub struct AssetDownloadTicket {
     pub thread_id: String,
-    pub sandbox_path: PathBuf,
+    pub workspace_path: PathBuf,
     pub public_path: String,
     pub token_hash: String,
     pub expires_at: DateTime<Utc>,
@@ -226,7 +226,7 @@ pub struct ThreadState {
     pub provider: ProviderCode,
     pub effort_level: EffortLevel,
     pub effort_args: Vec<String>,
-    pub sandbox_path: PathBuf,
+    pub workspace_path: PathBuf,
     pub skills: Vec<SkillFile>,
     pub status: ThreadStatus,
     pub process_id: Option<u32>,
@@ -663,12 +663,12 @@ pub struct CreateThreadInput {
     #[serde(default)]
     pub effort_level: Option<EffortLevel>,
     pub skills: Option<CreateThreadSkillsInput>,
-    pub sandbox: Option<CreateThreadSandboxInput>,
+    pub workspace: Option<CreateThreadWorkspaceInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateThreadSandboxInput {
+pub struct CreateThreadWorkspaceInput {
     pub path: PathBuf,
 }
 
@@ -696,9 +696,9 @@ pub struct CreateThreadOutput {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SandboxFolderInspection {
+pub struct WorkspaceFolderInspection {
     pub is_empty_folder: bool,
-    pub has_sandbox_config: bool,
+    pub has_workspace_config: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1105,7 +1105,7 @@ impl ProviderAdapter for CodexProviderAdapter {
         let mut args = vec![
             "exec".to_string(),
             "--cd".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            path_for_external_use(&ctx.thread.workspace_path),
             "--sandbox".to_string(),
             "danger-full-access".to_string(),
             "--skip-git-repo-check".to_string(),
@@ -1122,7 +1122,7 @@ impl ProviderAdapter for CodexProviderAdapter {
         Ok(CommandSpec {
             program: "codex".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -1145,7 +1145,7 @@ impl ProviderAdapter for CodexProviderAdapter {
         let mut args = vec![
             "exec".to_string(),
             "--cd".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            path_for_external_use(&ctx.thread.workspace_path),
             "--sandbox".to_string(),
             "danger-full-access".to_string(),
             "--skip-git-repo-check".to_string(),
@@ -1159,7 +1159,7 @@ impl ProviderAdapter for CodexProviderAdapter {
         Ok(CommandSpec {
             program: "codex".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -1229,7 +1229,7 @@ impl ProviderAdapter for AntigravityProviderAdapter {
         Ok(CommandSpec {
             program: "agy".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: String::new(),
@@ -1266,7 +1266,7 @@ impl ProviderAdapter for AntigravityProviderAdapter {
         Ok(CommandSpec {
             program: "agy".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: String::new(),
@@ -1334,7 +1334,7 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
             "--format".to_string(),
             "json".to_string(),
             "--dir".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            path_for_external_use(&ctx.thread.workspace_path),
         ];
         args.extend(ctx.thread.effort_args.clone());
         args.push("-".to_string());
@@ -1347,7 +1347,7 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
         Ok(CommandSpec {
             program: "opencode".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -1375,7 +1375,7 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
             "--format".to_string(),
             "json".to_string(),
             "--dir".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            path_for_external_use(&ctx.thread.workspace_path),
             "--session".to_string(),
             provider_session_id.to_string(),
         ];
@@ -1385,7 +1385,7 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
         Ok(CommandSpec {
             program: "opencode".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -1429,7 +1429,7 @@ impl ProviderAdapter for CursorProviderAdapter {
     ) -> Result<CommandSpec, PedelecError> {
         let mut args = vec![
             "--workspace".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            path_for_external_use(&ctx.thread.workspace_path),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--force".to_string(),
@@ -1445,7 +1445,7 @@ impl ProviderAdapter for CursorProviderAdapter {
         Ok(CommandSpec {
             program: "cursor-agent".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -1467,7 +1467,7 @@ impl ProviderAdapter for CursorProviderAdapter {
 
         let mut args = vec![
             "--workspace".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            path_for_external_use(&ctx.thread.workspace_path),
             "--resume".to_string(),
             provider_session_id.to_string(),
             "--output-format".to_string(),
@@ -1480,7 +1480,7 @@ impl ProviderAdapter for CursorProviderAdapter {
         Ok(CommandSpec {
             program: "cursor-agent".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -2183,7 +2183,7 @@ impl ProviderAdapter for ClaudeProviderAdapter {
         Ok(CommandSpec {
             program: "claude".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -2217,7 +2217,7 @@ impl ProviderAdapter for ClaudeProviderAdapter {
         Ok(CommandSpec {
             program: "claude".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env: build_provider_env(ctx)?,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -2267,7 +2267,7 @@ impl ProviderAdapter for OllamaProviderAdapter {
         args.extend(ctx.thread.effort_args.clone());
         args.extend([
             "--sandbox".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            path_for_external_use(&ctx.thread.workspace_path),
         ]);
         let prompt = build_provider_run_prompt(
             &ctx.thread,
@@ -2301,7 +2301,7 @@ impl ProviderAdapter for OllamaProviderAdapter {
         Ok(CommandSpec {
             program: "pedelec-agent".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -2326,7 +2326,7 @@ impl ProviderAdapter for OllamaProviderAdapter {
         args.extend(ctx.thread.effort_args.clone());
         args.extend([
             "--sandbox".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            path_for_external_use(&ctx.thread.workspace_path),
             "--session-id".to_string(),
             provider_session_id.to_string(),
         ]);
@@ -2357,7 +2357,7 @@ impl ProviderAdapter for OllamaProviderAdapter {
         Ok(CommandSpec {
             program: "pedelec-agent".to_string(),
             args,
-            cwd: ctx.thread.sandbox_path.clone(),
+            cwd: ctx.thread.workspace_path.clone(),
             env,
             prompt: prompt.clone(),
             stdin: prompt,
@@ -2482,7 +2482,7 @@ impl ProviderReadiness {
 #[derive(Debug, Default)]
 pub struct CoreRuntime {
     pub thread_manager: ThreadManager,
-    pub sandbox_manager: SandboxManager,
+    pub workspace_manager: WorkspaceManager,
     pub skill_manager: SkillManager,
     pub tool_registry: ToolRegistryStore,
     pub tool_request_broker: ToolRequestBroker,
@@ -2551,7 +2551,7 @@ impl CoreRuntime {
                 "thread has ended",
             ));
         }
-        let sandbox_path = thread.sandbox_path.clone();
+        let workspace_path = thread.workspace_path.clone();
         self.expire_asset_uploads();
         if self.asset_upload_tickets.values().any(|ticket| {
             ticket.thread_id == input.thread_id
@@ -2565,7 +2565,7 @@ impl CoreRuntime {
                 "an asset upload is already in progress",
             ));
         }
-        // Keep sandbox asset names readable while using the separate 256-bit token
+        // Keep asset names readable while using the separate 256-bit token
         // for authorization. The collision check covers all tickets in this runtime.
         let upload_id = loop {
             let candidate = format!("upl_{}", &Uuid::new_v4().simple().to_string()[..8]);
@@ -2596,7 +2596,7 @@ impl CoreRuntime {
             upload_id.clone(),
             AssetUploadTicket {
                 thread_id: input.thread_id,
-                sandbox_path,
+                workspace_path,
                 public_path,
                 relative_path,
                 filename: input.filename,
@@ -2629,12 +2629,12 @@ impl CoreRuntime {
                 "thread has ended",
             ));
         }
-        let input_path = sandbox_assets_root(&thread.sandbox_path);
+        let input_path = workspace_assets_root(&thread.workspace_path);
         if !input_path.exists() {
             return Ok(ListAssetsOutput { assets: Vec::new() });
         }
         let mut assets = Vec::new();
-        collect_sandbox_assets(&input_path, &input_path, &mut assets)?;
+        collect_assets(&input_path, &input_path, &mut assets)?;
         assets.sort_by(|a, b| {
             b.modified_at
                 .cmp(&a.modified_at)
@@ -2677,7 +2677,7 @@ impl CoreRuntime {
             ));
         }
         let (target, name, size_bytes, modified_at) = resolve_asset_file(thread, &input.path)?;
-        let sandbox_path = thread.sandbox_path.clone();
+        let workspace_path = thread.workspace_path.clone();
         let port = self.asset_upload_port.ok_or_else(|| {
             PedelecError::new(
                 error_codes::ASSET_UPLOAD_SERVER_UNAVAILABLE,
@@ -2699,7 +2699,7 @@ impl CoreRuntime {
             download_id.clone(),
             AssetDownloadTicket {
                 thread_id: input.thread_id,
-                sandbox_path,
+                workspace_path,
                 public_path: input.path.clone(),
                 token_hash: format!("{:x}", Sha256::digest(token.as_bytes())),
                 expires_at,
@@ -2772,31 +2772,31 @@ impl CoreRuntime {
         let effort_args = resolve_thread_effort_args(&settings, &input.provider, effort_level)?;
         let thread_id = self.next_available_thread_id()?;
         let initialize =
-            |sandbox: &Path| initialize_generated_skills(sandbox, input.skills.as_ref());
-        let (sandbox_path, (skills, registry)) = match input.sandbox.as_ref() {
-            Some(custom_sandbox) => {
-                let sandbox_path = self
-                    .sandbox_manager
-                    .prepare_custom_sandbox(&custom_sandbox.path)?;
-                let initialized = initialize(&sandbox_path)?;
+            |workspace: &Path| initialize_generated_skills(workspace, input.skills.as_ref());
+        let (workspace_path, (skills, registry)) = match input.workspace.as_ref() {
+            Some(custom_workspace) => {
+                let workspace_path = self
+                    .workspace_manager
+                    .prepare_custom_workspace(&custom_workspace.path)?;
+                let initialized = initialize(&workspace_path)?;
                 if let Some(origin) = sdk_origin.as_deref() {
                     let sdk_version = sdk_version.as_deref().ok_or_else(|| {
                         PedelecError::new(
-                            error_codes::SANDBOX_CREATE_FAILED,
-                            "SDK version metadata is required for custom sandbox sessions",
+                            error_codes::WORKSPACE_CREATE_FAILED,
+                            "SDK version metadata is required for custom workspace sessions",
                         )
                     })?;
-                    self.sandbox_manager.ensure_custom_sandbox_config(
-                        &sandbox_path,
+                    self.workspace_manager.ensure_custom_workspace_config(
+                        &workspace_path,
                         sdk_version,
                         origin,
                     )?;
                 }
-                (sandbox_path, initialized)
+                (workspace_path, initialized)
             }
             None => self
-                .sandbox_manager
-                .create_thread_sandbox_with(&thread_id, initialize)?,
+                .workspace_manager
+                .create_thread_workspace_with(&thread_id, initialize)?,
         };
 
         let now = Utc::now();
@@ -2805,7 +2805,7 @@ impl CoreRuntime {
             provider: input.provider,
             effort_level,
             effort_args,
-            sandbox_path: sandbox_path.clone(),
+            workspace_path: workspace_path.clone(),
             skills,
             status: ThreadStatus::Idle,
             process_id: None,
@@ -2823,8 +2823,10 @@ impl CoreRuntime {
             },
         );
         self.tool_registry.insert(thread_id.clone(), registry);
-        self.event_bus
-            .register_thread_log(&thread_id, thread_event_log_path(&sandbox_path, &thread_id));
+        self.event_bus.register_thread_log(
+            &thread_id,
+            thread_event_log_path(&workspace_path, &thread_id),
+        );
         self.event_bus.emit_created(&thread_id);
         self.event_bus
             .emit_status_changed(&thread_id, ThreadStatus::Idle);
@@ -2992,7 +2994,7 @@ impl CoreRuntime {
             if self.thread_manager.contains_thread(&thread_id) {
                 continue;
             }
-            if self.sandbox_manager.thread_sandbox_exists(&thread_id)? {
+            if self.workspace_manager.thread_workspace_exists(&thread_id)? {
                 continue;
             }
             return Ok(thread_id);
@@ -3091,10 +3093,14 @@ impl CoreRuntime {
     }
 
     fn restore_ended_thread_runtime(&mut self, thread_id: &str) -> Result<PathBuf, PedelecError> {
-        let sandbox_path = self.thread_manager.thread(thread_id)?.sandbox_path.clone();
-        let registry = ToolRegistry::load_from_skills_dir(sandbox_skills_root(&sandbox_path))?;
+        let workspace_path = self
+            .thread_manager
+            .thread(thread_id)?
+            .workspace_path
+            .clone();
+        let registry = ToolRegistry::load_from_skills_dir(workspace_skills_root(&workspace_path))?;
         self.tool_registry.insert(thread_id.to_string(), registry);
-        Ok(thread_event_log_path(&sandbox_path, thread_id))
+        Ok(thread_event_log_path(&workspace_path, thread_id))
     }
 
     fn begin_send_text_start(
@@ -3383,7 +3389,7 @@ impl CoreRuntime {
                 set_command_env(command, OPENCODE_CONFIG_CONTENT_ENV, config);
             }
             ProviderBootstrapMode::AntigravityWorkspaceAgent => {
-                ensure_antigravity_custom_agent(&ctx.thread.sandbox_path)?;
+                ensure_antigravity_custom_agent(&ctx.thread.workspace_path)?;
                 remove_agent_selector(&mut command.args);
                 command.args = insert_agent_selector(command.args.clone(), PEDELEC_OPENCODE_AGENT);
             }
@@ -3836,8 +3842,8 @@ impl CoreRuntime {
         Ok(())
     }
 
-    pub fn cleanup_stale_sandboxes_for_app_start(&self) -> Vec<PedelecError> {
-        self.sandbox_manager.remove_all_thread_sandboxes()
+    pub fn cleanup_stale_workspaces_for_app_start(&self) -> Vec<PedelecError> {
+        self.workspace_manager.remove_all_thread_workspaces()
     }
 
     pub fn cleanup_for_app_exit(&mut self) -> Vec<PedelecError> {
@@ -3846,7 +3852,7 @@ impl CoreRuntime {
             let _ = self.end_thread(EndThreadInput { thread_id });
         }
 
-        self.sandbox_manager.remove_all_thread_sandboxes()
+        self.workspace_manager.remove_all_thread_workspaces()
     }
     pub fn active_process_id(&self, thread_id: &str) -> Option<u32> {
         self.thread_manager
@@ -3870,11 +3876,11 @@ impl CoreRuntime {
         self.event_bus.event_log_path(thread_id)
     }
 
-    pub fn thread_sandbox_path(&self, thread_id: &str) -> Option<PathBuf> {
+    pub fn thread_workspace_path(&self, thread_id: &str) -> Option<PathBuf> {
         self.thread_manager
             .thread(thread_id)
             .ok()
-            .map(|thread| thread.sandbox_path.clone())
+            .map(|thread| thread.workspace_path.clone())
     }
 
     pub fn begin_tool_call(
@@ -4221,7 +4227,7 @@ impl ThreadManager {
     fn next_thread_id(&mut self) -> Result<String, PedelecError> {
         if self.next_thread_number >= THREAD_ID_MAX_COUNTER {
             return Err(PedelecError::new(
-                error_codes::SANDBOX_CREATE_FAILED,
+                error_codes::WORKSPACE_CREATE_FAILED,
                 "thread id counter was exhausted",
             ));
         }
@@ -4230,7 +4236,7 @@ impl ThreadManager {
         let encoded = to_base36(self.next_thread_number);
         if encoded.len() > THREAD_ID_BASE36_MAX_WIDTH {
             return Err(PedelecError::new(
-                error_codes::SANDBOX_CREATE_FAILED,
+                error_codes::WORKSPACE_CREATE_FAILED,
                 "thread id counter was exhausted",
             ));
         }
@@ -4303,66 +4309,66 @@ impl ThreadManager {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SandboxManager {
-    sandbox_root: Option<PathBuf>,
+pub struct WorkspaceManager {
+    workspace_root: Option<PathBuf>,
 }
 
-impl SandboxManager {
-    pub fn with_sandbox_root(sandbox_root: impl Into<PathBuf>) -> Self {
+impl WorkspaceManager {
+    pub fn with_workspace_root(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
-            sandbox_root: Some(sandbox_root.into()),
+            workspace_root: Some(workspace_root.into()),
         }
     }
 
-    pub fn thread_sandbox_exists(&self, thread_id: &str) -> Result<bool, PedelecError> {
+    pub fn thread_workspace_exists(&self, thread_id: &str) -> Result<bool, PedelecError> {
         let safe_thread_id = sanitize_thread_id(thread_id)?;
-        Ok(self.sandbox_root()?.join(safe_thread_id).exists())
+        Ok(self.workspace_root()?.join(safe_thread_id).exists())
     }
 
-    pub fn create_thread_sandbox(&self, thread_id: &str) -> Result<PathBuf, PedelecError> {
+    pub fn create_thread_workspace(&self, thread_id: &str) -> Result<PathBuf, PedelecError> {
         let safe_thread_id = sanitize_thread_id(thread_id)?;
-        let sandbox_root = self.sandbox_root()?;
-        let sandbox_path = sandbox_root.join(safe_thread_id);
+        let workspace_root = self.workspace_root()?;
+        let workspace_path = workspace_root.join(safe_thread_id);
 
-        if sandbox_path.exists() {
+        if workspace_path.exists() {
             return Err(PedelecError::with_details(
-                error_codes::SANDBOX_CREATE_FAILED,
-                "thread sandbox already exists",
-                serde_json::json!({ "sandboxPath": path_for_external_use(&sandbox_path) }),
+                error_codes::WORKSPACE_CREATE_FAILED,
+                "thread workspace already exists",
+                serde_json::json!({ "workspacePath": path_for_external_use(&workspace_path) }),
             ));
         }
 
         let create_result = (|| {
-            fs::create_dir_all(&sandbox_path).map_err(|err| {
-                sandbox_io_error(
-                    error_codes::SANDBOX_CREATE_FAILED,
-                    "cannot create thread sandbox",
-                    &sandbox_path,
+            fs::create_dir_all(&workspace_path).map_err(|err| {
+                workspace_io_error(
+                    error_codes::WORKSPACE_CREATE_FAILED,
+                    "cannot create thread workspace",
+                    &workspace_path,
                     err,
                 )
             })?;
 
-            self.create_sandbox_subdirectories(&sandbox_path)?;
+            self.create_runtime_subdirectories(&workspace_path)?;
 
-            Ok(sandbox_path.clone())
+            Ok(workspace_path.clone())
         })();
 
         if create_result.is_err() {
-            let _ = fs::remove_dir_all(&sandbox_path);
+            let _ = fs::remove_dir_all(&workspace_path);
         }
 
         create_result
     }
 
-    pub fn prepare_custom_sandbox(
+    pub fn prepare_custom_workspace(
         &self,
         custom_path: impl AsRef<Path>,
     ) -> Result<PathBuf, PedelecError> {
         let custom_path = custom_path.as_ref();
-        let managed_root = self.sandbox_root()?;
+        let managed_root = self.workspace_root()?;
         if !custom_path.is_absolute() {
-            return Err(sandbox_path_invalid_error(
-                "custom sandbox path must be absolute",
+            return Err(workspace_path_invalid_error(
+                "custom workspace path must be absolute",
                 custom_path,
                 &managed_root,
             ));
@@ -4379,24 +4385,24 @@ impl SandboxManager {
 
         if custom_path.exists() {
             let metadata = fs::metadata(custom_path).map_err(|err| {
-                sandbox_path_invalid_io_error(
-                    "cannot inspect custom sandbox path",
+                workspace_path_invalid_io_error(
+                    "cannot inspect custom workspace path",
                     custom_path,
                     err,
                 )
             })?;
             if !metadata.is_dir() {
-                return Err(sandbox_path_invalid_error(
-                    "custom sandbox path is not a directory",
+                return Err(workspace_path_invalid_error(
+                    "custom workspace path is not a directory",
                     custom_path,
                     &managed_root,
                 ));
             }
         } else {
             fs::create_dir_all(custom_path).map_err(|err| {
-                sandbox_io_error(
-                    error_codes::SANDBOX_CREATE_FAILED,
-                    "cannot create custom sandbox directory",
+                workspace_io_error(
+                    error_codes::WORKSPACE_CREATE_FAILED,
+                    "cannot create custom workspace directory",
                     custom_path,
                     err,
                 )
@@ -4404,8 +4410,8 @@ impl SandboxManager {
         }
 
         let resolved_custom_path = custom_path.canonicalize().map_err(|err| {
-            sandbox_path_invalid_io_error(
-                "cannot canonicalize custom sandbox path",
+            workspace_path_invalid_io_error(
+                "cannot canonicalize custom workspace path",
                 custom_path,
                 err,
             )
@@ -4418,47 +4424,47 @@ impl SandboxManager {
             &resolved_managed_root,
         )?;
 
-        self.create_sandbox_subdirectories(&resolved_custom_path)?;
+        self.create_runtime_subdirectories(&resolved_custom_path)?;
         Ok(resolved_custom_path)
     }
 
-    fn ensure_custom_sandbox_config(
+    fn ensure_custom_workspace_config(
         &self,
-        sandbox_path: &Path,
+        workspace_path: &Path,
         sdk_version: &str,
         origin: &str,
     ) -> Result<(), PedelecError> {
         #[derive(Serialize)]
-        struct SandboxConfig<'a> {
+        struct WorkspaceConfig<'a> {
             #[serde(rename = "sdk-version")]
             sdk_version: &'a str,
             origin: &'a str,
         }
 
-        let config_path = sandbox_lock_path(sandbox_path);
-        let contents = serde_json::to_vec_pretty(&SandboxConfig {
+        let config_path = workspace_metadata_path(workspace_path);
+        let contents = serde_json::to_vec_pretty(&WorkspaceConfig {
             sdk_version,
             origin,
         })
-        .expect("sandbox config serialization should not fail");
+        .expect("workspace config serialization should not fail");
 
         match fs::symlink_metadata(&config_path) {
             Ok(metadata) if metadata.is_file() => return Ok(()),
             Ok(_) => {
-                return Err(sandbox_io_error(
-                    error_codes::SANDBOX_CREATE_FAILED,
-                    "sandbox config path is not a regular file",
+                return Err(workspace_io_error(
+                    error_codes::WORKSPACE_CREATE_FAILED,
+                    "workspace config path is not a regular file",
                     &config_path,
                     io::Error::new(
                         io::ErrorKind::AlreadyExists,
-                        "sandbox config path is occupied",
+                        "workspace config path is occupied",
                     ),
                 ));
             }
             Err(err) if err.kind() != io::ErrorKind::NotFound => {
-                return Err(sandbox_io_error(
-                    error_codes::SANDBOX_CREATE_FAILED,
-                    "cannot inspect sandbox config path",
+                return Err(workspace_io_error(
+                    error_codes::WORKSPACE_CREATE_FAILED,
+                    "cannot inspect workspace config path",
                     &config_path,
                     err,
                 ));
@@ -4475,27 +4481,27 @@ impl SandboxManager {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 return match fs::symlink_metadata(&config_path) {
                     Ok(metadata) if metadata.is_file() => Ok(()),
-                    Ok(_) => Err(sandbox_io_error(
-                        error_codes::SANDBOX_CREATE_FAILED,
-                        "sandbox config path is not a regular file",
+                    Ok(_) => Err(workspace_io_error(
+                        error_codes::WORKSPACE_CREATE_FAILED,
+                        "workspace config path is not a regular file",
                         &config_path,
                         io::Error::new(
                             io::ErrorKind::AlreadyExists,
-                            "sandbox config path is occupied",
+                            "workspace config path is occupied",
                         ),
                     )),
-                    Err(metadata_err) => Err(sandbox_io_error(
-                        error_codes::SANDBOX_CREATE_FAILED,
-                        "cannot inspect sandbox config path",
+                    Err(metadata_err) => Err(workspace_io_error(
+                        error_codes::WORKSPACE_CREATE_FAILED,
+                        "cannot inspect workspace config path",
                         &config_path,
                         metadata_err,
                     )),
                 };
             }
             Err(err) => {
-                return Err(sandbox_io_error(
-                    error_codes::SANDBOX_CREATE_FAILED,
-                    "cannot create sandbox config",
+                return Err(workspace_io_error(
+                    error_codes::WORKSPACE_CREATE_FAILED,
+                    "cannot create workspace config",
                     &config_path,
                     err,
                 ));
@@ -4505,9 +4511,9 @@ impl SandboxManager {
         if let Err(err) = file.write_all(&contents).and_then(|_| file.flush()) {
             drop(file);
             let _ = fs::remove_file(&config_path);
-            return Err(sandbox_io_error(
-                error_codes::SANDBOX_CREATE_FAILED,
-                "cannot write sandbox config",
+            return Err(workspace_io_error(
+                error_codes::WORKSPACE_CREATE_FAILED,
+                "cannot write workspace config",
                 &config_path,
                 err,
             ));
@@ -4516,72 +4522,72 @@ impl SandboxManager {
         Ok(())
     }
 
-    fn create_sandbox_subdirectories(&self, sandbox_path: &Path) -> Result<(), PedelecError> {
-        let private_data_root = sandbox_private_data_root(sandbox_path);
-        ensure_sandbox_directory(
+    fn create_runtime_subdirectories(&self, workspace_path: &Path) -> Result<(), PedelecError> {
+        let private_data_root = workspace_runtime_data_root(workspace_path);
+        ensure_runtime_directory(
             &private_data_root,
-            "cannot create Pedelec sandbox data directory",
+            "cannot create Pedelec runtime data directory",
         )?;
         for path in [
-            sandbox_skills_root(sandbox_path),
-            sandbox_assets_root(sandbox_path),
-            sandbox_logs_root(sandbox_path),
-            sandbox_tmp_root(sandbox_path),
+            workspace_skills_root(workspace_path),
+            workspace_assets_root(workspace_path),
+            workspace_logs_root(workspace_path),
+            workspace_tmp_root(workspace_path),
         ] {
-            ensure_sandbox_directory(&path, "cannot create thread sandbox subdirectory")?;
+            ensure_runtime_directory(&path, "cannot create thread workspace subdirectory")?;
         }
         Ok(())
     }
 
-    pub fn create_thread_sandbox_with<T>(
+    pub fn create_thread_workspace_with<T>(
         &self,
         thread_id: &str,
         initialize: impl FnOnce(&Path) -> Result<T, PedelecError>,
     ) -> Result<(PathBuf, T), PedelecError> {
-        let sandbox_path = self.create_thread_sandbox(thread_id)?;
+        let workspace_path = self.create_thread_workspace(thread_id)?;
 
-        match initialize(&sandbox_path) {
-            Ok(value) => Ok((sandbox_path, value)),
+        match initialize(&workspace_path) {
+            Ok(value) => Ok((workspace_path, value)),
             Err(err) => {
-                let _ = self.remove_thread_sandbox(&sandbox_path);
+                let _ = self.remove_thread_workspace(&workspace_path);
                 Err(err)
             }
         }
     }
 
-    pub fn remove_thread_sandbox(
+    pub fn remove_thread_workspace(
         &self,
-        sandbox_path: impl AsRef<Path>,
+        workspace_path: impl AsRef<Path>,
     ) -> Result<(), PedelecError> {
-        let sandbox_path = sandbox_path.as_ref();
-        if !sandbox_path.exists() {
+        let workspace_path = workspace_path.as_ref();
+        if !workspace_path.exists() {
             return Ok(());
         }
 
-        self.ensure_path_inside_sandbox_root(sandbox_path)?;
-        fs::remove_dir_all(sandbox_path).map_err(|err| {
-            sandbox_io_error(
-                error_codes::SANDBOX_REMOVE_FAILED,
-                "cannot remove thread sandbox",
-                sandbox_path,
+        self.ensure_path_inside_workspace_root(workspace_path)?;
+        fs::remove_dir_all(workspace_path).map_err(|err| {
+            workspace_io_error(
+                error_codes::WORKSPACE_REMOVE_FAILED,
+                "cannot remove thread workspace",
+                workspace_path,
                 err,
             )
         })
     }
 
-    pub fn remove_thread_sandbox_with_retry(
+    pub fn remove_thread_workspace_with_retry(
         &self,
-        sandbox_path: impl AsRef<Path>,
+        workspace_path: impl AsRef<Path>,
     ) -> Result<(), PedelecError> {
-        let sandbox_path = sandbox_path.as_ref();
+        let workspace_path = workspace_path.as_ref();
         let mut last_error = None;
-        for attempt in 0..SANDBOX_REMOVE_MAX_ATTEMPTS {
-            match self.remove_thread_sandbox(sandbox_path) {
+        for attempt in 0..WORKSPACE_REMOVE_MAX_ATTEMPTS {
+            match self.remove_thread_workspace(workspace_path) {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     last_error = Some(err);
-                    if attempt + 1 < SANDBOX_REMOVE_MAX_ATTEMPTS {
-                        std::thread::sleep(SANDBOX_REMOVE_RETRY_DELAY);
+                    if attempt + 1 < WORKSPACE_REMOVE_MAX_ATTEMPTS {
+                        std::thread::sleep(WORKSPACE_REMOVE_RETRY_DELAY);
                     }
                 }
             }
@@ -4589,29 +4595,29 @@ impl SandboxManager {
 
         Err(last_error.unwrap_or_else(|| {
             PedelecError::with_details(
-                error_codes::SANDBOX_REMOVE_FAILED,
-                "cannot remove thread sandbox",
-                serde_json::json!({ "path": path_for_external_use(sandbox_path) }),
+                error_codes::WORKSPACE_REMOVE_FAILED,
+                "cannot remove thread workspace",
+                serde_json::json!({ "path": path_for_external_use(workspace_path) }),
             )
         }))
     }
 
-    pub fn remove_all_thread_sandboxes(&self) -> Vec<PedelecError> {
-        let sandbox_root = match self.sandbox_root() {
+    pub fn remove_all_thread_workspaces(&self) -> Vec<PedelecError> {
+        let workspace_root = match self.workspace_root() {
             Ok(root) => root,
             Err(err) => return vec![err],
         };
-        if !sandbox_root.exists() {
+        if !workspace_root.exists() {
             return vec![];
         }
 
-        let entries = match fs::read_dir(&sandbox_root) {
+        let entries = match fs::read_dir(&workspace_root) {
             Ok(entries) => entries,
             Err(err) => {
-                return vec![sandbox_io_error(
-                    error_codes::SANDBOX_REMOVE_FAILED,
-                    "cannot read sandbox root",
-                    &sandbox_root,
+                return vec![workspace_io_error(
+                    error_codes::WORKSPACE_REMOVE_FAILED,
+                    "cannot read workspace root",
+                    &workspace_root,
                     err,
                 )];
             }
@@ -4622,10 +4628,10 @@ impl SandboxManager {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    errors.push(sandbox_io_error(
-                        error_codes::SANDBOX_REMOVE_FAILED,
-                        "cannot read sandbox root entry",
-                        &sandbox_root,
+                    errors.push(workspace_io_error(
+                        error_codes::WORKSPACE_REMOVE_FAILED,
+                        "cannot read workspace root entry",
+                        &workspace_root,
                         err,
                     ));
                     continue;
@@ -4636,9 +4642,9 @@ impl SandboxManager {
             let is_dir = match entry.file_type() {
                 Ok(file_type) => file_type.is_dir(),
                 Err(err) => {
-                    errors.push(sandbox_io_error(
-                        error_codes::SANDBOX_REMOVE_FAILED,
-                        "cannot inspect sandbox root entry",
+                    errors.push(workspace_io_error(
+                        error_codes::WORKSPACE_REMOVE_FAILED,
+                        "cannot inspect workspace root entry",
                         &path,
                         err,
                     ));
@@ -4649,7 +4655,7 @@ impl SandboxManager {
                 continue;
             }
 
-            if let Err(err) = self.remove_thread_sandbox_with_retry(&path) {
+            if let Err(err) = self.remove_thread_workspace_with_retry(&path) {
                 errors.push(err);
             }
         }
@@ -4657,34 +4663,34 @@ impl SandboxManager {
         errors
     }
 
-    fn sandbox_root(&self) -> Result<PathBuf, PedelecError> {
-        match &self.sandbox_root {
+    fn workspace_root(&self) -> Result<PathBuf, PedelecError> {
+        match &self.workspace_root {
             Some(root) => Ok(root.clone()),
             None => dirs::home_dir()
-                .map(|home| home.join(".pedelec").join("sandbox"))
+                .map(|home| home.join(".pedelec").join("workspaces"))
                 .ok_or_else(|| {
                     PedelecError::new(
-                        error_codes::SANDBOX_PATH_INVALID,
-                        "cannot resolve user home directory for sandbox root",
+                        error_codes::WORKSPACE_PATH_INVALID,
+                        "cannot resolve user home directory for workspace root",
                     )
                 }),
         }
     }
 
-    fn ensure_path_inside_sandbox_root(&self, path: &Path) -> Result<(), PedelecError> {
-        let sandbox_root = self.sandbox_root()?;
-        let root = sandbox_root.canonicalize().map_err(|err| {
-            sandbox_io_error(
-                error_codes::SANDBOX_PATH_INVALID,
-                "cannot canonicalize sandbox root",
-                &sandbox_root,
+    fn ensure_path_inside_workspace_root(&self, path: &Path) -> Result<(), PedelecError> {
+        let workspace_root = self.workspace_root()?;
+        let root = workspace_root.canonicalize().map_err(|err| {
+            workspace_io_error(
+                error_codes::WORKSPACE_PATH_INVALID,
+                "cannot canonicalize workspace root",
+                &workspace_root,
                 err,
             )
         })?;
         let target = path.canonicalize().map_err(|err| {
-            sandbox_io_error(
-                error_codes::SANDBOX_PATH_INVALID,
-                "cannot canonicalize thread sandbox",
+            workspace_io_error(
+                error_codes::WORKSPACE_PATH_INVALID,
+                "cannot canonicalize thread workspace",
                 path,
                 err,
             )
@@ -4692,9 +4698,9 @@ impl SandboxManager {
 
         if !target.starts_with(root) {
             return Err(PedelecError::with_details(
-                error_codes::SANDBOX_PATH_INVALID,
-                "thread sandbox is outside sandbox root",
-                serde_json::json!({ "sandboxPath": path_for_external_use(path) }),
+                error_codes::WORKSPACE_PATH_INVALID,
+                "thread workspace is outside workspace root",
+                serde_json::json!({ "workspacePath": path_for_external_use(path) }),
             ));
         }
 
@@ -4703,10 +4709,10 @@ impl SandboxManager {
 }
 
 fn initialize_generated_skills(
-    sandbox: &Path,
+    workspace: &Path,
     skills_input: Option<&CreateThreadSkillsInput>,
 ) -> Result<(Vec<SkillFile>, ToolRegistry), PedelecError> {
-    let skills_dir = sandbox_skills_root(sandbox);
+    let skills_dir = workspace_skills_root(workspace);
     fs::create_dir_all(&skills_dir).map_err(|err| {
         skill_download_error(
             "cannot create skills directory",
@@ -4720,35 +4726,35 @@ fn initialize_generated_skills(
     Ok((skills, registry))
 }
 
-pub fn inspect_sandbox_folder(path: &Path) -> Result<SandboxFolderInspection, PedelecError> {
+pub fn inspect_workspace_folder(path: &Path) -> Result<WorkspaceFolderInspection, PedelecError> {
     let entries = fs::read_dir(path).map_err(|err| {
-        sandbox_io_error(
+        workspace_io_error(
             error_codes::DIRECTORY_PICKER_FAILED,
-            "cannot inspect selected sandbox folder",
+            "cannot inspect selected workspace folder",
             path,
             err,
         )
     })?;
     let mut is_empty_folder = true;
-    let mut has_sandbox_config = false;
+    let mut has_workspace_config = false;
 
     for entry in entries {
         let entry = entry.map_err(|err| {
-            sandbox_io_error(
+            workspace_io_error(
                 error_codes::DIRECTORY_PICKER_FAILED,
-                "cannot inspect selected sandbox folder entry",
+                "cannot inspect selected workspace folder entry",
                 path,
                 err,
             )
         })?;
         is_empty_folder = false;
-        if entry.file_name() == OsStr::new(SANDBOX_LOCK_FILE) {
-            has_sandbox_config = entry
+        if entry.file_name() == OsStr::new(PEDELEC_WORKSPACE_FILE) {
+            has_workspace_config = entry
                 .file_type()
                 .map_err(|err| {
-                    sandbox_io_error(
+                    workspace_io_error(
                         error_codes::DIRECTORY_PICKER_FAILED,
-                        "cannot inspect selected sandbox config entry",
+                        "cannot inspect selected workspace config entry",
                         &entry.path(),
                         err,
                     )
@@ -4757,40 +4763,40 @@ pub fn inspect_sandbox_folder(path: &Path) -> Result<SandboxFolderInspection, Pe
         }
     }
 
-    Ok(SandboxFolderInspection {
+    Ok(WorkspaceFolderInspection {
         is_empty_folder,
-        has_sandbox_config,
+        has_workspace_config,
     })
 }
 
-fn thread_event_log_path(sandbox_path: &Path, thread_id: &str) -> PathBuf {
-    sandbox_logs_root(sandbox_path).join(format!("events-{thread_id}-{}.jsonl", Uuid::new_v4()))
+fn thread_event_log_path(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_logs_root(workspace_path).join(format!("events-{thread_id}-{}.jsonl", Uuid::new_v4()))
 }
 
-fn ensure_sandbox_directory(path: &Path, message: &'static str) -> Result<(), PedelecError> {
+fn ensure_runtime_directory(path: &Path, message: &'static str) -> Result<(), PedelecError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => Ok(()),
-        Ok(_) => Err(sandbox_io_error(
-            error_codes::SANDBOX_CREATE_FAILED,
+        Ok(_) => Err(workspace_io_error(
+            error_codes::WORKSPACE_CREATE_FAILED,
             message,
             path,
             io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "sandbox directory path is occupied by a non-directory entry",
+                "workspace runtime directory path is occupied by a non-directory entry",
             ),
         )),
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             fs::create_dir_all(path).map_err(|create_err| {
-                sandbox_io_error(
-                    error_codes::SANDBOX_CREATE_FAILED,
+                workspace_io_error(
+                    error_codes::WORKSPACE_CREATE_FAILED,
                     message,
                     path,
                     create_err,
                 )
             })
         }
-        Err(err) => Err(sandbox_io_error(
-            error_codes::SANDBOX_CREATE_FAILED,
+        Err(err) => Err(workspace_io_error(
+            error_codes::WORKSPACE_CREATE_FAILED,
             message,
             path,
             err,
@@ -4798,31 +4804,31 @@ fn ensure_sandbox_directory(path: &Path, message: &'static str) -> Result<(), Pe
     }
 }
 
-fn sandbox_path_invalid_error(
+fn workspace_path_invalid_error(
     message: &'static str,
     custom_path: &Path,
     managed_root: &Path,
 ) -> PedelecError {
     PedelecError::with_details(
-        error_codes::SANDBOX_PATH_INVALID,
+        error_codes::WORKSPACE_PATH_INVALID,
         message,
         serde_json::json!({
-            "sandboxPath": path_for_external_use(custom_path),
-            "managedSandboxRoot": path_for_external_use(managed_root),
+            "workspacePath": path_for_external_use(custom_path),
+            "managedWorkspaceRoot": path_for_external_use(managed_root),
         }),
     )
 }
 
-fn sandbox_path_invalid_io_error(
+fn workspace_path_invalid_io_error(
     message: &'static str,
     path: &Path,
     err: std::io::Error,
 ) -> PedelecError {
     PedelecError::with_details(
-        error_codes::SANDBOX_PATH_INVALID,
+        error_codes::WORKSPACE_PATH_INVALID,
         message,
         serde_json::json!({
-            "sandboxPath": path_for_external_use(path),
+            "workspacePath": path_for_external_use(path),
             "error": err.to_string(),
         }),
     )
@@ -4834,7 +4840,7 @@ fn resolve_path_for_overlap(path: &Path) -> Result<PathBuf, PedelecError> {
     } else {
         env::current_dir()
             .map_err(|err| {
-                sandbox_path_invalid_io_error("cannot resolve current directory", path, err)
+                workspace_path_invalid_io_error("cannot resolve current directory", path, err)
             })?
             .join(path)
     };
@@ -4845,24 +4851,24 @@ fn resolve_path_for_overlap(path: &Path) -> Result<PathBuf, PedelecError> {
     while !existing_ancestor.exists() {
         let component = existing_ancestor.file_name().ok_or_else(|| {
             PedelecError::with_details(
-                error_codes::SANDBOX_PATH_INVALID,
-                "cannot resolve sandbox path ancestor",
+                error_codes::WORKSPACE_PATH_INVALID,
+                "cannot resolve workspace path ancestor",
                 serde_json::json!({ "path": path_for_external_use(path) }),
             )
         })?;
         missing_components.push(component.to_os_string());
         if !existing_ancestor.pop() {
             return Err(PedelecError::with_details(
-                error_codes::SANDBOX_PATH_INVALID,
-                "cannot resolve sandbox path ancestor",
+                error_codes::WORKSPACE_PATH_INVALID,
+                "cannot resolve workspace path ancestor",
                 serde_json::json!({ "path": path_for_external_use(path) }),
             ));
         }
     }
 
     let mut resolved = existing_ancestor.canonicalize().map_err(|err| {
-        sandbox_path_invalid_io_error(
-            "cannot canonicalize sandbox path ancestor",
+        workspace_path_invalid_io_error(
+            "cannot canonicalize workspace path ancestor",
             &existing_ancestor,
             err,
         )
@@ -4876,8 +4882,8 @@ fn resolve_path_for_overlap(path: &Path) -> Result<PathBuf, PedelecError> {
 fn normalize_absolute_path(path: &Path) -> Result<PathBuf, PedelecError> {
     if !path.is_absolute() {
         return Err(PedelecError::with_details(
-            error_codes::SANDBOX_PATH_INVALID,
-            "sandbox path must be absolute",
+            error_codes::WORKSPACE_PATH_INVALID,
+            "workspace path must be absolute",
             serde_json::json!({ "path": path_for_external_use(path) }),
         ));
     }
@@ -4906,8 +4912,8 @@ fn ensure_paths_do_not_overlap(
     if path_is_prefix(custom_comparison_path, managed_comparison_path)
         || path_is_prefix(managed_comparison_path, custom_comparison_path)
     {
-        return Err(sandbox_path_invalid_error(
-            "custom sandbox path overlaps the managed sandbox root",
+        return Err(workspace_path_invalid_error(
+            "custom workspace path overlaps the managed workspace root",
             custom_path,
             managed_root,
         ));
@@ -6094,16 +6100,16 @@ fn invalid_sdk_origin_error() -> PedelecError {
     PedelecError::new(error_codes::THREAD_ACCESS_DENIED, "invalid caller origin")
 }
 
-fn collect_sandbox_assets(
+fn collect_assets(
     root: &Path,
     directory: &Path,
-    assets: &mut Vec<SandboxAsset>,
+    assets: &mut Vec<Asset>,
 ) -> Result<(), PedelecError> {
     let relative_directory = asset_relative_path(root, directory)?;
     let entries = fs::read_dir(directory).map_err(|err| {
         PedelecError::with_details(
             error_codes::ASSET_LIST_FAILED,
-            "failed to read sandbox assets",
+            "failed to read workspace assets",
             serde_json::json!({ "path": relative_directory, "error": err.to_string() }),
         )
     })?;
@@ -6112,7 +6118,7 @@ fn collect_sandbox_assets(
         let entry = entry.map_err(|err| {
             PedelecError::with_details(
                 error_codes::ASSET_LIST_FAILED,
-                "failed to read sandbox asset",
+                "failed to read asset",
                 serde_json::json!({ "path": relative_directory, "error": err.to_string() }),
             )
         })?;
@@ -6121,7 +6127,7 @@ fn collect_sandbox_assets(
         let file_type = entry.file_type().map_err(|err| {
             PedelecError::with_details(
                 error_codes::ASSET_LIST_FAILED,
-                "failed to inspect sandbox asset",
+                "failed to inspect asset",
                 serde_json::json!({ "path": public_path, "error": err.to_string() }),
             )
         })?;
@@ -6131,7 +6137,7 @@ fn collect_sandbox_assets(
         let name = entry.file_name().into_string().map_err(|_| {
             PedelecError::with_details(
                 error_codes::ASSET_LIST_FAILED,
-                "sandbox asset filename cannot be encoded",
+                "asset filename cannot be encoded",
                 serde_json::json!({ "path": public_path }),
             )
         })?;
@@ -6139,7 +6145,7 @@ fn collect_sandbox_assets(
             continue;
         }
         if file_type.is_dir() {
-            collect_sandbox_assets(root, &path, assets)?;
+            collect_assets(root, &path, assets)?;
             continue;
         }
         if !file_type.is_file() {
@@ -6148,7 +6154,7 @@ fn collect_sandbox_assets(
         let metadata = entry.metadata().map_err(|err| {
             PedelecError::with_details(
                 error_codes::ASSET_LIST_FAILED,
-                "failed to read sandbox asset metadata",
+                "failed to read asset metadata",
                 serde_json::json!({ "path": public_path, "error": err.to_string() }),
             )
         })?;
@@ -6157,7 +6163,7 @@ fn collect_sandbox_assets(
             .map_err(|err| {
                 PedelecError::with_details(
                     error_codes::ASSET_LIST_FAILED,
-                    "failed to read sandbox asset modified time",
+                    "failed to read asset modified time",
                     serde_json::json!({ "path": public_path, "error": err.to_string() }),
                 )
             })?
@@ -6165,7 +6171,7 @@ fn collect_sandbox_assets(
             .map_err(|_| {
                 PedelecError::with_details(
                     error_codes::ASSET_LIST_FAILED,
-                    "sandbox asset modified time predates Unix epoch",
+                    "asset modified time predates Unix epoch",
                     serde_json::json!({ "path": public_path }),
                 )
             })?
@@ -6173,11 +6179,11 @@ fn collect_sandbox_assets(
         let modified_at = i64::try_from(modified_at).map_err(|_| {
             PedelecError::with_details(
                 error_codes::ASSET_LIST_FAILED,
-                "sandbox asset modified time is out of range",
+                "asset modified time is out of range",
                 serde_json::json!({ "path": public_path }),
             )
         })?;
-        assets.push(SandboxAsset {
+        assets.push(Asset {
             name,
             path: public_path,
             size_bytes: metadata.len(),
@@ -6191,7 +6197,7 @@ fn asset_relative_path(root: &Path, path: &Path) -> Result<String, PedelecError>
     let relative = path.strip_prefix(root).map_err(|_| {
         PedelecError::new(
             error_codes::ASSET_LIST_FAILED,
-            "sandbox asset path is outside the asset root",
+            "asset path is outside the asset root",
         )
     })?;
     let mut components = Vec::new();
@@ -6200,13 +6206,13 @@ fn asset_relative_path(root: &Path, path: &Path) -> Result<String, PedelecError>
             Component::Normal(part) => components.push(part.to_str().ok_or_else(|| {
                 PedelecError::new(
                     error_codes::ASSET_LIST_FAILED,
-                    "sandbox asset path cannot be encoded",
+                    "asset path cannot be encoded",
                 )
             })?),
             _ => {
                 return Err(PedelecError::new(
                     error_codes::ASSET_LIST_FAILED,
-                    "sandbox asset path is invalid",
+                    "asset path is invalid",
                 ))
             }
         }
@@ -6248,7 +6254,7 @@ fn resolve_asset_file(
             serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
         )
     })?;
-    let root = sandbox_assets_root(&thread.sandbox_path);
+    let root = workspace_assets_root(&thread.workspace_path);
     let target = root.join(relative_path);
     let metadata = fs::symlink_metadata(&target).map_err(|_| {
         PedelecError::with_details(
@@ -6352,10 +6358,10 @@ pub mod error_codes {
     pub const PROVIDER_BOOTSTRAP_ASSET_FAILED: &str = "PROVIDER_BOOTSTRAP_ASSET_FAILED";
     pub const SKILL_URL_INVALID: &str = "SKILL_URL_INVALID";
     pub const SKILL_DOWNLOAD_FAILED: &str = "SKILL_DOWNLOAD_FAILED";
-    pub const SANDBOX_CREATE_FAILED: &str = "SANDBOX_CREATE_FAILED";
-    pub const SANDBOX_REMOVE_FAILED: &str = "SANDBOX_REMOVE_FAILED";
-    pub const SANDBOX_PATH_INVALID: &str = "SANDBOX_PATH_INVALID";
-    pub const SANDBOX_OPEN_FAILED: &str = "SANDBOX_OPEN_FAILED";
+    pub const WORKSPACE_CREATE_FAILED: &str = "WORKSPACE_CREATE_FAILED";
+    pub const WORKSPACE_REMOVE_FAILED: &str = "WORKSPACE_REMOVE_FAILED";
+    pub const WORKSPACE_PATH_INVALID: &str = "WORKSPACE_PATH_INVALID";
+    pub const WORKSPACE_OPEN_FAILED: &str = "WORKSPACE_OPEN_FAILED";
     pub const DIRECTORY_PICKER_FAILED: &str = "DIRECTORY_PICKER_FAILED";
     pub const TOOLS_JSON_NOT_FOUND: &str = "TOOLS_JSON_NOT_FOUND";
     pub const TOOLS_JSON_INVALID: &str = "TOOLS_JSON_INVALID";
@@ -7810,8 +7816,8 @@ fn insert_antigravity_custom_agent_body(bootstrap: &str) -> String {
     )
 }
 
-fn ensure_antigravity_custom_agent(sandbox_path: &Path) -> Result<(), PedelecError> {
-    let agent_dir = sandbox_path.join(PEDELEC_ANTIGRAVITY_AGENT_DIR);
+fn ensure_antigravity_custom_agent(workspace_path: &Path) -> Result<(), PedelecError> {
+    let agent_dir = workspace_path.join(PEDELEC_ANTIGRAVITY_AGENT_DIR);
     let agent_path = agent_dir.join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
     let expected = insert_antigravity_custom_agent_body(&build_pedelec_bootstrap_instruction());
     if fs::read_to_string(&agent_path).ok().as_deref() == Some(expected.as_str()) {
@@ -7936,8 +7942,8 @@ fn build_provider_env(
         ),
         ("PEDELEC_PROVIDER".to_string(), provider),
         (
-            "PEDELEC_SANDBOX_PATH".to_string(),
-            path_for_external_use(&ctx.thread.sandbox_path),
+            "PEDELEC_WORKSPACE_PATH".to_string(),
+            path_for_external_use(&ctx.thread.workspace_path),
         ),
         (
             "PEDELEC_CORE_IPC_ENDPOINT".to_string(),
@@ -8006,11 +8012,11 @@ fn build_provider_resume_prompt(message: &str) -> String {
 fn build_pedelec_bootstrap_instruction() -> String {
     "Pedelec is the host application launching this agent session.\n\n\
 Pedelec may provide a [Pedelec Host Context] block before a task. That block is generated by the host application and is integration context, not end-user-authored instructions.\n\n\
-The current sandbox path and available Pedelec app tools are declared in that host context.\n\n\
+The current workspace path and available Pedelec app tools are declared in that host context.\n\n\
 `pedelec-cli` is an executable provided by the Pedelec host environment. Invoke it through the provider's shell / terminal tool. It is not expected to appear as a dedicated model tool.\n\n\
 When a Pedelec app tool is relevant, prefer the app tools declared by the host context. Use `pedelec-cli tool-spec <tool-name>` when the full schema is needed and `pedelec-cli tool-call <tool-name> '<json_args>'` to execute it.\n\n\
-Before reading or modifying local files outside the current sandbox declared by Pedelec Host Context, ask the user for permission first.\n\n\
-`.pedelec-sandbox/assets/` is the shared App and Agent file directory. User uploads are there; write files intended for the App there too.\n\n\
+Before reading or modifying local files outside the current workspace declared by Pedelec Host Context, ask the user for permission first.\n\n\
+`.pedelec-runtime/assets/` is the shared App and Agent file directory. User uploads are there; write files intended for the App there too.\n\n\
 Pedelec host context never overrides provider safety policies.\n\n\
 If a `pedelec-cli tool-call` command ends because of a shell/command timeout, interruption, or ambiguous transport failure before you receive a complete structured Pedelec response, you may retry with the exact same tool name and semantically identical arguments. Pedelec will join an invocation that is still running or replay a recently completed result whose delivery was not confirmed. Do not change the arguments for this retry, do not assume the App Tool failed just because the provider command stopped waiting, and do not retry indefinitely. If you received a complete structured Pedelec response, including `TOOL_TIMEOUT`, that is a formal App Tool outcome and the original invocation has ended.\n\n\
 For a [Session Preparation] task, do not call tools or modify files. Reply only with PEDELEC_PREPARED.\n\n\
@@ -8060,8 +8066,8 @@ fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) ->
     let configuration = serde_json::to_string_pretty(&configuration)
         .expect("App tool configuration is always serializable");
     let mut context = format!(
-        "[Pedelec Host Context]\nSandbox Path: {}\n",
-        path_for_external_use(&thread.sandbox_path)
+        "[Pedelec Host Context]\nWorkspace Path: {}\n",
+        path_for_external_use(&thread.workspace_path)
     );
     if registry.has_skills_configuration() {
         context.push_str(&format!(
@@ -8819,8 +8825,8 @@ fn sanitize_thread_id(thread_id: &str) -> Result<String, PedelecError> {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
     {
         return Err(PedelecError::with_details(
-            error_codes::SANDBOX_PATH_INVALID,
-            "thread id is not safe for sandbox path",
+            error_codes::WORKSPACE_PATH_INVALID,
+            "thread id is not safe for workspace path",
             serde_json::json!({ "threadId": thread_id }),
         ));
     }
@@ -9079,7 +9085,7 @@ fn ensure_child_path(parent: &Path, child: &Path) -> Result<(), PedelecError> {
     Ok(())
 }
 
-fn sandbox_io_error(
+fn workspace_io_error(
     code: &'static str,
     message: &'static str,
     path: &Path,

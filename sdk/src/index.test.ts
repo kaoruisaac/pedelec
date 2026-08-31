@@ -233,12 +233,12 @@ describe("Pedelec SDK", () => {
     expect(session.effortLevel).toBe("high");
   });
 
-  it("forwards an explicit sandbox path with an explicit provider and effort level", async () => {
+  it("forwards an explicit workspace path with an explicit provider and effort level", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.createSession({
       provider: "codex",
       effortLevel: "high",
-      sandbox: { path: "C:\\workspace\\project-a" },
+      workspace: { path: "C:\\workspace\\project-a" },
     });
     const request = pageWindow.lastSent();
 
@@ -248,26 +248,26 @@ describe("Pedelec SDK", () => {
       input: {
         provider: "codex",
         effortLevel: "high",
-        sandbox: { path: "C:\\workspace\\project-a" },
+        workspace: { path: "C:\\workspace\\project-a" },
       },
     });
     respondOk(pageWindow, request, { sessionId: "thread_custom_explicit" });
     await promise;
   });
 
-  it("preserves sandbox through provider-only and default-provider resolution", async () => {
+  it("preserves workspace through provider-only and default-provider resolution", async () => {
     const pedelec = new Pedelec();
     const providerOnly = pedelec.createSession({
       provider: "codex",
-      sandbox: { path: "C:\\workspace\\provider-only" },
+      workspace: { path: "C:\\workspace\\provider-only" },
     });
     const providerCreate = pageWindow.lastSent();
-    expect(providerCreate.input.sandbox).toEqual({ path: "C:\\workspace\\provider-only" });
+    expect(providerCreate.input.workspace).toEqual({ path: "C:\\workspace\\provider-only" });
     respondOk(pageWindow, providerCreate, { sessionId: "thread_custom_provider" });
     await providerOnly;
 
     const defaultProvider = pedelec.createSession({
-      sandbox: { path: "C:\\workspace\\default" },
+      workspace: { path: "C:\\workspace\\default" },
     });
     const defaultSettings = pageWindow.lastSent();
     respondSettings(pageWindow, defaultSettings, {
@@ -280,35 +280,51 @@ describe("Pedelec SDK", () => {
     ]);
     await nextTick();
     const defaultCreate = pageWindow.lastSent();
-    expect(defaultCreate.input.sandbox).toEqual({ path: "C:\\workspace\\default" });
+    expect(defaultCreate.input.workspace).toEqual({ path: "C:\\workspace\\default" });
     respondOk(pageWindow, defaultCreate, { sessionId: "thread_custom_default" });
     await defaultProvider;
   });
 
-  it("rejects malformed sandbox input before sending a request", async () => {
+  it("rejects malformed workspace input before sending a request", async () => {
     const pedelec = new Pedelec();
 
-    await expect(pedelec.createSession({ provider: "codex", sandbox: null } as any)).rejects.toMatchObject({
+    await expect(pedelec.createSession({ provider: "codex", workspace: null } as any)).rejects.toMatchObject({
       code: "INVALID_INPUT",
-      message: "sandbox must be an object",
+      message: "workspace must be an object",
     });
-    await expect(pedelec.createSession({ provider: "codex", sandbox: {} } as any)).rejects.toMatchObject({
+    await expect(pedelec.createSession({ provider: "codex", workspace: {} } as any)).rejects.toMatchObject({
       code: "INVALID_INPUT",
-      message: "sandbox.path must be a string",
-    });
-    await expect(
-      pedelec.createSession({ provider: "codex", sandbox: { path: "   " } })
-    ).rejects.toMatchObject({
-      code: "INVALID_INPUT",
-      message: "sandbox.path must not be empty",
+      message: "workspace.path must be a string",
     });
     await expect(
-      pedelec.createSession({ provider: "codex", sandbox: { path: 123 } } as any)
+      pedelec.createSession({ provider: "codex", workspace: { path: "   " } })
     ).rejects.toMatchObject({
       code: "INVALID_INPUT",
-      message: "sandbox.path must be a string",
+      message: "workspace.path must not be empty",
+    });
+    await expect(
+      pedelec.createSession({ provider: "codex", workspace: { path: 123 } } as any)
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "workspace.path must be a string",
     });
     expect(pageWindow.port.sent).toHaveLength(0);
+  });
+
+  it("does not forward the removed sandbox input or expose its picker alias", async () => {
+    const pedelec = new Pedelec();
+    const create = pedelec.createSession({
+      provider: "codex",
+      sandbox: { path: "C:\\workspace\\legacy" },
+    } as any);
+    const request = pageWindow.lastSent();
+
+    expect(request.input).not.toHaveProperty("sandbox");
+    expect(request.input.workspace).toBeUndefined();
+    expect((pedelec as any).sandboxFolderPicker).toBeUndefined();
+
+    respondOk(pageWindow, request, { sessionId: "thread_default_workspace" });
+    await create;
   });
 
   it("gets approval status from the extension without creating a session", async () => {
@@ -1800,61 +1816,61 @@ describe("Pedelec SDK", () => {
     });
   });
 
-  it("sandboxFolderPicker sends the sandbox picker request and normalizes an empty folder", async () => {
+  it("workspaceFolderPicker sends the workspace picker request and normalizes an empty folder", async () => {
     const pedelec = new Pedelec();
-    const picker = pedelec.sandboxFolderPicker();
+    const picker = pedelec.workspaceFolderPicker();
     const request = pageWindow.lastSent();
-    expect(request).toMatchObject({ type: "pick_sandbox_folder" });
+    expect(request).toMatchObject({ type: "pick_workspace_folder" });
     respondOk(pageWindow, request, {
       path: "C:\\workspace\\project",
       isEmptyFolder: true,
-      hasSandboxConfig: false,
+      hasWorkspaceConfig: false,
     });
 
     await expect(picker).resolves.toEqual({
       path: "C:\\workspace\\project",
       isEmptyFolder: true,
-      hasSandboxConfig: false,
+      hasWorkspaceConfig: false,
     });
   });
 
-  it("sandboxFolderPicker normalizes an existing sandbox folder", async () => {
+  it("workspaceFolderPicker normalizes an existing workspace folder", async () => {
     const pedelec = new Pedelec();
-    const picker = pedelec.sandboxFolderPicker();
+    const picker = pedelec.workspaceFolderPicker();
     respondOk(pageWindow, pageWindow.lastSent(), {
       path: "C:\\workspace\\project",
       isEmptyFolder: false,
-      hasSandboxConfig: true,
+      hasWorkspaceConfig: true,
     });
 
     await expect(picker).resolves.toEqual({
       path: "C:\\workspace\\project",
       isEmptyFolder: false,
-      hasSandboxConfig: true,
+      hasWorkspaceConfig: true,
     });
   });
 
-  it("sandboxFolderPicker resolves cancellation as null", async () => {
+  it("workspaceFolderPicker resolves cancellation as null", async () => {
     const pedelec = new Pedelec();
-    const picker = pedelec.sandboxFolderPicker();
+    const picker = pedelec.workspaceFolderPicker();
     respondOk(pageWindow, pageWindow.lastSent(), { path: null });
 
     await expect(picker).resolves.toBeNull();
   });
 
-  it("sandboxFolderPicker rejects malformed responses with SDK_PROTOCOL_ERROR", async () => {
+  it("workspaceFolderPicker rejects malformed responses with SDK_PROTOCOL_ERROR", async () => {
     const pedelec = new Pedelec();
     for (const result of [
       {},
-      { path: 123, isEmptyFolder: true, hasSandboxConfig: false },
-      { path: "C:\\workspace\\project", hasSandboxConfig: false },
-      { path: "C:\\workspace\\project", isEmptyFolder: "true", hasSandboxConfig: false },
-      { path: "C:\\workspace\\project", isEmptyFolder: false, hasSandboxConfig: "true" },
-      { path: {} , isEmptyFolder: false, hasSandboxConfig: false },
-      { path: [], isEmptyFolder: false, hasSandboxConfig: false },
-      { path: "", isEmptyFolder: false, hasSandboxConfig: false },
+      { path: 123, isEmptyFolder: true, hasWorkspaceConfig: false },
+      { path: "C:\\workspace\\project", hasWorkspaceConfig: false },
+      { path: "C:\\workspace\\project", isEmptyFolder: "true", hasWorkspaceConfig: false },
+      { path: "C:\\workspace\\project", isEmptyFolder: false, hasWorkspaceConfig: "true" },
+      { path: {} , isEmptyFolder: false, hasWorkspaceConfig: false },
+      { path: [], isEmptyFolder: false, hasWorkspaceConfig: false },
+      { path: "", isEmptyFolder: false, hasWorkspaceConfig: false },
     ]) {
-      const picker = pedelec.sandboxFolderPicker();
+      const picker = pedelec.workspaceFolderPicker();
       respondOk(pageWindow, pageWindow.lastSent(), result);
       await expect(picker).rejects.toMatchObject({
         code: "SDK_PROTOCOL_ERROR",
@@ -1862,9 +1878,9 @@ describe("Pedelec SDK", () => {
     }
   });
 
-  it("sandboxFolderPicker does not use bridgeTimeoutMs while the picker is open", async () => {
+  it("workspaceFolderPicker does not use bridgeTimeoutMs while the picker is open", async () => {
     const pedelec = new Pedelec({ bridgeTimeoutMs: 1 });
-    const picker = pedelec.sandboxFolderPicker();
+    const picker = pedelec.workspaceFolderPicker();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     let settled = false;
@@ -1875,14 +1891,14 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, pageWindow.lastSent(), {
       path: "C:\\workspace\\project",
       isEmptyFolder: true,
-      hasSandboxConfig: false,
+      hasWorkspaceConfig: false,
     });
     await expect(picker).resolves.toMatchObject({ path: "C:\\workspace\\project" });
   });
 
-  it("sandboxFolderPicker still rejects when its extension Port disconnects", async () => {
+  it("workspaceFolderPicker still rejects when its extension Port disconnects", async () => {
     const pedelec = new Pedelec({ bridgeTimeoutMs: 1 });
-    const picker = pedelec.sandboxFolderPicker();
+    const picker = pedelec.workspaceFolderPicker();
     pageWindow.port.disconnect();
 
     await expect(picker).rejects.toMatchObject({

@@ -1154,7 +1154,7 @@ function createBackground(runtimeChrome, options = {}) {
             provider: input.provider,
             effortLevel: input.effortLevel,
             skills: input.skills,
-            sandbox: input.sandbox,
+            workspace: input.workspace,
           }, message.callerSdkVersion === undefined
             ? {}
             : { callerSdkVersion: message.callerSdkVersion });
@@ -1201,13 +1201,13 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
-      if (message.type === "pick_sandbox_folder") {
+      if (message.type === "pick_workspace_folder") {
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
         }
         const result = await withNativeOperation(() =>
-          sendSdkNativeRequest(context, "pick_sandbox_folder")
+          sendSdkNativeRequest(context, "pick_workspace_folder")
         );
         postSdkResponse(port, channelId, requestId, true, result);
         return;

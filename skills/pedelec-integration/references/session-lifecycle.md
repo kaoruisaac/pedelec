@@ -24,9 +24,9 @@ Handlers already running need their own lifecycle checks; unregistering cannot s
 
 All listener and handler registration methods return unsubscribe functions. Dispose them deterministically. If the application owns the session, unregister dependent bindings and then call `session.end()` at the chosen lifecycle boundary. Do not keep UI callbacks attached to an ended handle.
 
-Ending a session makes its handle unusable but does not mean every sandbox path is immediately deleted. A session without `sandbox.path` uses temporary Desktop-managed storage, cleaned on normal Desktop exit and stale cleanup. An absolute `sandbox.path` is application-managed: Pedelec does not delete it on end or stale cleanup. Multiple active sessions may share an explicit workspace, but the application owns write-conflict prevention and must not overlap the managed sandbox root.
+Ending a session makes its handle unusable but does not mean every workspace path is immediately deleted. A session without `workspace.path` uses temporary Desktop-managed storage, cleaned on normal Desktop exit and stale cleanup. An absolute `workspace.path` is application-managed: Pedelec does not delete it on end or stale cleanup. Multiple active sessions may share an explicit workspace, but the application owns write-conflict prevention and must not overlap the managed workspace root.
 
-Do not treat a managed sandbox as durable storage, and do not expect an ended session to use retained managed storage through asset APIs. Forced termination or locked files can defer managed cleanup.
+Do not treat a managed workspace as durable storage, and do not expect an ended session to use retained managed storage through asset APIs. Forced termination or locked files can defer managed cleanup.
 
 ## Resume and multi-tab behavior
 

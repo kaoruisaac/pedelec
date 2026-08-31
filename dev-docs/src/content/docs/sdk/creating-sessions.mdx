@@ -12,19 +12,19 @@ The SDK creates a session handle and Core resolves the provider's Desktop-config
 For an application-managed workspace, let the user choose the folder with the native picker before calling `createSession()`:
 
 ```ts
-const folder = await pedelec.sandboxFolderPicker();
+const folder = await pedelec.workspaceFolderPicker();
 if (!folder) return;
 
-if (!folder.isEmptyFolder && !folder.hasSandboxConfig) {
+if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
   // The application decides whether to warn the user.
 }
 
 const session = await pedelec.createSession({
-  sandbox: { path: folder.path },
+  workspace: { path: folder.path },
 });
 ```
 
-The picker returns a folder result or `null` on cancellation. It is read-only and reports only the root-folder snapshot (`isEmptyFolder`) and whether `.pedelec-lock.json` is a regular file (`hasSandboxConfig`). It does not decide whether the folder is a valid Pedelec sandbox or initialize its contents; Core applies the sandbox rules during `createSession()`, then creates the marker after successful custom initialization.
+The picker returns a folder result or `null` on cancellation. It is read-only and reports only the root-folder snapshot (`isEmptyFolder`) and whether `.pedelec-workspace.json` is a regular file (`hasWorkspaceConfig`). It does not decide whether the folder is a valid Pedelec workspace or initialize its contents; Core applies the workspace rules during `createSession()`, then creates the marker after successful custom initialization.
 
 ```ts
 const session = await pedelec.createSession();
@@ -51,15 +51,15 @@ const session = await pedelec.createSession({
 
 Explicit provider creation does not read Desktop settings to resolve model arguments. Core resolves the current provider profile after the request arrives.
 
-## Skills and sandbox
+## Skills and workspace
 
-Effort selection composes with skills and an application-owned sandbox:
+Effort selection composes with skills and an application-owned workspace:
 
 ```ts
 const session = await pedelec.createSession({
   provider: "claude",
   effortLevel: "default",
-  sandbox: { path: "C:\\workspace\\project-a" },
+  workspace: { path: "C:\\workspace\\project-a" },
   skills: {
     guidance: "Use the declared tools and report structured failures.",
     tools,

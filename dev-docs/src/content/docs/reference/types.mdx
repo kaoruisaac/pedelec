@@ -14,11 +14,11 @@ import type {
   ProviderInfo,
   PedelecSessionStatus,
   ToolArgsSchema,
-  SandboxAsset,
-  SandboxAssetPath,
+  Asset,
+  AssetPath,
   ReadAssetType,
-  CreateSessionSandboxInput,
-  SandboxFolderPickerResult,
+  CreateSessionWorkspaceInput,
+  WorkspaceFolderPickerResult,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -54,41 +54,41 @@ type CreateSessionInput<
       provider: ProviderCode;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      sandbox?: CreateSessionSandboxInput;
+      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      sandbox?: CreateSessionSandboxInput;
+      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
 `effortLevel` is provider-independent and may be used with or without `provider`.
 
-### `CreateSessionSandboxInput`
+### `CreateSessionWorkspaceInput`
 
 ```ts
-type CreateSessionSandboxInput = {
+type CreateSessionWorkspaceInput = {
   path: string;
 };
 ```
 
-`path` is an absolute application-managed workspace path. Pedelec creates missing sandbox subdirectories but never deletes this workspace. It may be shared by multiple active sessions and must not overlap the managed sandbox root.
+`path` is an absolute application-managed workspace path. Pedelec creates missing runtime subdirectories but never deletes this workspace. It may be shared by multiple active sessions and must not overlap the managed workspace root.
 
-### `SandboxFolderPickerResult`
+### `WorkspaceFolderPickerResult`
 
 ```ts
-interface SandboxFolderPickerResult {
+interface WorkspaceFolderPickerResult {
   path: string;
   isEmptyFolder: boolean;
-  hasSandboxConfig: boolean;
+  hasWorkspaceConfig: boolean;
 }
 ```
 
-This is the read-only snapshot returned by `sandboxFolderPicker()`. `hasSandboxConfig` only indicates that `.pedelec-lock.json` is a regular file; it does not validate the marker contents.
+This is the read-only snapshot returned by `workspaceFolderPicker()`. `hasWorkspaceConfig` only indicates that `.pedelec-workspace.json` is a regular file; it does not validate the marker contents.
 
 ## Provider and settings
 
@@ -140,13 +140,13 @@ type PedelecAvailability = {
 
 ## Assets
 
-### `SandboxAssetPath`
+### `AssetPath`
 
 ```ts
-type SandboxAssetPath = `/${string}`;
+type AssetPath = `/${string}`;
 ```
 
-The SDK public path for an asset in the session's shared store. Physically, the Agent-visible shared store is `<sandbox.path>/.pedelec-sandbox/assets/`; the `.pedelec-sandbox` directory is private runtime layout and is not exposed in SDK values. For example, `/images/photo.png` refers to `<sandbox.path>/.pedelec-sandbox/assets/images/photo.png`. Runtime validation also rejects backslashes, empty path segments, `.` and `..`.
+The SDK public path for an asset in the session's shared store. Physically, the Agent-visible shared store is `<workspace.path>/.pedelec-runtime/assets/`; the `.pedelec-runtime` directory is private runtime layout and is not exposed in SDK values. For example, `/images/photo.png` refers to `<workspace.path>/.pedelec-runtime/assets/images/photo.png`. Runtime validation also rejects backslashes, empty path segments, `.` and `..`.
 
 ### `ReadAssetType`
 
@@ -156,18 +156,18 @@ type ReadAssetType = "text" | "json" | "file";
 
 Selects the conversion performed by `PedelecSession.readAsset()`: strict UTF-8 text, parsed JSON, or a browser `File`.
 
-### `SandboxAsset`
+### `Asset`
 
 ```ts
-type SandboxAsset = {
+type Asset = {
   name: string;
-  path: SandboxAssetPath;
+  path: AssetPath;
   sizeBytes: number;
   modifiedAt: number;
 };
 ```
 
-`modifiedAt` is the sandbox filesystem modification time. `path` is sandbox-relative and does not reveal the browser user's absolute local path.
+`modifiedAt` is the workspace filesystem modification time. `path` is workspace-relative and does not reveal the browser user's absolute local path.
 
 ## Errors and status
 

@@ -5,10 +5,10 @@ mod tests {
     use super::*;
     use pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
     use pedelec_core::{
-        sandbox_assets_root, sandbox_logs_root, CommandSpec, CoreRuntime, CreateThreadOutput,
+        workspace_assets_root, workspace_logs_root, CommandSpec, CoreRuntime, CreateThreadOutput,
         CreateThreadSkillsInput, CreateThreadToolInput, EffortLevel, PedelecSettings,
-        ProviderAdapterState, ProviderCode, SandboxManager, ThreadErrorSource, ThreadState,
-        ThreadStatus, ToolRegistry,
+        ProviderAdapterState, ProviderCode, ThreadErrorSource, ThreadState, ThreadStatus,
+        ToolRegistry, WorkspaceManager,
     };
     use serde_json::{json, Value};
     use std::env;
@@ -445,9 +445,9 @@ mod tests {
     fn phase09_mock_app_path_create_send_tool_end_e2e() {
         let temp = tempfile::tempdir().unwrap();
         let runtime_path = temp.path().join("runtime.json");
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let runtime = Arc::new(Mutex::new(CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         }));
         runtime
@@ -618,13 +618,13 @@ mod tests {
             Some(ThreadStatus::Idle)
         );
 
-        let sandbox_path = runtime
+        let workspace_path = runtime
             .lock()
             .unwrap()
-            .thread_sandbox_path(&output.thread_id)
+            .thread_workspace_path(&output.thread_id)
             .unwrap();
-        assert!(sandbox_path.exists());
-        let sentinel_path = sandbox_assets_root(&sandbox_path).join("end-sentinel.txt");
+        assert!(workspace_path.exists());
+        let sentinel_path = workspace_assets_root(&workspace_path).join("end-sentinel.txt");
         std::fs::write(&sentinel_path, "preserve me").unwrap();
         let end = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
@@ -653,13 +653,13 @@ mod tests {
                 }
             )
         }));
-        assert!(sandbox_path.exists());
+        assert!(workspace_path.exists());
         assert_eq!(
             std::fs::read_to_string(&sentinel_path).unwrap(),
             "preserve me"
         );
         assert!(runtime.lock().unwrap().cleanup_for_app_exit().is_empty());
-        assert!(!sandbox_path.exists());
+        assert!(!workspace_path.exists());
     }
 
     #[test]
@@ -1423,11 +1423,11 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_rolls_back_sandbox_when_skill_load_fails() {
+    fn create_thread_rolls_back_workspace_when_skill_load_fails() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -1443,14 +1443,14 @@ mod tests {
                     timeout_ms: None,
                 }],
             }),
-            sandbox: None,
+            workspace: None,
         });
 
         assert_eq!(
             result.unwrap_err().code,
             error_codes::TOOLS_MANIFEST_INVALID
         );
-        let entries = std::fs::read_dir(&sandbox_root)
+        let entries = std::fs::read_dir(&workspace_root)
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(entries, 0);
@@ -1518,7 +1518,7 @@ mod tests {
                     &runtime
                         .lock()
                         .unwrap()
-                        .thread_sandbox_path("thread_mock")
+                        .thread_workspace_path("thread_mock")
                         .unwrap()
                         .to_string_lossy()
                         .to_string()
@@ -1602,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    fn end_thread_stops_running_process_emits_ended_and_preserves_sandbox() {
+    fn end_thread_stops_running_process_emits_ended_and_preserves_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
         insert_thread_with_registry(
@@ -1624,13 +1624,13 @@ mod tests {
             },
         )
         .unwrap();
-        let sandbox_path = runtime
+        let workspace_path = runtime
             .lock()
             .unwrap()
-            .thread_sandbox_path("thread_end")
+            .thread_workspace_path("thread_end")
             .unwrap();
-        assert!(sandbox_path.exists());
-        let sentinel_path = sandbox_logs_root(&sandbox_path).join("end-sentinel.txt");
+        assert!(workspace_path.exists());
+        let sentinel_path = workspace_logs_root(&workspace_path).join("end-sentinel.txt");
         std::fs::write(&sentinel_path, "preserve me").unwrap();
 
         runtime
@@ -1657,13 +1657,13 @@ mod tests {
             None
         );
         assert_eq!(runtime.lock().unwrap().running_process_count(), 0);
-        assert!(sandbox_path.exists());
+        assert!(workspace_path.exists());
         assert_eq!(
             std::fs::read_to_string(&sentinel_path).unwrap(),
             "preserve me"
         );
         assert!(runtime.lock().unwrap().cleanup_for_app_exit().is_empty());
-        assert!(!sandbox_path.exists());
+        assert!(!workspace_path.exists());
     }
 
     fn insert_thread_with_registry(
@@ -1676,17 +1676,17 @@ mod tests {
         let mut runtime = runtime.lock().unwrap();
         runtime.provider_readiness.mark_ready_for_test();
         let now = chrono::Utc::now();
-        let sandbox_root = temp.join("sandbox");
-        runtime.sandbox_manager = SandboxManager::with_sandbox_root(&sandbox_root);
-        let sandbox_path = sandbox_root.join(thread_id);
-        std::fs::create_dir_all(sandbox_logs_root(&sandbox_path)).unwrap();
+        let workspace_root = temp.join("workspace");
+        runtime.workspace_manager = WorkspaceManager::with_workspace_root(&workspace_root);
+        let workspace_path = workspace_root.join(thread_id);
+        std::fs::create_dir_all(workspace_logs_root(&workspace_path)).unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: EffortLevel::Default,
                 effort_args: vec![],
-                sandbox_path,
+                workspace_path,
                 skills: vec![],
                 status,
                 process_id: None,
@@ -1742,7 +1742,7 @@ mod tests {
         let cwd = runtime
             .lock()
             .unwrap()
-            .thread_sandbox_path(thread_id)
+            .thread_workspace_path(thread_id)
             .unwrap();
         runtime.lock().unwrap().test_provider_command =
             Some(test_provider_command(cwd, sleep, fail));

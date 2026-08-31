@@ -12,19 +12,19 @@ SDK 建立 session handle，Core 再解析 Desktop 設定的 provider effort pro
 若 application 使用自己管理的 workspace，請先透過原生 picker 讓使用者選取資料夾，再呼叫 `createSession()`：
 
 ```ts
-const folder = await pedelec.sandboxFolderPicker();
+const folder = await pedelec.workspaceFolderPicker();
 if (!folder) return;
 
-if (!folder.isEmptyFolder && !folder.hasSandboxConfig) {
+if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
   // application 自行決定是否警告使用者。
 }
 
 const session = await pedelec.createSession({
-  sandbox: { path: folder.path },
+  workspace: { path: folder.path },
 });
 ```
 
-Picker 取消時回傳 `null`。它是 read-only snapshot，只提供根目錄是否為空的 `isEmptyFolder`，以及 `.pedelec-lock.json` 是否為 regular file 的 `hasSandboxConfig`；不判斷資料夾是否為有效 Pedelec sandbox，也不初始化內容。Core 會在 `createSession()` 階段套用 sandbox 規則，成功初始化 custom sandbox 後才建立 marker。
+Picker 取消時回傳 `null`。它是 read-only snapshot，只提供根目錄是否為空的 `isEmptyFolder`，以及 `.pedelec-workspace.json` 是否為 regular file 的 `hasWorkspaceConfig`；不判斷資料夾是否為有效 Pedelec workspace，也不初始化內容。Core 會在 `createSession()` 階段套用 workspace 規則，成功初始化 custom workspace 後才建立 marker。
 
 ```ts
 const session = await pedelec.createSession();
@@ -51,9 +51,9 @@ const session = await pedelec.createSession({
 
 Explicit provider 的 SDK 路徑不會為了解析 model args 讀取 Desktop settings；Core 收到 request 後才解析目前 profile。
 
-## Skills、sandbox 與 Ollama
+## Skills、workspace 與 Ollama
 
-Effort 可和 `skills`、`sandbox` 一起使用。SDK 不接受 provider model field，請在 Desktop Settings 設定 model。Ollama 選中的 profile 必須有 model；空 profile 回傳 `MODEL_REQUIRED`，Low/High 不會 fallback。
+Effort 可和 `skills`、`workspace` 一起使用。SDK 不接受 provider model field，請在 Desktop Settings 設定 model。Ollama 選中的 profile 必須有 model；空 profile 回傳 `MODEL_REQUIRED`，Low/High 不會 fallback。
 
 ## Metadata 與 resume
 

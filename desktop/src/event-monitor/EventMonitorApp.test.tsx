@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   eventHandler: undefined as ((event: { payload: unknown }) => void) | undefined,
   unlisten: vi.fn(),
   monitorEndThread: vi.fn(),
-  openThreadSandbox: vi.fn(),
+  openThreadWorkspace: vi.fn(),
   sendThreadText: vi.fn(),
   listen: vi.fn(),
 }));
@@ -24,7 +24,7 @@ vi.mock("solid-icons/fa", () => ({
 
 vi.mock("./eventMonitorActions", () => ({
   monitorEndThread: mocks.monitorEndThread,
-  openThreadSandbox: mocks.openThreadSandbox,
+  openThreadWorkspace: mocks.openThreadWorkspace,
   sendThreadText: mocks.sendThreadText,
 }));
 
@@ -39,7 +39,7 @@ describe("EventMonitorApp Debug Prompt", () => {
     mocks.unlisten.mockReset();
     mocks.monitorEndThread.mockReset();
     mocks.monitorEndThread.mockResolvedValue(undefined);
-    mocks.openThreadSandbox.mockReset();
+    mocks.openThreadWorkspace.mockReset();
     mocks.sendThreadText.mockReset();
     mocks.sendThreadText.mockResolvedValue({ threadId: "t000123" });
     mocks.listen.mockReset();

@@ -57,7 +57,7 @@ The Pedelec Desktop App owns the Core Runtime. It:
 
 - creates and tracks sessions;
 - stores provider settings and three effort profiles;
-- prepares a sandbox for a session;
+- prepares a workspace for a session;
 - launches or resumes the selected provider process;
 - converts provider output into normalized events;
 - injects tool guidance and the tool index into the initial provider prompt; and
@@ -79,15 +79,15 @@ A typical explicit-provider session follows this flow:
 2. The SDK validates the basic input and serializes the skills manifest. Inline handler functions remain in the browser and are not sent to Core.
 3. The extension checks whether the page origin is approved. If it is not, the session request waits while the extension popup asks the user.
 4. The extension opens a Native Messaging connection when needed.
-5. The desktop runtime resolves and validates the selected effort profile, snapshots its argv tokens, creates the session and sandbox, then returns a `sessionId`.
+5. The desktop runtime resolves and validates the selected effort profile, snapshots its argv tokens, creates the session and workspace, then returns a `sessionId`.
 6. The extension subscribes the current SDK route to that session.
 7. The SDK returns a `PedelecSession` object.
 
 Creating a session does not necessarily launch a long-running provider process immediately. Provider execution is managed by the desktop runtime when the session is prepared or receives a turn.
 
-### Sandbox ownership
+### Workspace ownership
 
-Without `sandbox.path`, the desktop runtime creates a temporary managed sandbox under `~/.pedelec/sandbox/<threadId>` and owns its cleanup. An application can instead pass an absolute `sandbox.path` to select an application-managed workspace. Pedelec creates `.pedelec-sandbox/{assets,logs,skills,tmp}/`, preserves existing project content and private data, and never deletes an explicit workspace. Multiple active sessions may share one explicit path; filesystem write coordination remains the application's responsibility. Explicit paths cannot overlap the managed sandbox root.
+Without `workspace.path`, the desktop runtime creates a temporary managed workspace under `~/.pedelec/workspaces/<threadId>` and owns its cleanup. An application can instead pass an absolute `workspace.path` to select an application-managed workspace. Pedelec creates `.pedelec-runtime/{assets,logs,skills,tmp}/`, preserves existing project content and private data, and never deletes an explicit workspace. Multiple active sessions may share one explicit path; filesystem write coordination remains the application's responsibility. Explicit paths cannot overlap the managed workspace root.
 
 ## What happens during `sendText()`
 
@@ -140,7 +140,7 @@ Web App → SDK → Chrome Extension → Native Host → Core IPC → Desktop Ru
 Asset bodies use a separate internal data path:
 
 ```text
-Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session `.pedelec-sandbox/assets/`
+Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session `.pedelec-runtime/assets/`
 ```
 
 The SDK obtains and uses upload and download tickets internally through `session.uploadAsset()` and `session.readAsset()`. Applications must not create a localhost server or depend on transfer URLs, ports, tokens, or ticket lifecycles. Asset bodies do not pass through the Extension message body, Native Messaging payload, or Core IPC message body.

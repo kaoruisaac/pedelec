@@ -51,7 +51,7 @@ Pedelec Desktop Runtime
 Codex / Antigravity / OpenCode / Cursor / Claude Code / Ollama
 ```
 
-上圖是 control/event path。Asset file body 使用另一條內部路徑：`Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session .pedelec-sandbox/assets/`。只使用 asset API，不要依賴內部 URL、port、token 或 ticket lifecycle。
+上圖是 control/event path。Asset file body 使用另一條內部路徑：`Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session .pedelec-runtime/assets/`。只使用 asset API，不要依賴內部 URL、port、token 或 ticket lifecycle。
 
 SDK 不會要求 Web App 自行啟動 localhost server，也不會直接啟動 provider executable。它只和已安裝的 Extension 溝通，再由 Extension 將通過使用者核准的要求送往 Desktop Runtime。
 
@@ -414,7 +414,7 @@ await session.end();
 
 結束後，該 session 不能再呼叫 `sendText()`。如果需要新的對話，請重新 `createSession()`。
 
-結束 session 不會立即刪除其 sandbox。未指定 `sandbox.path` 的 session 使用 Desktop 管理的暫存資料：Desktop App 正常退出時會清除 managed sandbox，異常結束後的殘留會在下次啟動時清理。指定 absolute `sandbox.path` 則是 application 管理的 workspace，Pedelec 在 session 結束、App 退出或 stale cleanup 時都不會刪除它，多個 active session 可以共用。關閉主視窗只會隱藏 App，不會觸發 managed cleanup。Ended session 不能透過 asset API 存取保留的 sandbox，explicit shared workspace 的 filesystem conflict 也不由 Pedelec 協調。
+結束 session 不會立即刪除其 workspace。未指定 `workspace.path` 的 session 使用 Desktop 管理的暫存資料：Desktop App 正常退出時會清除 managed workspace，異常結束後的殘留會在下次啟動時清理。指定 absolute `workspace.path` 則是 application 管理的 workspace，Pedelec 在 session 結束、App 退出或 stale cleanup 時都不會刪除它，多個 active session 可以共用。關閉主視窗只會隱藏 App，不會觸發 managed cleanup。Ended session 不能透過 asset API 存取保留的 workspace，explicit shared workspace 的 filesystem conflict 也不由 Pedelec 協調。
 
 若啟用 `autoEndOnDisconnect`，disconnect cleanup 的目標與呼叫 `session.end()` 相同：thread 會被結束，且不再被視為 active。
 

@@ -12,7 +12,7 @@ import {
   toolCallDetails,
   toolResultDetails,
 } from "./eventMonitorFormatters";
-import { monitorEndThread, openThreadSandbox, sendThreadText } from "./eventMonitorActions";
+import { monitorEndThread, openThreadWorkspace, sendThreadText } from "./eventMonitorActions";
 import { createEventMonitorStore } from "./eventMonitorStore";
 import type { MonitorEvent, ThreadViewModel } from "./eventMonitorStore";
 
@@ -49,9 +49,9 @@ export function EventMonitorApp() {
     }
   });
 
-  async function handleOpenThreadSandbox(threadId: string): Promise<void> {
+  async function handleOpenThreadWorkspace(threadId: string): Promise<void> {
     try {
-      await openThreadSandbox(threadId);
+      await openThreadWorkspace(threadId);
     } catch (error) {
       setGlobalError(error);
     }
@@ -237,7 +237,7 @@ export function EventMonitorApp() {
                 isSubmittingDebugPrompt={isSubmittingDebugPrompt()}
                 onDebugPromptChange={setDebugPrompt}
                 onSendDebugPrompt={handleSendDebugPrompt}
-                onOpenSandbox={handleOpenThreadSandbox}
+                onOpenWorkspace={handleOpenThreadWorkspace}
                 isStopPending={stoppingThreadIds().has(thread().threadId)}
                 onStopThread={handleStopThread}
               />
@@ -264,7 +264,7 @@ function ThreadDetail(props: {
   isSubmittingDebugPrompt: boolean;
   onDebugPromptChange: (value: string) => void;
   onSendDebugPrompt: (threadId: string, message: string) => Promise<void>;
-  onOpenSandbox: (threadId: string) => Promise<void>;
+  onOpenWorkspace: (threadId: string) => Promise<void>;
   isStopPending: boolean;
   onStopThread: (threadId: string) => Promise<void>;
 }) {
@@ -279,9 +279,9 @@ function ThreadDetail(props: {
             <button
               type="button"
               class="event-monitor-icon-button"
-              title="Open sandbox folder"
-              aria-label="Open sandbox folder"
-              onClick={() => void props.onOpenSandbox(thread().threadId)}
+              title="Open workspace folder"
+              aria-label="Open workspace folder"
+              onClick={() => void props.onOpenWorkspace(thread().threadId)}
             >
               <FaRegularFolderOpen size={16} />
             </button>

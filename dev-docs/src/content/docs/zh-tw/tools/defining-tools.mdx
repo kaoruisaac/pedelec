@@ -156,7 +156,7 @@ const readSelection = defineTool({
 });
 ```
 
-Handler 保存在 SDK session，會從 serializable manifest 移除，不會寫入 Core sandbox。
+Handler 保存在 SDK session，會從 serializable manifest 移除，不會寫入 workspace。
 
 Definition 與 implementation 自然放一起時很方便；若 implementation 屬於 mounted component 或要 override default，可在建立後註冊 named handler。
 

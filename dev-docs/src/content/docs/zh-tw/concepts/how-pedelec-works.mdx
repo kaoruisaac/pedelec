@@ -57,7 +57,7 @@ Pedelec Desktop App 擁有 Core Runtime，負責：
 
 - 建立與追蹤 session；
 - 保存 provider 設定與三個 effort profile；
-- 為 session 準備 sandbox；
+- 為 session 準備 workspace；
 - 啟動或 resume provider process；
 - 將各 provider 輸出轉換成標準 event；
 - 將 tool guidance 與 tool index 注入初始 provider prompt；
@@ -79,15 +79,15 @@ Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 
 2. SDK 驗證基本輸入並序列化 skills manifest。Inline handler function 只留在 browser，不會送到 Core。
 3. Extension 檢查 page origin 是否已核准；尚未核准時，request 會等待使用者在 popup 操作。
 4. Extension 在需要時建立 Native Messaging connection。
-5. Desktop Runtime 解析、驗證並 snapshot 選中的 effort argv，建立 session 與 sandbox，回傳 `sessionId`。
+5. Desktop Runtime 解析、驗證並 snapshot 選中的 effort argv，建立 session 與 workspace，回傳 `sessionId`。
 6. Extension 訂閱該 session，並將目前 SDK route 綁定到它。
 7. SDK 回傳 `PedelecSession`。
 
 建立 session 不代表一定會立刻啟動長時間存活的 provider process。Desktop Runtime 會在 prepare 或收到 turn 時管理 provider execution。
 
-### Sandbox ownership
+### Workspace ownership
 
-未指定 `sandbox.path` 時，Desktop Runtime 會在 `~/.pedelec/sandbox/<threadId>` 建立 temporary managed sandbox，並負責 cleanup。Application 也可以傳入 absolute `sandbox.path`，選擇由 application 管理的 workspace。Pedelec 會建立 `.pedelec-sandbox/{assets,logs,skills,tmp}/`，保留既有 project content 與 private data，且永遠不會刪除 explicit workspace。多個 active session 可以共用同一個 path；filesystem write coordination 由 application 負責。Explicit path 不得與 managed sandbox root overlap。
+未指定 `workspace.path` 時，Desktop Runtime 會在 `~/.pedelec/workspaces/<threadId>` 建立 temporary managed workspace，並負責 cleanup。Application 也可以傳入 absolute `workspace.path`，選擇由 application 管理的 workspace。Pedelec 會建立 `.pedelec-runtime/{assets,logs,skills,tmp}/`，保留既有 project content 與 private data，且永遠不會刪除 explicit workspace。多個 active session 可以共用同一個 path；filesystem write coordination 由 application 負責。Explicit path 不得與 managed workspace root overlap。
 
 ## `sendText()` 的資料流
 
@@ -140,7 +140,7 @@ Web App → SDK → Chrome Extension → Native Host → Core IPC → Desktop Ru
 Asset body 使用獨立的內部 data path：
 
 ```text
-Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session `.pedelec-sandbox/assets/`
+Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session `.pedelec-runtime/assets/`
 ```
 
 SDK 會透過 `session.uploadAsset()` 與 `session.readAsset()` 在內部取得並使用 upload/download ticket。Web App 不應自行建立 localhost server，也不應依賴 transfer URL、port、token 或 ticket lifecycle；asset body 不會經過 Extension message body、Native Messaging payload 或 Core IPC message body。

@@ -69,7 +69,7 @@ pub fn run() {
             refresh_providers,
             open_provider_installer,
             open_provider_terminal,
-            open_thread_sandbox,
+            open_thread_workspace,
             restart_app,
             send_text,
             debug_send_text,
@@ -94,10 +94,13 @@ pub fn run() {
             let _startup_cleanup_errors = runtime_for_setup
                 .lock()
                 .unwrap()
-                .cleanup_stale_sandboxes_for_app_start();
+                .cleanup_stale_workspaces_for_app_start();
             #[cfg(debug_assertions)]
             for err in _startup_cleanup_errors {
-                eprintln!("sandbox cleanup failed during app startup: {}", err.message);
+                eprintln!(
+                    "workspace cleanup failed during app startup: {}",
+                    err.message
+                );
             }
 
             write_app_launch_config_for_current_exe().map_err(|err| {
@@ -269,7 +272,7 @@ pub fn run() {
                     let _errors = runtime_for_exit.lock().unwrap().cleanup_for_app_exit();
                     #[cfg(debug_assertions)]
                     for err in _errors {
-                        eprintln!("sandbox cleanup failed during app exit: {}", err.message);
+                        eprintln!("workspace cleanup failed during app exit: {}", err.message);
                     }
                 }
             }
@@ -416,22 +419,22 @@ fn open_provider_terminal(
     open_provider_terminal_window(input.provider, executable)
 }
 
-fn validated_thread_sandbox_path(
+fn validated_thread_workspace_path(
     thread_id: &str,
-    sandbox_path: Option<PathBuf>,
+    workspace_path: Option<PathBuf>,
 ) -> Result<PathBuf, PedelecError> {
-    let sandbox_path = sandbox_path.ok_or_else(|| {
+    let workspace_path = workspace_path.ok_or_else(|| {
         PedelecError::with_details(
             error_codes::THREAD_NOT_FOUND,
-            "thread sandbox could not be resolved because the thread no longer exists",
+            "thread workspace could not be resolved because the thread no longer exists",
             serde_json::json!({ "threadId": thread_id }),
         )
     })?;
 
-    if !sandbox_path.is_dir() {
+    if !workspace_path.is_dir() {
         return Err(PedelecError::with_details(
-            error_codes::SANDBOX_PATH_INVALID,
-            "thread sandbox path is not a directory or no longer exists",
+            error_codes::WORKSPACE_PATH_INVALID,
+            "thread workspace path is not a directory or no longer exists",
             serde_json::json!({
                 "threadId": thread_id,
                 "pathStatus": "missing_or_not_directory",
@@ -439,27 +442,30 @@ fn validated_thread_sandbox_path(
         ));
     }
 
-    Ok(sandbox_path)
+    Ok(workspace_path)
 }
 
 #[tauri::command]
-fn open_thread_sandbox(
+fn open_thread_workspace(
     app: tauri::AppHandle,
     state: State<'_, CoreRuntimeOwner>,
     thread_id: String,
 ) -> Result<(), PedelecError> {
-    let sandbox_path = {
+    let workspace_path = {
         let runtime = state.runtime();
         let runtime = runtime.lock().unwrap();
-        validated_thread_sandbox_path(&thread_id, runtime.thread_sandbox_path(&thread_id))?
+        validated_thread_workspace_path(&thread_id, runtime.thread_workspace_path(&thread_id))?
     };
 
     app.opener()
-        .open_path(sandbox_path.to_string_lossy().into_owned(), None::<String>)
+        .open_path(
+            workspace_path.to_string_lossy().into_owned(),
+            None::<String>,
+        )
         .map_err(|error| {
             PedelecError::with_details(
-                error_codes::SANDBOX_OPEN_FAILED,
-                "cannot open thread sandbox",
+                error_codes::WORKSPACE_OPEN_FAILED,
+                "cannot open thread workspace",
                 serde_json::json!({
                     "threadId": thread_id,
                     "pathStatus": "validated_directory",
@@ -599,25 +605,25 @@ fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRunt
 }
 
 #[cfg(test)]
-mod sandbox_open_tests {
+mod workspace_open_tests {
     use super::*;
     use std::fs;
 
     #[test]
-    fn accepts_an_existing_sandbox_directory() {
+    fn accepts_an_existing_workspace_directory() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_path = temp.path().join("t000123");
-        fs::create_dir(&sandbox_path).unwrap();
+        let workspace_path = temp.path().join("t000123");
+        fs::create_dir(&workspace_path).unwrap();
 
         assert_eq!(
-            validated_thread_sandbox_path("t000123", Some(sandbox_path.clone())).unwrap(),
-            sandbox_path
+            validated_thread_workspace_path("t000123", Some(workspace_path.clone())).unwrap(),
+            workspace_path
         );
     }
 
     #[test]
     fn reports_missing_thread_as_thread_not_found() {
-        let error = validated_thread_sandbox_path("t000123", None).unwrap_err();
+        let error = validated_thread_workspace_path("t000123", None).unwrap_err();
 
         assert_eq!(error.code, error_codes::THREAD_NOT_FOUND);
         assert_eq!(
@@ -627,13 +633,13 @@ mod sandbox_open_tests {
     }
 
     #[test]
-    fn rejects_a_missing_or_non_directory_sandbox_path() {
+    fn rejects_a_missing_or_non_directory_workspace_path() {
         let temp = tempfile::tempdir().unwrap();
         let missing_path = temp.path().join("missing");
         let missing_error =
-            validated_thread_sandbox_path("t000123", Some(missing_path.clone())).unwrap_err();
+            validated_thread_workspace_path("t000123", Some(missing_path.clone())).unwrap_err();
 
-        assert_eq!(missing_error.code, error_codes::SANDBOX_PATH_INVALID);
+        assert_eq!(missing_error.code, error_codes::WORKSPACE_PATH_INVALID);
         assert_eq!(
             missing_error.details,
             Some(serde_json::json!({
@@ -644,9 +650,9 @@ mod sandbox_open_tests {
 
         let file_path = temp.path().join("file");
         fs::write(&file_path, "not a directory").unwrap();
-        let file_error = validated_thread_sandbox_path("t000123", Some(file_path)).unwrap_err();
+        let file_error = validated_thread_workspace_path("t000123", Some(file_path)).unwrap_err();
 
-        assert_eq!(file_error.code, error_codes::SANDBOX_PATH_INVALID);
+        assert_eq!(file_error.code, error_codes::WORKSPACE_PATH_INVALID);
     }
 }
 
@@ -654,8 +660,8 @@ mod sandbox_open_tests {
 mod debug_send_text_tests {
     use super::*;
     use pedelec_core::{
-        CommandSpec, CoreRuntime, EffortLevel, ProviderAdapterState, ProviderCode, SandboxManager,
-        ThreadState, ThreadStatus,
+        CommandSpec, CoreRuntime, EffortLevel, ProviderAdapterState, ProviderCode, ThreadState,
+        ThreadStatus, WorkspaceManager,
     };
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -705,13 +711,13 @@ mod debug_send_text_tests {
     #[test]
     fn debug_send_text_skips_origin_authorization_but_uses_normal_send_start() {
         let (runtime, _temp) = runtime_with_sdk_thread(ThreadStatus::Idle);
-        let sandbox_path = runtime
+        let workspace_path = runtime
             .lock()
             .unwrap()
-            .thread_sandbox_path("t000001")
+            .thread_workspace_path("t000001")
             .unwrap();
         runtime.lock().unwrap().test_provider_command = Some(test_provider_command(
-            sandbox_path,
+            workspace_path,
             "What did you just change?",
         ));
 
@@ -762,13 +768,13 @@ mod debug_send_text_tests {
         status: ThreadStatus,
     ) -> (Arc<Mutex<CoreRuntime>>, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandboxes");
-        let sandbox_path = sandbox_root.join("t000001");
-        std::fs::create_dir_all(&sandbox_path).unwrap();
+        let workspace_root = temp.path().join("workspaces");
+        let workspace_path = workspace_root.join("t000001");
+        std::fs::create_dir_all(&workspace_path).unwrap();
 
         let mut runtime = CoreRuntime::default();
         runtime.provider_readiness.mark_ready_for_test();
-        runtime.sandbox_manager = SandboxManager::with_sandbox_root(&sandbox_root);
+        runtime.workspace_manager = WorkspaceManager::with_workspace_root(&workspace_root);
         let now = chrono::Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
@@ -776,7 +782,7 @@ mod debug_send_text_tests {
                 provider: ProviderCode::Codex,
                 effort_level: EffortLevel::Default,
                 effort_args: Vec::new(),
-                sandbox_path,
+                workspace_path,
                 skills: Vec::new(),
                 status,
                 process_id: None,

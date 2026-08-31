@@ -10,8 +10,8 @@ It demonstrates:
 - `sendText`, streaming chat deltas, session errors, and ended sessions
 - frontend tool handlers and tool result/error display
 - per-session transcript, tool call log, error log, and debug event log
-- selecting an optional application-owned sandbox with `sandboxFolderPicker()`
-- creating sessions with an explicit sandbox workspace
+- selecting an optional application-owned workspace with `workspaceFolderPicker()`
+- creating sessions with an explicit workspace
 
 ## Install
 
@@ -57,13 +57,13 @@ The page registers these frontend tools:
 
 Unknown tools return a structured `TOOL_HANDLER_NOT_FOUND` result.
 
-## Optional Sandbox
+## Optional Workspace
 
 The Create Session panel can optionally select the workspace used by a new session:
 
-- Leave Sandbox unselected to use the Desktop-managed temporary sandbox.
+- Leave Workspace unselected to use the Desktop-managed temporary workspace.
 - Select directory to choose an application-owned workspace with the native directory picker.
-- Click Clear to return to the Desktop-managed temporary sandbox.
+- Click Clear to return to the Desktop-managed temporary workspace.
 
 The selected workspace remains in the form after a session is created, so consecutive demo sessions can share it.
 

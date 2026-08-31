@@ -16,17 +16,17 @@ export type JsonPrimitive = string | number | boolean | null;
 
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
-export type SandboxAssetPath = `/${string}`;
+export type AssetPath = `/${string}`;
 export type ReadAssetType = "text" | "json" | "file";
 
-export type SandboxAsset = {
+export type Asset = {
   name: string;
-  path: SandboxAssetPath;
+  path: AssetPath;
   sizeBytes: number;
   modifiedAt: number;
 };
 
-function normalizeListAssetsResponse(response: unknown): SandboxAsset[] {
+function normalizeListAssetsResponse(response: unknown): Asset[] {
   if (!response || typeof response !== "object" || Array.isArray(response)) return invalidListAssetsResponse(response);
   const assets = (response as { assets?: unknown }).assets;
   if (!Array.isArray(assets)) return invalidListAssetsResponse(response);
@@ -39,7 +39,7 @@ function normalizeListAssetsResponse(response: unknown): SandboxAsset[] {
     if (!validName || !validPath || !validNumber(sizeBytes) || !validNumber(modifiedAt)) {
       return invalidListAssetsResponse({ index, asset });
     }
-    return { name, path: path as SandboxAssetPath, sizeBytes: sizeBytes as number, modifiedAt: modifiedAt as number };
+    return { name, path: path as AssetPath, sizeBytes: sizeBytes as number, modifiedAt: modifiedAt as number };
   });
 }
 
@@ -47,7 +47,7 @@ function invalidListAssetsResponse(details: unknown): never {
   throw makeError("SDK_PROTOCOL_ERROR", "list_assets response had an invalid shape", { response: details });
 }
 
-function isValidAssetPath(path: unknown): path is SandboxAssetPath {
+function isValidAssetPath(path: unknown): path is AssetPath {
   return typeof path === "string" && /^\/(?:[^/\\\x00-\x1f]+)(?:\/[^/\\\x00-\x1f]+)*$/.test(path) &&
     path.split("/").every((part, index) => index === 0 || (part !== "." && part !== ".."));
 }
@@ -155,14 +155,14 @@ export type SerializableSkillsManifest = {
   tools: SerializableToolManifest[];
 };
 
-export type CreateSessionSandboxInput = {
+export type CreateSessionWorkspaceInput = {
   path: string;
 };
 
-export interface SandboxFolderPickerResult {
+export interface WorkspaceFolderPickerResult {
   path: string;
   isEmptyFolder: boolean;
-  hasSandboxConfig: boolean;
+  hasWorkspaceConfig: boolean;
 }
 
 type CreateSessionInputWithProvider<
@@ -171,7 +171,7 @@ type CreateSessionInputWithProvider<
   provider: ProviderCode;
   effortLevel?: EffortLevel;
   skills?: SkillsInput<TTools>;
-  sandbox?: CreateSessionSandboxInput;
+  workspace?: CreateSessionWorkspaceInput;
   autoEndOnDisconnect?: boolean;
 };
 
@@ -181,7 +181,7 @@ type CreateSessionInputWithDefaults<
   provider?: undefined;
   effortLevel?: EffortLevel;
   skills?: SkillsInput<TTools>;
-  sandbox?: CreateSessionSandboxInput;
+  workspace?: CreateSessionWorkspaceInput;
   autoEndOnDisconnect?: boolean;
 };
 
@@ -531,7 +531,7 @@ export class Pedelec {
         provider: resolvedInput.provider,
         effortLevel: resolvedInput.effortLevel,
         skills: resolvedInput.skills,
-        sandbox: resolvedInput.sandbox,
+        workspace: resolvedInput.workspace,
         autoEndOnDisconnect: resolvedInput.autoEndOnDisconnect,
       },
     });
@@ -548,13 +548,13 @@ export class Pedelec {
     );
   }
 
-  async sandboxFolderPicker(): Promise<SandboxFolderPickerResult | null> {
+  async workspaceFolderPicker(): Promise<WorkspaceFolderPickerResult | null> {
     const result = await this.requestWithOptions<unknown>(
-      "pick_sandbox_folder",
+      "pick_workspace_folder",
       {},
       { timeoutMs: null },
     );
-    return normalizeSandboxFolderPickerResponse(result);
+    return normalizeWorkspaceFolderPickerResponse(result);
   }
 
   async listProviders(): Promise<ProviderInfo[]> {
@@ -669,7 +669,7 @@ export class Pedelec {
         provider: ProviderCode;
         effortLevel: EffortLevel;
         skills?: SerializableSkillsManifest;
-        sandbox?: CreateSessionSandboxInput;
+        workspace?: CreateSessionWorkspaceInput;
         inlineToolHandlers: Map<string, ToolSpecificHandler>;
         autoEndOnDisconnect: boolean;
       }
@@ -677,7 +677,7 @@ export class Pedelec {
     provider: ProviderCode;
     effortLevel: EffortLevel;
     skills?: SerializableSkillsManifest;
-    sandbox?: CreateSessionSandboxInput;
+    workspace?: CreateSessionWorkspaceInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
     autoEndOnDisconnect: boolean;
   }> {
@@ -686,7 +686,7 @@ export class Pedelec {
       model?: unknown;
       effortLevel?: unknown;
       skills?: unknown;
-      sandbox?: unknown;
+      workspace?: unknown;
       autoEndOnDisconnect?: unknown;
     };
     const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
@@ -700,17 +700,17 @@ export class Pedelec {
     }
     const autoEndOnDisconnect = raw.autoEndOnDisconnect !== false;
     const normalizedSkills = normalizeSkillsInput(raw.skills);
-    const sandbox = normalizeCreateSessionSandboxInput(raw.sandbox);
+    const workspace = normalizeCreateSessionWorkspaceInput(raw.workspace);
 
     if (!hasProvider) {
-      return this.resolveDefaultCreateSessionInput(effortLevel, normalizedSkills, sandbox, autoEndOnDisconnect);
+      return this.resolveDefaultCreateSessionInput(effortLevel, normalizedSkills, workspace, autoEndOnDisconnect);
     }
 
     return {
       provider: provider as ProviderCode,
       effortLevel,
       skills: normalizedSkills.manifest,
-      sandbox,
+      workspace,
       inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
@@ -774,13 +774,13 @@ export class Pedelec {
   private async resolveDefaultCreateSessionInput(
     effortLevel: EffortLevel,
     normalizedSkills: NormalizedSkillsInput,
-    sandbox: CreateSessionSandboxInput | undefined,
+    workspace: CreateSessionWorkspaceInput | undefined,
     autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
     effortLevel: EffortLevel;
     skills?: SerializableSkillsManifest;
-    sandbox?: CreateSessionSandboxInput;
+    workspace?: CreateSessionWorkspaceInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
     autoEndOnDisconnect: boolean;
   }> {
@@ -796,7 +796,7 @@ export class Pedelec {
       provider: settings.defaultProvider,
       effortLevel,
       skills: normalizedSkills.manifest,
-      sandbox,
+      workspace,
       inlineToolHandlers: normalizedSkills.handlers,
       autoEndOnDisconnect,
     };
@@ -945,18 +945,18 @@ export class Pedelec {
   }
 }
 
-function normalizeCreateSessionSandboxInput(value: unknown): CreateSessionSandboxInput | undefined {
+function normalizeCreateSessionWorkspaceInput(value: unknown): CreateSessionWorkspaceInput | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw makeError("INVALID_INPUT", "sandbox must be an object");
+    throw makeError("INVALID_INPUT", "workspace must be an object");
   }
 
   const path = (value as { path?: unknown }).path;
   if (typeof path !== "string") {
-    throw makeError("INVALID_INPUT", "sandbox.path must be a string");
+    throw makeError("INVALID_INPUT", "workspace.path must be a string");
   }
   if (path.trim().length === 0) {
-    throw makeError("INVALID_INPUT", "sandbox.path must not be empty");
+    throw makeError("INVALID_INPUT", "workspace.path must not be empty");
   }
 
   return { path };
@@ -972,7 +972,7 @@ export class PedelecSession<TToolName extends string = string> {
   private pendingSend: PendingSend | null = null;
   private pendingPrepare: PendingSend | null = null;
   private preparePromise: Promise<void> | null = null;
-  private uploadPromise: Promise<SandboxAssetPath> | null = null;
+  private uploadPromise: Promise<AssetPath> | null = null;
   private ending = false;
   private prepared = false;
   private activeTurn: ActiveTurn | null = null;
@@ -1126,9 +1126,9 @@ export class PedelecSession<TToolName extends string = string> {
     };
   }
 
-  uploadAsset(file: File): Promise<SandboxAssetPath>;
-  uploadAsset(file: File, targetPath: SandboxAssetPath): Promise<SandboxAssetPath>;
-  uploadAsset(file: File, targetPath?: SandboxAssetPath): Promise<SandboxAssetPath> {
+  uploadAsset(file: File): Promise<AssetPath>;
+  uploadAsset(file: File, targetPath: AssetPath): Promise<AssetPath>;
+  uploadAsset(file: File, targetPath?: AssetPath): Promise<AssetPath> {
     if (this.transportDetached || this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     if (this.uploadPromise) {
       return Promise.reject(makeError("SESSION_BUSY", "session is busy", { sessionId: this.sessionId }));
@@ -1152,22 +1152,22 @@ export class PedelecSession<TToolName extends string = string> {
       if (!response.ok) throw normalizeError(payload?.error, "ASSET_UPLOAD_FAILED", "asset upload failed");
         if (!isValidAssetPath(payload?.path)) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response had an invalid path");
         if (targetPath !== undefined && payload.path !== targetPath) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response path did not match target path");
-      return payload.path as SandboxAssetPath;
+      return payload.path as AssetPath;
     }).finally(() => { this.uploadPromise = null; });
     return this.uploadPromise;
   }
 
-  listAssets(): Promise<SandboxAsset[]> {
+  listAssets(): Promise<Asset[]> {
     if (this.transportDetached || this.ending || this.status === "ended") {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
     return this.client.request("list_assets", { sessionId: this.sessionId }).then(normalizeListAssetsResponse);
   }
 
-  readAsset(path: SandboxAssetPath, type: "text"): Promise<string>;
-  readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>;
-  readAsset(path: SandboxAssetPath, type: "file"): Promise<File>;
-  readAsset<T = JsonValue>(path: SandboxAssetPath, type: ReadAssetType): Promise<string | T | File> {
+  readAsset(path: AssetPath, type: "text"): Promise<string>;
+  readAsset<T = JsonValue>(path: AssetPath, type: "json"): Promise<T>;
+  readAsset(path: AssetPath, type: "file"): Promise<File>;
+  readAsset<T = JsonValue>(path: AssetPath, type: ReadAssetType): Promise<string | T | File> {
     if (this.transportDetached || this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     if (!isValidAssetPath(path) || !["text", "json", "file"].includes(type)) {
       return Promise.reject(makeError("ASSET_PATH_INVALID", "asset path or read type is invalid"));
@@ -1569,22 +1569,22 @@ function normalizePedelecSettings(value: unknown): PedelecSettings {
   return { defaultProvider: value.defaultProvider };
 }
 
-function normalizeSandboxFolderPickerResponse(value: unknown): SandboxFolderPickerResult | null {
+function normalizeWorkspaceFolderPickerResponse(value: unknown): WorkspaceFolderPickerResult | null {
   if (!isPlainObject(value) || !("path" in value)) {
-    throw makeError("SDK_PROTOCOL_ERROR", "pick_sandbox_folder response had an invalid shape");
+    throw makeError("SDK_PROTOCOL_ERROR", "pick_workspace_folder response had an invalid shape");
   }
 
   const path = value.path;
   if (path === null) return null;
   if (typeof path !== "string" || path.length === 0 ||
-      typeof value.isEmptyFolder !== "boolean" || typeof value.hasSandboxConfig !== "boolean") {
-    throw makeError("SDK_PROTOCOL_ERROR", "pick_sandbox_folder response had an invalid shape");
+      typeof value.isEmptyFolder !== "boolean" || typeof value.hasWorkspaceConfig !== "boolean") {
+    throw makeError("SDK_PROTOCOL_ERROR", "pick_workspace_folder response had an invalid shape");
   }
 
   return {
     path,
     isEmptyFolder: value.isEmptyFolder,
-    hasSandboxConfig: value.hasSandboxConfig,
+    hasWorkspaceConfig: value.hasWorkspaceConfig,
   };
 }
 

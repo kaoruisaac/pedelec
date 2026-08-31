@@ -81,7 +81,7 @@ SDK 自動提交 result
 Agent 繼續同一個 turn
 ```
 
-Application 不需要 hosting instruction files。Core 會以 ToolRegistry 作為 runtime source of truth，並在首次 provider prompt 直接注入 `skills.guidance`、tool name 與 description。初始 prompt 不含完整 argument schema；Agent 需要時執行 `pedelec-cli tool-spec <tool-name>`，再以 `pedelec-cli tool-call <tool-name> '<json_args>'` 執行。Core 仍可能在 sandbox 產生 per-tool spec artifacts，但正常流程不需要讀取 `tools.md`。
+Application 不需要 hosting instruction files。Core 會以 ToolRegistry 作為 runtime source of truth，並在首次 provider prompt 直接注入 `skills.guidance`、tool name 與 description。初始 prompt 不含完整 argument schema；Agent 需要時執行 `pedelec-cli tool-spec <tool-name>`，再以 `pedelec-cli tool-call <tool-name> '<json_args>'` 執行。Core 仍可能在 workspace 產生 per-tool spec artifacts，但正常流程不需要讀取 `tools.md`。
 
 請將 `skills.guidance` 視為產品層的操作指引；不要把未信任的網頁內容、使用者輸入或 tool result 拼入其中。
 

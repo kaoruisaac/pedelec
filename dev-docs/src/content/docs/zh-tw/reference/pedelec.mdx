@@ -57,14 +57,14 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       provider: ProviderCode;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      sandbox?: CreateSessionSandboxInput;
+      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      sandbox?: CreateSessionSandboxInput;
+      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -74,11 +74,11 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 - 無 `provider`：使用 Desktop `defaultProvider` 並確認 available。
 - `provider` 可搭配 provider-independent `effortLevel`；省略時使用 `default`。
 - `provider` + `model`：使用 explicit values。
-- `sandbox.path`：可選擇使用 absolute、由 application 管理的 workspace，取代 temporary managed sandbox。
+- `workspace.path`：可選擇使用 absolute、由 application 管理的 workspace，取代 temporary managed workspace。
 - 只有 `model`：invalid。
 - `autoEndOnDisconnect`：預設 `true`。
 
-Explicit `sandbox.path` 可以是新目錄或既有目錄。Core 會建立 Pedelec 擁有的 `.pedelec-sandbox/{skills,assets,logs,tmp}/` runtime 結構，但不清空既有 project 內容。Pedelec 永遠不會刪除 explicit workspace，多個 active session 也可以共用它。Path 不得與 Pedelec managed sandbox root overlap；無效 path 回傳 `SANDBOX_PATH_INVALID`。
+Explicit `workspace.path` 可以是新目錄或既有目錄。Core 會建立 Pedelec 擁有的 `.pedelec-runtime/{skills,assets,logs,tmp}/` runtime 結構，但不清空既有 project 內容。Pedelec 永遠不會刪除 explicit workspace，多個 active session 也可以共用它。Path 不得與 Pedelec managed workspace root overlap；無效 path 回傳 `WORKSPACE_PATH_INVALID`。
 
 ### Returns
 
@@ -100,28 +100,28 @@ const session = await pedelec.createSession({
 });
 ```
 
-## `sandboxFolderPicker()`
+## `workspaceFolderPicker()`
 
 ```ts
-sandboxFolderPicker(): Promise<SandboxFolderPickerResult | null>
+workspaceFolderPicker(): Promise<WorkspaceFolderPickerResult | null>
 ```
 
-透過 Pedelec Desktop 開啟作業系統的原生、僅可選取資料夾的 picker。選取資料夾時回傳 path、根目錄是否為空，以及 `.pedelec-lock.json` 是否為 regular file；關閉或取消時 resolve `null`。
+透過 Pedelec Desktop 開啟作業系統的原生、僅可選取資料夾的 picker。選取資料夾時回傳 path、根目錄是否為空，以及 `.pedelec-workspace.json` 是否為 regular file；關閉或取消時 resolve `null`。
 
 ```ts
-const folder = await pedelec.sandboxFolderPicker();
+const folder = await pedelec.workspaceFolderPicker();
 if (!folder) return;
 
-if (!folder.isEmptyFolder && !folder.hasSandboxConfig) {
+if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
   // application 自行決定是否警告使用者。
 }
 
 const session = await pedelec.createSession({
-  sandbox: { path: folder.path },
+  workspace: { path: folder.path },
 });
 ```
 
-這是敏感的 Desktop API，可能觸發目前 origin 的 approval flow。Picker 只做 read-only observation，不會驗證或初始化 sandbox、建立 workspace 子目錄、parse marker JSON，也不限制 origin 或 SDK version。`isEmptyFolder` 只反映根目錄當下是否有任何 entry；`hasSandboxConfig` 只判斷 `.pedelec-lock.json` 是否為 regular file，即使內容不是合法 JSON 也算存在。既有的 custom-sandbox validation 仍由 `createSession()` 負責；成功初始化後才建立含 SDK version 與 normalized caller origin 的 `.pedelec-lock.json`。Picker 真正失敗時 reject `DIRECTORY_PICKER_FAILED`；使用者取消不是 error。
+這是敏感的 Desktop API，可能觸發目前 origin 的 approval flow。Picker 只做 read-only observation，不會驗證或初始化 workspace、建立 workspace 子目錄、parse marker JSON，也不限制 origin 或 SDK version。`isEmptyFolder` 只反映根目錄當下是否有任何 entry；`hasWorkspaceConfig` 只判斷 `.pedelec-workspace.json` 是否為 regular file，即使內容不是合法 JSON 也算存在。既有的 custom workspace validation 仍由 `createSession()` 負責；成功初始化後才建立含 SDK version 與 normalized caller origin 的 `.pedelec-workspace.json`。Picker 真正失敗時 reject `DIRECTORY_PICKER_FAILED`；使用者取消不是 error。
 
 ## `listProviders()`
 

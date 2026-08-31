@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-Pedelec does not allow any web page to create local agent sessions or open a native directory picker automatically. The Chrome Extension identifies the page origin and requires user approval before the first `createSession()`, `resumeSession()`, or `sandboxFolderPicker()` from that origin.
+Pedelec does not allow any web page to create local agent sessions or open a native directory picker automatically. The Chrome Extension identifies the page origin and requires user approval before the first `createSession()`, `resumeSession()`, or `workspaceFolderPicker()` from that origin.
 
 ## Read approval status
 
@@ -64,7 +64,7 @@ It returns Extension, approval, Desktop, and an optional normalized error. An un
 
 ## What triggers the approval popup
 
-`getApprovalStatus()` only reads status and pings Core. It does not request approval. `getSettings()`, `listProviders()`, and `sandboxFolderPicker()` are sensitive Desktop APIs: they require origin approval and can trigger the approval popup. They expose only defaults, provider summaries, or the explicitly selected folder observation; use `appConnected` rather than `listProviders()` for connectivity.
+`getApprovalStatus()` only reads status and pings Core. It does not request approval. `getSettings()`, `listProviders()`, and `workspaceFolderPicker()` are sensitive Desktop APIs: they require origin approval and can trigger the approval popup. They expose only defaults, provider summaries, or the explicitly selected folder observation; use `appConnected` rather than `listProviders()` for connectivity.
 
 The first operation that creates/resumes a session or opens the directory picker triggers approval when needed:
 
@@ -73,7 +73,7 @@ await pedelec.createSession({ provider: "codex" });
 // or
 await pedelec.resumeSession(savedSessionId);
 // or
-const folder = await pedelec.sandboxFolderPicker();
+const folder = await pedelec.workspaceFolderPicker();
 ```
 
 The extension queues the request, opens its popup, and waits for the user to approve or reject the site. After approval, the queued operation continues automatically.

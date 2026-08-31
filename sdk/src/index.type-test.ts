@@ -7,16 +7,16 @@ import {
   type PedelecEventContext,
   type StatusEventContext,
   type ToolCallContext,
-  type SandboxAsset,
-  type SandboxAssetPath,
+  type Asset,
+  type AssetPath,
   type PedelecAvailability,
   type ApprovalStatus,
   type ProviderInfo,
-  type CreateSessionSandboxInput,
-  type SandboxFolderPickerResult,
+  type CreateSessionWorkspaceInput,
+  type WorkspaceFolderPickerResult,
 } from "./index";
 
-function sandboxInputHasPublicType(): CreateSessionSandboxInput {
+function workspaceInputHasPublicType(): CreateSessionWorkspaceInput {
   return { path: "C:\\workspace\\project" };
 }
 
@@ -115,10 +115,10 @@ async function noSkillsFallsBackToString() {
   const pedelec = new Pedelec();
   const session = await pedelec.createSession({
     provider: "codex",
-    sandbox: { path: "C:\\workspace\\project" },
+    workspace: { path: "C:\\workspace\\project" },
   });
-  const typedSandbox: CreateSessionSandboxInput = sandboxInputHasPublicType();
-  void typedSandbox;
+  const typedWorkspace: CreateSessionWorkspaceInput = workspaceInputHasPublicType();
+  void typedWorkspace;
 
   session.onTool((name) => {
     const anyString: string = name;
@@ -135,6 +135,11 @@ async function effortLevelPublicTypeContract() {
   await pedelec.createSession({ effortLevel: "high" });
   const session = await pedelec.createSession({ provider: "codex", effortLevel: "low" });
 
+  // @ts-expect-error the removed sandbox input is not part of the public contract
+  pedelec.createSession({ provider: "codex", sandbox: { path: "C:\\workspace\\legacy" } });
+  // @ts-expect-error the removed sandbox picker is not part of the public contract
+  pedelec.sandboxFolderPicker();
+
   // @ts-expect-error model is no longer a createSession option
   pedelec.createSession({ provider: "codex", model: "gpt-5" });
   // @ts-expect-error session no longer exposes provider model
@@ -147,8 +152,8 @@ async function listAssetsHasPublicTypes() {
   const pedelec = new Pedelec();
   const session = await pedelec.resumeSession("thread_1");
   const assets = await session.listAssets();
-  assets satisfies SandboxAsset[];
-  const path: SandboxAssetPath = assets[0]!.path;
+  assets satisfies Asset[];
+  const path: AssetPath = assets[0]!.path;
   path satisfies `/${string}`;
 }
 
@@ -157,13 +162,13 @@ async function assetPathsUseAssetsAsAnImplicitRoot() {
   const session = await pedelec.resumeSession("thread_1");
   const file = new File(["asset"], "original.txt", { type: "text/plain" });
   const generated = await session.uploadAsset(file);
-  generated satisfies SandboxAssetPath;
+  generated satisfies AssetPath;
   const exact = await session.uploadAsset(file, "/img/image.txt");
-  exact satisfies SandboxAssetPath;
-  const namedAssetsDirectory: SandboxAssetPath = "/assets/image.txt";
+  exact satisfies AssetPath;
+  const namedAssetsDirectory: AssetPath = "/assets/image.txt";
   void namedAssetsDirectory;
   // @ts-expect-error asset paths must begin with a slash
-  const missingSlash: SandboxAssetPath = "assets/image.txt";
+  const missingSlash: AssetPath = "assets/image.txt";
   void missingSlash;
 }
 
@@ -175,15 +180,15 @@ async function availabilityHasPublicType() {
   void promise;
 }
 
-async function sandboxFolderPickerHasPublicType() {
+async function workspaceFolderPickerHasPublicType() {
   const pedelec = new Pedelec();
-  const result: Promise<SandboxFolderPickerResult | null> = pedelec.sandboxFolderPicker();
+  const result: Promise<WorkspaceFolderPickerResult | null> = pedelec.workspaceFolderPicker();
   void result;
 }
 
 function directoryPickerIsRemoved() {
   const pedelec = new Pedelec();
-  // @ts-expect-error directoryPicker was removed in favor of sandboxFolderPicker
+  // @ts-expect-error directoryPicker was removed in favor of workspaceFolderPicker
   pedelec.directoryPicker();
 }
 
@@ -206,7 +211,7 @@ void noSkillsFallsBackToString;
 void effortLevelPublicTypeContract;
 void listAssetsHasPublicTypes;
 void availabilityHasPublicType;
-void sandboxFolderPickerHasPublicType;
+void workspaceFolderPickerHasPublicType;
 void directoryPickerIsRemoved;
 void publicSecurityTypesAreRestricted;
 

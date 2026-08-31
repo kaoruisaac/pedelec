@@ -28,7 +28,7 @@ A web application can use Pedelec to:
 - send user instructions and receive streamed assistant text;
 - expose narrowly scoped browser-side tools to the agent;
 - resume or end sessions; and
-- upload and list completed sandbox assets; and
+- upload and list completed workspace assets; and
 - show connection, approval, provider, and lifecycle state in the UI.
 
 ## Why Pedelec exists
@@ -146,7 +146,7 @@ const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
 ```
 
-The physical shared App/Agent directory is `.pedelec-sandbox/assets/`. In the SDK contract, `assets/` is its implicit root: `listAssets()` recursively lists regular files at every level as a flat array, ordered by filesystem modification time (newest first) and then by name; nested paths such as `/results/report.json` are returned in full. Directory entries and symlinks are excluded, as are `.pedelec-*` entries at every level; other dotfiles are included. It may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
+The physical shared App/Agent directory is `.pedelec-runtime/assets/`. In the SDK contract, `assets/` is its implicit root: `listAssets()` recursively lists regular files at every level as a flat array, ordered by filesystem modification time (newest first) and then by name; nested paths such as `/results/report.json` are returned in full. Directory entries and symlinks are excluded, as are `.pedelec-*` entries at every level; other dotfiles are included. It may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
 
 ```ts
 const text = await session.readAsset("/report.txt", "text");
@@ -156,37 +156,39 @@ const result = await session.readAsset("/model.glb", "file");
 
 Public asset paths use `/...` with `assets/` as their implicit root; nested paths such as `/results/model.glb` are supported up to 100 MiB.
 
-## Sandbox workspace
+## Workspace
 
-By default, each session receives a temporary Desktop-managed sandbox. To use an application-owned workspace that can persist across sessions, pass an absolute path:
+Workspace is the filesystem root in which the Agent works. Pedelec stores its private runtime data under `<workspace>/.pedelec-runtime/`.
+
+By default, each session receives a temporary Desktop-managed workspace. To use an application-owned workspace that can persist across sessions, pass an absolute path:
 
 ```ts
 const session = await pedelec.createSession({
   provider: "codex",
-  sandbox: { path: "C:\\workspace\\project-a" },
+  workspace: { path: "C:\\workspace\\project-a" },
 });
 ```
 
-Pedelec creates `.pedelec-sandbox/` with missing `assets/`, `logs/`, `skills/`, and `tmp/` subdirectories, preserving existing project files and existing private data. It never deletes an explicit workspace, and multiple active sessions may share it. Filesystem write conflicts are the application's responsibility. An explicit path must not overlap Pedelec's managed sandbox root.
+Pedelec creates `.pedelec-runtime/` with missing `assets/`, `logs/`, `skills/`, and `tmp/` subdirectories, preserving existing project files and existing private data. It never deletes an explicit workspace, and multiple active sessions may share it. Filesystem write conflicts are the application's responsibility. An explicit path must not overlap Pedelec's managed workspace root.
 
 ## Selecting an Application Workspace
 
-Use `sandboxFolderPicker()` when the application wants the user to choose a local workspace before creating a session:
+Use `workspaceFolderPicker()` when the application wants the user to choose a local workspace before creating a session:
 
 ```ts
-const folder = await pedelec.sandboxFolderPicker();
+const folder = await pedelec.workspaceFolderPicker();
 if (!folder) return; // The user cancelled the native picker.
 
-if (!folder.isEmptyFolder && !folder.hasSandboxConfig) {
+if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
   // The application decides whether to warn the user.
 }
 
 const session = await pedelec.createSession({
-  sandbox: { path: folder.path },
+  workspace: { path: folder.path },
 });
 ```
 
-`sandboxFolderPicker()` returns `Promise<SandboxFolderPickerResult | null>`. It is a read-only snapshot: it does not validate or initialize the selected folder, create workspace directories, or create the sandbox marker. `isEmptyFolder` only reports whether the selected folder root has any filesystem entry. `hasSandboxConfig` is true only when `.pedelec-lock.json` exists as a regular file; its JSON is not parsed. The picker requires the same origin approval as other sensitive Desktop APIs, and cancellation returns `null`. `createSession()` still applies the full sandbox rules and creates the marker after successful custom sandbox initialization. The marker currently records the SDK version and normalized caller origin but does not restrict reuse by origin or SDK version.
+`workspaceFolderPicker()` returns `Promise<WorkspaceFolderPickerResult | null>`. It is a read-only snapshot: it does not validate or initialize the selected folder, create workspace directories, or create the workspace marker. `isEmptyFolder` only reports whether the selected folder root has any filesystem entry. `hasWorkspaceConfig` is true only when `.pedelec-workspace.json` exists as a regular file; its JSON is not parsed. The picker requires the same origin approval as other sensitive Desktop APIs, and cancellation returns `null`. `createSession()` still applies the full workspace rules and creates the marker after successful custom workspace initialization. The marker currently records the SDK version and normalized caller origin but does not restrict reuse by origin or SDK version.
 
 ---
 

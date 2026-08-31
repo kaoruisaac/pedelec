@@ -59,6 +59,10 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `MESSAGE_TOO_LARGE` | Local IPC message exceeded its size limit | Reduce prompt/tool/result payload | Only with smaller data |
 | `SDK_BRIDGE_TIMEOUT` | Extension did not answer within `bridgeTimeoutMs` | Check all downstream layers; avoid repeated writes | After diagnosing connection |
 | `DIRECTORY_PICKER_FAILED` | The native directory picker could not be created, shown, or converted to the SDK path result | Ask the user to retry and check Desktop/native dialog support; cancellation is not an error | Usually after the dialog/runtime issue is fixed |
+| `WORKSPACE_PATH_INVALID` | The requested workspace path is not absolute, is not a directory, overlaps the managed workspace root, or cannot be resolved | Choose a valid application-managed workspace path | After fixing the path |
+| `WORKSPACE_CREATE_FAILED` | Pedelec could not create or initialize a managed workspace or its private runtime data | Preserve the application-owned workspace and inspect the error details | After fixing the filesystem issue |
+| `WORKSPACE_REMOVE_FAILED` | Pedelec could not remove a managed temporary workspace | Keep the path available for cleanup and inspect locked-file or permission details | After the filesystem issue clears |
+| `WORKSPACE_OPEN_FAILED` | Desktop could not open the validated thread workspace folder | Check the folder and OS opener integration | After fixing the opener issue |
 | `SDK_TRANSPORT_ERROR` | Generic bridge request failure | Inspect `message/details`; verify Extension/native/Core | Depends on operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape or request type did not match SDK expectations | Align component versions; report reproducible mismatch | Usually not until versions/config fixed |
 

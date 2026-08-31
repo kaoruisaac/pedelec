@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-Pedelec 不允許任意網站自動建立本機 agent session 或開啟原生 directory picker。Chrome Extension 會辨識 page origin，並在該 origin 第一次呼叫 `createSession()`、`resumeSession()` 或 `sandboxFolderPicker()` 前要求使用者核准。
+Pedelec 不允許任意網站自動建立本機 agent session 或開啟原生 directory picker。Chrome Extension 會辨識 page origin，並在該 origin 第一次呼叫 `createSession()`、`resumeSession()` 或 `workspaceFolderPicker()` 前要求使用者核准。
 
 ## 讀取 approval status
 
@@ -64,7 +64,7 @@ const availability = await pedelec.checkAvailability();
 
 ## 什麼操作會開啟 approval popup
 
-`getApprovalStatus()` 只讀取狀態並 ping Core，不會主動提出核准要求。`getSettings()`、`listProviders()` 與 `sandboxFolderPicker()` 是敏感 Desktop API，需 origin approval 且可能開啟 popup；它們只回傳 defaults、provider summary，或使用者明確選取的 folder observation。請用 `appConnected`，不要再以 `listProviders()` 作為 connectivity probe。
+`getApprovalStatus()` 只讀取狀態並 ping Core，不會主動提出核准要求。`getSettings()`、`listProviders()` 與 `workspaceFolderPicker()` 是敏感 Desktop API，需 origin approval 且可能開啟 popup；它們只回傳 defaults、provider summary，或使用者明確選取的 folder observation。請用 `appConnected`，不要再以 `listProviders()` 作為 connectivity probe。
 
 尚未核准時，第一個建立/resume session 或開啟 directory picker 的操作才會觸發：
 
@@ -73,7 +73,7 @@ await pedelec.createSession({ provider: "codex" });
 // 或
 await pedelec.resumeSession(savedSessionId);
 // 或
-const folder = await pedelec.sandboxFolderPicker();
+const folder = await pedelec.workspaceFolderPicker();
 ```
 
 Extension 會暫存 request、開啟 popup，等待使用者 approve 或 reject。核准後，原本等待的操作會自動繼續。

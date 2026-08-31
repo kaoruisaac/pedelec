@@ -103,33 +103,33 @@ Common errors: `SESSION_BUSY`, `SESSION_ENDED`, `SEND_TEXT_FAILED`, `SESSION_ERR
 ## `uploadAsset()`
 
 ```ts
-uploadAsset(file: File): Promise<SandboxAssetPath>
-uploadAsset(file: File, targetPath: SandboxAssetPath): Promise<SandboxAssetPath>
+uploadAsset(file: File): Promise<AssetPath>
+uploadAsset(file: File, targetPath: AssetPath): Promise<AssetPath>
 ```
 
-Uploads one browser `File` until session end. It can run alongside prepare, send, and provider execution, but only one upload may run per session. A file is limited to 100 MiB and is stored physically under `.pedelec-sandbox/assets/`; the SDK returns a `/...` path rooted implicitly in `assets/`. Pass `targetPath` to write exactly to a nested path, creating missing parent directories and replacing an existing regular file.
+Uploads one browser `File` until session end. It can run alongside prepare, send, and provider execution, but only one upload may run per session. A file is limited to 100 MiB and is stored physically under `.pedelec-runtime/assets/`; the SDK returns a `/...` path rooted implicitly in `assets/`. Pass `targetPath` to write exactly to a nested path, creating missing parent directories and replacing an existing regular file.
 
 The content is transferred through Desktop's internal `127.0.0.1` loopback asset transfer server, rather than extension, Native Messaging, or Core IPC message bodies. See [Error Codes](./error-codes/) for request, upload `PUT`, and ticket failures.
 
 ## `listAssets()`
 
 ```ts
-listAssets(): Promise<SandboxAsset[]>
+listAssets(): Promise<Asset[]>
 ```
 
-Returns completed regular files from every level of the physical `.pedelec-sandbox/assets/` directory as a flat array. Files created by either the App or Agent can appear. Results are ordered by filesystem modification time newest first, then by `name` when timestamps are equal. Directory entries and file or directory symlinks are not returned or followed. At every level, entries whose basename starts with `.pedelec-` are excluded; other dotfiles and files inside dot-directories are included.
+Returns completed regular files from every level of the physical `.pedelec-runtime/assets/` directory as a flat array. Files created by either the App or Agent can appear. Results are ordered by filesystem modification time newest first, then by `name` when timestamps are equal. Directory entries and file or directory symlinks are not returned or followed. At every level, entries whose basename starts with `.pedelec-` are excluded; other dotfiles and files inside dot-directories are included.
 
 `name` is the basename, while `path` is the complete public path relative to `assets/`, such as `/results/report.json`. `modifiedAt` is the filesystem modification time rather than a guaranteed write-completion timestamp. Listing is allowed while the agent runs; an ending or ended session rejects with `SESSION_ENDED`. Pagination, deletion, rename, and move are not supported.
 
 ## `readAsset()`
 
 ```ts
-readAsset(path: SandboxAssetPath, type: "text"): Promise<string>
-readAsset<T = JsonValue>(path: SandboxAssetPath, type: "json"): Promise<T>
-readAsset(path: SandboxAssetPath, type: "file"): Promise<File>
+readAsset(path: AssetPath, type: "text"): Promise<string>
+readAsset<T = JsonValue>(path: AssetPath, type: "json"): Promise<T>
+readAsset(path: AssetPath, type: "file"): Promise<File>
 ```
 
-Reads a known file from the physical shared session `.pedelec-sandbox/assets/` directory, using a public path such as `/results/report.json`. The path must begin with `/`, use forward slashes, and contain no empty, `.` or `..` segments.
+Reads a known file from the physical shared session `.pedelec-runtime/assets/` directory, using a public path such as `/results/report.json`. The path must begin with `/`, use forward slashes, and contain no empty, `.` or `..` segments.
 
 The read limit is 100 MiB. Reads are allowed while prepare, send, or provider execution is active, but an ending or ended session rejects with `SESSION_ENDED`. If the Agent may still be writing the same path, coordinate completion in your application or agent workflow before reading it.
 
@@ -285,7 +285,7 @@ On success:
 - the session is removed from the client registry;
 - later `sendText()`/`prepare()` rejects.
 
-Calling `end()` terminates the session but does not immediately delete its sandbox. Without `sandbox.path`, the session uses temporary Desktop-managed storage: Pedelec removes managed sandboxes when the Desktop App exits normally and attempts to remove leftovers when it next starts. With an explicit absolute `sandbox.path`, the workspace is application-managed and Pedelec never deletes it on session end, app exit, or stale cleanup; multiple active sessions may share it. Closing the main window only hides the app, so it does not trigger managed cleanup. An ended session still cannot use `uploadAsset()`, `listAssets()`, or `readAsset()`, even while its sandbox remains present. Shared workspace filesystem conflicts remain the application's responsibility, and explicit paths cannot overlap the managed sandbox root.
+Calling `end()` terminates the session but does not immediately delete its workspace. Without `workspace.path`, the session uses temporary Desktop-managed storage: Pedelec removes managed workspaces when the Desktop App exits normally and attempts to remove leftovers when it next starts. With an explicit absolute `workspace.path`, the workspace is application-managed and Pedelec never deletes it on session end, app exit, or stale cleanup; multiple active sessions may share it. Closing the main window only hides the app, so it does not trigger managed cleanup. An ended session still cannot use `uploadAsset()`, `listAssets()`, or `readAsset()`, even while its workspace remains present. Shared workspace filesystem conflicts remain the application's responsibility, and explicit paths cannot overlap the managed workspace root.
 
 Calling `end()` on an already-ended handle resolves immediately.
 

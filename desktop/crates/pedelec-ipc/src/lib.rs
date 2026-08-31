@@ -1,6 +1,6 @@
 use encoding_rs::Encoding;
 use pedelec_core::{
-    error_codes, inspect_sandbox_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
+    error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
     CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError,
     PrepareThreadInput, PrepareThreadOutput, ProviderProcessTermination,
     RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime, SubmitToolResultInput,
@@ -507,7 +507,9 @@ fn handle_core_ipc_request_with_services(
     platform_services: Arc<dyn CoreIpcPlatformServices>,
 ) -> CoreIpcResponse {
     match request.r#type.as_str() {
-        "pick_sandbox_folder" => handle_pick_sandbox_folder_request(&request, platform_services),
+        "pick_workspace_folder" => {
+            handle_pick_workspace_folder_request(&request, platform_services)
+        }
         "create_thread" => match decode_payload::<CreateThreadInput>(&request) {
             Ok(input) => match match request.caller_origin.as_deref() {
                 Some(origin) => runtime.lock().unwrap().create_sdk_thread(
@@ -619,7 +621,7 @@ fn handle_core_ipc_request_with_services(
     }
 }
 
-fn handle_pick_sandbox_folder_request(
+fn handle_pick_workspace_folder_request(
     request: &CoreIpcRequest,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
 ) -> CoreIpcResponse {
@@ -642,7 +644,7 @@ fn handle_pick_sandbox_folder_request(
     match platform_services.pick_directory() {
         Ok(None) => ok_response(&request.request_id, serde_json::json!({ "path": null })),
         Ok(Some(path)) => {
-            let inspection = match inspect_sandbox_folder(&path) {
+            let inspection = match inspect_workspace_folder(&path) {
                 Ok(inspection) => inspection,
                 Err(err) => return error_response(&request.request_id, err),
             };
@@ -652,7 +654,7 @@ fn handle_pick_sandbox_folder_request(
                     serde_json::json!({
                         "path": path,
                         "isEmptyFolder": inspection.is_empty_folder,
-                        "hasSandboxConfig": inspection.has_sandbox_config,
+                        "hasWorkspaceConfig": inspection.has_workspace_config,
                     }),
                 ),
                 Err(_) => error_response(
@@ -1711,7 +1713,7 @@ mod tests {
         let cwd = if cfg!(windows) {
             PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test")
         } else {
-            PathBuf::from("/tmp/pedelec-sandbox")
+            PathBuf::from("/tmp/pedelec-workspace")
         };
         let spec = pedelec_core::CommandSpec {
             program: "codex".into(),
@@ -2100,7 +2102,7 @@ mod tests {
                 provider: pedelec_core::ProviderCode::Codex,
                 effort_level: pedelec_core::EffortLevel::Default,
                 effort_args: Vec::new(),
-                sandbox_path: PathBuf::from("."),
+                workspace_path: PathBuf::from("."),
                 skills: Vec::new(),
                 status: pedelec_core::ThreadStatus::Idle,
                 process_id: None,

@@ -12,7 +12,7 @@ Read this checklist before declaring the integration complete.
 - End, unmount, route change, reload, and error paths clean up listeners and handlers.
 - Resume restores UI listeners, handlers, resource mapping, and ownership guards.
 - `autoEndOnDisconnect` matches the persistence requirement.
-- Sandbox ownership and explicit workspace conflict rules are understood.
+- Workspace ownership and explicit workspace conflict rules are understood.
 
 ## Tool contracts
 

@@ -38,7 +38,7 @@ fn tcp_picker_request_returns_selected_path_without_creating_session_state() {
     let response = send_core_ipc_request_with_runtime_path(
         &CoreIpcRequest {
             request_id: "pick_path".into(),
-            r#type: "pick_sandbox_folder".into(),
+            r#type: "pick_workspace_folder".into(),
             caller_origin: Some("https://approved.example".into()),
             caller_sdk_version: None,
             payload: Some(json!({})),
@@ -53,7 +53,7 @@ fn tcp_picker_request_returns_selected_path_without_creating_session_state() {
         Some(json!({
             "path": selected.to_string_lossy().to_string(),
             "isEmptyFolder": true,
-            "hasSandboxConfig": false,
+            "hasWorkspaceConfig": false,
         }))
     );
     assert!(runtime
@@ -70,7 +70,7 @@ fn ipc_picker_to_custom_session_to_picker_reports_the_created_marker() {
     let selected = temp.path().join("application-workspace");
     std::fs::create_dir_all(&selected).unwrap();
     let runtime: SharedCoreRuntime = Arc::new(Mutex::new(CoreRuntime {
-        sandbox_manager: pedelec_core::SandboxManager::with_sandbox_root(
+        workspace_manager: pedelec_core::WorkspaceManager::with_workspace_root(
             temp.path().join("managed"),
         ),
         ..CoreRuntime::default()
@@ -87,7 +87,7 @@ fn ipc_picker_to_custom_session_to_picker_reports_the_created_marker() {
 
     let picker_request = |request_id: &str| CoreIpcRequest {
         request_id: request_id.into(),
-        r#type: "pick_sandbox_folder".into(),
+        r#type: "pick_workspace_folder".into(),
         caller_origin: Some("https://approved.example".into()),
         caller_sdk_version: None,
         payload: None,
@@ -102,7 +102,7 @@ fn ipc_picker_to_custom_session_to_picker_reports_the_created_marker() {
         Some(json!({
             "path": selected.to_string_lossy().to_string(),
             "isEmptyFolder": true,
-            "hasSandboxConfig": false,
+            "hasWorkspaceConfig": false,
         }))
     );
 
@@ -115,15 +115,15 @@ fn ipc_picker_to_custom_session_to_picker_reports_the_created_marker() {
             payload: Some(json!({
                 "provider": "codex",
                 "skills": null,
-                "sandbox": { "path": selected.to_string_lossy().to_string() },
+                "workspace": { "path": selected.to_string_lossy().to_string() },
             })),
         },
         &runtime_path,
     )
     .unwrap();
     assert!(created.ok);
-    let marker = selected.join(".pedelec-lock.json");
-    assert!(!selected.join(".pedelec-sandbox.json").exists());
+    let marker = selected.join(".pedelec-workspace.json");
+    assert!(!selected.join(".pedelec-lock.json").exists());
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&marker).unwrap()).unwrap(),
         json!({
@@ -142,7 +142,7 @@ fn ipc_picker_to_custom_session_to_picker_reports_the_created_marker() {
         Some(json!({
             "path": selected.to_string_lossy().to_string(),
             "isEmptyFolder": false,
-            "hasSandboxConfig": true,
+            "hasWorkspaceConfig": true,
         }))
     );
 }
@@ -165,14 +165,14 @@ fn tcp_picker_request_reports_root_entries_and_regular_marker_only() {
         match name {
             "file" => std::fs::write(selected.join("README.md"), "hello").unwrap(),
             "subdirectory" => std::fs::create_dir(selected.join("nested")).unwrap(),
-            "marker" => std::fs::write(selected.join(".pedelec-lock.json"), "{}").unwrap(),
+            "marker" => std::fs::write(selected.join(".pedelec-workspace.json"), "{}").unwrap(),
             "invalid-marker" => {
-                std::fs::write(selected.join(".pedelec-lock.json"), "not json").unwrap()
+                std::fs::write(selected.join(".pedelec-workspace.json"), "not json").unwrap()
             }
-            "marker-directory" => std::fs::create_dir(selected.join(".pedelec-lock.json")).unwrap(),
-            "legacy-marker" => {
-                std::fs::write(selected.join(".pedelec-sandbox.json"), "{}").unwrap()
+            "marker-directory" => {
+                std::fs::create_dir(selected.join(".pedelec-workspace.json")).unwrap()
             }
+            "legacy-marker" => std::fs::write(selected.join(".pedelec-lock.json"), "{}").unwrap(),
             _ => unreachable!(),
         }
 
@@ -190,7 +190,7 @@ fn tcp_picker_request_reports_root_entries_and_regular_marker_only() {
         let response = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
                 request_id: format!("pick_{name}"),
-                r#type: "pick_sandbox_folder".into(),
+                r#type: "pick_workspace_folder".into(),
                 caller_origin: Some("https://approved.example".into()),
                 caller_sdk_version: None,
                 payload: None,
@@ -205,7 +205,7 @@ fn tcp_picker_request_reports_root_entries_and_regular_marker_only() {
             expected_empty
         );
         assert_eq!(
-            response.result.as_ref().unwrap()["hasSandboxConfig"],
+            response.result.as_ref().unwrap()["hasWorkspaceConfig"],
             expected_marker
         );
     }
@@ -226,7 +226,7 @@ fn tcp_picker_request_preserves_cancel_and_failure_and_requires_origin() {
     let cancelled = send_core_ipc_request_with_runtime_path(
         &CoreIpcRequest {
             request_id: "pick_cancel".into(),
-            r#type: "pick_sandbox_folder".into(),
+            r#type: "pick_workspace_folder".into(),
             caller_origin: Some("https://approved.example".into()),
             caller_sdk_version: None,
             payload: None,
@@ -240,7 +240,7 @@ fn tcp_picker_request_preserves_cancel_and_failure_and_requires_origin() {
     let missing_origin = send_core_ipc_request_with_runtime_path(
         &CoreIpcRequest {
             request_id: "pick_unauthorized".into(),
-            r#type: "pick_sandbox_folder".into(),
+            r#type: "pick_workspace_folder".into(),
             caller_origin: None,
             caller_sdk_version: None,
             payload: None,
@@ -269,7 +269,7 @@ fn tcp_picker_request_preserves_cancel_and_failure_and_requires_origin() {
     let failed = send_core_ipc_request_with_runtime_path(
         &CoreIpcRequest {
             request_id: "pick_failed".into(),
-            r#type: "pick_sandbox_folder".into(),
+            r#type: "pick_workspace_folder".into(),
             caller_origin: Some("https://approved.example".into()),
             caller_sdk_version: None,
             payload: None,
@@ -301,7 +301,7 @@ fn tcp_picker_request_rejects_inspection_io_failures_and_old_request_type() {
     let failed = send_core_ipc_request_with_runtime_path(
         &CoreIpcRequest {
             request_id: "pick_inspection_failed".into(),
-            r#type: "pick_sandbox_folder".into(),
+            r#type: "pick_workspace_folder".into(),
             caller_origin: Some("https://approved.example".into()),
             caller_sdk_version: None,
             payload: None,
@@ -318,7 +318,7 @@ fn tcp_picker_request_rejects_inspection_io_failures_and_old_request_type() {
     let old = send_core_ipc_request_with_runtime_path(
         &CoreIpcRequest {
             request_id: "pick_old".into(),
-            r#type: "pick_directory".into(),
+            r#type: "pick_sandbox_folder".into(),
             caller_origin: Some("https://approved.example".into()),
             caller_sdk_version: None,
             payload: None,

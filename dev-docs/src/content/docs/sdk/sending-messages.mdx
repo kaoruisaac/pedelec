@@ -9,11 +9,11 @@ A session processes one turn at a time. `prepare()` is an optional optimization;
 
 ## Work with session assets
 
-The App and Agent share the session's physical `.pedelec-sandbox/assets/` directory. The SDK exposes that store through public `/...` paths whose implicit root is not included in the returned path. The App can upload input files, recursively list completed files from every level, and read files produced by either side until the session ends.
+The App and Agent share the session's physical `.pedelec-runtime/assets/` directory. The SDK exposes that store through public `/...` paths whose implicit root is not included in the returned path. The App can upload input files, recursively list completed files from every level, and read files produced by either side until the session ends.
 
 ### Upload a file
 
-Use `uploadAsset()` with one browser `File`. Files are limited to 100 MiB; returned public paths use `/...`, with `.pedelec-sandbox/assets/` as their physical root and `assets/` as their implicit SDK root. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
+Use `uploadAsset()` with one browser `File`. Files are limited to 100 MiB; returned public paths use `/...`, with `.pedelec-runtime/assets/` as their physical root and `assets/` as their implicit SDK root. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
 
 ```ts
 const file = input.files?.[0];
@@ -23,7 +23,7 @@ const path = await session.uploadAsset(file);
 await session.sendText(`Please process this file: ${path}`);
 ```
 
-The file body is sent directly to a loopback server listening on `127.0.0.1`; it does not travel through the extension, native-messaging host, or Core IPC. A successful upload only means the file is available in the sandbox—it does not guarantee that the selected provider or model can understand its format.
+The file body is sent directly to a loopback server listening on `127.0.0.1`; it does not travel through the extension, native-messaging host, or Core IPC. A successful upload only means the file is available in the workspace—it does not guarantee that the selected provider or model can understand its format.
 
 ### List assets
 

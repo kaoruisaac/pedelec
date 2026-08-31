@@ -1,6 +1,6 @@
 //! Loopback-only binary asset data plane.  The control plane only creates tickets.
 use pedelec_core::{
-    error_codes, sandbox_assets_root, sandbox_tmp_root, AssetDownloadState, AssetUploadState,
+    error_codes, workspace_assets_root, workspace_tmp_root, AssetDownloadState, AssetUploadState,
     PedelecError, SharedCoreRuntime, MAX_ASSET_UPLOAD_BYTES,
 };
 use sha2::{Digest, Sha256};
@@ -11,8 +11,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
-fn asset_upload_temp_path(sandbox_path: &Path, upload_id: &str) -> std::path::PathBuf {
-    sandbox_tmp_root(sandbox_path).join(format!("{upload_id}.upload"))
+fn asset_upload_temp_path(workspace_path: &Path, upload_id: &str) -> std::path::PathBuf {
+    workspace_tmp_root(workspace_path).join(format!("{upload_id}.upload"))
 }
 
 pub fn start_asset_upload_server(runtime: SharedCoreRuntime) -> Result<u16, PedelecError> {
@@ -139,10 +139,10 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
         }
         ticket.state = AssetUploadState::Uploading;
         (
-            asset_upload_temp_path(&ticket.sandbox_path, upload_id),
-            sandbox_assets_root(&ticket.sandbox_path),
+            asset_upload_temp_path(&ticket.workspace_path, upload_id),
+            workspace_assets_root(&ticket.workspace_path),
             ticket.relative_path.clone(),
-            sandbox_assets_root(&ticket.sandbox_path).join(&ticket.relative_path),
+            workspace_assets_root(&ticket.workspace_path).join(&ticket.relative_path),
             ticket.expected_size_bytes,
             ticket.public_path.clone(),
         )
@@ -264,7 +264,7 @@ fn handle_download(
                 );
             }
         };
-        let root = sandbox_assets_root(&ticket.sandbox_path);
+        let root = workspace_assets_root(&ticket.workspace_path);
         let target = relative
             .split('/')
             .fold(root.clone(), |path, part| path.join(part));
@@ -441,7 +441,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use pedelec_core::{
-        sandbox_assets_root, sandbox_tmp_root, AssetUploadState, CoreRuntime,
+        workspace_assets_root, workspace_tmp_root, AssetUploadState, CoreRuntime,
         CreateAssetUploadInput, EffortLevel, ProviderAdapterState, ProviderCode, ThreadState,
         ThreadStatus,
     };
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn upload_ticket_uses_private_asset_and_tmp_layout() {
         let temp = tempdir().unwrap();
-        let sandbox_path = temp.path().join("sandbox");
+        let workspace_path = temp.path().join("workspace");
         let thread_id = "thread_upload_layout".to_string();
         let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
         runtime.lock().unwrap().thread_manager.insert_thread(
@@ -462,7 +462,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: EffortLevel::Default,
                 effort_args: vec![],
-                sandbox_path: sandbox_path.clone(),
+                workspace_path: workspace_path.clone(),
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 process_id: None,
@@ -508,18 +508,18 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 201"), "response: {response}");
         assert!(response.contains(r#"{"path":"/nested/upload.txt"}"#));
-        assert!(!response.contains(".pedelec-sandbox"));
+        assert!(!response.contains(".pedelec-runtime"));
 
-        let private_asset = sandbox_assets_root(&sandbox_path).join("nested/upload.txt");
+        let private_asset = workspace_assets_root(&workspace_path).join("nested/upload.txt");
         assert_eq!(std::fs::read(&private_asset).unwrap(), payload.as_slice());
-        assert!(!sandbox_path.join("assets/nested/upload.txt").exists());
+        assert!(!workspace_path.join("assets/nested/upload.txt").exists());
 
-        let private_tmp_root = sandbox_tmp_root(&sandbox_path);
-        let private_tmp = asset_upload_temp_path(&sandbox_path, &ticket.upload_id);
+        let private_tmp_root = workspace_tmp_root(&workspace_path);
+        let private_tmp = asset_upload_temp_path(&workspace_path, &ticket.upload_id);
         assert_eq!(private_tmp.parent(), Some(private_tmp_root.as_path()));
         assert!(private_tmp_root.is_dir());
         assert!(!private_tmp.exists());
-        assert!(!sandbox_path.join("tmp").exists());
+        assert!(!workspace_path.join("tmp").exists());
 
         assert_eq!(
             runtime

@@ -1,20 +1,20 @@
-use pedelec_core::SandboxManager;
+use pedelec_core::WorkspaceManager;
 
 #[test]
-fn sandbox_manager_public_contract_creates_and_removes_a_thread_sandbox() {
+fn workspace_manager_public_contract_creates_and_removes_a_thread_workspace() {
     let temp = tempfile::tempdir().unwrap();
-    let manager = SandboxManager::with_sandbox_root(temp.path());
+    let manager = WorkspaceManager::with_workspace_root(temp.path());
 
     let path = manager
-        .create_thread_sandbox("thread_public_contract")
+        .create_thread_workspace("thread_public_contract")
         .unwrap();
     assert!(path.is_dir());
     assert!(manager
-        .thread_sandbox_exists("thread_public_contract")
+        .thread_workspace_exists("thread_public_contract")
         .unwrap());
 
-    manager.remove_thread_sandbox(&path).unwrap();
+    manager.remove_thread_workspace(&path).unwrap();
     assert!(!manager
-        .thread_sandbox_exists("thread_public_contract")
+        .thread_workspace_exists("thread_public_contract")
         .unwrap());
 }

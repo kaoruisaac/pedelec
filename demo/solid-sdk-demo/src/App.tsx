@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type SandboxAsset, type ToolArgsSchema } from "pedelec";
+import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema } from "pedelec";
 
 const MAX_EVENTS = 300;
 const MAX_ASSET_SIZE_BYTES = 100 * 1024 * 1024;
@@ -51,7 +51,7 @@ type DemoSessionState = {
   sessionId: string;
   provider: string;
   effortLevel?: "default" | "low" | "high";
-  sandboxPath?: string;
+  workspacePath?: string;
   resumed: boolean;
   status: SessionStatus;
   transcript: DemoChatMessage[];
@@ -61,7 +61,7 @@ type DemoSessionState = {
   createdAt: number;
   updatedAt: number;
   sending: boolean;
-  assets: SandboxAsset[];
+  assets: Asset[];
   assetsLoading: boolean;
   assetsLoaded: boolean;
   assetsError: PedelecError | null;
@@ -140,8 +140,8 @@ export default function App() {
   const [providers, setProviders] = createSignal<ProviderInfo[]>([]);
   const [providersLoading, setProvidersLoading] = createSignal(false);
   const [effortLevel, setEffortLevel] = createSignal<"default" | "low" | "high">("default");
-  const [sandboxPath, setSandboxPath] = createSignal("");
-  const [sandboxPicking, setSandboxPicking] = createSignal(false);
+  const [workspacePath, setWorkspacePath] = createSignal("");
+  const [workspacePicking, setWorkspacePicking] = createSignal(false);
   const [resumeId, setResumeId] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [selectedAsset, setSelectedAsset] = createSignal<File | null>(null);
@@ -175,7 +175,7 @@ export default function App() {
     );
   });
   const canCreate = createMemo(() =>
-    Boolean(client() && provider() && !providersLoading() && providers().length > 0 && !sandboxPicking()),
+    Boolean(client() && provider() && !providersLoading() && providers().length > 0 && !workspacePicking()),
   );
 
   function resetClient() {
@@ -187,8 +187,8 @@ export default function App() {
     setProviders([]);
     setProvidersLoading(false);
     setProvider("");
-    setSandboxPath("");
-    setSandboxPicking(false);
+    setWorkspacePath("");
+    setWorkspacePicking(false);
     setSelectedAsset(null);
     clearAssetFileInput();
     setConnection(initializeClient(setClient));
@@ -234,24 +234,24 @@ export default function App() {
   async function createSession(event: SubmitEvent) {
     event.preventDefault();
     const sdk = client();
-    if (!sdk || sandboxPicking()) return;
+    if (!sdk || workspacePicking()) return;
 
-    const selectedSandboxPath = sandboxPath();
-    const sandbox = selectedSandboxPath ? { path: selectedSandboxPath } : undefined;
+    const selectedWorkspacePath = workspacePath();
+    const workspace = selectedWorkspacePath ? { path: selectedWorkspacePath } : undefined;
 
     try {
       appendGlobalEvent("create_session_requested", {
         provider: provider(),
         effortLevel: effortLevel(),
-        sandboxPath: selectedSandboxPath || undefined,
+        workspacePath: selectedWorkspacePath || undefined,
       });
       const session = await sdk.createSession({
         provider: provider() as ProviderCode,
         effortLevel: effortLevel(),
         skills: createDemoSkills(),
-        ...(sandbox ? { sandbox } : {}),
+        ...(workspace ? { workspace } : {}),
       });
-      registerSession(session, provider(), effortLevel(), selectedSandboxPath || undefined, false);
+      registerSession(session, provider(), effortLevel(), selectedWorkspacePath || undefined, false);
       setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
       recordError(toDemoError(err));
@@ -277,21 +277,21 @@ export default function App() {
     }
   }
 
-  async function selectSandboxDirectory() {
+  async function selectWorkspaceDirectory() {
     const sdk = client();
-    if (!sdk || sandboxPicking()) return;
+    if (!sdk || workspacePicking()) return;
 
-    setSandboxPicking(true);
+    setWorkspacePicking(true);
     try {
-      const folder = await sdk.sandboxFolderPicker();
+      const folder = await sdk.workspaceFolderPicker();
       if (folder !== null) {
-        setSandboxPath(folder.path);
+        setWorkspacePath(folder.path);
       }
     } catch (err) {
       recordError(toDemoError(err));
       markExtensionError(err);
     } finally {
-      setSandboxPicking(false);
+      setWorkspacePicking(false);
     }
   }
 
@@ -396,7 +396,7 @@ export default function App() {
     session: PedelecSession,
     fallbackProvider: string,
     fallbackEffortLevel?: "default" | "low" | "high",
-    sandboxPath?: string,
+    workspacePath?: string,
     resumed = false,
   ) {
     const existing = sessions().find((item) => item.sessionId === session.sessionId);
@@ -436,7 +436,7 @@ export default function App() {
       sessionId: session.sessionId,
       provider: session.provider || fallbackProvider || "unknown",
       effortLevel: session.effortLevel || fallbackEffortLevel,
-      sandboxPath,
+      workspacePath,
       resumed,
       status: session.getStatus(),
       transcript: [],
@@ -461,7 +461,7 @@ export default function App() {
       sessionId: session.sessionId,
       provider: state.provider,
       effortLevel: state.effortLevel,
-      sandboxPath: state.sandboxPath,
+      workspacePath: state.workspacePath,
     });
     appendSessionEvent(session.sessionId, "session_selected", {});
     void refreshSessionAssets(session.sessionId);
@@ -641,7 +641,7 @@ export default function App() {
     if (assetFileInput) assetFileInput.value = "";
   }
 
-  async function copyAssetPath(asset: SandboxAsset) {
+  async function copyAssetPath(asset: Asset) {
     const sessionId = activeSessionId() || undefined;
     try {
       await navigator.clipboard.writeText(asset.path);
@@ -713,26 +713,26 @@ export default function App() {
                   <option value="high">High</option>
                 </select>
               </label>
-              <div class="sandbox-selector">
-                <span class="sandbox-label">Sandbox (optional)</span>
-                <output class="sandbox-path" aria-live="polite">
-                  {sandboxPath() || "Desktop-managed temporary sandbox"}
+              <div class="workspace-selector">
+                <span class="workspace-label">Workspace (optional)</span>
+                <output class="workspace-path" aria-live="polite">
+                  {workspacePath() || "Desktop-managed temporary workspace"}
                 </output>
-                <div class="sandbox-actions">
+                <div class="workspace-actions">
                   <button
                     type="button"
                     class="secondary"
-                    disabled={!client() || sandboxPicking()}
-                    onClick={() => void selectSandboxDirectory()}
+                    disabled={!client() || workspacePicking()}
+                    onClick={() => void selectWorkspaceDirectory()}
                   >
-                    {sandboxPicking() ? "Opening..." : "Select directory"}
+                    {workspacePicking() ? "Opening..." : "Select directory"}
                   </button>
-                  <Show when={sandboxPath()}>
+                  <Show when={workspacePath()}>
                     <button
                       type="button"
                       class="secondary"
-                      disabled={sandboxPicking()}
-                      onClick={() => setSandboxPath("")}
+                      disabled={workspacePicking()}
+                      onClick={() => setWorkspacePath("")}
                     >
                       Clear
                     </button>
@@ -787,8 +787,8 @@ export default function App() {
                     <Info label="Effort" value={session().effortLevel || "unknown"} />
                     <Info label="Status" value={session().status} />
                     <Info
-                      label="Sandbox"
-                      value={session().resumed ? "Unknown / resumed session" : session().sandboxPath || "Desktop managed"}
+                      label="Workspace"
+                      value={session().resumed ? "Unknown / resumed session" : session().workspacePath || "Desktop managed"}
                     />
                     <Info label="Created" value={formatTime(session().createdAt)} />
                     <Info label="Updated" value={formatTime(session().updatedAt)} />
@@ -1020,7 +1020,7 @@ function AssetUploadBlock(props: {
   fileInputRef: (element: HTMLInputElement) => void;
   onFileChange: (file: File | null) => void;
   onSubmit: (event: SubmitEvent) => void;
-  onCopyPath: (asset: SandboxAsset) => void;
+  onCopyPath: (asset: Asset) => void;
   onRefresh: () => void;
 }) {
   return (
@@ -1031,7 +1031,7 @@ function AssetUploadBlock(props: {
           if (session().uploadingAsset) return "Uploading asset...";
           if (session().status === "ended") return "Assets cannot be uploaded after the session ends.";
           if (props.selectedFile && props.selectedFile.size > MAX_ASSET_SIZE_BYTES) return "File exceeds the 100 MiB limit.";
-          return `Single files up to 100 MiB can be uploaded to this session's sandbox.`;
+          return `Single files up to 100 MiB can be uploaded to this session's workspace.`;
         };
 
         return (
@@ -1078,7 +1078,7 @@ function AssetUploadBlock(props: {
   );
 }
 
-function UploadedAssetRow(props: { asset: SandboxAsset; onCopy: () => void }) {
+function UploadedAssetRow(props: { asset: Asset; onCopy: () => void }) {
   return (
     <article class="asset-row">
       <header>

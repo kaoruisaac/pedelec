@@ -41,7 +41,7 @@ mod tests {
         );
         assert!(instruction.contains("do not retry indefinitely"));
         assert!(instruction
-            .contains("`.pedelec-sandbox/assets/` is the shared App and Agent file directory"));
+            .contains("`.pedelec-runtime/assets/` is the shared App and Agent file directory"));
         assert!(!instruction.contains("`assets/` is the shared App and Agent file directory"));
     }
 
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_new_command_uses_sandbox_args_env_prompt_and_no_generated_session_id() {
+    fn codex_new_command_uses_workspace_args_env_prompt_and_no_generated_session_id() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
@@ -475,7 +475,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(start.command.program, "codex");
-        let sandbox_path = temp.path().join("sandbox").join("thread_codex_new");
+        let workspace_path = temp.path().join("workspace").join("thread_codex_new");
         assert!(start
             .command
             .args
@@ -492,9 +492,9 @@ mod tests {
             .command
             .args
             .windows(2)
-            .any(|args| args == ["--cd", sandbox_path.to_str().unwrap()]));
+            .any(|args| args == ["--cd", workspace_path.to_str().unwrap()]));
         assert!(start.command.args.ends_with(&["gpt-5".into(), "-".into()]));
-        assert_eq!(start.command.cwd, sandbox_path);
+        assert_eq!(start.command.cwd, workspace_path);
         assert!(!start.command.args.iter().any(|arg| arg == "--last"));
         assert_provider_instruction_present(&start.command);
         assert!(start.command.stdin.ends_with("hello"));
@@ -596,7 +596,7 @@ mod tests {
             args == [
                 "--cd",
                 temp.path()
-                    .join("sandbox")
+                    .join("workspace")
                     .join("thread_codex_resume")
                     .to_str()
                     .unwrap(),
@@ -615,7 +615,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn provider_run_commands_externalize_verbatim_sandbox_paths_and_keep_canonical_cwd() {
+    fn provider_run_commands_externalize_verbatim_workspace_paths_and_keep_canonical_cwd() {
         let cases = [
             ("codex", ProviderCode::Codex, Some("gpt-5")),
             (
@@ -649,7 +649,7 @@ mod tests {
                 .thread_manager
                 .thread_mut(&thread_id)
                 .unwrap()
-                .sandbox_path = verbatim.clone();
+                .workspace_path = verbatim.clone();
 
             let start = runtime
                 .begin_send_text(SendTextInput {
@@ -660,9 +660,10 @@ mod tests {
 
             assert_eq!(start.command.cwd, verbatim);
             assert_eq!(
-                env_value(&start.command, "PEDELEC_SANDBOX_PATH"),
+                env_value(&start.command, "PEDELEC_WORKSPACE_PATH"),
                 Some(external)
             );
+            assert_eq!(env_value(&start.command, "PEDELEC_SANDBOX_PATH"), None);
             assert!(!start.command.args.iter().any(|arg| arg.contains(r"\\?\")));
             assert!(!start.command.prompt.contains(r"\\?\"));
             assert!(start.command.prompt.contains(external));
@@ -688,7 +689,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn provider_resume_commands_externalize_verbatim_sandbox_paths_and_keep_canonical_cwd() {
+    fn provider_resume_commands_externalize_verbatim_workspace_paths_and_keep_canonical_cwd() {
         let cases = [
             ("codex", ProviderCode::Codex, Some("gpt-5"), "codex-session"),
             (
@@ -727,7 +728,7 @@ mod tests {
                 .thread_manager
                 .thread_mut(&thread_id)
                 .unwrap()
-                .sandbox_path = verbatim.clone();
+                .workspace_path = verbatim.clone();
 
             let start = runtime
                 .begin_send_text(SendTextInput {
@@ -738,9 +739,10 @@ mod tests {
 
             assert_eq!(start.command.cwd, verbatim);
             assert_eq!(
-                env_value(&start.command, "PEDELEC_SANDBOX_PATH"),
+                env_value(&start.command, "PEDELEC_WORKSPACE_PATH"),
                 Some(external)
             );
+            assert_eq!(env_value(&start.command, "PEDELEC_SANDBOX_PATH"), None);
             assert!(!start.command.args.iter().any(|arg| arg.contains(r"\\?\")));
             assert!(!start.command.prompt.contains(r"\\?\"));
 
@@ -1171,7 +1173,7 @@ mod tests {
             })
             .unwrap();
 
-        let sandbox_path = temp.path().join("sandbox").join("thread_opencode_new");
+        let workspace_path = temp.path().join("workspace").join("thread_opencode_new");
         assert_eq!(start.command.program, "opencode");
         assert!(start
             .command
@@ -1183,7 +1185,7 @@ mod tests {
             .command
             .args
             .windows(2)
-            .any(|args| args == ["--dir", sandbox_path.to_str().unwrap()]));
+            .any(|args| args == ["--dir", workspace_path.to_str().unwrap()]));
         let config: Value =
             serde_json::from_str(env_value(&start.command, OPENCODE_CONFIG_CONTENT_ENV).unwrap())
                 .unwrap();
@@ -1192,7 +1194,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Pedelec is the host application"));
-        assert_eq!(start.command.cwd, sandbox_path);
+        assert_eq!(start.command.cwd, workspace_path);
         assert!(start.command.stdin.ends_with(message));
         assert_provider_instruction_present(&start.command);
         assert!(!start
@@ -1360,8 +1362,8 @@ mod tests {
                 }),
             },
         );
-        let sandbox = runtime.thread_sandbox_path(thread_id).unwrap();
-        let agent_path = sandbox
+        let workspace = runtime.thread_workspace_path(thread_id).unwrap();
+        let agent_path = workspace
             .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
             .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
         fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
@@ -1425,7 +1427,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let custom_workspace = temp.path().join("custom-project");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
         let thread_id = runtime
@@ -1433,7 +1435,7 @@ mod tests {
                 provider: ProviderCode::Antigravity,
                 effort_level: None,
                 skills: Some(sample_skills_input()),
-                sandbox: Some(CreateThreadSandboxInput {
+                workspace: Some(CreateThreadWorkspaceInput {
                     path: custom_workspace.clone(),
                 }),
             })
@@ -1460,12 +1462,12 @@ mod tests {
             .command;
         let thread = runtime.thread_manager.thread(&thread_id).unwrap();
         let agent_path = thread
-            .sandbox_path
+            .workspace_path
             .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
             .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
 
         assert_eq!(
-            thread.sandbox_path,
+            thread.workspace_path,
             custom_workspace.canonicalize().unwrap()
         );
         assert!(agent_path.is_file());
@@ -1507,7 +1509,7 @@ mod tests {
             .command;
         assert!(!command.args.iter().any(|arg| arg == "--agent"));
         assert!(!runtime
-            .thread_sandbox_path(thread_id)
+            .thread_workspace_path(thread_id)
             .unwrap()
             .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
             .exists());
@@ -1534,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_sessions_sharing_a_sandbox_can_ensure_the_agent_asset() {
+    fn antigravity_sessions_sharing_a_workspace_can_ensure_the_agent_asset() {
         let temp = tempfile::tempdir().unwrap();
         let first_id = "thread_antigravity_shared_first";
         let second_id = "thread_antigravity_shared_second";
@@ -1578,7 +1580,7 @@ mod tests {
             .unwrap();
 
         let agent_path = first
-            .sandbox_path
+            .workspace_path
             .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
             .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
         assert!(agent_path.is_file());
@@ -1667,13 +1669,13 @@ mod tests {
             })
             .unwrap();
 
-        let sandbox_path = temp.path().join("sandbox").join("thread_cursor_new");
+        let workspace_path = temp.path().join("workspace").join("thread_cursor_new");
         assert_eq!(start.command.program, "cursor-agent");
         assert_eq!(
             start.command.args,
             vec![
                 "--workspace",
-                sandbox_path.to_str().unwrap(),
+                workspace_path.to_str().unwrap(),
                 "--output-format",
                 "stream-json",
                 "--force",
@@ -1682,16 +1684,16 @@ mod tests {
                 "gpt-5",
             ]
         );
-        assert_eq!(start.command.cwd, sandbox_path);
+        assert_eq!(start.command.cwd, workspace_path);
         assert!(start.command.stdin.ends_with(message));
         assert!(start.command.prompt.contains("[Pedelec Host Bootstrap]"));
         assert!(start.command.prompt.contains("[Pedelec Host Context]"));
         assert!(start.command.prompt.contains("[User Message]"));
         assert!(start.command.prompt.contains("PEDELEC_PREPARED"));
         assert!(!start.command.prompt.contains("[Pedelec Runtime Rules]"));
-        assert!(!sandbox_path.join(".cursor").exists());
-        assert!(!sandbox_path.join("AGENTS.md").exists());
-        assert!(!sandbox_path.join("CLAUDE.md").exists());
+        assert!(!workspace_path.join(".cursor").exists());
+        assert!(!workspace_path.join("AGENTS.md").exists());
+        assert!(!workspace_path.join("CLAUDE.md").exists());
         assert_provider_instruction_present(&start.command);
         assert!(!start
             .command
@@ -1768,17 +1770,17 @@ mod tests {
         assert!(command.prompt.ends_with("[Session Preparation]"));
         assert!(!command.prompt.contains("After preparation is complete"));
         assert!(!runtime
-            .thread_sandbox_path("thread_cursor_prepare")
+            .thread_workspace_path("thread_cursor_prepare")
             .unwrap()
             .join(".cursor")
             .exists());
         assert!(!runtime
-            .thread_sandbox_path("thread_cursor_prepare")
+            .thread_workspace_path("thread_cursor_prepare")
             .unwrap()
             .join("AGENTS.md")
             .exists());
         assert!(!runtime
-            .thread_sandbox_path("thread_cursor_prepare")
+            .thread_workspace_path("thread_cursor_prepare")
             .unwrap()
             .join("CLAUDE.md")
             .exists());
@@ -1886,7 +1888,7 @@ mod tests {
             })
             .unwrap();
 
-        let sandbox_path = temp.path().join("sandbox").join("thread_claude_new");
+        let workspace_path = temp.path().join("workspace").join("thread_claude_new");
         assert_eq!(start.command.program, "claude");
         assert!(start.command.args.windows(2).any(|args| {
             args[0] == "--append-system-prompt" && args[1] == build_pedelec_bootstrap_instruction()
@@ -1906,7 +1908,7 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "--disable-slash-commands"));
-        assert_eq!(start.command.cwd, sandbox_path);
+        assert_eq!(start.command.cwd, workspace_path);
         assert!(start.command.stdin.ends_with(message));
         assert_provider_instruction_present(&start.command);
         assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
@@ -2421,7 +2423,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_new_command_uses_pedelec_agent_model_sandbox_and_stdin_prompt() {
+    fn ollama_new_command_uses_pedelec_agent_model_workspace_and_stdin_prompt() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
@@ -2439,7 +2441,7 @@ mod tests {
             })
             .unwrap();
 
-        let sandbox_path = temp.path().join("sandbox").join("thread_ollama_new");
+        let workspace_path = temp.path().join("workspace").join("thread_ollama_new");
         assert_eq!(start.command.program, "pedelec-agent");
         assert_eq!(
             start.command.args,
@@ -2449,10 +2451,10 @@ mod tests {
                 "--model",
                 "qwen3-14b-32k:latest",
                 "--sandbox",
-                sandbox_path.to_str().unwrap(),
+                workspace_path.to_str().unwrap(),
             ]
         );
-        assert_eq!(start.command.cwd, sandbox_path);
+        assert_eq!(start.command.cwd, workspace_path);
         assert!(start.command.stdin.ends_with(message));
         assert_provider_instruction_present(&start.command);
         assert!(!start.command.args.iter().any(|arg| arg == message));
@@ -2516,7 +2518,7 @@ mod tests {
             .thread_manager
             .thread_mut(thread_id)
             .unwrap()
-            .sandbox_path = verbatim.clone();
+            .workspace_path = verbatim.clone();
         let event_rx = runtime.event_bus.subscribe(thread_id);
         let start = runtime
             .begin_send_text(SendTextInput {
@@ -2567,7 +2569,7 @@ mod tests {
                 "model-a",
                 "--sandbox",
                 temp.path()
-                    .join("sandbox")
+                    .join("workspace")
                     .join("thread_outer")
                     .to_str()
                     .unwrap(),
@@ -3368,7 +3370,9 @@ mod tests {
         write_settings_file(&settings_path, &settings).unwrap();
         let mut runtime = CoreRuntime {
             settings_file_path: Some(settings_path),
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("sandboxes")),
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
             ..CoreRuntime::default()
         };
 
@@ -3377,7 +3381,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
         let default_state = runtime
@@ -3392,7 +3396,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Low),
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
         let low_state = runtime
@@ -3413,7 +3417,9 @@ mod tests {
         write_settings_file(&settings_path, &settings).unwrap();
         let mut runtime = CoreRuntime {
             settings_file_path: Some(settings_path),
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("sandboxes")),
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
             ..CoreRuntime::default()
         };
 
@@ -3422,7 +3428,7 @@ mod tests {
                 provider: ProviderCode::Ollama,
                 effort_level: Some(EffortLevel::Low),
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap_err();
         assert_eq!(error.code, error_codes::MODEL_REQUIRED);
@@ -3437,7 +3443,9 @@ mod tests {
         write_settings_file(&settings_path, &settings).unwrap();
         let mut runtime = CoreRuntime {
             settings_file_path: Some(settings_path.clone()),
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("sandboxes")),
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
             ..CoreRuntime::default()
         };
 
@@ -3446,7 +3454,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::High),
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
@@ -3469,7 +3477,9 @@ mod tests {
         write_settings_file(&settings_path, &settings).unwrap();
         let mut runtime = CoreRuntime {
             settings_file_path: Some(settings_path.clone()),
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("sandboxes")),
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
             ..CoreRuntime::default()
         };
         let output = runtime
@@ -3477,7 +3487,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
         let thread_id = output.thread_id.clone();
@@ -4281,7 +4291,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: EffortLevel::Default,
             effort_args: vec!["-m".into(), "gpt-5".into()],
-            sandbox_path: PathBuf::from("C:/tmp/pedelec/thread_abc123"),
+            workspace_path: PathBuf::from("C:/tmp/pedelec/thread_abc123"),
             skills: vec![SkillFile {
                 original_url: "https://example.test/tools.md".into(),
                 original_filename: "tools.md".into(),
@@ -4298,10 +4308,10 @@ mod tests {
 
         let value = serde_json::to_value(state).unwrap();
         assert!(value.get("threadId").is_some());
-        assert!(value.get("sandboxPath").is_some());
+        assert!(value.get("workspacePath").is_some());
         assert!(value.get("createdAt").is_some());
         assert!(value.get("thread_id").is_none());
-        assert!(value.get("sandbox_path").is_none());
+        assert!(value.get("workspace_path").is_none());
         assert!(value.get("created_at").is_none());
     }
 
@@ -4313,7 +4323,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: EffortLevel::Default,
             effort_args: Vec::new(),
-            sandbox_path: PathBuf::from("sandbox").join("thread_no_tools_md"),
+            workspace_path: PathBuf::from("workspace").join("thread_no_tools_md"),
             skills: vec![SkillFile {
                 original_url: "https://example.test/tools.json".into(),
                 original_filename: "tools.json".into(),
@@ -4331,7 +4341,7 @@ mod tests {
         let instruction = build_provider_instruction(&thread, &ToolRegistry::default());
 
         assert!(instruction.contains("[Pedelec Host Context]"));
-        assert!(instruction.contains("Sandbox Path:"));
+        assert!(instruction.contains("Workspace Path:"));
         assert!(!instruction.contains("[Pedelec App Tool Configuration]"));
         assert!(!instruction.contains("tools.md"));
         assert!(!instruction.contains("pedelec-cli tool-call"));
@@ -4345,7 +4355,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: EffortLevel::Default,
             effort_args: Vec::new(),
-            sandbox_path: PathBuf::from("sandbox").join("thread_with_tools_md"),
+            workspace_path: PathBuf::from("workspace").join("thread_with_tools_md"),
             skills: vec![],
             status: ThreadStatus::Idle,
             process_id: None,
@@ -4376,7 +4386,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: EffortLevel::Default,
             effort_args: Vec::new(),
-            sandbox_path: PathBuf::from("sandbox").join("thread_empty_tools"),
+            workspace_path: PathBuf::from("workspace").join("thread_empty_tools"),
             skills: vec![],
             status: ThreadStatus::Idle,
             process_id: None,
@@ -4550,67 +4560,104 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_creates_required_subdirectories_and_removes_them() {
+    fn workspace_creates_required_subdirectories_and_removes_them() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = SandboxManager::with_sandbox_root(temp.path().join("sandbox"));
+        let manager = WorkspaceManager::with_workspace_root(temp.path().join("workspace"));
 
-        let sandbox = manager.create_thread_sandbox("thread_abc123").unwrap();
+        let workspace = manager.create_thread_workspace("thread_abc123").unwrap();
 
-        assert!(sandbox.exists());
-        assert!(sandbox_private_data_root(&sandbox).is_dir());
-        assert!(sandbox_skills_root(&sandbox).is_dir());
-        assert!(sandbox_assets_root(&sandbox).is_dir());
-        assert!(sandbox_logs_root(&sandbox).is_dir());
-        assert!(sandbox_tmp_root(&sandbox).is_dir());
+        assert!(workspace.exists());
+        assert!(workspace_runtime_data_root(&workspace).is_dir());
+        assert!(workspace_skills_root(&workspace).is_dir());
+        assert!(workspace_assets_root(&workspace).is_dir());
+        assert!(workspace_logs_root(&workspace).is_dir());
+        assert!(workspace_tmp_root(&workspace).is_dir());
+        assert!(!workspace.join(".pedelec-sandbox").exists());
         for subdir in ["skills", "assets", "logs", "tmp"] {
             assert!(
-                !sandbox.join(subdir).exists(),
+                !workspace.join(subdir).exists(),
                 "unexpected root subdir {subdir}"
             );
         }
 
-        manager.remove_thread_sandbox(&sandbox).unwrap();
-        assert!(!sandbox.exists());
+        manager.remove_thread_workspace(&workspace).unwrap();
+        assert!(!workspace.exists());
     }
 
     #[test]
-    fn sandbox_rollback_removes_partial_sandbox_after_skill_download_failure() {
+    fn default_workspace_manager_uses_the_new_managed_root() {
+        let root = WorkspaceManager::default().workspace_root().unwrap();
+
+        assert_eq!(
+            root.file_name().and_then(|name| name.to_str()),
+            Some("workspaces")
+        );
+        assert_ne!(
+            root.file_name().and_then(|name| name.to_str()),
+            Some("sandbox")
+        );
+    }
+
+    #[test]
+    fn workspace_cleanup_does_not_touch_the_legacy_sandbox_root() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = SandboxManager::with_sandbox_root(temp.path().join("sandbox"));
+        let workspace_root = temp.path().join("workspaces");
+        let legacy_root = temp.path().join("sandbox");
+        fs::create_dir_all(workspace_root.join("thread_current")).unwrap();
+        fs::create_dir_all(legacy_root.join("thread_legacy")).unwrap();
+        let manager = WorkspaceManager::with_workspace_root(&workspace_root);
+
+        assert!(manager.remove_all_thread_workspaces().is_empty());
+        assert!(!workspace_root.join("thread_current").exists());
+        assert!(legacy_root.join("thread_legacy").exists());
+    }
+
+    #[test]
+    fn workspace_rollback_removes_partial_workspace_after_skill_download_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = WorkspaceManager::with_workspace_root(temp.path().join("workspace"));
         let skill_manager = SkillManager::default();
         let bad_urls = vec!["http://example.com/tools.md".to_string()];
 
-        let result = manager.create_thread_sandbox_with("thread_rollback", |sandbox| {
-            skill_manager.download_skills(sandbox_skills_root(sandbox), &bad_urls)
+        let result = manager.create_thread_workspace_with("thread_rollback", |workspace| {
+            skill_manager.download_skills(workspace_skills_root(workspace), &bad_urls)
         });
 
         assert_eq!(result.unwrap_err().code, error_codes::SKILL_URL_INVALID);
-        assert!(!temp.path().join("sandbox").join("thread_rollback").exists());
+        assert!(!temp
+            .path()
+            .join("workspace")
+            .join("thread_rollback")
+            .exists());
     }
 
     #[test]
-    fn custom_sandbox_validates_paths_and_preserves_existing_workspace_content() {
+    fn custom_workspace_validates_paths_and_preserves_existing_workspace_content() {
         let temp = tempfile::tempdir().unwrap();
         let managed_root = temp.path().join("managed");
-        let manager = SandboxManager::with_sandbox_root(&managed_root);
+        let manager = WorkspaceManager::with_workspace_root(&managed_root);
         let custom = temp.path().join("project");
         fs::create_dir_all(custom.join("skills")).unwrap();
         fs::create_dir_all(custom.join("assets")).unwrap();
         fs::create_dir_all(custom.join("logs")).unwrap();
         fs::create_dir_all(custom.join("tmp")).unwrap();
-        fs::create_dir_all(sandbox_private_data_root(&custom).join("skills")).unwrap();
-        fs::write(sandbox_private_data_root(&custom).join("keep.txt"), "keep").unwrap();
+        fs::create_dir_all(workspace_runtime_data_root(&custom).join("skills")).unwrap();
+        fs::write(
+            workspace_runtime_data_root(&custom).join("keep.txt"),
+            "keep",
+        )
+        .unwrap();
         fs::write(custom.join("source.txt"), "keep").unwrap();
         fs::write(custom.join("skills").join("keep.txt"), "keep").unwrap();
         fs::write(custom.join("assets").join("existing.bin"), b"keep").unwrap();
 
-        let resolved = manager.prepare_custom_sandbox(&custom).unwrap();
+        let resolved = manager.prepare_custom_workspace(&custom).unwrap();
         assert_eq!(resolved, custom.canonicalize().unwrap());
-        assert!(sandbox_private_data_root(&resolved).is_dir());
-        assert!(sandbox_skills_root(&resolved).is_dir());
-        assert!(sandbox_assets_root(&resolved).is_dir());
-        assert!(sandbox_logs_root(&resolved).is_dir());
-        assert!(sandbox_tmp_root(&resolved).is_dir());
+        assert!(workspace_runtime_data_root(&resolved).is_dir());
+        assert!(workspace_skills_root(&resolved).is_dir());
+        assert!(workspace_assets_root(&resolved).is_dir());
+        assert!(workspace_logs_root(&resolved).is_dir());
+        assert!(workspace_tmp_root(&resolved).is_dir());
         assert_eq!(
             fs::read_to_string(resolved.join("source.txt")).unwrap(),
             "keep"
@@ -4624,7 +4671,7 @@ mod tests {
             b"keep"
         );
         assert_eq!(
-            fs::read_to_string(sandbox_private_data_root(&resolved).join("keep.txt")).unwrap(),
+            fs::read_to_string(workspace_runtime_data_root(&resolved).join("keep.txt")).unwrap(),
             "keep"
         );
         for subdir in ["skills", "assets", "logs", "tmp"] {
@@ -4637,15 +4684,18 @@ mod tests {
         let file_path = temp.path().join("not-a-directory");
         fs::write(&file_path, "file").unwrap();
         assert_eq!(
-            manager.prepare_custom_sandbox(&file_path).unwrap_err().code,
-            error_codes::SANDBOX_PATH_INVALID
+            manager
+                .prepare_custom_workspace(&file_path)
+                .unwrap_err()
+                .code,
+            error_codes::WORKSPACE_PATH_INVALID
         );
         assert_eq!(
             manager
-                .prepare_custom_sandbox(Path::new("relative-project"))
+                .prepare_custom_workspace(Path::new("relative-project"))
                 .unwrap_err()
                 .code,
-            error_codes::SANDBOX_PATH_INVALID
+            error_codes::WORKSPACE_PATH_INVALID
         );
 
         for overlap in [
@@ -4653,36 +4703,36 @@ mod tests {
             managed_root.join("nested"),
             temp.path().to_path_buf(),
         ] {
-            let error = manager.prepare_custom_sandbox(overlap).unwrap_err();
-            assert_eq!(error.code, error_codes::SANDBOX_PATH_INVALID);
-            assert!(error.details.unwrap()["managedSandboxRoot"].is_string());
+            let error = manager.prepare_custom_workspace(overlap).unwrap_err();
+            assert_eq!(error.code, error_codes::WORKSPACE_PATH_INVALID);
+            assert!(error.details.unwrap()["managedWorkspaceRoot"].is_string());
         }
 
         let sibling = manager
-            .prepare_custom_sandbox(temp.path().join("sibling"))
+            .prepare_custom_workspace(temp.path().join("sibling"))
             .unwrap();
         assert!(sibling.is_dir());
     }
 
     #[test]
-    fn custom_sandbox_rejects_a_private_data_path_that_is_not_a_directory() {
+    fn custom_workspace_rejects_a_private_data_path_that_is_not_a_directory() {
         let temp = tempfile::tempdir().unwrap();
         let managed_root = temp.path().join("managed");
-        let manager = SandboxManager::with_sandbox_root(&managed_root);
+        let manager = WorkspaceManager::with_workspace_root(&managed_root);
         let custom = temp.path().join("project");
         fs::create_dir_all(&custom).unwrap();
-        fs::write(sandbox_private_data_root(&custom), "not a directory").unwrap();
+        fs::write(workspace_runtime_data_root(&custom), "not a directory").unwrap();
         fs::write(custom.join("keep.txt"), "keep").unwrap();
 
-        let error = manager.prepare_custom_sandbox(&custom).unwrap_err();
+        let error = manager.prepare_custom_workspace(&custom).unwrap_err();
 
-        assert_eq!(error.code, error_codes::SANDBOX_CREATE_FAILED);
-        assert!(sandbox_private_data_root(&custom).is_file());
+        assert_eq!(error.code, error_codes::WORKSPACE_CREATE_FAILED);
+        assert!(workspace_runtime_data_root(&custom).is_file());
         assert_eq!(fs::read_to_string(custom.join("keep.txt")).unwrap(), "keep");
     }
 
     #[test]
-    fn custom_sandbox_generated_skills_merge_and_overwrite_collisions() {
+    fn custom_workspace_generated_skills_merge_and_overwrite_collisions() {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("project");
         fs::create_dir_all(custom.join("skills")).unwrap();
@@ -4691,15 +4741,15 @@ mod tests {
             "ROOT",
         )
         .unwrap();
-        fs::create_dir_all(sandbox_skills_root(&custom)).unwrap();
+        fs::create_dir_all(workspace_skills_root(&custom)).unwrap();
         fs::write(
-            sandbox_skills_root(&custom).join("tools-get_app_state.json"),
+            workspace_skills_root(&custom).join("tools-get_app_state.json"),
             "OLD",
         )
         .unwrap();
-        fs::write(sandbox_skills_root(&custom).join("unrelated.txt"), "KEEP").unwrap();
+        fs::write(workspace_skills_root(&custom).join("unrelated.txt"), "KEEP").unwrap();
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
 
@@ -4708,42 +4758,42 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: Some(sample_skills_input()),
-                sandbox: Some(CreateThreadSandboxInput {
+                workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
                 }),
             })
             .unwrap();
 
-        let sandbox = runtime.thread_sandbox_path(&output.thread_id).unwrap();
-        assert_eq!(sandbox, custom.canonicalize().unwrap());
+        let workspace = runtime.thread_workspace_path(&output.thread_id).unwrap();
+        assert_eq!(workspace, custom.canonicalize().unwrap());
         let generated =
-            fs::read_to_string(sandbox_skills_root(&sandbox).join("tools-get_app_state.json"))
+            fs::read_to_string(workspace_skills_root(&workspace).join("tools-get_app_state.json"))
                 .unwrap();
         assert!(generated.contains("get_app_state"));
         assert_ne!(generated, "OLD");
         assert_eq!(
-            fs::read_to_string(sandbox_skills_root(&sandbox).join("unrelated.txt")).unwrap(),
+            fs::read_to_string(workspace_skills_root(&workspace).join("unrelated.txt")).unwrap(),
             "KEEP"
         );
         assert_eq!(
-            fs::read_to_string(sandbox.join("skills").join("tools-get_app_state.json")).unwrap(),
+            fs::read_to_string(workspace.join("skills").join("tools-get_app_state.json")).unwrap(),
             "ROOT"
         );
     }
 
     #[test]
-    fn sdk_custom_sandbox_creates_normalized_write_once_marker() {
+    fn sdk_custom_workspace_creates_normalized_write_once_marker() {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("project");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
         let input = || CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: None,
             skills: None,
-            sandbox: Some(CreateThreadSandboxInput {
+            workspace: Some(CreateThreadWorkspaceInput {
                 path: custom.clone(),
             }),
         };
@@ -4751,7 +4801,7 @@ mod tests {
         runtime
             .create_sdk_thread(input(), "https://Example.com:443", Some("mock-sdk-version"))
             .unwrap();
-        let marker = sandbox_lock_path(&custom);
+        let marker = workspace_metadata_path(&custom);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&fs::read(&marker).unwrap()).unwrap(),
             json!({
@@ -4759,7 +4809,7 @@ mod tests {
                 "origin": "https://example.com",
             })
         );
-        assert!(!custom.join(".pedelec-sandbox.json").exists());
+        assert!(!custom.join(".pedelec-lock.json").exists());
 
         fs::write(&marker, "not json").unwrap();
         runtime
@@ -4769,11 +4819,11 @@ mod tests {
     }
 
     #[test]
-    fn sdk_custom_sandbox_does_not_leave_marker_when_initialization_or_marker_creation_fails() {
+    fn sdk_custom_workspace_does_not_leave_marker_when_initialization_or_marker_creation_fails() {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("project");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
 
@@ -4789,7 +4839,7 @@ mod tests {
                     timeout_ms: None,
                 }],
             }),
-            sandbox: Some(CreateThreadSandboxInput {
+            workspace: Some(CreateThreadWorkspaceInput {
                 path: custom.clone(),
             }),
         };
@@ -4804,33 +4854,36 @@ mod tests {
                 .code,
             error_codes::TOOLS_MANIFEST_INVALID
         );
-        assert!(!sandbox_lock_path(&custom).exists());
+        assert!(!workspace_metadata_path(&custom).exists());
 
-        let marker = sandbox_lock_path(&custom);
+        let marker = workspace_metadata_path(&custom);
         fs::create_dir_all(&marker).unwrap();
         let result = runtime.create_sdk_thread(
             CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: Some(CreateThreadSandboxInput {
+                workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
                 }),
             },
             "https://example.com",
             Some("mock-sdk-version"),
         );
-        assert_eq!(result.unwrap_err().code, error_codes::SANDBOX_CREATE_FAILED);
+        assert_eq!(
+            result.unwrap_err().code,
+            error_codes::WORKSPACE_CREATE_FAILED
+        );
         assert!(marker.is_dir());
         assert!(runtime.thread_manager.thread("thread_000001").is_err());
     }
 
     #[test]
-    fn multiple_sessions_share_custom_sandbox_with_unique_event_logs() {
+    fn multiple_sessions_share_custom_workspace_with_unique_event_logs() {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("shared-project");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
 
@@ -4839,7 +4892,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: Some(CreateThreadSandboxInput {
+                workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
                 }),
             })
@@ -4849,15 +4902,15 @@ mod tests {
                 provider: ProviderCode::Claude,
                 effort_level: None,
                 skills: None,
-                sandbox: Some(CreateThreadSandboxInput {
+                workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
                 }),
             })
             .unwrap();
 
-        let first_sandbox = runtime.thread_sandbox_path(&first.thread_id).unwrap();
-        let second_sandbox = runtime.thread_sandbox_path(&second.thread_id).unwrap();
-        assert_eq!(first_sandbox, second_sandbox);
+        let first_workspace = runtime.thread_workspace_path(&first.thread_id).unwrap();
+        let second_workspace = runtime.thread_workspace_path(&second.thread_id).unwrap();
+        assert_eq!(first_workspace, second_workspace);
         let first_log = runtime.event_log_path(&first.thread_id).unwrap();
         let second_log = runtime.event_log_path(&second.thread_id).unwrap();
         assert_ne!(first_log, second_log);
@@ -4873,19 +4926,19 @@ mod tests {
             .to_string_lossy()
             .contains(&second.thread_id));
         assert!(!custom.join("logs").join("events.jsonl").exists());
-        assert!(sandbox_logs_root(&custom).is_dir());
+        assert!(workspace_logs_root(&custom).is_dir());
         assert!(fs::read_to_string(first_log).unwrap().contains("created"));
         assert!(fs::read_to_string(second_log).unwrap().contains("created"));
     }
 
     #[test]
-    fn custom_sandbox_initialization_failure_does_not_delete_workspace() {
+    fn custom_workspace_initialization_failure_does_not_delete_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("project");
         fs::create_dir_all(&custom).unwrap();
         fs::write(custom.join("sentinel.txt"), "keep").unwrap();
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.path().join("managed")),
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
 
@@ -4901,7 +4954,7 @@ mod tests {
                     timeout_ms: None,
                 }],
             }),
-            sandbox: Some(CreateThreadSandboxInput {
+            workspace: Some(CreateThreadWorkspaceInput {
                 path: custom.clone(),
             }),
         });
@@ -4918,12 +4971,12 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_removes_managed_sandboxes_but_preserves_custom_workspace() {
+    fn cleanup_removes_managed_workspaces_but_preserves_custom_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let managed_root = temp.path().join("managed");
         let custom = temp.path().join("external-project");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&managed_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
             ..CoreRuntime::default()
         };
         let custom_thread = runtime
@@ -4931,14 +4984,14 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: Some(CreateThreadSandboxInput {
+                workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
                 }),
             })
             .unwrap();
         runtime
-            .sandbox_manager
-            .create_thread_sandbox("t000001")
+            .workspace_manager
+            .create_thread_workspace("t000001")
             .unwrap();
         fs::write(custom.join("keep.txt"), "keep").unwrap();
 
@@ -4952,11 +5005,11 @@ mod tests {
         );
 
         let startup_runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&managed_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
             ..CoreRuntime::default()
         };
         assert!(startup_runtime
-            .cleanup_stale_sandboxes_for_app_start()
+            .cleanup_stale_workspaces_for_app_start()
             .is_empty());
         assert!(custom.exists());
     }
@@ -6261,10 +6314,10 @@ mod tests {
             None,
             None,
         );
-        let sandbox = temp.path().join("sandbox/thread_assets");
-        let assets = sandbox_assets_root(&sandbox);
-        fs::create_dir_all(sandbox.join("assets")).unwrap();
-        fs::write(sandbox.join("assets/root-only.txt"), b"user project file").unwrap();
+        let workspace = temp.path().join("workspace/thread_assets");
+        let assets = workspace_assets_root(&workspace);
+        fs::create_dir_all(workspace.join("assets")).unwrap();
+        fs::write(workspace.join("assets/root-only.txt"), b"user project file").unwrap();
         fs::create_dir_all(assets.join("nested/previews")).unwrap();
         fs::create_dir_all(assets.join(".cache")).unwrap();
         fs::create_dir_all(assets.join(".pedelec-cache")).unwrap();
@@ -6358,16 +6411,16 @@ mod tests {
     #[test]
     fn read_asset_does_not_fall_back_to_a_root_level_assets_directory() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox = temp.path().join("sandbox/thread_asset_isolation");
-        fs::create_dir_all(sandbox.join("assets")).unwrap();
-        fs::write(sandbox.join("assets/result.json"), b"user project file").unwrap();
+        let workspace = temp.path().join("workspace/thread_asset_isolation");
+        fs::create_dir_all(workspace.join("assets")).unwrap();
+        fs::write(workspace.join("assets/result.json"), b"user project file").unwrap();
         let now = chrono::Utc::now();
         let thread = ThreadState {
             thread_id: "thread_asset_isolation".into(),
             provider: ProviderCode::Codex,
             effort_level: EffortLevel::Default,
             effort_args: vec![],
-            sandbox_path: sandbox,
+            workspace_path: workspace,
             skills: vec![],
             status: ThreadStatus::Idle,
             process_id: None,
@@ -6383,13 +6436,13 @@ mod tests {
     #[test]
     fn list_assets_fails_when_a_nested_directory_cannot_be_read() {
         let temp = tempfile::tempdir().unwrap();
-        let assets_root = sandbox_assets_root(&temp.path().join("sandbox/thread_assets"));
+        let assets_root = workspace_assets_root(&temp.path().join("workspace/thread_assets"));
         fs::create_dir_all(&assets_root).unwrap();
         let missing_nested_directory = assets_root.join("nested");
         let mut assets = Vec::new();
 
-        let error = collect_sandbox_assets(&assets_root, &missing_nested_directory, &mut assets)
-            .unwrap_err();
+        let error =
+            collect_assets(&assets_root, &missing_nested_directory, &mut assets).unwrap_err();
 
         assert_eq!(error.code, error_codes::ASSET_LIST_FAILED);
         assert_eq!(error.details.unwrap()["path"], "/nested");
@@ -6399,16 +6452,16 @@ mod tests {
     #[test]
     fn create_thread_generates_short_incrementing_thread_ids() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: None,
             skills: None,
-            sandbox: None,
+            workspace: None,
         };
 
         let first = runtime.create_thread(input.clone()).unwrap();
@@ -6418,17 +6471,17 @@ mod tests {
         assert_eq!(second.thread_id, "t000002");
         assert_short_thread_id(&first.thread_id);
         assert_short_thread_id(&second.thread_id);
-        assert!(sandbox_root.join("t000001").exists());
-        assert!(sandbox_root.join("t000002").exists());
+        assert!(workspace_root.join("t000001").exists());
+        assert!(workspace_root.join("t000002").exists());
     }
 
     #[test]
-    fn create_thread_skips_existing_short_thread_sandbox() {
+    fn create_thread_skips_existing_short_thread_workspace() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
-        fs::create_dir_all(sandbox_root.join("t000001")).unwrap();
+        let workspace_root = temp.path().join("workspace");
+        fs::create_dir_all(workspace_root.join("t000001")).unwrap();
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -6437,21 +6490,21 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
 
         assert_eq!(output.thread_id, "t000002");
         assert_short_thread_id(&output.thread_id);
-        assert!(sandbox_root.join("t000002").exists());
+        assert!(workspace_root.join("t000002").exists());
     }
 
     #[test]
     fn create_thread_skips_existing_active_short_thread_id() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
         let now = chrono::Utc::now();
@@ -6461,7 +6514,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: EffortLevel::Default,
                 effort_args: Vec::new(),
-                sandbox_path: sandbox_root.join("t000001"),
+                workspace_path: workspace_root.join("t000001"),
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 process_id: None,
@@ -6481,28 +6534,28 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
 
         assert_eq!(output.thread_id, "t000002");
         assert_short_thread_id(&output.thread_id);
-        assert!(sandbox_root.join("t000002").exists());
+        assert!(workspace_root.join("t000002").exists());
     }
 
     #[test]
-    fn cleanup_for_app_exit_ends_active_threads_and_removes_sandboxes() {
+    fn cleanup_for_app_exit_ends_active_threads_and_removes_workspaces() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: None,
             skills: None,
-            sandbox: None,
+            workspace: None,
         };
         let first = runtime.create_thread(input.clone()).unwrap();
         let second = runtime.create_thread(input).unwrap();
@@ -6527,16 +6580,16 @@ mod tests {
             .has_pending_for_thread(&first.thread_id));
         assert!(runtime.tool_registry.get(&first.thread_id).is_none());
         assert!(runtime.tool_registry.get(&second.thread_id).is_none());
-        assert!(!sandbox_root.join(&first.thread_id).exists());
-        assert!(!sandbox_root.join(&second.thread_id).exists());
+        assert!(!workspace_root.join(&first.thread_id).exists());
+        assert!(!workspace_root.join(&second.thread_id).exists());
     }
 
     #[test]
-    fn end_thread_preserves_sandbox_until_app_exit_cleanup() {
+    fn end_thread_preserves_workspace_until_app_exit_cleanup() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
         let thread = runtime
@@ -6544,11 +6597,11 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
-        let sandbox_path = runtime.thread_sandbox_path(&thread.thread_id).unwrap();
-        let sentinel_path = sandbox_assets_root(&sandbox_path).join("sentinel.txt");
+        let workspace_path = runtime.thread_workspace_path(&thread.thread_id).unwrap();
+        let sentinel_path = workspace_assets_root(&workspace_path).join("sentinel.txt");
         fs::write(&sentinel_path, "preserve me").unwrap();
         let event_rx = runtime.event_bus.subscribe(&thread.thread_id);
         let (request_id, result_rx) = runtime
@@ -6587,76 +6640,76 @@ mod tests {
         assert!(event_rx
             .try_iter()
             .any(|event| matches!(event, ThreadEvent::Ended { .. })));
-        assert!(sandbox_path.exists());
+        assert!(workspace_path.exists());
         assert_eq!(fs::read_to_string(&sentinel_path).unwrap(), "preserve me");
 
         assert!(runtime.cleanup_for_app_exit().is_empty());
-        assert!(!sandbox_path.exists());
+        assert!(!workspace_path.exists());
     }
 
     #[test]
-    fn cleanup_for_app_exit_removes_orphan_sandbox_directories() {
+    fn cleanup_for_app_exit_removes_orphan_workspace_directories() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
-        fs::create_dir_all(sandbox_logs_root(&sandbox_root.join("t000999"))).unwrap();
-        fs::write(sandbox_root.join("keep.txt"), "not a sandbox").unwrap();
+        let workspace_root = temp.path().join("workspace");
+        fs::create_dir_all(workspace_logs_root(&workspace_root.join("t000999"))).unwrap();
+        fs::write(workspace_root.join("keep.txt"), "not a workspace").unwrap();
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
         let errors = runtime.cleanup_for_app_exit();
 
         assert!(errors.is_empty());
-        assert!(!sandbox_root.join("t000999").exists());
-        assert!(sandbox_root.join("keep.txt").exists());
+        assert!(!workspace_root.join("t000999").exists());
+        assert!(workspace_root.join("keep.txt").exists());
     }
 
     #[test]
-    fn startup_cleanup_removes_stale_sandbox_directories_without_touching_files() {
+    fn startup_cleanup_removes_stale_workspace_directories_without_touching_files() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
-        fs::create_dir_all(sandbox_assets_root(&sandbox_root.join("t000999"))).unwrap();
+        let workspace_root = temp.path().join("workspace");
+        fs::create_dir_all(workspace_assets_root(&workspace_root.join("t000999"))).unwrap();
         fs::write(
-            sandbox_assets_root(&sandbox_root.join("t000999")).join("stale.txt"),
+            workspace_assets_root(&workspace_root.join("t000999")).join("stale.txt"),
             "stale",
         )
         .unwrap();
-        fs::write(sandbox_root.join("keep.txt"), "not a sandbox").unwrap();
+        fs::write(workspace_root.join("keep.txt"), "not a workspace").unwrap();
         let runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
-        assert!(runtime.cleanup_stale_sandboxes_for_app_start().is_empty());
-        assert!(!sandbox_root.join("t000999").exists());
-        assert!(sandbox_root.join("keep.txt").exists());
+        assert!(runtime.cleanup_stale_workspaces_for_app_start().is_empty());
+        assert!(!workspace_root.join("t000999").exists());
+        assert!(workspace_root.join("keep.txt").exists());
         assert!(runtime.thread_manager.thread_ids().is_empty());
     }
 
     #[test]
-    fn startup_cleanup_succeeds_when_sandbox_root_does_not_exist() {
+    fn startup_cleanup_succeeds_when_workspace_root_does_not_exist() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("missing-sandbox");
+        let workspace_root = temp.path().join("missing-workspace");
         let runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
-        assert!(runtime.cleanup_stale_sandboxes_for_app_start().is_empty());
-        assert!(!sandbox_root.exists());
+        assert!(runtime.cleanup_stale_workspaces_for_app_start().is_empty());
+        assert!(!workspace_root.exists());
     }
 
     #[test]
-    fn remove_all_thread_sandboxes_succeeds_when_root_does_not_exist() {
+    fn remove_all_thread_workspaces_succeeds_when_root_does_not_exist() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("missing-sandbox");
-        let manager = SandboxManager::with_sandbox_root(&sandbox_root);
+        let workspace_root = temp.path().join("missing-workspace");
+        let manager = WorkspaceManager::with_workspace_root(&workspace_root);
 
-        let errors = manager.remove_all_thread_sandboxes();
+        let errors = manager.remove_all_thread_workspaces();
 
         assert!(errors.is_empty());
-        assert!(!sandbox_root.exists());
+        assert!(!workspace_root.exists());
     }
 
     #[test]
@@ -6668,15 +6721,15 @@ mod tests {
 
         let err = manager.next_thread_id().unwrap_err();
 
-        assert_eq!(err.code, error_codes::SANDBOX_CREATE_FAILED);
+        assert_eq!(err.code, error_codes::WORKSPACE_CREATE_FAILED);
     }
 
     #[test]
     fn create_thread_generates_per_tool_specs_without_tools_md() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -6685,12 +6738,12 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: Some(sample_skills_input()),
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
-        let skills_dir = sandbox_skills_root(&thread.sandbox_path);
+        let skills_dir = workspace_skills_root(&thread.workspace_path);
         let spec = fs::read_to_string(skills_dir.join("tools-get_app_state.json")).unwrap();
 
         assert!(!skills_dir.join("tools.md").exists());
@@ -6714,9 +6767,9 @@ mod tests {
     #[test]
     fn tool_spec_reads_from_in_memory_registry() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -6725,11 +6778,11 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: Some(sample_skills_input()),
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
         fs::write(
-            sandbox_skills_root(&sandbox_root.join(&output.thread_id))
+            workspace_skills_root(&workspace_root.join(&output.thread_id))
                 .join("tools-get_app_state.json"),
             "{}",
         )
@@ -6750,9 +6803,9 @@ mod tests {
     #[test]
     fn create_thread_registers_idle_state_without_starting_process_and_logs_events() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -6761,7 +6814,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: Some(sample_skills_input()),
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
 
@@ -6786,9 +6839,9 @@ mod tests {
     #[test]
     fn create_thread_without_skills_creates_empty_skills_dir() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -6797,7 +6850,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: None,
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
 
@@ -6805,7 +6858,7 @@ mod tests {
         assert_eq!(thread.status, ThreadStatus::Idle);
         assert_eq!(thread.process_id, None);
         assert_eq!(runtime.running_process_count(), 0);
-        let skills_dir = sandbox_skills_root(&thread.sandbox_path);
+        let skills_dir = workspace_skills_root(&thread.workspace_path);
         assert!(skills_dir.exists());
         assert!(skills_dir.is_dir());
         assert!(!skills_dir.join("tools.md").exists());
@@ -6816,9 +6869,9 @@ mod tests {
     #[test]
     fn prepare_thread_builds_prepare_prompt() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -6827,7 +6880,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: Some(sample_skills_input()),
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
 
@@ -7001,9 +7054,9 @@ mod tests {
     #[test]
     fn prepare_thread_noops_when_provider_session_id_exists() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -7012,7 +7065,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: Some(sample_skills_input()),
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
         runtime
@@ -7043,9 +7096,9 @@ mod tests {
     #[test]
     fn send_text_after_prepare_uses_resume_command() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox_root = temp.path().join("sandbox");
+        let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(&sandbox_root),
+            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
 
@@ -7054,7 +7107,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 skills: Some(sample_skills_input()),
-                sandbox: None,
+                workspace: None,
             })
             .unwrap();
         let thread_id = output.thread_id.clone();
@@ -7146,9 +7199,9 @@ mod tests {
             Some("session_existing".into()),
             None,
         );
-        let sandbox_path = runtime.thread_sandbox_path(thread_id).unwrap();
-        let initial_log_path = sandbox_logs_root(&sandbox_path).join("initial.jsonl");
-        let skills_dir = sandbox_skills_root(&sandbox_path);
+        let workspace_path = runtime.thread_workspace_path(thread_id).unwrap();
+        let initial_log_path = workspace_logs_root(&workspace_path).join("initial.jsonl");
+        let skills_dir = workspace_skills_root(&workspace_path);
         fs::create_dir_all(&skills_dir).unwrap();
         fs::write(
             skills_dir.join("tools-get_app_state.json"),
@@ -7431,7 +7484,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: EffortLevel::Default,
                 effort_args: Vec::new(),
-                sandbox_path: PathBuf::from("sandbox").join(thread_id),
+                workspace_path: PathBuf::from("workspace").join(thread_id),
                 skills: vec![],
                 status,
                 process_id: None,
@@ -7572,7 +7625,7 @@ mod tests {
         model: Option<String>,
     ) -> CoreRuntime {
         let mut runtime = CoreRuntime {
-            sandbox_manager: SandboxManager::with_sandbox_root(temp.join("sandbox")),
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.join("workspace")),
             settings_file_path: Some(temp.join("settings.json")),
             ..CoreRuntime::default()
         };
@@ -7591,8 +7644,8 @@ mod tests {
         )
         .unwrap();
         runtime.set_core_ipc_runtime("127.0.0.1:12345", temp.join("runtime.json"));
-        let sandbox_path = temp.join("sandbox").join(thread_id);
-        fs::create_dir_all(sandbox_logs_root(&sandbox_path)).unwrap();
+        let workspace_path = temp.join("workspace").join(thread_id);
+        fs::create_dir_all(workspace_logs_root(&workspace_path)).unwrap();
         let now = chrono::Utc::now();
         let has_user_message = provider_session_id.is_some();
         let effort_args = model
@@ -7610,7 +7663,7 @@ mod tests {
                 provider: provider.clone(),
                 effort_level: EffortLevel::Default,
                 effort_args,
-                sandbox_path,
+                workspace_path,
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 process_id: None,

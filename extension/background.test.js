@@ -132,7 +132,7 @@ async function createSdkSession(background, sdkPort, nativePort, sessionId, auto
   return sdkPort.sent.find((message) => message.requestId === `create_${sessionId}`);
 }
 
-test("create_session forwards an explicit sandbox without inventing a path", async () => {
+test("create_session forwards an explicit workspace without inventing a path", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -146,12 +146,12 @@ test("create_session forwards an explicit sandbox without inventing a path", asy
     type: "create_session",
     input: {
       provider: "codex",
-      sandbox: { path: "C:\\workspace\\project-a" },
+      workspace: { path: "C:\\workspace\\project-a" },
       autoEndOnDisconnect: true,
     },
   });
   const nativeCreate = await respondToNative(background, native, { threadId: "thread_custom" });
-  assert.deepEqual(nativeCreate.sandbox, { path: "C:\\workspace\\project-a" });
+  assert.deepEqual(nativeCreate.workspace, { path: "C:\\workspace\\project-a" });
 
   await respondToNative(background, native, {}, 2);
   await waitFor(() => sdk.sent.some((message) => message.requestId === "create_custom"));
@@ -164,7 +164,7 @@ test("create_session forwards an explicit sandbox without inventing a path", asy
     input: { provider: "codex" },
   });
   const nativeDefault = await respondToNative(background, native, { threadId: "thread_default" }, 3);
-  assert.equal(nativeDefault.sandbox, undefined);
+  assert.equal(nativeDefault.workspace, undefined);
   await respondToNative(background, native, {}, 4);
 });
 
@@ -206,7 +206,7 @@ test("SDK settings projection strips provider settings and effort args", async (
   assert.equal(request.type, "get_settings");
 });
 
-test("approved pick_sandbox_folder forwards the origin and returns folder inspection", async () => {
+test("approved pick_workspace_folder forwards the origin and returns folder inspection", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -214,27 +214,27 @@ test("approved pick_sandbox_folder forwards the origin and returns folder inspec
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_path", type: "pick_sandbox_folder" });
+  sdk.emit({ channelId: "channel_a", requestId: "pick_path", type: "pick_workspace_folder" });
   const request = await respondToNative(background, native, {
     path: "C:\\workspace\\project",
     isEmptyFolder: false,
-    hasSandboxConfig: true,
+    hasWorkspaceConfig: true,
   });
   assert.deepEqual(
     { type: request.type, callerOrigin: request.callerOrigin },
-    { type: "pick_sandbox_folder", callerOrigin: "https://app.example.test" },
+    { type: "pick_workspace_folder", callerOrigin: "https://app.example.test" },
   );
   await waitFor(() => sdk.sent.some((message) => message.requestId === "pick_path"));
   assert.deepEqual(sdk.sent.find((message) => message.requestId === "pick_path").result, {
     path: "C:\\workspace\\project",
     isEmptyFolder: false,
-    hasSandboxConfig: true,
+    hasWorkspaceConfig: true,
   });
   assert.deepEqual(background.getState().events, []);
   assert.equal(background.getState().error, null);
 });
 
-test("pick_sandbox_folder cancellation is forwarded as a successful null result and keeps native work alive", async () => {
+test("pick_workspace_folder cancellation is forwarded as a successful null result and keeps native work alive", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -242,7 +242,7 @@ test("pick_sandbox_folder cancellation is forwarded as a successful null result 
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_cancel", type: "pick_sandbox_folder" });
+  sdk.emit({ channelId: "channel_a", requestId: "pick_cancel", type: "pick_workspace_folder" });
   await waitFor(() => native.sent.length === 1);
   assert.equal(background.getNativeRequestCount(), 1);
   assert.equal(native.disconnectCount, 0);
@@ -254,7 +254,7 @@ test("pick_sandbox_folder cancellation is forwarded as a successful null result 
   assert.equal(native.disconnectCount, 1);
 });
 
-test("unapproved pick_sandbox_folder enters approval and replays after approval", async () => {
+test("unapproved pick_workspace_folder enters approval and replays after approval", async () => {
   const chrome = createChrome({ approved: false });
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -262,7 +262,7 @@ test("unapproved pick_sandbox_folder enters approval and replays after approval"
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_approval", type: "pick_sandbox_folder" });
+  sdk.emit({ channelId: "channel_a", requestId: "pick_approval", type: "pick_workspace_folder" });
   await waitFor(() => background.getPendingApproval()?.requestCount === 1);
   assert.equal(native.sent.length, 0);
 
@@ -271,12 +271,12 @@ test("unapproved pick_sandbox_folder enters approval and replays after approval"
   background.handlePopupConnect(popup);
   popup.emit({ type: "approve_origin", origin: "https://app.example.test" });
   const request = await respondToNative(background, native, { path: null });
-  assert.equal(request.type, "pick_sandbox_folder");
+  assert.equal(request.type, "pick_workspace_folder");
   assert.equal(request.callerOrigin, "https://app.example.test");
   await waitFor(() => sdk.sent.some((message) => message.requestId === "pick_approval"));
 });
 
-test("pick_sandbox_folder native failures are returned as SDK errors without changing extension state", async () => {
+test("pick_workspace_folder native failures are returned as SDK errors without changing extension state", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -284,7 +284,7 @@ test("pick_sandbox_folder native failures are returned as SDK errors without cha
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_failed", type: "pick_sandbox_folder" });
+  sdk.emit({ channelId: "channel_a", requestId: "pick_failed", type: "pick_workspace_folder" });
   await waitFor(() => native.sent.length === 1);
   const request = native.sent[0];
   background.handleNativeMessage({
@@ -316,16 +316,16 @@ test("create_session forwards SDK version metadata separately from consumer inpu
     callerSdkVersion: "mock-sdk-version",
     input: {
       provider: "codex",
-      sandbox: { path: "C:\\workspace\\project", callerSdkVersion: "consumer-value" },
+      workspace: { path: "C:\\workspace\\project", callerSdkVersion: "consumer-value" },
     },
   });
   const request = await respondToNative(background, native, { threadId: "thread_version" });
   assert.equal(request.callerSdkVersion, "mock-sdk-version");
-  assert.equal(request.sandbox.callerSdkVersion, "consumer-value");
+  assert.equal(request.workspace.callerSdkVersion, "consumer-value");
   await respondToNative(background, native, {}, 2);
 });
 
-test("old pick_directory SDK request is rejected", async () => {
+test("legacy pick_sandbox_folder SDK request is rejected", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -333,7 +333,7 @@ test("old pick_directory SDK request is rejected", async () => {
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_old", type: "pick_directory" });
+  sdk.emit({ channelId: "channel_a", requestId: "pick_old", type: "pick_sandbox_folder" });
   await waitFor(() => sdk.sent.some((message) => message.requestId === "pick_old"));
   const response = sdk.sent.find((message) => message.requestId === "pick_old");
   assert.equal(response.ok, false);

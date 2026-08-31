@@ -51,7 +51,7 @@ Pedelec Desktop Runtime
 Codex / Antigravity / OpenCode / Cursor / Claude Code / Ollama
 ```
 
-The diagram is the control/event path. Asset file bodies follow a separate internal path: `Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session .pedelec-sandbox/assets/`. Use the asset APIs only; do not depend on the internal URL, port, token, or ticket lifecycle.
+The diagram is the control/event path. Asset file bodies follow a separate internal path: `Web App fetch(PUT/GET) → Desktop-managed 127.0.0.1 loopback asset transfer server → session .pedelec-runtime/assets/`. Use the asset APIs only; do not depend on the internal URL, port, token, or ticket lifecycle.
 ## SDK Prerequisites
 
 The Pedelec SDK must run in a browser page environment and requires:
@@ -409,7 +409,7 @@ await session.end();
 
 After a session ends, `sendText()` can no longer be called on it. Create a new session with `createSession()` if you need a new conversation.
 
-Ending a session does not immediately delete its sandbox. Sessions without `sandbox.path` use temporary Desktop-managed storage: managed sandboxes are removed on normal Desktop App exit, and leftover directories are cleaned up on the next app launch. An explicit absolute `sandbox.path` is application-managed and is never deleted by Pedelec on session end, app exit, or stale cleanup; multiple active sessions may share it. Closing the main window only hides the app and does not trigger managed cleanup. Ended sessions cannot access retained sandbox assets through the asset APIs, and explicit shared workspaces do not receive filesystem conflict coordination.
+Ending a session does not immediately delete its workspace. Sessions without `workspace.path` use temporary Desktop-managed storage: managed workspaces are removed on normal Desktop App exit, and leftover directories are cleaned up on the next app launch. An explicit absolute `workspace.path` is application-managed and is never deleted by Pedelec on session end, app exit, or stale cleanup; multiple active sessions may share it. Closing the main window only hides the app and does not trigger managed cleanup. Ended sessions cannot access retained workspace assets through the asset APIs, and explicit shared workspaces do not receive filesystem conflict coordination.
 
 If `autoEndOnDisconnect` is enabled, disconnect cleanup has the same goal as calling `session.end()`: the thread is ended and no longer treated as active.
 

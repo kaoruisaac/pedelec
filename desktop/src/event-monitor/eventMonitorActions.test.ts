@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { monitorEndThread, openThreadSandbox, sendThreadText } from "./eventMonitorActions";
+import { monitorEndThread, openThreadWorkspace, sendThreadText } from "./eventMonitorActions";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -12,20 +12,20 @@ describe("event monitor actions", () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
   });
 
-  it("opens the selected thread sandbox with the expected command payload", async () => {
-    await openThreadSandbox("t000123");
+  it("opens the selected thread workspace with the expected command payload", async () => {
+    await openThreadWorkspace("t000123");
 
     expect(invoke).toHaveBeenCalledTimes(1);
-    expect(invoke).toHaveBeenCalledWith("open_thread_sandbox", {
+    expect(invoke).toHaveBeenCalledWith("open_thread_workspace", {
       threadId: "t000123",
     });
   });
 
   it("propagates Tauri invoke failures", async () => {
-    const error = new Error("sandbox opener failed");
+    const error = new Error("workspace opener failed");
     vi.mocked(invoke).mockRejectedValueOnce(error);
 
-    await expect(openThreadSandbox("t000123")).rejects.toBe(error);
+    await expect(openThreadWorkspace("t000123")).rejects.toBe(error);
   });
 
   it("sends debug thread text with the existing payload shape", async () => {

@@ -59,6 +59,10 @@ try {
 | `MESSAGE_TOO_LARGE` | Local IPC message 超過 size limit | 縮小 prompt/tool/result payload | 只在資料縮小後 |
 | `SDK_BRIDGE_TIMEOUT` | Extension 未在 `bridgeTimeoutMs` 內回應 | 檢查下游 layers，不要重複 write | 診斷後 |
 | `DIRECTORY_PICKER_FAILED` | 原生 directory picker 無法建立、顯示，或無法轉換成 SDK path result | 請使用者重試並檢查 Desktop/native dialog 支援；取消不是 error | 修復 dialog/runtime 問題後 |
+| `WORKSPACE_PATH_INVALID` | Workspace path 不是 absolute、不是 directory、與 managed workspace root overlap，或無法解析 | 選擇有效的 application-managed workspace path | 修正 path 後 |
+| `WORKSPACE_CREATE_FAILED` | Pedelec 無法建立或初始化 managed workspace 或其 private runtime data | 保留 application-owned workspace，查看 error details | 修復 filesystem 問題後 |
+| `WORKSPACE_REMOVE_FAILED` | Pedelec 無法移除 managed temporary workspace | 保留 path 供後續 cleanup，查看 locked file 或 permission details | filesystem 問題解除後 |
+| `WORKSPACE_OPEN_FAILED` | Desktop 無法開啟已驗證的 thread workspace folder | 檢查 folder 與 OS opener integration | 修復 opener 問題後 |
 | `SDK_TRANSPORT_ERROR` | Generic bridge failure | 查看 message/details，驗證 Extension/native/Core | 視 operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape 或 request type 不相容 | 對齊 component versions，回報 reproducible mismatch | 通常修復前不可 |
 

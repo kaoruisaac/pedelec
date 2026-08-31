@@ -196,7 +196,7 @@ fn native_message_to_core_request(
         | "list_assets" => Some(Value::Object(object)),
         "list_providers" | "get_settings" => Some(Value::Object(object)),
         // The directory picker deliberately has no caller-controlled payload.
-        "pick_sandbox_folder" => Some(serde_json::json!({})),
+        "pick_workspace_folder" => Some(serde_json::json!({})),
         // The connectivity probe deliberately has no caller-controlled payload.
         "ping" => Some(serde_json::json!({})),
         "submit_tool_result" => {
@@ -666,9 +666,9 @@ mod tests {
     }
 
     #[test]
-    fn native_sandbox_folder_picker_preserves_metadata_without_session_payload() {
+    fn native_workspace_folder_picker_preserves_metadata_without_session_payload() {
         let request = native_message_to_core_request(json!({
-            "type": "pick_sandbox_folder",
+            "type": "pick_workspace_folder",
             "requestId": "req_picker",
             "callerOrigin": "https://approved.example",
             "callerSdkVersion": "mock-sdk-version",
@@ -677,7 +677,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(request.r#type, "pick_sandbox_folder");
+        assert_eq!(request.r#type, "pick_workspace_folder");
         assert_eq!(
             request.caller_origin.as_deref(),
             Some("https://approved.example")
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn native_directory_picker_request_is_not_supported() {
         assert!(native_message_to_core_request(json!({
-            "type": "pick_directory",
+            "type": "pick_sandbox_folder",
             "requestId": "req_old_picker"
         }))
         .is_err());
@@ -984,7 +984,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: EffortLevel::Default,
                 effort_args: vec![],
-                sandbox_path: PathBuf::from("sandbox").join(thread_id),
+                workspace_path: PathBuf::from("workspace").join(thread_id),
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 process_id: None,

@@ -152,19 +152,19 @@ label {
   font-weight: 650;
 }
 
-.sandbox-selector {
+.workspace-selector {
   display: grid;
   gap: 6px;
   min-width: 0;
 }
 
-.sandbox-label {
+.workspace-label {
   color: #3a4a55;
   font-size: 13px;
   font-weight: 650;
 }
 
-.sandbox-path {
+.workspace-path {
   display: block;
   min-width: 0;
   border: 1px solid #c3cdd5;
@@ -178,13 +178,13 @@ label {
   overflow-wrap: anywhere;
 }
 
-.sandbox-actions {
+.workspace-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.sandbox-actions button {
+.workspace-actions button {
   flex: 1 1 130px;
 }
 

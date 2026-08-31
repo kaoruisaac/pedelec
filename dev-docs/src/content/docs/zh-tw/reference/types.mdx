@@ -14,11 +14,11 @@ import type {
   ProviderInfo,
   PedelecSessionStatus,
   ToolArgsSchema,
-  SandboxAsset,
-  SandboxAssetPath,
+  Asset,
+  AssetPath,
   ReadAssetType,
-  CreateSessionSandboxInput,
-  SandboxFolderPickerResult,
+  CreateSessionWorkspaceInput,
+  WorkspaceFolderPickerResult,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -54,41 +54,41 @@ type CreateSessionInput<
       provider: ProviderCode;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      sandbox?: CreateSessionSandboxInput;
+      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
       provider?: undefined;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      sandbox?: CreateSessionSandboxInput;
+      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
 `effortLevel` 不依賴 provider，可單獨使用。
 
-### `CreateSessionSandboxInput`
+### `CreateSessionWorkspaceInput`
 
 ```ts
-type CreateSessionSandboxInput = {
+type CreateSessionWorkspaceInput = {
   path: string;
 };
 ```
 
-`path` 是 absolute、由 application 管理的 workspace path。Pedelec 會建立缺少的 sandbox 子目錄，但永遠不會刪除這個 workspace。它可以由多個 active session 共用，且不得與 managed sandbox root overlap。
+`path` 是 absolute、由 application 管理的 workspace path。Pedelec 會建立缺少的 workspace 子目錄，但永遠不會刪除這個 workspace。它可以由多個 active session 共用，且不得與 managed workspace root overlap。
 
-### `SandboxFolderPickerResult`
+### `WorkspaceFolderPickerResult`
 
 ```ts
-interface SandboxFolderPickerResult {
+interface WorkspaceFolderPickerResult {
   path: string;
   isEmptyFolder: boolean;
-  hasSandboxConfig: boolean;
+  hasWorkspaceConfig: boolean;
 }
 ```
 
-這是 `sandboxFolderPicker()` 回傳的 read-only snapshot。`hasSandboxConfig` 只表示 `.pedelec-lock.json` 是 regular file，不會驗證 marker 內容。
+這是 `workspaceFolderPicker()` 回傳的 read-only snapshot。`hasWorkspaceConfig` 只表示 `.pedelec-workspace.json` 是 regular file，不會驗證 marker 內容。
 
 ## Provider 與 settings
 
@@ -140,13 +140,13 @@ type PedelecAvailability = {
 
 ## Assets
 
-### `SandboxAssetPath`
+### `AssetPath`
 
 ```ts
-type SandboxAssetPath = `/${string}`;
+type AssetPath = `/${string}`;
 ```
 
-Session shared store 中 asset 的 SDK public path。Agent 可見的 shared store 實際位於 `<sandbox.path>/.pedelec-sandbox/assets/`；`.pedelec-sandbox` 是 private runtime layout，不會出現在 SDK value 中。例如 `/images/photo.png` 對應到 `<sandbox.path>/.pedelec-sandbox/assets/images/photo.png`。Runtime validation 也會拒絕 backslash、空 path segment、`.` 與 `..`。
+Session shared store 中 asset 的 SDK public path。Agent 可見的 shared store 實際位於 `<workspace.path>/.pedelec-runtime/assets/`；`.pedelec-runtime` 是 private runtime layout，不會出現在 SDK value 中。例如 `/images/photo.png` 對應到 `<workspace.path>/.pedelec-runtime/assets/images/photo.png`。Runtime validation 也會拒絕 backslash、空 path segment、`.` 與 `..`。
 
 ### `ReadAssetType`
 
@@ -156,18 +156,18 @@ type ReadAssetType = "text" | "json" | "file";
 
 決定 `PedelecSession.readAsset()` 的轉換方式：strict UTF-8 text、parsed JSON，或 browser `File`。
 
-### `SandboxAsset`
+### `Asset`
 
 ```ts
-type SandboxAsset = {
+type Asset = {
   name: string;
-  path: SandboxAssetPath;
+  path: AssetPath;
   sizeBytes: number;
   modifiedAt: number;
 };
 ```
 
-`modifiedAt` 是 sandbox filesystem modification time。`path` 是 sandbox-relative，不會揭露 browser 使用者的 absolute local path。
+`modifiedAt` 是 workspace filesystem modification time。`path` 是 workspace-relative，不會揭露 browser 使用者的 absolute local path。
 
 ## Errors 與 status
 
