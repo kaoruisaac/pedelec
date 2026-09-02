@@ -3,7 +3,8 @@ use crate::owner::ProviderRuntimeController;
 use crate::persistent_process::{
     PersistentProcess, PersistentProcessError, PersistentProcessSpec, ProcessExit,
 };
-use crate::rpc::{RpcEnvelopeMode, RpcError, RpcEvent, RpcId, RpcPeer, RpcTrafficRecord};
+use crate::protocol::ProtocolTrafficRecord;
+use crate::rpc::{RpcEnvelopeMode, RpcError, RpcEvent, RpcId, RpcPeer};
 use serde_json::Value;
 use std::fmt;
 use std::path::Path;
@@ -279,10 +280,10 @@ impl PersistentRuntimeController {
             .recv()
     }
 
-    pub fn recv_rpc_traffic_timeout(
+    pub fn recv_protocol_traffic_timeout(
         &self,
         timeout: Duration,
-    ) -> Result<RpcTrafficRecord, RecvTimeoutError> {
+    ) -> Result<ProtocolTrafficRecord, RecvTimeoutError> {
         self.peer.recv_traffic_timeout(timeout)
     }
 

@@ -60,7 +60,7 @@
       ]
     },
     "claude": {
-      "revision": 1,
+      "revision": 2,
       "profiles": {
         "low": [
           "--model",
@@ -76,7 +76,7 @@
         ],
         "high": [
           "--model",
-          "claude-fable-5",
+          "claude-fable-5-1",
           "--effort",
           "medium"
         ]
@@ -87,7 +87,7 @@
           "id": "premium",
           "args": [
             "--model",
-            "claude-fable-5",
+            "claude-fable-5-1",
             "--effort",
             "medium"
           ],

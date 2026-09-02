@@ -127,6 +127,7 @@ mod tests {
                 bootstrap_capabilities: None,
                 app_server_capability: None,
                 acp_capability: None,
+                stream_json_capability: None,
             },
         )]);
 
@@ -190,20 +191,82 @@ mod tests {
     }
 
     #[test]
-    fn application_runtime_routes_codex_opencode_and_cursor_persistently() {
+    fn application_runtime_routes_migrated_providers_persistently() {
         let runtime = CoreRuntime::new_for_application();
-        assert_eq!(
-            runtime.provider_execution_family(&ProviderCode::Codex),
-            ProviderExecutionFamily::PersistentRuntime
+        for provider in [
+            ProviderCode::Codex,
+            ProviderCode::Antigravity,
+            ProviderCode::OpenCode,
+            ProviderCode::Cursor,
+        ] {
+            assert_eq!(
+                runtime.provider_execution_family(&provider),
+                ProviderExecutionFamily::PersistentRuntime,
+                "provider={provider:?}"
+            );
+        }
+        for provider in [ProviderCode::Claude, ProviderCode::Ollama] {
+            assert_eq!(
+                runtime.provider_execution_family(&provider),
+                ProviderExecutionFamily::LegacyCommand,
+                "provider={provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_persistent_intent_uses_selected_native_model_and_effort_args() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_typed_settings";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
         );
+        runtime.use_persistent_provider_for_test(ProviderCode::Antigravity);
+        let thread = runtime.thread_manager.thread_mut(thread_id).unwrap();
+        thread.effort_level = EffortLevel::High;
+        thread.effort_args = vec![
+            "--model".into(),
+            "agy-native-model".into(),
+            "--effort".into(),
+            "low".into(),
+        ];
+
+        let session = runtime.build_persistent_session_intent(thread_id).unwrap();
+        assert_eq!(session.model.as_deref(), Some("agy-native-model"));
         assert_eq!(
-            runtime.provider_execution_family(&ProviderCode::OpenCode),
-            ProviderExecutionFamily::PersistentRuntime
+            session.antigravity_reasoning_effort,
+            Some(AntigravityReasoningEffort::Low)
         );
-        assert_eq!(
-            runtime.provider_execution_family(&ProviderCode::Cursor),
-            ProviderExecutionFamily::PersistentRuntime
+        assert_eq!(session.effort_level, EffortLevel::High);
+        assert_eq!(session.reasoning_effort, None);
+    }
+
+    #[test]
+    fn antigravity_persistent_intent_keeps_empty_native_settings_optional() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_antigravity_empty_settings";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Antigravity,
+            None,
+            None,
         );
+        runtime.use_persistent_provider_for_test(ProviderCode::Antigravity);
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .effort_args
+            .clear();
+
+        let session = runtime.build_persistent_session_intent(thread_id).unwrap();
+        assert_eq!(session.model, None);
+        assert_eq!(session.antigravity_reasoning_effort, None);
     }
 
     #[test]
@@ -255,6 +318,7 @@ mod tests {
             bootstrap_capabilities: None,
             app_server_capability: None,
             acp_capability: None,
+            stream_json_capability: None,
         };
         assert_eq!(
             provider_bootstrap_capability_from_probe(
@@ -309,6 +373,54 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_persistent_readiness_requires_stream_json_and_custom_agent_support() {
+        for (version, stream_json_supported, expected_available, expected_error) in [
+            ("1.1.6", false, false, Some("stream-json")),
+            ("1.1.5", true, false, Some("workspace custom agent")),
+            ("1.1.6", true, true, None),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let provider_path = test_antigravity_path(temp.path(), version, stream_json_supported);
+            let mut runtime = CoreRuntime {
+                provider_path_value_override: Some(provider_path),
+                ..CoreRuntime::new_for_application()
+            };
+            runtime.refresh_providers();
+
+            let provider = runtime
+                .list_providers()
+                .into_iter()
+                .find(|provider| provider.code == ProviderCode::Antigravity)
+                .unwrap();
+            assert!(provider.scanned);
+            assert_eq!(provider.version.as_deref(), Some(version));
+            assert_eq!(provider.available, expected_available);
+            if let Some(expected_error) = expected_error {
+                assert!(provider
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(expected_error)));
+                let error = runtime
+                    .provider_executable_path(&ProviderCode::Antigravity)
+                    .unwrap_err();
+                assert_eq!(error.code, error_codes::PROVIDER_TERMINAL_UNAVAILABLE);
+                assert_eq!(
+                    error
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("runtimeCapabilityAvailable")),
+                    Some(&json!(false))
+                );
+            } else {
+                assert!(provider.error.is_none());
+                assert!(runtime
+                    .provider_executable_path(&ProviderCode::Antigravity)
+                    .is_ok());
+            }
+        }
+    }
+
+    #[test]
     fn antigravity_custom_agent_version_gate_maps_supported_versions() {
         for (version, expected) in [
             (vec![1, 1, 5], ProviderBootstrapMode::UserPromptFallback),
@@ -328,6 +440,7 @@ mod tests {
                 bootstrap_capabilities: None,
                 app_server_capability: None,
                 acp_capability: None,
+                stream_json_capability: None,
             };
             assert_eq!(
                 provider_bootstrap_capability_from_probe(
@@ -630,6 +743,7 @@ mod tests {
                 bootstrap_capabilities: None,
                 app_server_capability: None,
                 acp_capability: None,
+                stream_json_capability: None,
             },
         );
 
@@ -1462,6 +1576,7 @@ mod tests {
                 }),
                 app_server_capability: None,
                 acp_capability: None,
+                stream_json_capability: None,
             },
         );
         let workspace = runtime.thread_workspace_path(thread_id).unwrap();
@@ -1554,6 +1669,7 @@ mod tests {
                 }),
                 app_server_capability: None,
                 acp_capability: None,
+                stream_json_capability: None,
             },
         );
 
@@ -1604,6 +1720,7 @@ mod tests {
                 bootstrap_capabilities: None,
                 app_server_capability: None,
                 acp_capability: None,
+                stream_json_capability: None,
             },
         );
         let command = runtime
@@ -7584,6 +7701,41 @@ mod tests {
         env::join_paths([bin_dir]).unwrap()
     }
 
+    fn test_antigravity_path(root: &Path, version: &str, stream_json_supported: bool) -> OsString {
+        let bin_dir = root.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        #[cfg(windows)]
+        let contents = if stream_json_supported {
+            format!(
+                "@echo off\r\nif \"%1\"==\"--help\" (echo --input-format stream-json --output-format stream-json) else (echo {version})\r\n"
+            )
+        } else {
+            format!("@echo off\r\nif \"%1\"==\"--help\" (echo usage) else (echo {version})\r\n")
+        };
+        #[cfg(not(windows))]
+        let contents = if stream_json_supported {
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '--input-format stream-json --output-format stream-json'; else printf '%s\\n' '{version}'; fi\n"
+            )
+        } else {
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' 'usage'; else printf '%s\\n' '{version}'; fi\n"
+            )
+        };
+        #[cfg(windows)]
+        let program_name = "agy.cmd";
+        #[cfg(not(windows))]
+        let program_name = "agy";
+        let path = bin_dir.join(program_name);
+        fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        env::join_paths([bin_dir]).unwrap()
+    }
+
     fn test_cursor_path(root: &Path, acp_supported: bool) -> OsString {
         let bin_dir = root.join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -7922,6 +8074,7 @@ mod tests {
                     }),
                     app_server_capability: None,
                     acp_capability: None,
+                    stream_json_capability: None,
                 },
             );
         }

@@ -1,4 +1,4 @@
-use crate::{record_rpc_traffic, PersistentRuntimeDispatcher};
+use crate::{record_protocol_traffic, PersistentRuntimeDispatcher};
 use pedelec_core::{
     build_persistent_user_prompt_with_bootstrap, error_codes, PedelecError,
     PersistentProviderSessionIntent, PersistentRuntimeOperation, ProviderCode,
@@ -365,7 +365,8 @@ impl AcpRuntimeDispatcher {
         let process_id = controller.process_id();
         thread::spawn(move || {
             loop {
-                match controller.recv_rpc_traffic_timeout(std::time::Duration::from_millis(50)) {
+                match controller.recv_protocol_traffic_timeout(std::time::Duration::from_millis(50))
+                {
                     Ok(record) => {
                         let current = match typed.lock() {
                             Ok(current) => current,
@@ -377,7 +378,7 @@ impl AcpRuntimeDispatcher {
                         {
                             break;
                         }
-                        record_rpc_traffic(
+                        record_protocol_traffic(
                             &runtime,
                             provider.provider_code(),
                             generation,
@@ -2310,6 +2311,7 @@ mod tests {
             effort_level: EffortLevel::Default,
             model: Some("fake/selected".into()),
             reasoning_effort: None,
+            antigravity_reasoning_effort: None,
             approval_policy: PersistentApprovalPolicy::Never,
             sandbox_policy: PersistentSandboxPolicy::ReadOnly,
             host_instructions: "Pedelec is the host application\nthread-open privileged context"

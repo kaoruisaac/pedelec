@@ -15,7 +15,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[cfg(windows)]
     #[test]
@@ -781,14 +781,7 @@ mod tests {
         let tool_response = tool_handle.join().unwrap();
         assert!(tool_response.ok);
         assert_eq!(tool_response.result.unwrap(), json!({ "value": 123 }));
-        assert_eq!(
-            runtime
-                .lock()
-                .unwrap()
-                .tool_request_broker
-                .replay_candidate_count(),
-            0
-        );
+        assert_replay_candidate_count_eventually(&runtime, 0);
 
         let second_path = runtime_path.clone();
         let second_handle = thread::spawn(move || {
@@ -893,14 +886,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replay.result, Some(json!({ "value": 123 })));
-        assert_eq!(
-            runtime
-                .lock()
-                .unwrap()
-                .tool_request_broker
-                .replay_candidate_count(),
-            0
-        );
+        assert_replay_candidate_count_eventually(&runtime, 0);
         assert_eq!(
             event_rx
                 .try_iter()
@@ -978,14 +964,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(successful_replay.result, Some(json!({ "value": 456 })));
-        assert_eq!(
-            runtime
-                .lock()
-                .unwrap()
-                .tool_request_broker
-                .replay_candidate_count(),
-            0
-        );
+        assert_replay_candidate_count_eventually(&runtime, 0);
         assert_eq!(
             event_rx
                 .try_iter()
@@ -1066,14 +1045,7 @@ mod tests {
             second.join().unwrap().unwrap().result,
             Some(json!({ "value": 789 }))
         );
-        assert_eq!(
-            runtime
-                .lock()
-                .unwrap()
-                .tool_request_broker
-                .replay_candidate_count(),
-            0
-        );
+        assert_replay_candidate_count_eventually(&runtime, 0);
 
         let third = spawn_tool_call(
             runtime_path.clone(),
@@ -1184,14 +1156,7 @@ mod tests {
         .unwrap();
         assert!(!replay.ok);
         assert_eq!(replay.error.unwrap().code, error_codes::TOOL_TIMEOUT);
-        assert_eq!(
-            runtime
-                .lock()
-                .unwrap()
-                .tool_request_broker
-                .replay_candidate_count(),
-            0
-        );
+        assert_replay_candidate_count_eventually(&runtime, 0);
         assert_eq!(
             runtime.lock().unwrap().tool_request_broker.pending_count(),
             0
@@ -1239,14 +1204,7 @@ mod tests {
             first_response.error.unwrap().code,
             error_codes::TOOL_TIMEOUT
         );
-        assert_eq!(
-            runtime
-                .lock()
-                .unwrap()
-                .tool_request_broker
-                .replay_candidate_count(),
-            0
-        );
+        assert_replay_candidate_count_eventually(&runtime, 0);
 
         let second = spawn_tool_call(
             runtime_path.clone(),
@@ -2107,6 +2065,30 @@ exit 0
             if let ThreadEvent::ToolCall { request_id, .. } = event {
                 return request_id;
             }
+        }
+    }
+
+    fn assert_replay_candidate_count_eventually(
+        runtime: &Arc<Mutex<CoreRuntime>>,
+        expected: usize,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let actual = runtime
+                .lock()
+                .unwrap()
+                .tool_request_broker
+                .replay_candidate_count();
+            if actual == expected {
+                return;
+            }
+            if Instant::now() >= deadline {
+                assert_eq!(
+                    actual, expected,
+                    "timed out waiting for replay candidate count"
+                );
+            }
+            thread::sleep(Duration::from_millis(1));
         }
     }
 

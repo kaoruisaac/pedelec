@@ -5,9 +5,9 @@
 //! responses, and normalization of the subset of updates Pedelec consumes.
 
 use crate::{
-    PersistentProcessSpec, PersistentRuntimeController, ProviderRuntimeController,
-    RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent, RpcServerRequest, RpcTrafficRecord,
-    RuntimeControllerError, RuntimeEvent,
+    PersistentProcessSpec, PersistentRuntimeController, ProtocolTrafficRecord,
+    ProviderRuntimeController, RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent,
+    RpcServerRequest, RuntimeControllerError, RuntimeEvent,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -1117,11 +1117,11 @@ impl AcpController {
             .recv_timeout(timeout)
     }
 
-    pub fn recv_rpc_traffic_timeout(
+    pub fn recv_protocol_traffic_timeout(
         &self,
         timeout: Duration,
-    ) -> Result<RpcTrafficRecord, RecvTimeoutError> {
-        self.transport.recv_rpc_traffic_timeout(timeout)
+    ) -> Result<ProtocolTrafficRecord, RecvTimeoutError> {
+        self.transport.recv_protocol_traffic_timeout(timeout)
     }
 
     pub fn shutdown(&self) -> Result<(), AcpRuntimeError> {
@@ -2422,7 +2422,7 @@ mod tests {
         }
         assert!(saw_stderr);
         let mut rpc_traffic = Vec::new();
-        while let Ok(record) = controller.recv_rpc_traffic_timeout(Duration::from_millis(50)) {
+        while let Ok(record) = controller.recv_protocol_traffic_timeout(Duration::from_millis(50)) {
             rpc_traffic.push(record);
         }
         let permission_request = rpc_traffic

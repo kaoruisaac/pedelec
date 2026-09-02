@@ -143,14 +143,14 @@ describe("event monitor store", () => {
     expect(monitor.store.runtimeByProvider.opencode).toBeUndefined();
   });
 
-  it("bounds RPC traffic without changing semantic event metrics or truncating messages", () => {
+  it("bounds protocol traffic without changing semantic event metrics or truncating messages", () => {
     const monitor = createEventMonitorStore();
     monitor.upsertThreadEvent({ type: "created", threadId: "codex-thread" });
     const largeText = "x".repeat(10_000);
 
     for (let index = 0; index < 350; index += 1) {
-      monitor.upsertRpcTraffic({
-        type: "provider_rpc_traffic",
+      monitor.upsertProtocolTraffic({
+        type: "provider_protocol_traffic",
         provider: "codex",
         threadId: "codex-thread",
         processId: 1234,
@@ -160,23 +160,23 @@ describe("event monitor store", () => {
         kind: "notification",
         message: { index, text: index === 349 ? largeText : "small" },
       });
-      monitor.upsertRpcTraffic({
-        type: "provider_rpc_traffic",
-        provider: "codex",
-        processId: 1234,
-        runtimeGeneration: 7,
+      monitor.upsertProtocolTraffic({
+        type: "provider_protocol_traffic",
+        provider: "antigravity",
+        processId: 5678,
+        runtimeGeneration: 9,
         ts: `2026-09-02T01:00:${String(index).padStart(3, "0")}Z`,
         direction: "provider_to_client",
-        kind: "notification",
+        kind: "event",
         message: { globalIndex: index },
       });
     }
 
     const thread = monitor.store.threadsById["codex-thread"]!;
-    expect(thread.rpcTraffic).toHaveLength(300);
-    expect(thread.rpcTraffic[0]?.message).toEqual({ index: 349, text: largeText });
-    expect(monitor.store.globalRpcTraffic).toHaveLength(300);
-    expect(monitor.store.globalRpcTraffic[0]?.message).toEqual({ globalIndex: 349 });
+    expect(thread.protocolTraffic).toHaveLength(300);
+    expect(thread.protocolTraffic[0]?.message).toEqual({ index: 349, text: largeText });
+    expect(monitor.store.globalProtocolTraffic).toHaveLength(300);
+    expect(monitor.store.globalProtocolTraffic[0]?.message).toEqual({ globalIndex: 349 });
     expect(monitor.store.totalEventCount).toBe(1);
     expect(thread.eventCount).toBe(1);
     expect(thread.lastEventType).toBe("created");

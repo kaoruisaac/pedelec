@@ -1,17 +1,14 @@
 use crate::jsonl::{JsonLineChannel, JsonLineError, JsonLineEvent};
 use crate::persistent_process::PersistentWriter;
-use chrono::Utc;
+use crate::protocol::{ProtocolTrafficLogger, ProtocolTrafficRecord};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use uuid::Uuid;
 
 /// Controls the envelope emitted by [`RpcPeer`]. Codex App Server uses the
 /// historical bare shape while ACP requires strict JSON-RPC 2.0 envelopes.
@@ -65,16 +62,6 @@ pub enum RpcDisconnectReason {
     TransportIo(String),
     Explicit,
     ChannelClosed,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RpcTrafficRecord {
-    pub ts: String,
-    pub direction: String,
-    pub kind: String,
-    pub thread_id: Option<String>,
-    pub message: Value,
-    pub unmatched: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,8 +146,7 @@ impl RpcCorrelationState {
 }
 
 #[derive(Default)]
-struct ProtocolLogState {
-    writers: HashMap<String, std::fs::File>,
+struct RpcProtocolState {
     resolver: Option<OwnerResolver>,
     server_request_owners: HashMap<RpcId, String>,
 }
@@ -171,9 +157,10 @@ struct RpcInner {
     correlations: Mutex<RpcCorrelationState>,
     disconnected: Mutex<Option<RpcDisconnectReason>>,
     events: mpsc::Sender<RpcEvent>,
-    traffic: mpsc::Sender<RpcTrafficRecord>,
+    traffic: mpsc::Sender<ProtocolTrafficRecord>,
     envelope_mode: RpcEnvelopeMode,
-    protocol_logs: Mutex<ProtocolLogState>,
+    protocol_state: Mutex<RpcProtocolState>,
+    protocol_logger: ProtocolTrafficLogger,
 }
 
 /// A writer abstraction keeps `RpcPeer` reusable with persistent process
@@ -195,7 +182,7 @@ impl JsonLineWriter for PersistentWriter {
 pub struct RpcPeer {
     inner: Arc<RpcInner>,
     events: Arc<Mutex<mpsc::Receiver<RpcEvent>>>,
-    traffic: Arc<Mutex<mpsc::Receiver<RpcTrafficRecord>>>,
+    traffic: Arc<Mutex<mpsc::Receiver<ProtocolTrafficRecord>>>,
 }
 
 impl fmt::Debug for RpcPeer {
@@ -236,7 +223,8 @@ impl RpcPeer {
             events: events_tx,
             traffic: traffic_tx,
             envelope_mode,
-            protocol_logs: Mutex::new(ProtocolLogState::default()),
+            protocol_state: Mutex::new(RpcProtocolState::default()),
+            protocol_logger: ProtocolTrafficLogger::default(),
         });
         let peer = Self {
             inner: Arc::clone(&inner),
@@ -386,45 +374,9 @@ impl RpcPeer {
     }
 
     pub fn register_protocol_log(&self, owner: &str, provider: &str, workspace: &Path) {
-        if self
-            .inner
-            .protocol_logs
-            .lock()
-            .expect("RPC protocol log mutex poisoned")
-            .writers
-            .contains_key(owner)
-        {
-            return;
-        }
-        let logs_root = workspace.join(".pedelec-runtime").join("logs");
-        if fs::create_dir_all(&logs_root).is_err() {
-            return;
-        }
-        let safe_provider = provider
-            .to_ascii_lowercase()
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                    ch
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>();
-        let path = logs_root.join(format!(
-            "protocol-{safe_provider}-{owner}-{}.jsonl",
-            Uuid::new_v4()
-        ));
-        let Ok(file) = OpenOptions::new().create_new(true).append(true).open(path) else {
-            return;
-        };
         self.inner
-            .protocol_logs
-            .lock()
-            .expect("RPC protocol log mutex poisoned")
-            .writers
-            .entry(owner.to_string())
-            .or_insert(file);
+            .protocol_logger
+            .register_protocol_log(owner, provider, workspace);
     }
 
     pub fn set_protocol_owner_resolver(
@@ -432,9 +384,9 @@ impl RpcPeer {
         resolver: Arc<dyn Fn(&Value) -> Option<String> + Send + Sync>,
     ) {
         self.inner
-            .protocol_logs
+            .protocol_state
             .lock()
-            .expect("RPC protocol log mutex poisoned")
+            .expect("RPC protocol state mutex poisoned")
             .resolver = Some(resolver);
     }
 
@@ -455,7 +407,7 @@ impl RpcPeer {
             .recv_timeout(timeout)
     }
 
-    pub fn try_recv_traffic(&self) -> Result<RpcTrafficRecord, mpsc::TryRecvError> {
+    pub fn try_recv_traffic(&self) -> Result<ProtocolTrafficRecord, mpsc::TryRecvError> {
         self.traffic
             .lock()
             .expect("RPC traffic mutex poisoned")
@@ -465,7 +417,7 @@ impl RpcPeer {
     pub fn recv_traffic_timeout(
         &self,
         timeout: Duration,
-    ) -> Result<RpcTrafficRecord, mpsc::RecvTimeoutError> {
+    ) -> Result<ProtocolTrafficRecord, mpsc::RecvTimeoutError> {
         self.traffic
             .lock()
             .expect("RPC traffic mutex poisoned")
@@ -536,9 +488,9 @@ impl RpcPeer {
 
     fn take_server_request_owner(&self, id: &RpcId) -> Option<String> {
         self.inner
-            .protocol_logs
+            .protocol_state
             .lock()
-            .expect("RPC protocol log mutex poisoned")
+            .expect("RPC protocol state mutex poisoned")
             .server_request_owners
             .remove(id)
     }
@@ -673,9 +625,9 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
                 );
                 if let Some(owner) = owner {
                     inner
-                        .protocol_logs
+                        .protocol_state
                         .lock()
-                        .expect("RPC protocol log mutex poisoned")
+                        .expect("RPC protocol state mutex poisoned")
                         .server_request_owners
                         .insert(id.clone(), owner);
                 }
@@ -766,9 +718,9 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
 
 fn resolve_protocol_owner(inner: &Arc<RpcInner>, frame: &Value) -> Option<String> {
     let resolver = inner
-        .protocol_logs
+        .protocol_state
         .lock()
-        .expect("RPC protocol log mutex poisoned")
+        .expect("RPC protocol state mutex poisoned")
         .resolver
         .clone();
     resolver.and_then(|resolver| resolver(frame))
@@ -785,39 +737,11 @@ fn capture_protocol_frame(
     let owner = explicit_owner
         .map(str::to_string)
         .or_else(|| resolve_protocol_owner(inner, message));
-    let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let traffic = RpcTrafficRecord {
-        ts: ts.clone(),
-        direction: direction.to_string(),
-        kind: kind.to_string(),
-        thread_id: owner.clone(),
-        message: message.clone(),
-        unmatched,
-    };
+    let traffic =
+        inner
+            .protocol_logger
+            .capture(direction, kind, message, owner.as_deref(), unmatched);
     let _ = inner.traffic.send(traffic);
-
-    let Some(owner) = owner else {
-        return;
-    };
-    let record = json!({
-        "ts": ts,
-        "direction": direction,
-        "kind": kind,
-        "message": message,
-    });
-    let Ok(mut bytes) = serde_json::to_vec(&record) else {
-        return;
-    };
-    bytes.push(b'\n');
-    let mut state = inner
-        .protocol_logs
-        .lock()
-        .expect("RPC protocol log mutex poisoned");
-    let Some(writer) = state.writers.get_mut(&owner) else {
-        return;
-    };
-    let _ = writer.write_all(&bytes);
-    let _ = writer.flush();
 }
 
 fn parse_remote_error(error: &Value) -> Result<RpcError, RpcError> {

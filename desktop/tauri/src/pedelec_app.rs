@@ -651,7 +651,7 @@ fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRunt
         (
             runtime.subscribe_all_threads(),
             runtime.subscribe_provider_runtime_diagnostics(),
-            runtime.subscribe_provider_rpc_traffic(),
+            runtime.subscribe_provider_protocol_traffic(),
         )
     };
     let thread_event_app = app.clone();
@@ -671,7 +671,7 @@ fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRunt
     });
     thread::spawn(move || {
         while let Ok(event) = rpc_traffic_rx.recv() {
-            let _ = app.emit("provider_rpc_traffic", event);
+            let _ = app.emit("provider_protocol_traffic", event);
         }
     });
 }

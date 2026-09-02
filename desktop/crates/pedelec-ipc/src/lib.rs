@@ -3,16 +3,17 @@ use pedelec_core::{
     error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
     CreateAssetUploadInput, CreateThreadInput, EndThreadExecutionIntent, EndThreadInput,
     ListAssetsInput, PedelecError, PersistentRuntimeOperation, PrepareThreadInput,
-    PrepareThreadOutput, ProviderExecutionIntent, ProviderProcessTermination, ProviderRpcTraffic,
-    ProviderRuntimeDiagnostic, RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime,
-    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolInvocationOutcome,
-    ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput,
+    PrepareThreadOutput, ProviderExecutionIntent, ProviderProcessTermination,
+    ProviderProtocolTraffic, ProviderRuntimeDiagnostic, RunningProviderProcessPurpose,
+    SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
+    ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration, ToolInvocationWait,
+    ToolSpecInput,
 };
 use pedelec_runtime::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
     CodexRuntimeEvent, CodexRuntimeLaunchConfig, CodexSandboxMode, CodexSessionConfig,
-    CodexTurnConfig, CodexTurnSandboxPolicy, CodexTurnStatus, ProviderRuntimeController,
-    ProviderRuntimeOwner, RpcTrafficRecord, RuntimeRegistryError, CODEX_RUNTIME_KEY,
+    CodexTurnConfig, CodexTurnSandboxPolicy, CodexTurnStatus, ProtocolTrafficRecord,
+    ProviderRuntimeController, ProviderRuntimeOwner, RuntimeRegistryError, CODEX_RUNTIME_KEY,
 };
 use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
@@ -35,7 +36,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod antigravity;
 mod opencode;
+pub use antigravity::AntigravityRuntimeDispatcher;
 pub use opencode::{
     AcpProviderKind, AcpRuntimeDispatcher, CursorRuntimeDispatcher, OpenCodeRuntimeDispatcher,
     CURSOR_RUNTIME_KEY, OPENCODE_RUNTIME_KEY,
@@ -59,6 +62,7 @@ pub trait PersistentRuntimeDispatcher: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct ProviderRuntimeDispatcher {
     codex: CodexRuntimeDispatcher,
+    antigravity: AntigravityRuntimeDispatcher,
     opencode: OpenCodeRuntimeDispatcher,
     cursor: CursorRuntimeDispatcher,
 }
@@ -67,12 +71,14 @@ impl ProviderRuntimeDispatcher {
     pub fn new(owner: ProviderRuntimeOwner, core_runtime: SharedCoreRuntime) -> Self {
         Self {
             codex: CodexRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
+            antigravity: AntigravityRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
             opencode: OpenCodeRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
             cursor: CursorRuntimeDispatcher::new(owner, core_runtime),
         }
     }
 
     pub fn shutdown(&self) -> Vec<String> {
+        self.antigravity.record_shutdown_diagnostics();
         self.opencode.record_shutdown_diagnostic();
         self.cursor.record_shutdown_diagnostic();
         self.codex.shutdown()
@@ -83,6 +89,7 @@ impl PersistentRuntimeDispatcher for ProviderRuntimeDispatcher {
     fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
         match operation.provider() {
             pedelec_core::ProviderCode::Codex => self.codex.dispatch(operation),
+            pedelec_core::ProviderCode::Antigravity => self.antigravity.dispatch(operation),
             pedelec_core::ProviderCode::OpenCode => self.opencode.dispatch(operation),
             pedelec_core::ProviderCode::Cursor => self.cursor.dispatch(operation),
             provider => Err(PedelecError::with_details(
@@ -255,7 +262,7 @@ impl CodexRuntimeDispatcher {
         let process_id = controller.process_id();
         thread::spawn(move || {
             loop {
-                match controller.recv_rpc_traffic_timeout(Duration::from_millis(50)) {
+                match controller.recv_protocol_traffic_timeout(Duration::from_millis(50)) {
                     Ok(record) => {
                         let current = match current_controller.lock() {
                             Ok(current) => current,
@@ -267,7 +274,7 @@ impl CodexRuntimeDispatcher {
                         {
                             break;
                         }
-                        record_rpc_traffic(
+                        record_protocol_traffic(
                             &runtime,
                             pedelec_core::ProviderCode::Codex,
                             generation,
@@ -878,16 +885,16 @@ fn codex_runtime_stderr_diagnostic(
     }
 }
 
-pub(crate) fn record_rpc_traffic(
+pub(crate) fn record_protocol_traffic(
     runtime: &SharedCoreRuntime,
     provider: pedelec_core::ProviderCode,
     runtime_generation: u64,
     process_id: u32,
-    record: RpcTrafficRecord,
+    record: ProtocolTrafficRecord,
 ) {
     if let Ok(mut core) = runtime.lock() {
-        core.record_provider_rpc_traffic(ProviderRpcTraffic {
-            event_type: "provider_rpc_traffic".to_string(),
+        core.record_provider_protocol_traffic(ProviderProtocolTraffic {
+            event_type: "provider_protocol_traffic".to_string(),
             provider,
             runtime_generation,
             process_id,

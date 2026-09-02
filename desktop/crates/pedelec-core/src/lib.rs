@@ -314,6 +314,27 @@ impl CodexReasoningEffort {
     }
 }
 
+/// Native reasoning values accepted by Antigravity's persistent stream
+/// transport. Persisted effort tiers are parsed into this semantic value
+/// before crossing the provider-runtime boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AntigravityReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl AntigravityReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PersistentApprovalPolicy {
@@ -929,6 +950,8 @@ pub struct PersistentProviderSessionIntent {
     pub effort_level: EffortLevel,
     pub model: Option<String>,
     pub reasoning_effort: Option<CodexReasoningEffort>,
+    #[serde(default)]
+    pub antigravity_reasoning_effort: Option<AntigravityReasoningEffort>,
     pub approval_policy: PersistentApprovalPolicy,
     pub sandbox_policy: PersistentSandboxPolicy,
     pub host_instructions: String,
@@ -1174,12 +1197,12 @@ pub enum ProviderRuntimeEvent {
     },
 }
 
-/// Desktop-only raw RPC traffic for persistent provider runtimes. This is a
-/// live observability stream and deliberately does not belong to `ThreadEvent`
-/// or the provider runtime diagnostic contract.
+/// Desktop-only raw provider protocol traffic for persistent runtimes. This
+/// provider-neutral observability stream carries bare RPC, JSON-RPC, and
+/// non-RPC event protocols without promoting them into `ThreadEvent`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderRpcTraffic {
+pub struct ProviderProtocolTraffic {
     #[serde(rename = "type")]
     pub event_type: String,
     pub provider: ProviderCode,
@@ -2875,7 +2898,7 @@ pub struct CoreRuntime {
     pub tool_request_broker: ToolRequestBroker,
     pub event_bus: EventBus,
     pub provider_runtime_diagnostics: ProviderRuntimeDiagnosticBus,
-    pub provider_rpc_traffic: ProviderRpcTrafficBus,
+    pub provider_protocol_traffic: ProviderProtocolTrafficBus,
     pub running_processes: HashMap<String, RunningProviderProcess>,
     pub core_ipc_endpoint: Option<String>,
     pub core_ipc_runtime_file_path: Option<PathBuf>,
@@ -2914,6 +2937,9 @@ impl CoreRuntime {
     pub fn new_for_application() -> Self {
         let mut runtime = Self::new();
         runtime.persistent_providers.insert(ProviderCode::Codex);
+        runtime
+            .persistent_providers
+            .insert(ProviderCode::Antigravity);
         runtime.persistent_providers.insert(ProviderCode::OpenCode);
         runtime.persistent_providers.insert(ProviderCode::Cursor);
         runtime
@@ -3346,6 +3372,12 @@ impl CoreRuntime {
                     "acpCapability": matches!(provider, ProviderCode::OpenCode | ProviderCode::Cursor)
                         .then_some(scan.acp_capability)
                         .flatten(),
+                    "streamJsonCapability": (*provider == ProviderCode::Antigravity)
+                        .then_some(scan.stream_json_capability)
+                        .flatten(),
+                    "workspaceCustomAgentCapability": (*provider == ProviderCode::Antigravity)
+                        .then(|| antigravity_custom_agent_capability_available(scan))
+                        .flatten(),
                 }),
             ));
         };
@@ -3357,6 +3389,17 @@ impl CoreRuntime {
             ));
         }
         Ok(path)
+    }
+
+    /// Materializes the static Antigravity workspace agent required by the
+    /// persistent `--agent pedelec-runtime` launch contract. Dispatchers call
+    /// this before spawning a fresh AGY process so a clean workspace cannot
+    /// race process startup against bootstrap asset creation.
+    pub fn prepare_antigravity_persistent_workspace(
+        &self,
+        workspace_path: &Path,
+    ) -> Result<(), PedelecError> {
+        ensure_antigravity_custom_agent(workspace_path)
     }
 
     /// Replaces the complete external-provider scan only after every provider has
@@ -3916,10 +3959,19 @@ impl CoreRuntime {
                 serde_json::json!({ "threadId": thread_id }),
             )
         })?;
-        let (model, reasoning_effort) = match &thread.provider {
-            ProviderCode::Codex => parse_codex_session_settings(&thread.effort_args, thread_id)?,
+        let (model, reasoning_effort, antigravity_reasoning_effort) = match &thread.provider {
+            ProviderCode::Codex => {
+                let (model, effort) = parse_codex_session_settings(&thread.effort_args, thread_id)?;
+                (model, effort, None)
+            }
+            ProviderCode::Antigravity => {
+                let (model, effort) =
+                    parse_antigravity_session_settings(&thread.effort_args, thread_id)?;
+                (model, None, effort)
+            }
             _ => (
                 provider_model_from_effort_args(&thread.provider, &thread.effort_args),
+                None,
                 None,
             ),
         };
@@ -3937,6 +3989,7 @@ impl CoreRuntime {
             effort_level: thread.effort_level,
             model,
             reasoning_effort,
+            antigravity_reasoning_effort,
             approval_policy: PersistentApprovalPolicy::Never,
             sandbox_policy: PersistentSandboxPolicy::ReadOnly,
             host_instructions,
@@ -5342,15 +5395,17 @@ impl CoreRuntime {
         self.provider_runtime_diagnostics.emit(diagnostic);
     }
 
-    /// Subscribes to desktop-only live raw RPC traffic. Unlike runtime
-    /// diagnostics this bus intentionally keeps no in-memory history because
-    /// durable protocol history already lives in per-session JSONL logs.
-    pub fn subscribe_provider_rpc_traffic(&mut self) -> mpsc::Receiver<ProviderRpcTraffic> {
-        self.provider_rpc_traffic.subscribe()
+    /// Subscribes to desktop-only live raw provider protocol traffic. Unlike
+    /// runtime diagnostics this bus intentionally keeps no in-memory history
+    /// because durable protocol history already lives in per-session JSONL logs.
+    pub fn subscribe_provider_protocol_traffic(
+        &mut self,
+    ) -> mpsc::Receiver<ProviderProtocolTraffic> {
+        self.provider_protocol_traffic.subscribe()
     }
 
-    pub fn record_provider_rpc_traffic(&mut self, traffic: ProviderRpcTraffic) {
-        self.provider_rpc_traffic.emit(traffic);
+    pub fn record_provider_protocol_traffic(&mut self, traffic: ProviderProtocolTraffic) {
+        self.provider_protocol_traffic.emit(traffic);
     }
 }
 
@@ -5559,22 +5614,22 @@ impl ProviderRuntimeDiagnosticBus {
     }
 }
 
-/// Live-only fan-out for complete raw provider RPC frames used by the desktop
-/// Event Monitor. No history is retained here; session protocol JSONL is the
-/// durable source of truth.
+/// Live-only fan-out for complete raw provider protocol frames used by the
+/// desktop Event Monitor. No history is retained here; session protocol JSONL
+/// is the durable source of truth.
 #[derive(Debug, Default)]
-pub struct ProviderRpcTrafficBus {
-    subscribers: Vec<mpsc::Sender<ProviderRpcTraffic>>,
+pub struct ProviderProtocolTrafficBus {
+    subscribers: Vec<mpsc::Sender<ProviderProtocolTraffic>>,
 }
 
-impl ProviderRpcTrafficBus {
-    fn subscribe(&mut self) -> mpsc::Receiver<ProviderRpcTraffic> {
+impl ProviderProtocolTrafficBus {
+    fn subscribe(&mut self) -> mpsc::Receiver<ProviderProtocolTraffic> {
         let (tx, rx) = mpsc::channel();
         self.subscribers.push(tx);
         rx
     }
 
-    fn emit(&mut self, traffic: ProviderRpcTraffic) {
+    fn emit(&mut self, traffic: ProviderProtocolTraffic) {
         self.subscribers
             .retain(|subscriber| subscriber.send(traffic.clone()).is_ok());
     }
@@ -7934,6 +7989,61 @@ fn parse_codex_session_settings(
     Ok((model, effort))
 }
 
+fn parse_antigravity_session_settings(
+    args: &[String],
+    thread_id: &str,
+) -> Result<(Option<String>, Option<AntigravityReasoningEffort>), PedelecError> {
+    validate_effort_tier(&ProviderCode::Antigravity, EffortLevel::Default, args).map_err(
+        |error| {
+            PedelecError::with_details(
+                error_codes::INVALID_INPUT,
+                "Antigravity settings could not be mapped to typed stream runtime fields",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "provider": "antigravity",
+                    "error": error,
+                    "source": "effort_args",
+                }),
+            )
+        },
+    )?;
+
+    let mut model = None;
+    let mut effort = None;
+    for pair in args.chunks_exact(2) {
+        match pair[0].as_str() {
+            "--model" => {
+                if model.replace(pair[1].trim().to_string()).is_some() {
+                    return Err(PedelecError::with_details(
+                        error_codes::INVALID_INPUT,
+                        "Antigravity model setting is duplicated",
+                        serde_json::json!({ "threadId": thread_id, "provider": "antigravity" }),
+                    ));
+                }
+            }
+            "--effort" => {
+                let parsed = match pair[1].trim() {
+                    "low" => AntigravityReasoningEffort::Low,
+                    "medium" => AntigravityReasoningEffort::Medium,
+                    "high" => AntigravityReasoningEffort::High,
+                    _ => {
+                        unreachable!("validate_effort_tier accepted an unknown Antigravity effort")
+                    }
+                };
+                if effort.replace(parsed).is_some() {
+                    return Err(PedelecError::with_details(
+                        error_codes::INVALID_INPUT,
+                        "Antigravity reasoning effort setting is duplicated",
+                        serde_json::json!({ "threadId": thread_id, "provider": "antigravity" }),
+                    ));
+                }
+            }
+            _ => unreachable!("validate_effort_tier accepted an unknown Antigravity setting"),
+        }
+    }
+    Ok((model, effort))
+}
+
 fn provider_display_name(provider: &ProviderCode) -> &'static str {
     match provider {
         ProviderCode::Codex => "Codex",
@@ -7969,6 +8079,9 @@ pub(crate) struct ProviderCli {
     app_server_capability: Option<bool>,
     /// `Some(false)` means the provider lacks the required persistent ACP entrypoint.
     acp_capability: Option<bool>,
+    /// `Some(false)` means Antigravity was found and versioned but does not expose
+    /// the bidirectional stream-json input/output transport required by Pedelec.
+    stream_json_capability: Option<bool>,
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -8436,16 +8549,42 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
             } else {
                 None
             };
-            let error = match (app_server_capability, acp_capability) {
-                (Some(false), _) => Some(
+            let stream_json_capability =
+                if program == provider_program_name(&ProviderCode::Antigravity) {
+                    Some(probe_antigravity_stream_json_capability(
+                        &path,
+                        Some(path_value),
+                    ))
+                } else {
+                    None
+                };
+            let mut error = match (
+                app_server_capability,
+                acp_capability,
+                stream_json_capability,
+            ) {
+                (Some(false), _, _) => Some(
                     "Codex executable does not expose the required `app-server` capability"
                         .to_string(),
                 ),
-                (_, Some(false)) => Some(format!(
+                (_, Some(false), _) => Some(format!(
                     "{program} executable does not expose the required `acp` capability"
                 )),
+                (_, _, Some(false)) => Some(
+                    "agy executable does not expose the required bidirectional `stream-json` capability"
+                        .to_string(),
+                ),
                 _ => None,
             };
+            if error.is_none()
+                && program == provider_program_name(&ProviderCode::Antigravity)
+                && !antigravity_custom_agent_version_supported(&version)
+            {
+                error = Some(
+                    "agy executable version does not support the required workspace custom agent capability"
+                        .to_string(),
+                );
+            }
             ProviderCli {
                 path: Some(path),
                 version: Some(version),
@@ -8453,6 +8592,7 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
                 bootstrap_capabilities: None,
                 app_server_capability,
                 acp_capability,
+                stream_json_capability,
             }
         }
         None => ProviderCli {
@@ -8466,6 +8606,7 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
             bootstrap_capabilities: None,
             app_server_capability: None,
             acp_capability: None,
+            stream_json_capability: None,
         },
     }
 }
@@ -8507,6 +8648,29 @@ fn probe_acp_capability(path: &Path, path_value: Option<&OsString>) -> bool {
         )
         .to_ascii_lowercase()
         .contains("acp")
+}
+
+fn probe_antigravity_stream_json_capability(path: &Path, path_value: Option<&OsString>) -> bool {
+    let output = run_bounded_provider_probe({
+        let mut command = provider_version_command(path, path_value);
+        command.arg("--help");
+        command
+    });
+    let Some(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    text.contains("--input-format")
+        && text.contains("--output-format")
+        && text.contains("stream-json")
 }
 
 fn is_provider_executable(path: &Path) -> bool {
@@ -8720,15 +8884,33 @@ fn required_runtime_capability(provider: &ProviderCode) -> Option<&'static str> 
     match provider {
         ProviderCode::Codex => Some("app-server"),
         ProviderCode::OpenCode | ProviderCode::Cursor => Some("acp"),
-        ProviderCode::Antigravity | ProviderCode::Claude | ProviderCode::Ollama => None,
+        ProviderCode::Antigravity => Some("stream-json + workspace-custom-agent"),
+        ProviderCode::Claude | ProviderCode::Ollama => None,
     }
+}
+
+fn antigravity_custom_agent_capability_available(scan: &ProviderCli) -> Option<bool> {
+    scan.version
+        .as_ref()
+        .map(antigravity_custom_agent_version_supported)
 }
 
 fn runtime_capability_available(provider: &ProviderCode, scan: &ProviderCli) -> Option<bool> {
     match provider {
         ProviderCode::Codex => scan.app_server_capability,
         ProviderCode::OpenCode | ProviderCode::Cursor => scan.acp_capability,
-        ProviderCode::Antigravity | ProviderCode::Claude | ProviderCode::Ollama => None,
+        ProviderCode::Antigravity => {
+            let stream_json = scan.stream_json_capability;
+            let custom_agent = antigravity_custom_agent_capability_available(scan);
+            match (stream_json, custom_agent) {
+                (Some(stream_json), Some(custom_agent)) => Some(stream_json && custom_agent),
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), None) => Some(true),
+                (None, Some(custom_agent)) => Some(custom_agent),
+                (None, None) => None,
+            }
+        }
+        ProviderCode::Claude | ProviderCode::Ollama => None,
     }
 }
 
@@ -9728,6 +9910,25 @@ This is Pedelec host-provided integration bootstrap for this persistent provider
 [/Pedelec Host Bootstrap]\n\n\
 [User Message]\n{user_message}"
     )
+}
+
+/// Builds the internal persistent-provider preparation turn. A fresh
+/// conversation receives the dynamic host bootstrap in this turn; a resumed
+/// conversation can omit it because that context already belongs to the
+/// provider conversation. Provider terminal status, not acknowledgement text,
+/// is the preparation completion source of truth.
+pub fn build_persistent_prepare_prompt(host_instructions: Option<&str>) -> String {
+    let task = "[Session Preparation]\nInitialize this provider conversation for subsequent Pedelec user turns. Do not call tools or modify files. A brief acknowledgement is sufficient.";
+    match host_instructions {
+        Some(host_instructions) => format!(
+            "[Pedelec Host Bootstrap]\n\
+This is Pedelec host-provided integration bootstrap for this persistent provider conversation. It is not a provider-native system message.\n\n\
+{host_instructions}\
+[/Pedelec Host Bootstrap]\n\n\
+{task}"
+        ),
+        None => task.to_string(),
+    }
 }
 
 fn build_provider_fallback_bootstrap() -> String {

@@ -5,8 +5,8 @@
 //! that knows the App Server method names and wire field names.
 
 use crate::{
-    PersistentProcessSpec, PersistentRuntimeController, RpcDisconnectReason, RpcError, RpcEvent,
-    RpcTrafficRecord, RuntimeControllerError, RuntimeEvent,
+    PersistentProcessSpec, PersistentRuntimeController, ProtocolTrafficRecord, RpcDisconnectReason,
+    RpcError, RpcEvent, RuntimeControllerError, RuntimeEvent,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -1048,11 +1048,11 @@ impl CodexAppServerController {
             .recv()
     }
 
-    pub fn recv_rpc_traffic_timeout(
+    pub fn recv_protocol_traffic_timeout(
         &self,
         timeout: Duration,
-    ) -> Result<RpcTrafficRecord, RecvTimeoutError> {
-        self.transport.recv_rpc_traffic_timeout(timeout)
+    ) -> Result<ProtocolTrafficRecord, RecvTimeoutError> {
+        self.transport.recv_protocol_traffic_timeout(timeout)
     }
 
     fn map_request_error(
@@ -2454,7 +2454,7 @@ done
             CodexRuntimeEvent::Stderr { text } if text.contains("fake Codex diagnostic")
         ));
         let mut traffic = Vec::new();
-        while let Ok(record) = controller.recv_rpc_traffic_timeout(Duration::from_millis(50)) {
+        while let Ok(record) = controller.recv_protocol_traffic_timeout(Duration::from_millis(50)) {
             traffic.push(record);
         }
         assert!(!traffic
@@ -2480,7 +2480,7 @@ done
         let mut traffic = Vec::new();
         for _ in 0..10 {
             let record = controller
-                .recv_rpc_traffic_timeout(Duration::from_secs(1))
+                .recv_protocol_traffic_timeout(Duration::from_secs(1))
                 .unwrap();
             let is_rejection = record.direction == "client_to_provider"
                 && record.kind == "response"

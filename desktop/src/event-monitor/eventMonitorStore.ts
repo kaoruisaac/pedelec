@@ -2,7 +2,7 @@ import { createStore, produce } from "solid-js/store";
 import type { ProviderCode } from "../settings/types";
 
 export const MAX_EVENTS_PER_THREAD = 300;
-export const MAX_RPC_TRAFFIC = 300;
+export const MAX_PROTOCOL_TRAFFIC = 300;
 export const MAX_RUNTIME_STDERR = 300;
 
 export interface MonitorEvent {
@@ -22,15 +22,15 @@ export interface MonitorEvent {
   [key: string]: unknown;
 }
 
-export interface ProviderRpcTraffic {
-  type: "provider_rpc_traffic";
+export interface ProviderProtocolTraffic {
+  type: "provider_protocol_traffic";
   provider: ProviderCode;
   runtimeGeneration: number;
   processId: number;
   threadId?: string;
   ts: string;
   direction: "client_to_provider" | "provider_to_client";
-  kind: "request" | "response" | "notification";
+  kind: "request" | "response" | "notification" | "event";
   message: unknown;
   unmatched?: boolean;
   receivedAt: string;
@@ -59,7 +59,7 @@ export interface ThreadViewModel {
   toolCalls: MonitorEvent[];
   toolResults: MonitorEvent[];
   errors: MonitorEvent[];
-  rpcTraffic: ProviderRpcTraffic[];
+  protocolTraffic: ProviderProtocolTraffic[];
 }
 
 export interface RuntimeSummary {
@@ -73,7 +73,7 @@ interface EventMonitorState {
   threadsById: Record<string, ThreadViewModel>;
   threadOrder: string[];
   totalEventCount: number;
-  globalRpcTraffic: ProviderRpcTraffic[];
+  globalProtocolTraffic: ProviderProtocolTraffic[];
   runtimeStderr: MonitorEvent[];
   runtimeStatus: string;
   runtimeProcessId?: number;
@@ -88,7 +88,7 @@ export interface EventMonitorStore {
   setGlobalError: (error: unknown) => void;
   upsertThreadEvent: (event: unknown) => void;
   upsertRuntimeDiagnostic: (event: unknown) => void;
-  upsertRpcTraffic: (event: unknown) => void;
+  upsertProtocolTraffic: (event: unknown) => void;
   clearEndedThreads: () => void;
 }
 
@@ -98,7 +98,7 @@ function createEmptyStore(): EventMonitorState {
     threadsById: {},
     threadOrder: [],
     totalEventCount: 0,
-    globalRpcTraffic: [],
+    globalProtocolTraffic: [],
     runtimeStderr: [],
     runtimeStatus: "unknown",
     runtimeProcessId: undefined,
@@ -228,15 +228,15 @@ export function createEventMonitorStore(): EventMonitorStore {
     );
   }
 
-  function upsertRpcTraffic(event: unknown): void {
+  function upsertProtocolTraffic(event: unknown): void {
     const receivedAt = new Date().toISOString();
     const raw = (event as Record<string, unknown>) || {};
     const eventWithReceivedAt = {
       ...raw,
       receivedAt,
-    } as ProviderRpcTraffic;
+    } as ProviderProtocolTraffic;
 
-    if (!isRpcTraffic(eventWithReceivedAt)) {
+    if (!isProtocolTraffic(eventWithReceivedAt)) {
       return;
     }
 
@@ -257,9 +257,9 @@ export function createEventMonitorStore(): EventMonitorStore {
           thread.provider = eventWithReceivedAt.provider;
           thread.runtimeProcessId = eventWithReceivedAt.processId;
           thread.runtimeGeneration = eventWithReceivedAt.runtimeGeneration;
-          thread.rpcTraffic = [eventWithReceivedAt, ...thread.rpcTraffic].slice(
+          thread.protocolTraffic = [eventWithReceivedAt, ...thread.protocolTraffic].slice(
             0,
-            MAX_RPC_TRAFFIC,
+            MAX_PROTOCOL_TRAFFIC,
           );
           draft.threadsById[threadId] = thread;
           if (!existing) {
@@ -277,10 +277,10 @@ export function createEventMonitorStore(): EventMonitorStore {
 
     setStore(
       produce((draft) => {
-        draft.globalRpcTraffic = [eventWithReceivedAt, ...draft.globalRpcTraffic].slice(
-          0,
-          MAX_RPC_TRAFFIC,
-        );
+        draft.globalProtocolTraffic = [
+          eventWithReceivedAt,
+          ...draft.globalProtocolTraffic,
+        ].slice(0, MAX_PROTOCOL_TRAFFIC);
       }),
     );
   }
@@ -333,7 +333,7 @@ export function createEventMonitorStore(): EventMonitorStore {
     setGlobalError,
     upsertThreadEvent,
     upsertRuntimeDiagnostic,
-    upsertRpcTraffic,
+    upsertProtocolTraffic,
     clearEndedThreads,
   };
 }
@@ -367,7 +367,7 @@ function createMonitorThreadViewModel({
     toolCalls: [],
     toolResults: [],
     errors: [],
-    rpcTraffic: [],
+    protocolTraffic: [],
   };
 }
 
@@ -448,15 +448,18 @@ function isRuntimeDiagnostic(event: MonitorEvent): boolean {
   return typeof event.type === "string" && event.type.startsWith("provider_runtime_");
 }
 
-function isRpcTraffic(event: ProviderRpcTraffic): boolean {
+function isProtocolTraffic(event: ProviderProtocolTraffic): boolean {
   return (
-    event.type === "provider_rpc_traffic" &&
+    event.type === "provider_protocol_traffic" &&
     isPersistentRuntimeProvider(event.provider) &&
     typeof event.runtimeGeneration === "number" &&
     typeof event.processId === "number" &&
     typeof event.ts === "string" &&
     (event.direction === "client_to_provider" || event.direction === "provider_to_client") &&
-    (event.kind === "request" || event.kind === "response" || event.kind === "notification")
+    (event.kind === "request" ||
+      event.kind === "response" ||
+      event.kind === "notification" ||
+      event.kind === "event")
   );
 }
 
@@ -523,8 +526,13 @@ function applyDiagnosticToRuntimeSummary(
 
 function isPersistentRuntimeProvider(
   provider: unknown,
-): provider is "codex" | "opencode" | "cursor" {
-  return provider === "codex" || provider === "opencode" || provider === "cursor";
+): provider is "codex" | "antigravity" | "opencode" | "cursor" {
+  return (
+    provider === "codex" ||
+    provider === "antigravity" ||
+    provider === "opencode" ||
+    provider === "cursor"
+  );
 }
 
 function normalizeError(error: unknown): string {

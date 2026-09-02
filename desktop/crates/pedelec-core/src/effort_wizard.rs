@@ -1045,7 +1045,7 @@ mod tests {
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.providers.len(), 4);
         assert_eq!(manifest.providers[&WizardProviderCode::Codex].revision, 1);
-        assert_eq!(manifest.providers[&WizardProviderCode::Claude].revision, 1);
+        assert_eq!(manifest.providers[&WizardProviderCode::Claude].revision, 2);
         assert_eq!(manifest.providers[&WizardProviderCode::Cursor].revision, 2);
         assert_eq!(
             manifest.providers[&WizardProviderCode::Antigravity].revision,
@@ -1060,6 +1060,12 @@ mod tests {
                 .profiles
                 .default,
             vec!["--model", "claude-opus-4-8", "--effort", "medium"]
+        );
+        assert_eq!(
+            manifest.providers[&WizardProviderCode::Claude]
+                .profiles
+                .high,
+            vec!["--model", "claude-fable-5-1", "--effort", "medium"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Cursor].profiles.low,
@@ -1389,7 +1395,7 @@ mod tests {
                 .get(&WizardProviderCode::Claude)
                 .unwrap()
                 .applied_preset_revision,
-            Some(1)
+            Some(2)
         );
 
         let before = read_settings_file(&temp.path().join("settings.json")).unwrap();
@@ -1451,11 +1457,11 @@ mod tests {
             .profiles;
         let valid = EffortWizardProviderApplyPatch {
             provider: WizardProviderCode::Claude,
-            preset_revision: 1,
+            preset_revision: 2,
             expected_current_efforts: settings.provider_settings.claude.efforts_args.clone(),
             confirmed_recommendation: EffortWizardProviderRecommendation {
                 provider: WizardProviderCode::Claude,
-                preset_revision: 1,
+                preset_revision: 2,
                 confirmed: EffortWizardConfirmedProfiles {
                     default: Some(claude_profiles.default.clone()),
                     ..Default::default()

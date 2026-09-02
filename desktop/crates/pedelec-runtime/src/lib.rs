@@ -5,13 +5,20 @@
 //! a higher-level runtime implementation.
 
 mod acp;
+mod antigravity;
 mod codex;
 mod jsonl;
 mod owner;
 mod persistent_process;
+mod protocol;
 mod rpc;
 mod worker;
 
+pub use antigravity::{
+    AntigravityReasoningEffort, AntigravityRuntimeError, AntigravityRuntimeEvent,
+    AntigravityRuntimeLaunchConfig, AntigravityStreamController,
+    DEFAULT_ANTIGRAVITY_MAX_FRAME_BYTES,
+};
 pub use codex::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
     CodexRuntimeEvent, CodexRuntimeLaunchConfig, CodexSandboxMode, CodexSessionAttachment,
@@ -28,9 +35,10 @@ pub use persistent_process::{
     ExitStatusSnapshot, PersistentProcess, PersistentProcessError, PersistentProcessSpec,
     PersistentWriter, ProcessExit, ProcessExitKind, ProcessGeneration, ProcessGenerationGuard,
 };
+pub use protocol::{ProtocolTrafficLogger, ProtocolTrafficRecord};
 pub use rpc::{
     JsonLineWriter, RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent, RpcId, RpcPeer,
-    RpcServerRequest, RpcTrafficRecord,
+    RpcServerRequest,
 };
 pub use worker::{
     PersistentRuntimeController, RuntimeCommand, RuntimeControllerError, RuntimeEvent,
@@ -742,10 +750,10 @@ mod tests {
             json!("ok")
         );
         let outbound = controller
-            .recv_rpc_traffic_timeout(Duration::from_secs(1))
+            .recv_protocol_traffic_timeout(Duration::from_secs(1))
             .unwrap();
         let inbound = controller
-            .recv_rpc_traffic_timeout(Duration::from_secs(1))
+            .recv_protocol_traffic_timeout(Duration::from_secs(1))
             .unwrap();
         assert_eq!(outbound.direction, "client_to_provider");
         assert_eq!(outbound.kind, "request");

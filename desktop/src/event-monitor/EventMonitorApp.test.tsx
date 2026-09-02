@@ -372,7 +372,7 @@ describe("EventMonitorApp Debug Prompt", () => {
     expect(metricValue(container, "Total events")).toBe("0");
   });
 
-  it("renders raw RPC traffic, runtime stderr, and runtime errors without a Runtime Diagnostics panel", async () => {
+  it("renders raw protocol traffic, runtime stderr, and runtime errors without a Runtime Diagnostics panel", async () => {
     const container = mountMonitor();
     emitThread("t000123", "running");
     emitThreadEvent({
@@ -384,8 +384,8 @@ describe("EventMonitorApp Debug Prompt", () => {
       runtimeGeneration: 9,
       resumed: false,
     });
-    emitRpcTraffic({
-      type: "provider_rpc_traffic",
+    emitProtocolTraffic({
+      type: "provider_protocol_traffic",
       provider: "codex",
       threadId: "t000123",
       processId: 4321,
@@ -414,7 +414,7 @@ describe("EventMonitorApp Debug Prompt", () => {
     });
     await tick();
 
-    expect(container.textContent).toContain("RPC Traffic");
+    expect(container.textContent).toContain("Protocol Traffic");
     expect(container.textContent).not.toContain("Runtime Diagnostics");
     expect(container.textContent).toContain("full-rpc-frame");
     expect(container.textContent).toContain("unmatched");
@@ -427,12 +427,12 @@ describe("EventMonitorApp Debug Prompt", () => {
     await tick();
 
     expect(mocks.listen).toHaveBeenCalledWith("thread_event", expect.any(Function));
-    expect(mocks.listen).toHaveBeenCalledWith("provider_rpc_traffic", expect.any(Function));
+    expect(mocks.listen).toHaveBeenCalledWith("provider_protocol_traffic", expect.any(Function));
 
     activeDispose?.();
     activeDispose = undefined;
     expect(mocks.unlisteners.get("thread_event")).toHaveBeenCalledTimes(1);
-    expect(mocks.unlisteners.get("provider_rpc_traffic")).toHaveBeenCalledTimes(1);
+    expect(mocks.unlisteners.get("provider_protocol_traffic")).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -456,8 +456,8 @@ function emitThreadEvent(payload: unknown): void {
   mocks.eventHandlers.get("thread_event")!({ payload });
 }
 
-function emitRpcTraffic(payload: unknown): void {
-  mocks.eventHandlers.get("provider_rpc_traffic")!({ payload });
+function emitProtocolTraffic(payload: unknown): void {
+  mocks.eventHandlers.get("provider_protocol_traffic")!({ payload });
 }
 
 function promptTextarea(container: HTMLElement): HTMLTextAreaElement {

@@ -16,7 +16,7 @@ import { monitorEndThread, openThreadWorkspace, sendThreadText } from "./eventMo
 import { createEventMonitorStore } from "./eventMonitorStore";
 import type {
   MonitorEvent,
-  ProviderRpcTraffic,
+  ProviderProtocolTraffic,
   RuntimeSummary,
   ThreadViewModel,
 } from "./eventMonitorStore";
@@ -28,7 +28,7 @@ export function EventMonitorApp() {
     clearEndedThreads,
     selectThread,
     setGlobalError,
-    upsertRpcTraffic,
+    upsertProtocolTraffic,
     upsertThreadEvent,
   } = monitor;
   const [debugPrompt, setDebugPrompt] = createSignal("");
@@ -133,7 +133,7 @@ export function EventMonitorApp() {
     };
 
     registerListener("thread_event", upsertThreadEvent);
-    registerListener("provider_rpc_traffic", upsertRpcTraffic);
+    registerListener("provider_protocol_traffic", upsertProtocolTraffic);
 
     onCleanup(() => {
       disposed = true;
@@ -160,6 +160,10 @@ export function EventMonitorApp() {
         <div class="event-monitor-metrics" aria-label="Monitor status">
           <Metric label="Core IPC" value="unknown" status="unknown" />
           <RuntimeMetric label="Codex Runtime" summary={store.runtimeByProvider.codex} />
+          <RuntimeMetric
+            label="Antigravity Runtime"
+            summary={store.runtimeByProvider.antigravity}
+          />
           <RuntimeMetric label="OpenCode Runtime" summary={store.runtimeByProvider.opencode} />
           <RuntimeMetric label="Cursor Runtime" summary={store.runtimeByProvider.cursor} />
           <Metric
@@ -271,7 +275,7 @@ export function EventMonitorApp() {
                 onOpenWorkspace={handleOpenThreadWorkspace}
                 isStopPending={stoppingThreadIds().has(thread().threadId)}
                 onStopThread={handleStopThread}
-                globalRpcTraffic={store.globalRpcTraffic}
+                globalProtocolTraffic={store.globalProtocolTraffic}
                 runtimeStderr={store.runtimeStderr}
               />
             )}
@@ -300,17 +304,17 @@ function ThreadDetail(props: {
   onOpenWorkspace: (threadId: string) => Promise<void>;
   isStopPending: boolean;
   onStopThread: (threadId: string) => Promise<void>;
-  globalRpcTraffic: ProviderRpcTraffic[];
+  globalProtocolTraffic: ProviderProtocolTraffic[];
   runtimeStderr: MonitorEvent[];
 }) {
   const thread = () => props.thread;
-  const rpcTraffic = () => {
+  const protocolTraffic = () => {
     if (!thread().provider || thread().runtimeGeneration === undefined) {
-      return thread().rpcTraffic;
+      return thread().protocolTraffic;
     }
     return [
-      ...thread().rpcTraffic,
-      ...props.globalRpcTraffic.filter(
+      ...thread().protocolTraffic,
+      ...props.globalProtocolTraffic.filter(
         (event) =>
           event.provider === thread().provider &&
           event.runtimeGeneration === thread().runtimeGeneration,
@@ -413,8 +417,8 @@ function ThreadDetail(props: {
           </For>
         </MonitorBlock>
 
-        <MonitorBlock title="RPC Traffic" empty={rpcTraffic().length === 0}>
-          <For each={rpcTraffic()}>
+        <MonitorBlock title="Protocol Traffic" empty={protocolTraffic().length === 0}>
+          <For each={protocolTraffic()}>
             {(event) => <pre class="event-monitor-json">{prettyJson(event)}</pre>}
           </For>
         </MonitorBlock>
