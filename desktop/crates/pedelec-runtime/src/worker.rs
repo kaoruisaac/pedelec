@@ -3,7 +3,7 @@ use crate::owner::ProviderRuntimeController;
 use crate::persistent_process::{
     PersistentProcess, PersistentProcessError, PersistentProcessSpec, ProcessExit,
 };
-use crate::rpc::{RpcEnvelopeMode, RpcError, RpcEvent, RpcId, RpcPeer};
+use crate::rpc::{RpcEnvelopeMode, RpcError, RpcEvent, RpcId, RpcPeer, RpcTrafficRecord};
 use serde_json::Value;
 use std::fmt;
 use std::path::Path;
@@ -277,6 +277,13 @@ impl PersistentRuntimeController {
             .lock()
             .expect("runtime events mutex poisoned")
             .recv()
+    }
+
+    pub fn recv_rpc_traffic_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<RpcTrafficRecord, RecvTimeoutError> {
+        self.peer.recv_traffic_timeout(timeout)
     }
 
     pub fn shutdown_with_grace(

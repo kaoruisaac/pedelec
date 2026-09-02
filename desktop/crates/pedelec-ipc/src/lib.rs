@@ -28,6 +28,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 #[cfg(test)]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -103,6 +104,7 @@ pub struct CodexRuntimeDispatcher {
     process_cwd: PathBuf,
     typed_controller: Arc<Mutex<Option<Arc<CodexAppServerController>>>>,
     event_pumps: Arc<Mutex<HashSet<u64>>>,
+    traffic_pumps: Arc<Mutex<HashSet<u64>>>,
     stopped_generations: Arc<Mutex<HashSet<u64>>>,
 }
 
@@ -115,6 +117,7 @@ impl CodexRuntimeDispatcher {
             process_cwd: std::env::temp_dir(),
             typed_controller: Arc::new(Mutex::new(None)),
             event_pumps: Arc::new(Mutex::new(HashSet::new())),
+            traffic_pumps: Arc::new(Mutex::new(HashSet::new())),
             stopped_generations: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -236,7 +239,69 @@ impl CodexRuntimeDispatcher {
         }
     }
 
+    fn start_rpc_traffic_pump(&self, controller: Arc<CodexAppServerController>) {
+        let generation = controller.generation();
+        if !self
+            .traffic_pumps
+            .lock()
+            .map(|mut generations| generations.insert(generation))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let runtime = Arc::clone(&self.core_runtime);
+        let current_controller = Arc::clone(&self.typed_controller);
+        let traffic_pumps = Arc::clone(&self.traffic_pumps);
+        let process_id = controller.process_id();
+        thread::spawn(move || {
+            loop {
+                match controller.recv_rpc_traffic_timeout(Duration::from_millis(50)) {
+                    Ok(record) => {
+                        let current = match current_controller.lock() {
+                            Ok(current) => current,
+                            Err(_) => break,
+                        };
+                        if !current
+                            .as_ref()
+                            .is_some_and(|active| active.generation() == generation)
+                        {
+                            break;
+                        }
+                        record_rpc_traffic(
+                            &runtime,
+                            pedelec_core::ProviderCode::Codex,
+                            generation,
+                            process_id,
+                            record,
+                        );
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        if !controller.is_healthy() {
+                            break;
+                        }
+                        let is_current = current_controller
+                            .lock()
+                            .map(|current| {
+                                current
+                                    .as_ref()
+                                    .is_some_and(|active| active.generation() == generation)
+                            })
+                            .unwrap_or(false);
+                        if !is_current {
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            if let Ok(mut generations) = traffic_pumps.lock() {
+                generations.remove(&generation);
+            }
+        });
+    }
+
     fn start_event_pump(&self, controller: Arc<CodexAppServerController>) {
+        self.start_rpc_traffic_pump(Arc::clone(&controller));
         let generation = controller.generation();
         let should_start = self
             .event_pumps
@@ -279,15 +344,6 @@ impl CodexRuntimeDispatcher {
                     break;
                 }
                 match event {
-                    CodexRuntimeEvent::RpcTraffic(record) => {
-                        record_rpc_traffic(
-                            &runtime,
-                            pedelec_core::ProviderCode::Codex,
-                            controller.generation(),
-                            controller.process_id(),
-                            record,
-                        );
-                    }
                     CodexRuntimeEvent::TurnStarted {
                         pedelec_thread_id,
                         provider_thread_id,
@@ -509,12 +565,11 @@ impl CodexRuntimeDispatcher {
                     CodexRuntimeEvent::Stderr { text } => {
                         record_runtime_diagnostic(
                             &runtime,
-                            ProviderRuntimeDiagnostic::ProviderRuntimeStderr {
-                                provider: pedelec_core::ProviderCode::Codex,
-                                runtime_generation: controller.generation(),
-                                process_id: controller.process_id(),
+                            codex_runtime_stderr_diagnostic(
+                                controller.generation(),
+                                controller.process_id(),
                                 text,
-                            },
+                            ),
                         );
                     }
                 }
@@ -807,6 +862,19 @@ fn runtime_disconnect_end_error(
 fn record_runtime_diagnostic(runtime: &SharedCoreRuntime, diagnostic: ProviderRuntimeDiagnostic) {
     if let Ok(mut core) = runtime.lock() {
         core.record_provider_runtime_diagnostic(diagnostic);
+    }
+}
+
+fn codex_runtime_stderr_diagnostic(
+    runtime_generation: u64,
+    process_id: u32,
+    text: String,
+) -> ProviderRuntimeDiagnostic {
+    ProviderRuntimeDiagnostic::ProviderRuntimeStderr {
+        provider: pedelec_core::ProviderCode::Codex,
+        runtime_generation,
+        process_id,
+        text,
     }
 }
 
@@ -2891,6 +2959,24 @@ mod tests {
     use super::*;
     use std::sync::{mpsc, Barrier};
     use std::time::Duration;
+
+    #[test]
+    fn codex_runtime_stderr_diagnostic_preserves_runtime_identity() {
+        let diagnostic = codex_runtime_stderr_diagnostic(42, 4242, "codex stderr".to_string());
+        assert!(matches!(
+            &diagnostic,
+            ProviderRuntimeDiagnostic::ProviderRuntimeStderr {
+                provider: pedelec_core::ProviderCode::Codex,
+                runtime_generation: 42,
+                process_id: 4242,
+                text,
+            } if text == "codex stderr"
+        ));
+        assert_eq!(
+            serde_json::to_value(diagnostic).unwrap()["type"],
+            "provider_runtime_stderr"
+        );
+    }
 
     #[test]
     fn provider_start_diagnostics_externalize_cwd_without_changing_the_spec() {

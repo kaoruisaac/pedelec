@@ -79,7 +79,6 @@ pub struct RpcTrafficRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RpcEvent {
-    Traffic(RpcTrafficRecord),
     Notification { method: String, params: Value },
     ServerRequest(RpcServerRequest),
     Stderr { text: String },
@@ -172,6 +171,7 @@ struct RpcInner {
     correlations: Mutex<RpcCorrelationState>,
     disconnected: Mutex<Option<RpcDisconnectReason>>,
     events: mpsc::Sender<RpcEvent>,
+    traffic: mpsc::Sender<RpcTrafficRecord>,
     envelope_mode: RpcEnvelopeMode,
     protocol_logs: Mutex<ProtocolLogState>,
 }
@@ -195,6 +195,7 @@ impl JsonLineWriter for PersistentWriter {
 pub struct RpcPeer {
     inner: Arc<RpcInner>,
     events: Arc<Mutex<mpsc::Receiver<RpcEvent>>>,
+    traffic: Arc<Mutex<mpsc::Receiver<RpcTrafficRecord>>>,
 }
 
 impl fmt::Debug for RpcPeer {
@@ -226,18 +227,21 @@ impl RpcPeer {
         envelope_mode: RpcEnvelopeMode,
     ) -> Self {
         let (events_tx, events_rx) = mpsc::channel();
+        let (traffic_tx, traffic_rx) = mpsc::channel();
         let inner = Arc::new(RpcInner {
             writer: Mutex::new(writer),
             next_id: AtomicU64::new(1),
             correlations: Mutex::new(RpcCorrelationState::default()),
             disconnected: Mutex::new(None),
             events: events_tx,
+            traffic: traffic_tx,
             envelope_mode,
             protocol_logs: Mutex::new(ProtocolLogState::default()),
         });
         let peer = Self {
             inner: Arc::clone(&inner),
             events: Arc::new(Mutex::new(events_rx)),
+            traffic: Arc::new(Mutex::new(traffic_rx)),
         };
         spawn_reader_loop(inner, channel);
         peer
@@ -337,13 +341,7 @@ impl RpcPeer {
     pub fn notify(&self, method: impl Into<String>, params: Value) -> Result<(), RpcError> {
         let request = self.envelope(json!({ "method": method.into(), "params": params }));
         self.write_or_disconnect(&request)?;
-        self.capture_protocol_frame(
-            "client_to_provider",
-            "notification",
-            &request,
-            None,
-            false,
-        );
+        self.capture_protocol_frame("client_to_provider", "notification", &request, None, false);
         Ok(())
     }
 
@@ -454,6 +452,23 @@ impl RpcPeer {
         self.events
             .lock()
             .expect("RPC events mutex poisoned")
+            .recv_timeout(timeout)
+    }
+
+    pub fn try_recv_traffic(&self) -> Result<RpcTrafficRecord, mpsc::TryRecvError> {
+        self.traffic
+            .lock()
+            .expect("RPC traffic mutex poisoned")
+            .try_recv()
+    }
+
+    pub fn recv_traffic_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<RpcTrafficRecord, mpsc::RecvTimeoutError> {
+        self.traffic
+            .lock()
+            .expect("RPC traffic mutex poisoned")
             .recv_timeout(timeout)
     }
 
@@ -779,7 +794,7 @@ fn capture_protocol_frame(
         message: message.clone(),
         unmatched,
     };
-    let _ = inner.events.send(RpcEvent::Traffic(traffic));
+    let _ = inner.traffic.send(traffic);
 
     let Some(owner) = owner else {
         return;

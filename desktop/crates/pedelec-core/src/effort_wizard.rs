@@ -1044,9 +1044,13 @@ mod tests {
         let manifest = bundled_effort_wizard_manifest().unwrap();
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.providers.len(), 4);
-        for provider in WizardProviderCode::all() {
-            assert_eq!(manifest.providers[provider].revision, 1);
-        }
+        assert_eq!(manifest.providers[&WizardProviderCode::Codex].revision, 1);
+        assert_eq!(manifest.providers[&WizardProviderCode::Claude].revision, 1);
+        assert_eq!(manifest.providers[&WizardProviderCode::Cursor].revision, 2);
+        assert_eq!(
+            manifest.providers[&WizardProviderCode::Antigravity].revision,
+            1
+        );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Codex].profiles.low,
             vec!["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"max\""]
@@ -1058,10 +1062,20 @@ mod tests {
             vec!["--model", "claude-opus-4-8", "--effort", "medium"]
         );
         assert_eq!(
+            manifest.providers[&WizardProviderCode::Cursor].profiles.low,
+            vec!["--model", "composer-2.5-medium"]
+        );
+        assert_eq!(
+            manifest.providers[&WizardProviderCode::Cursor]
+                .profiles
+                .default,
+            vec!["--model", "grok-4.6-high"]
+        );
+        assert_eq!(
             manifest.providers[&WizardProviderCode::Cursor]
                 .profiles
                 .high,
-            vec!["--model", "claude-opus-5-high"]
+            vec!["--model", "grok-4.6-xhigh"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Antigravity]
@@ -1497,7 +1511,7 @@ mod tests {
                 .get(&WizardProviderCode::Cursor)
                 .unwrap()
                 .applied_preset_revision,
-            Some(1)
+            Some(2)
         );
     }
 }

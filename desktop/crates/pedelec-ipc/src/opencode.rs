@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -74,6 +75,7 @@ pub struct AcpRuntimeDispatcher {
     typed_controller: Arc<Mutex<Option<Arc<AcpController>>>>,
     workspaces: Arc<Mutex<HashMap<String, PathBuf>>>,
     event_pumps: Arc<Mutex<HashSet<u64>>>,
+    traffic_pumps: Arc<Mutex<HashSet<u64>>>,
     stopped_generations: Arc<Mutex<HashSet<u64>>>,
     launch_env: Vec<(String, String)>,
 }
@@ -97,6 +99,7 @@ impl AcpRuntimeDispatcher {
             typed_controller: Arc::new(Mutex::new(None)),
             workspaces: Arc::new(Mutex::new(HashMap::new())),
             event_pumps: Arc::new(Mutex::new(HashSet::new())),
+            traffic_pumps: Arc::new(Mutex::new(HashSet::new())),
             stopped_generations: Arc::new(Mutex::new(HashSet::new())),
             launch_env: Vec::new(),
         }
@@ -345,7 +348,70 @@ impl AcpRuntimeDispatcher {
         Ok(provider_id)
     }
 
+    fn start_rpc_traffic_pump(&self, controller: Arc<AcpController>) {
+        let generation = controller.generation();
+        if !self
+            .traffic_pumps
+            .lock()
+            .map(|mut pumps| pumps.insert(generation))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let runtime = Arc::clone(&self.core_runtime);
+        let typed = Arc::clone(&self.typed_controller);
+        let traffic_pumps = Arc::clone(&self.traffic_pumps);
+        let provider = self.provider;
+        let process_id = controller.process_id();
+        thread::spawn(move || {
+            loop {
+                match controller.recv_rpc_traffic_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(record) => {
+                        let current = match typed.lock() {
+                            Ok(current) => current,
+                            Err(_) => break,
+                        };
+                        if !current
+                            .as_ref()
+                            .is_some_and(|active| active.generation() == generation)
+                        {
+                            break;
+                        }
+                        record_rpc_traffic(
+                            &runtime,
+                            provider.provider_code(),
+                            generation,
+                            process_id,
+                            record,
+                        );
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        if !controller.is_healthy() {
+                            break;
+                        }
+                        let is_current = typed
+                            .lock()
+                            .map(|current| {
+                                current
+                                    .as_ref()
+                                    .is_some_and(|active| active.generation() == generation)
+                            })
+                            .unwrap_or(false);
+                        if !is_current {
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            if let Ok(mut pumps) = traffic_pumps.lock() {
+                pumps.remove(&generation);
+            }
+        });
+    }
+
     fn start_event_pump(&self, controller: Arc<AcpController>) {
+        self.start_rpc_traffic_pump(Arc::clone(&controller));
         let generation = controller.generation();
         if !self
             .event_pumps
@@ -1094,13 +1160,6 @@ fn handle_event(
     event: AcpRuntimeEvent,
 ) {
     match event {
-        AcpRuntimeEvent::RpcTraffic(record) => record_rpc_traffic(
-            runtime,
-            provider.provider_code(),
-            controller.generation(),
-            controller.process_id(),
-            record,
-        ),
         AcpRuntimeEvent::SessionReady { .. } => {}
         AcpRuntimeEvent::AssistantDelta {
             pedelec_thread_id,
@@ -2171,6 +2230,71 @@ mod tests {
             .to_string()
             .contains("Pedelec is the host application"));
         assert!(frames.contains("session/set_config_option"));
+
+        let diagnostic_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let has_stderr = runtime
+                .lock()
+                .unwrap()
+                .provider_runtime_diagnostic_history()
+                .iter()
+                .any(|diagnostic| {
+                    matches!(
+                        diagnostic,
+                        ProviderRuntimeDiagnostic::ProviderRuntimeStderr {
+                            provider: ProviderCode::OpenCode,
+                            text,
+                            ..
+                        } if text.contains("fake ACP diagnostic")
+                    )
+                });
+            if has_stderr || Instant::now() >= diagnostic_deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let diagnostics = runtime
+            .lock()
+            .unwrap()
+            .provider_runtime_diagnostic_history();
+        let (started_generation, started_pid) = diagnostics
+            .iter()
+            .find_map(|diagnostic| match diagnostic {
+                ProviderRuntimeDiagnostic::ProviderRuntimeStarted {
+                    provider: ProviderCode::OpenCode,
+                    runtime_generation,
+                    process_id,
+                } => Some((*runtime_generation, *process_id)),
+                _ => None,
+            })
+            .expect("OpenCode runtime start diagnostic should be recorded");
+        let stderr = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic,
+                    ProviderRuntimeDiagnostic::ProviderRuntimeStderr {
+                        provider: ProviderCode::OpenCode,
+                        text,
+                        ..
+                    } if text.contains("fake ACP diagnostic")
+                )
+            })
+            .expect("OpenCode runtime stderr diagnostic should be recorded");
+        let ProviderRuntimeDiagnostic::ProviderRuntimeStderr {
+            runtime_generation,
+            process_id,
+            ..
+        } = stderr
+        else {
+            unreachable!();
+        };
+        assert_eq!(*runtime_generation, started_generation);
+        assert_eq!(*process_id, started_pid);
+        assert_eq!(
+            serde_json::to_value(stderr).unwrap()["type"],
+            "provider_runtime_stderr"
+        );
         let _ = owner.shutdown();
     }
 

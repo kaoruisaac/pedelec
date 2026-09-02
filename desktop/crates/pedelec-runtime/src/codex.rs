@@ -229,7 +229,6 @@ pub struct CodexSessionAttachment {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodexRuntimeEvent {
-    RpcTraffic(RpcTrafficRecord),
     Notification {
         method: String,
         params: Value,
@@ -1049,6 +1048,13 @@ impl CodexAppServerController {
             .recv()
     }
 
+    pub fn recv_rpc_traffic_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<RpcTrafficRecord, RecvTimeoutError> {
+        self.transport.recv_rpc_traffic_timeout(timeout)
+    }
+
     fn map_request_error(
         &self,
         operation: &str,
@@ -1740,11 +1746,6 @@ fn run_event_worker(
     loop {
         match transport.recv_event_timeout(Duration::from_millis(50)) {
             Ok(RuntimeEvent::Rpc(event)) => match event {
-                RpcEvent::Traffic(record) => {
-                    if events.send(CodexRuntimeEvent::RpcTraffic(record)).is_err() {
-                        return;
-                    }
-                }
                 RpcEvent::Notification { method, params } => {
                     let decoded = decode_codex_notification(&mappings, &method, &params);
                     let protocol_error = decoded.iter().find_map(|event| match event {
@@ -1867,7 +1868,7 @@ mod tests {
                 (
                     "fake-codex.cmd",
                     r#"@echo off
- powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$counter=0; $turnCounter=0; while($null -ne ($line=[Console]::In.ReadLine())) { Add-Content -LiteralPath $env:FAKE_CODEX_LOG -Value $line; $request=$line | ConvertFrom-Json; if($null -eq $request.id) { continue }; if($request.method -eq 'initialize') { $result=@{userAgent='fake-codex';codexHome='fake-home';platformFamily='windows';platformOs='windows'} } elseif($request.method -eq 'thread/start') { $counter++; $result=@{thread=@{id=('codex-thread-' + $counter)}} } elseif($request.method -eq 'thread/resume') { $result=@{thread=@{id=$request.params.threadId}} } elseif($request.method -eq 'turn/start') { $turnCounter++; $threadId=$request.params.threadId; $turnId=('provider-turn-' + $turnCounter); $started=@{method='turn/started';params=@{threadId=$threadId;turn=@{id=$turnId;status='inProgress'}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($started); $delta=@{method='item/agentMessage/delta';params=@{threadId=$threadId;turnId=$turnId;itemId=('item-' + $turnCounter);delta='hello'}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($delta); $completed=@{method='turn/completed';params=@{threadId=$threadId;turn=@{id=$turnId;status='completed';items=@(@{id=('item-' + $turnCounter);type='agentMessage';text='hello'})}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($completed); [Console]::Out.Flush(); $result=@{turn=@{id=$turnId}} } else { $result=@{} }; $response=@{id=$request.id;result=$result} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($response); [Console]::Out.Flush() }"
+ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$counter=0; $turnCounter=0; while($null -ne ($line=[Console]::In.ReadLine())) { Add-Content -LiteralPath $env:FAKE_CODEX_LOG -Value $line; $request=$line | ConvertFrom-Json; if($null -eq $request.id) { if($request.method -eq 'initialized' -and $env:FAKE_CODEX_UNSUPPORTED_REQUEST -eq '1') { $serverRequest=@{id=999;method='workspace/unknown';params=@{sentinel='unsupported-server-request'}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($serverRequest); [Console]::Out.Flush() }; continue }; if($null -eq $request.method) { continue }; if($request.method -eq 'initialize') { $result=@{userAgent='fake-codex';codexHome='fake-home';platformFamily='windows';platformOs='windows'} } elseif($request.method -eq 'thread/start') { if($env:FAKE_CODEX_STDERR -eq '1') { [Console]::Error.WriteLine('fake Codex diagnostic'); [Console]::Error.Flush() }; $counter++; $result=@{thread=@{id=('codex-thread-' + $counter)}} } elseif($request.method -eq 'thread/resume') { $result=@{thread=@{id=$request.params.threadId}} } elseif($request.method -eq 'turn/start') { $turnCounter++; $threadId=$request.params.threadId; $turnId=('provider-turn-' + $turnCounter); $started=@{method='turn/started';params=@{threadId=$threadId;turn=@{id=$turnId;status='inProgress'}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($started); $delta=@{method='item/agentMessage/delta';params=@{threadId=$threadId;turnId=$turnId;itemId=('item-' + $turnCounter);delta='hello'}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($delta); $completed=@{method='turn/completed';params=@{threadId=$threadId;turn=@{id=$turnId;status='completed';items=@(@{id=('item-' + $turnCounter);type='agentMessage';text='hello'})}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($completed); [Console]::Out.Flush(); $result=@{turn=@{id=$turnId}} } else { $result=@{} }; $response=@{id=$request.id;result=$result} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($response); [Console]::Out.Flush() }"
 "#,
                 )
             } else {
@@ -1881,10 +1882,11 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake-codex","codexHome":"fake-home","platformFamily":"unix","platformOs":"unix"}}\n' "$id" ;;
-    *'"method":"initialized"'*) : ;;
-    *'"method":"thread/start"'*) counter=$((counter + 1)); printf '{"id":%s,"result":{"thread":{"id":"codex-thread-%s"}}}\n' "$id" "$counter" ;;
+    *'"method":"initialized"'*) if [ "${FAKE_CODEX_UNSUPPORTED_REQUEST:-}" = "1" ]; then printf '{"id":999,"method":"workspace/unknown","params":{"sentinel":"unsupported-server-request"}}\n'; fi ;;
+    *'"method":"thread/start"'*) if [ "${FAKE_CODEX_STDERR:-}" = "1" ]; then printf 'fake Codex diagnostic\n' >&2; fi; counter=$((counter + 1)); printf '{"id":%s,"result":{"thread":{"id":"codex-thread-%s"}}}\n' "$id" "$counter" ;;
      *'"method":"thread/resume"'*) thread_id=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'); printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$thread_id" ;;
      *'"method":"turn/start"'*) turn_counter=$((turn_counter + 1)); thread_id=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'); turn_id="provider-turn-$turn_counter"; item_id="item-$turn_counter"; printf '{"method":"turn/started","params":{"threadId":"%s","turn":{"id":"%s","status":"inProgress"}}}\n' "$thread_id" "$turn_id"; printf '{"method":"item/agentMessage/delta","params":{"threadId":"%s","turnId":"%s","itemId":"%s","delta":"hello"}}\n' "$thread_id" "$turn_id" "$item_id"; printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"%s","status":"completed","items":[{"id":"%s","type":"agentMessage","text":"hello"}]}}}\n' "$thread_id" "$turn_id" "$item_id"; printf '{"id":%s,"result":{"turn":{"id":"%s"}}}\n' "$id" "$turn_id" ;;
+    *'"error":'*) : ;;
     *) printf '{"id":%s,"result":{}}\n' "$id" ;;
   esac
 done
@@ -2417,6 +2419,110 @@ done
             fixture.methods(),
             vec!["initialize", "initialized", "thread/start", "thread/start"]
         );
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn stderr_stays_on_the_semantic_diagnostic_path_and_out_of_rpc_traffic_and_protocol_logs() {
+        let fixture = FakeAppServer::new();
+        let workspace = fixture._directory.path().join("stderr-workspace");
+        let controller = CodexAppServerController::spawn(
+            fixture.launch_config().with_env("FAKE_CODEX_STDERR", "1"),
+        )
+        .unwrap();
+        controller
+            .ensure_session(
+                "stderr-thread",
+                None,
+                &CodexSessionConfig {
+                    model: None,
+                    effort: None,
+                    cwd: workspace.clone(),
+                    approval_policy: CodexApprovalPolicy::Never,
+                    sandbox: CodexSandboxMode::ReadOnly,
+                    developer_instructions: String::new(),
+                    config: HashMap::new(),
+                },
+            )
+            .unwrap();
+
+        let stderr = controller
+            .recv_event_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(matches!(
+            stderr,
+            CodexRuntimeEvent::Stderr { text } if text.contains("fake Codex diagnostic")
+        ));
+        let mut traffic = Vec::new();
+        while let Ok(record) = controller.recv_rpc_traffic_timeout(Duration::from_millis(50)) {
+            traffic.push(record);
+        }
+        assert!(!traffic
+            .iter()
+            .any(|record| record.message.to_string().contains("fake Codex diagnostic")));
+        let records = protocol_records(&workspace, "stderr-thread");
+        assert!(!records
+            .iter()
+            .any(|record| record.to_string().contains("fake Codex diagnostic")));
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn unsupported_server_request_is_observable_bidirectionally_without_semantic_noise() {
+        let fixture = FakeAppServer::new();
+        let controller = CodexAppServerController::spawn(
+            fixture
+                .launch_config()
+                .with_env("FAKE_CODEX_UNSUPPORTED_REQUEST", "1"),
+        )
+        .unwrap();
+
+        let mut traffic = Vec::new();
+        for _ in 0..10 {
+            let record = controller
+                .recv_rpc_traffic_timeout(Duration::from_secs(1))
+                .unwrap();
+            let is_rejection = record.direction == "client_to_provider"
+                && record.kind == "response"
+                && record.message["id"] == 999
+                && record.message["error"]["code"] == -32601;
+            traffic.push(record);
+            if is_rejection {
+                break;
+            }
+        }
+
+        let request = traffic
+            .iter()
+            .find(|record| {
+                record.direction == "provider_to_client"
+                    && record.kind == "request"
+                    && record.message["method"] == "workspace/unknown"
+            })
+            .expect("unsupported server request should be present in RPC traffic");
+        assert_eq!(request.thread_id, None);
+        assert_eq!(
+            request.message["params"]["sentinel"],
+            "unsupported-server-request"
+        );
+        let response = traffic
+            .iter()
+            .find(|record| {
+                record.direction == "client_to_provider"
+                    && record.kind == "response"
+                    && record.message["id"] == request.message["id"]
+            })
+            .expect("unsupported server response should be present in RPC traffic");
+        assert_eq!(response.thread_id, None);
+        assert_eq!(response.message["error"]["code"], -32601);
+        assert!(response.message["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("workspace/unknown")));
+        assert!(controller.is_healthy());
+        assert!(matches!(
+            controller.recv_event_timeout(Duration::from_millis(100)),
+            Err(RecvTimeoutError::Timeout)
+        ));
         controller.shutdown().unwrap();
     }
 

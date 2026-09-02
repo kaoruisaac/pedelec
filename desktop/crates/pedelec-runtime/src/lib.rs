@@ -428,6 +428,43 @@ mod tests {
     }
 
     #[test]
+    fn ownerless_runtime_global_traffic_stays_live_and_out_of_session_logs() {
+        let temp = tempfile::tempdir().unwrap();
+        let (input_tx, input_rx) = mpsc::channel();
+        let (written_tx, _written_rx) = mpsc::channel();
+        let peer = test_peer(input_rx, written_tx);
+        peer.register_protocol_log("thread-a", "codex", temp.path());
+
+        let message = json!({
+            "method": "runtime/global",
+            "params": { "sentinel": "ownerless-global" }
+        });
+        let mut bytes = serde_json::to_vec(&message).unwrap();
+        bytes.push(b'\n');
+        input_tx.send(bytes).unwrap();
+
+        let traffic = peer.recv_traffic_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(traffic.direction, "provider_to_client");
+        assert_eq!(traffic.kind, "notification");
+        assert_eq!(traffic.thread_id, None);
+        assert_eq!(traffic.message, message);
+        assert!(matches!(
+            peer.recv_event_timeout(Duration::from_secs(1)).unwrap(),
+            RpcEvent::Notification { method, .. } if method == "runtime/global"
+        ));
+
+        let log_dir = temp.path().join(".pedelec-runtime").join("logs");
+        let path = fs::read_dir(log_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let body = fs::read_to_string(path).unwrap();
+        assert!(!body.contains("ownerless-global"));
+    }
+
+    #[test]
     fn protocol_jsonl_preserves_bare_codex_envelope_and_logging_failure_is_non_fatal() {
         let temp = tempfile::tempdir().unwrap();
         let (input_tx, input_rx) = mpsc::channel();
@@ -455,6 +492,8 @@ mod tests {
             )
             .unwrap();
         request.join().unwrap().unwrap();
+        let _ = peer.recv_traffic_timeout(Duration::from_secs(1)).unwrap();
+        let _ = peer.recv_traffic_timeout(Duration::from_secs(1)).unwrap();
         let log_dir = temp.path().join(".pedelec-runtime").join("logs");
         let path = fs::read_dir(log_dir)
             .unwrap()
@@ -469,8 +508,31 @@ mod tests {
         let bad_workspace = temp.path().join("not-a-directory");
         fs::write(&bad_workspace, "file").unwrap();
         peer.register_protocol_log("unwritable", "codex", &bad_workspace);
-        peer.notify("still/works", json!({})).unwrap();
-        let _: serde_json::Value = serde_json::from_slice(&written_rx.recv().unwrap()).unwrap();
+        let request_peer = peer.clone();
+        let request = thread::spawn(move || {
+            request_peer.request_scoped(
+                "unwritable",
+                "still/works",
+                json!({"sentinel":"logging-failure"}),
+                Duration::from_secs(1),
+            )
+        });
+        let frame: serde_json::Value = serde_json::from_slice(&written_rx.recv().unwrap()).unwrap();
+        let outbound = peer.recv_traffic_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(outbound.direction, "client_to_provider");
+        assert_eq!(outbound.kind, "request");
+        assert_eq!(outbound.thread_id.as_deref(), Some("unwritable"));
+        assert_eq!(outbound.message["method"], "still/works");
+        assert_eq!(outbound.message["params"]["sentinel"], "logging-failure");
+        input_tx
+            .send(format!("{{\"id\":{},\"result\":{{\"ok\":true}}}}\n", frame["id"]).into_bytes())
+            .unwrap();
+        assert_eq!(request.join().unwrap().unwrap(), json!({"ok": true}));
+        let inbound = peer.recv_traffic_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(inbound.direction, "provider_to_client");
+        assert_eq!(inbound.kind, "response");
+        assert_eq!(inbound.thread_id.as_deref(), Some("unwritable"));
+        assert_eq!(inbound.message["result"], json!({"ok": true}));
     }
 
     #[test]
@@ -502,10 +564,20 @@ mod tests {
                 .into_bytes(),
             )
             .unwrap();
-        assert!(matches!(
-            peer.recv_event_timeout(Duration::from_secs(1)).unwrap(),
-            RpcEvent::UnmatchedResponse { .. }
-        ));
+        let outbound_traffic = peer.recv_traffic_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(outbound_traffic.direction, "client_to_provider");
+        assert_eq!(outbound_traffic.kind, "request");
+        assert_eq!(
+            outbound_traffic.thread_id.as_deref(),
+            Some("thread-timeout")
+        );
+        assert!(!outbound_traffic.unmatched);
+        let late_traffic = peer.recv_traffic_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(late_traffic.direction, "provider_to_client");
+        assert_eq!(late_traffic.kind, "response");
+        assert_eq!(late_traffic.thread_id.as_deref(), Some("thread-timeout"));
+        assert!(late_traffic.unmatched);
+        assert_eq!(late_traffic.message["result"], "late");
         let log_dir = temp.path().join(".pedelec-runtime").join("logs");
         let body = fs::read_to_string(
             fs::read_dir(log_dir)
@@ -669,6 +741,22 @@ mod tests {
                 .unwrap(),
             json!("ok")
         );
+        let outbound = controller
+            .recv_rpc_traffic_timeout(Duration::from_secs(1))
+            .unwrap();
+        let inbound = controller
+            .recv_rpc_traffic_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(outbound.direction, "client_to_provider");
+        assert_eq!(outbound.kind, "request");
+        assert_eq!(outbound.message["method"], "ping");
+        assert_eq!(inbound.direction, "provider_to_client");
+        assert_eq!(inbound.kind, "response");
+        assert_eq!(inbound.message["result"], "ok");
+        assert!(matches!(
+            controller.recv_event_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
         let exit = controller
             .shutdown_with_grace(Duration::from_secs(1))
             .unwrap();

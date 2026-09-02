@@ -77,7 +77,7 @@ describe("event monitor store", () => {
     expect(monitor.store.selectedThreadId).toBe("active-thread");
   });
 
-  it("keeps global runtime diagnostics out of arbitrary threads and routes attached diagnostics", () => {
+  it("keeps global runtime diagnostics out of arbitrary threads and routes attached metadata", () => {
     const monitor = createEventMonitorStore();
 
     monitor.upsertThreadEvent({
@@ -100,12 +100,11 @@ describe("event monitor store", () => {
     expect(monitor.store.runtimeProcessId).toBe(1234);
     expect(monitor.store.runtimeGeneration).toBe(7);
     expect(monitor.store.totalEventCount).toBe(1);
+    expect(monitor.store.threadsById["codex-thread"]?.provider).toBe("codex");
     expect(monitor.store.threadsById["codex-thread"]?.providerSessionId).toBe(
       "provider-thread",
     );
-    expect(monitor.store.threadsById["codex-thread"]?.runtimeDiagnostics).toHaveLength(1);
-    expect(monitor.store.runtimeDiagnostics).toHaveLength(2);
-    expect(monitor.store.runtimeDiagnostics[0]?.threadId).toBe("codex-thread");
+    expect(monitor.store.threadsById["codex-thread"]?.events).toHaveLength(1);
   });
 
   it("keeps persistent runtime summaries isolated by provider", () => {
@@ -144,22 +143,72 @@ describe("event monitor store", () => {
     expect(monitor.store.runtimeByProvider.opencode).toBeUndefined();
   });
 
-  it("bounds persistent runtime diagnostics", () => {
+  it("bounds RPC traffic without changing semantic event metrics or truncating messages", () => {
     const monitor = createEventMonitorStore();
+    monitor.upsertThreadEvent({ type: "created", threadId: "codex-thread" });
+    const largeText = "x".repeat(10_000);
 
     for (let index = 0; index < 350; index += 1) {
-      monitor.upsertThreadEvent({
-        type: "provider_runtime_raw_protocol",
+      monitor.upsertRpcTraffic({
+        type: "provider_rpc_traffic",
         provider: "codex",
-        operation: "notification",
-        summary: `frame-${index}`,
+        threadId: "codex-thread",
         processId: 1234,
         runtimeGeneration: 7,
+        ts: `2026-09-02T00:00:${String(index).padStart(3, "0")}Z`,
+        direction: "provider_to_client",
+        kind: "notification",
+        message: { index, text: index === 349 ? largeText : "small" },
+      });
+      monitor.upsertRpcTraffic({
+        type: "provider_rpc_traffic",
+        provider: "codex",
+        processId: 1234,
+        runtimeGeneration: 7,
+        ts: `2026-09-02T01:00:${String(index).padStart(3, "0")}Z`,
+        direction: "provider_to_client",
+        kind: "notification",
+        message: { globalIndex: index },
       });
     }
 
-    expect(monitor.store.runtimeDiagnostics).toHaveLength(300);
-    expect(monitor.store.totalRuntimeDiagnosticCount).toBe(350);
-    expect(monitor.store.runtimeDiagnostics[0]?.summary).toBe("frame-349");
+    const thread = monitor.store.threadsById["codex-thread"]!;
+    expect(thread.rpcTraffic).toHaveLength(300);
+    expect(thread.rpcTraffic[0]?.message).toEqual({ index: 349, text: largeText });
+    expect(monitor.store.globalRpcTraffic).toHaveLength(300);
+    expect(monitor.store.globalRpcTraffic[0]?.message).toEqual({ globalIndex: 349 });
+    expect(monitor.store.totalEventCount).toBe(1);
+    expect(thread.eventCount).toBe(1);
+    expect(thread.lastEventType).toBe("created");
+  });
+
+  it("stores persistent runtime stderr separately and routes runtime errors into Errors", () => {
+    const monitor = createEventMonitorStore();
+    monitor.upsertThreadEvent({
+      type: "status_changed",
+      threadId: "codex-thread",
+      status: "running",
+    });
+    monitor.upsertRuntimeDiagnostic({
+      type: "provider_runtime_stderr",
+      provider: "codex",
+      processId: 1234,
+      runtimeGeneration: 7,
+      text: "provider stderr\n",
+    });
+    monitor.upsertRuntimeDiagnostic({
+      type: "provider_runtime_error",
+      provider: "codex",
+      threadId: "codex-thread",
+      processId: 1234,
+      runtimeGeneration: 7,
+      code: "PROVIDER_PROTOCOL_ERROR",
+      message: "bad frame",
+    });
+
+    expect(monitor.store.runtimeStderr).toHaveLength(1);
+    expect(monitor.store.runtimeStderr[0]?.text).toBe("provider stderr\n");
+    expect(monitor.store.threadsById["codex-thread"]?.errors).toHaveLength(1);
+    expect(monitor.store.threadsById["codex-thread"]?.status).toBe("running");
   });
 });

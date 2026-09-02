@@ -4,8 +4,8 @@ import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  eventHandler: undefined as ((event: { payload: unknown }) => void) | undefined,
-  unlisten: vi.fn(),
+  eventHandlers: new Map<string, (event: { payload: unknown }) => void>(),
+  unlisteners: new Map<string, ReturnType<typeof vi.fn>>(),
   monitorEndThread: vi.fn(),
   openThreadWorkspace: vi.fn(),
   sendThreadText: vi.fn(),
@@ -35,17 +35,19 @@ let activeDispose: (() => void) | undefined;
 describe("EventMonitorApp Debug Prompt", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
-    mocks.eventHandler = undefined;
-    mocks.unlisten.mockReset();
+    mocks.eventHandlers.clear();
+    mocks.unlisteners.clear();
     mocks.monitorEndThread.mockReset();
     mocks.monitorEndThread.mockResolvedValue(undefined);
     mocks.openThreadWorkspace.mockReset();
     mocks.sendThreadText.mockReset();
     mocks.sendThreadText.mockResolvedValue({ threadId: "t000123" });
     mocks.listen.mockReset();
-    mocks.listen.mockImplementation(async (_eventName: string, handler: (event: { payload: unknown }) => void) => {
-      mocks.eventHandler = handler;
-      return mocks.unlisten;
+    mocks.listen.mockImplementation(async (eventName: string, handler: (event: { payload: unknown }) => void) => {
+      const unlisten = vi.fn();
+      mocks.eventHandlers.set(eventName, handler);
+      mocks.unlisteners.set(eventName, unlisten);
+      return unlisten;
     });
   });
 
@@ -369,6 +371,69 @@ describe("EventMonitorApp Debug Prompt", () => {
     expect(metricValue(container, "Total sessions")).toBe("0");
     expect(metricValue(container, "Total events")).toBe("0");
   });
+
+  it("renders raw RPC traffic, runtime stderr, and runtime errors without a Runtime Diagnostics panel", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "running");
+    emitThreadEvent({
+      type: "provider_runtime_attached",
+      provider: "codex",
+      threadId: "t000123",
+      providerThreadId: "provider-thread",
+      processId: 4321,
+      runtimeGeneration: 9,
+      resumed: false,
+    });
+    emitRpcTraffic({
+      type: "provider_rpc_traffic",
+      provider: "codex",
+      threadId: "t000123",
+      processId: 4321,
+      runtimeGeneration: 9,
+      ts: "2026-09-02T08:00:00.000Z",
+      direction: "provider_to_client",
+      kind: "response",
+      message: { id: 12, result: { marker: "full-rpc-frame" } },
+      unmatched: true,
+    });
+    emitThreadEvent({
+      type: "provider_runtime_stderr",
+      provider: "codex",
+      processId: 4321,
+      runtimeGeneration: 9,
+      text: "persistent stderr marker",
+    });
+    emitThreadEvent({
+      type: "provider_runtime_error",
+      provider: "codex",
+      threadId: "t000123",
+      processId: 4321,
+      runtimeGeneration: 9,
+      code: "PROVIDER_PROTOCOL_ERROR",
+      message: "runtime error marker",
+    });
+    await tick();
+
+    expect(container.textContent).toContain("RPC Traffic");
+    expect(container.textContent).not.toContain("Runtime Diagnostics");
+    expect(container.textContent).toContain("full-rpc-frame");
+    expect(container.textContent).toContain("unmatched");
+    expect(container.textContent).toContain("persistent stderr marker");
+    expect(container.textContent).toContain("runtime error marker");
+  });
+
+  it("subscribes to both monitor event streams and cleans up both listeners", async () => {
+    mountMonitor();
+    await tick();
+
+    expect(mocks.listen).toHaveBeenCalledWith("thread_event", expect.any(Function));
+    expect(mocks.listen).toHaveBeenCalledWith("provider_rpc_traffic", expect.any(Function));
+
+    activeDispose?.();
+    activeDispose = undefined;
+    expect(mocks.unlisteners.get("thread_event")).toHaveBeenCalledTimes(1);
+    expect(mocks.unlisteners.get("provider_rpc_traffic")).toHaveBeenCalledTimes(1);
+  });
 });
 
 function mountMonitor(): HTMLElement {
@@ -379,12 +444,20 @@ function mountMonitor(): HTMLElement {
 }
 
 function emitThread(threadId: string, status: string): void {
-  mocks.eventHandler!({ payload: { type: "created", threadId } });
+  emitThreadEvent({ type: "created", threadId });
   emitStatus(threadId, status);
 }
 
 function emitStatus(threadId: string, status: string): void {
-  mocks.eventHandler!({ payload: { type: "status_changed", threadId, status } });
+  emitThreadEvent({ type: "status_changed", threadId, status });
+}
+
+function emitThreadEvent(payload: unknown): void {
+  mocks.eventHandlers.get("thread_event")!({ payload });
+}
+
+function emitRpcTraffic(payload: unknown): void {
+  mocks.eventHandlers.get("provider_rpc_traffic")!({ payload });
 }
 
 function promptTextarea(container: HTMLElement): HTMLTextAreaElement {

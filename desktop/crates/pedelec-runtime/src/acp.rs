@@ -269,7 +269,6 @@ pub enum AcpTurnStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcpRuntimeEvent {
-    RpcTraffic(RpcTrafficRecord),
     SessionReady {
         pedelec_thread_id: String,
         provider_session_id: String,
@@ -1118,6 +1117,13 @@ impl AcpController {
             .recv_timeout(timeout)
     }
 
+    pub fn recv_rpc_traffic_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<RpcTrafficRecord, RecvTimeoutError> {
+        self.transport.recv_rpc_traffic_timeout(timeout)
+    }
+
     pub fn shutdown(&self) -> Result<(), AcpRuntimeError> {
         self.healthy.store(false, Ordering::Release);
         self.transport
@@ -1412,9 +1418,6 @@ fn run_event_worker(
 ) {
     while let Ok(event) = transport.recv_event() {
         match event {
-            RuntimeEvent::Rpc(RpcEvent::Traffic(record)) => {
-                let _ = events.send(AcpRuntimeEvent::RpcTraffic(record));
-            }
             RuntimeEvent::Rpc(RpcEvent::Notification { method, params }) => {
                 if method == "session/update" {
                     if handle_session_update(&mappings, &events, params) {
@@ -2418,12 +2421,48 @@ mod tests {
             }
         }
         assert!(saw_stderr);
+        let mut rpc_traffic = Vec::new();
+        while let Ok(record) = controller.recv_rpc_traffic_timeout(Duration::from_millis(50)) {
+            rpc_traffic.push(record);
+        }
+        let permission_request = rpc_traffic
+            .iter()
+            .find(|record| {
+                record.direction == "provider_to_client"
+                    && record.kind == "request"
+                    && record.message["method"] == "session/request_permission"
+            })
+            .expect("permission request should be present in RPC traffic");
+        assert_eq!(permission_request.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(permission_request.message["jsonrpc"], "2.0");
+        assert_eq!(
+            permission_request.message["params"]["sessionId"],
+            session_id
+        );
+        let permission_id = permission_request.message["id"].clone();
+        let permission_response = rpc_traffic
+            .iter()
+            .find(|record| {
+                record.direction == "client_to_provider"
+                    && record.kind == "response"
+                    && record.message["id"] == permission_id
+            })
+            .expect("permission response should be present in RPC traffic");
+        assert_eq!(permission_response.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(permission_response.message["jsonrpc"], "2.0");
+        assert!(permission_response.message.get("result").is_some());
+        assert!(!rpc_traffic
+            .iter()
+            .any(|record| record.message.to_string().contains("fake ACP diagnostic")));
         assert!(fixture
             .frames()
             .iter()
             .filter(|frame| frame.get("method").is_some())
             .all(|frame| frame["jsonrpc"] == "2.0"));
         let records = protocol_records(&workspace, "thread-1");
+        assert!(!records
+            .iter()
+            .any(|record| record.to_string().contains("fake ACP diagnostic")));
         assert_protocol_request_has_response(&records, "session/new");
         assert_protocol_request_has_response(&records, "session/set_config_option");
         assert_protocol_request_has_response(&records, "session/set_mode");
