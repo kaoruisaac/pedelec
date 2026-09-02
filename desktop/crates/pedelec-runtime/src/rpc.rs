@@ -68,11 +68,21 @@ pub enum RpcDisconnectReason {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RpcTrafficRecord {
+    pub ts: String,
+    pub direction: String,
+    pub kind: String,
+    pub thread_id: Option<String>,
+    pub message: Value,
+    pub unmatched: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum RpcEvent {
+    Traffic(RpcTrafficRecord),
     Notification { method: String, params: Value },
     ServerRequest(RpcServerRequest),
     Stderr { text: String },
-    UnmatchedResponse { id: RpcId, response: Value },
     Disconnected { reason: RpcDisconnectReason },
 }
 
@@ -301,11 +311,12 @@ impl RpcPeer {
             self.mark_disconnected(RpcDisconnectReason::TransportIo(error.clone()));
             return Err(RpcError::Write { error });
         }
-        self.log_protocol_frame(
+        self.capture_protocol_frame(
             "client_to_provider",
             "request",
             &request,
             effective_owner.as_deref(),
+            false,
         );
 
         match reply_rx.recv_timeout(timeout) {
@@ -326,7 +337,13 @@ impl RpcPeer {
     pub fn notify(&self, method: impl Into<String>, params: Value) -> Result<(), RpcError> {
         let request = self.envelope(json!({ "method": method.into(), "params": params }));
         self.write_or_disconnect(&request)?;
-        self.log_protocol_frame("client_to_provider", "notification", &request, None);
+        self.capture_protocol_frame(
+            "client_to_provider",
+            "notification",
+            &request,
+            None,
+            false,
+        );
         Ok(())
     }
 
@@ -334,11 +351,12 @@ impl RpcPeer {
         let response = self.envelope(json!({ "id": id.as_value(), "result": result }));
         let owner = self.take_server_request_owner(&id);
         self.write_or_disconnect(&response)?;
-        self.log_protocol_frame(
+        self.capture_protocol_frame(
             "client_to_provider",
             "response",
             &response,
             owner.as_deref(),
+            false,
         );
         Ok(())
     }
@@ -359,11 +377,12 @@ impl RpcPeer {
         let response = self.envelope(json!({ "id": id.as_value(), "error": error }));
         let owner = self.take_server_request_owner(&id);
         self.write_or_disconnect(&response)?;
-        self.log_protocol_frame(
+        self.capture_protocol_frame(
             "client_to_provider",
             "response",
             &response,
             owner.as_deref(),
+            false,
         );
         Ok(())
     }
@@ -482,14 +501,22 @@ impl RpcPeer {
         value
     }
 
-    fn log_protocol_frame(
+    fn capture_protocol_frame(
         &self,
         direction: &str,
         kind: &str,
         message: &Value,
         explicit_owner: Option<&str>,
+        unmatched: bool,
     ) {
-        log_protocol_frame(&self.inner, direction, kind, message, explicit_owner);
+        capture_protocol_frame(
+            &self.inner,
+            direction,
+            kind,
+            message,
+            explicit_owner,
+            unmatched,
+        );
     }
 
     fn take_server_request_owner(&self, id: &RpcId) -> Option<String> {
@@ -621,12 +648,13 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
         match id {
             Some(id) => {
                 let owner = resolve_protocol_owner(inner, &frame);
-                log_protocol_frame(
+                capture_protocol_frame(
                     inner,
                     "provider_to_client",
                     "request",
                     &frame,
                     owner.as_deref(),
+                    false,
                 );
                 if let Some(owner) = owner {
                     inner
@@ -649,7 +677,14 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
                     })?;
             }
             None => {
-                log_protocol_frame(inner, "provider_to_client", "notification", &frame, None);
+                capture_protocol_frame(
+                    inner,
+                    "provider_to_client",
+                    "notification",
+                    &frame,
+                    None,
+                    false,
+                );
                 let params = object.get("params").cloned().unwrap_or(Value::Null);
                 inner
                     .events
@@ -698,23 +733,17 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
         .as_ref()
         .and_then(|pending| pending.owner.clone())
         .or(late_owner);
-    log_protocol_frame(
+    let unmatched = pending.is_none();
+    capture_protocol_frame(
         inner,
         "provider_to_client",
         "response",
         &frame,
         owner.as_deref(),
+        unmatched,
     );
     if let Some(pending) = pending {
         let _ = pending.reply.send(response);
-    } else {
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => json!({ "error": error.to_string() }),
-        };
-        let _ = inner
-            .events
-            .send(RpcEvent::UnmatchedResponse { id, response });
     }
 
     Ok(())
@@ -730,21 +759,33 @@ fn resolve_protocol_owner(inner: &Arc<RpcInner>, frame: &Value) -> Option<String
     resolver.and_then(|resolver| resolver(frame))
 }
 
-fn log_protocol_frame(
+fn capture_protocol_frame(
     inner: &Arc<RpcInner>,
     direction: &str,
     kind: &str,
     message: &Value,
     explicit_owner: Option<&str>,
+    unmatched: bool,
 ) {
     let owner = explicit_owner
         .map(str::to_string)
         .or_else(|| resolve_protocol_owner(inner, message));
+    let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let traffic = RpcTrafficRecord {
+        ts: ts.clone(),
+        direction: direction.to_string(),
+        kind: kind.to_string(),
+        thread_id: owner.clone(),
+        message: message.clone(),
+        unmatched,
+    };
+    let _ = inner.events.send(RpcEvent::Traffic(traffic));
+
     let Some(owner) = owner else {
         return;
     };
     let record = json!({
-        "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "ts": ts,
         "direction": direction,
         "kind": kind,
         "message": message,

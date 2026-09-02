@@ -6,7 +6,7 @@
 
 use crate::{
     PersistentProcessSpec, PersistentRuntimeController, RpcDisconnectReason, RpcError, RpcEvent,
-    RuntimeControllerError, RuntimeEvent,
+    RpcTrafficRecord, RuntimeControllerError, RuntimeEvent,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -229,16 +229,13 @@ pub struct CodexSessionAttachment {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodexRuntimeEvent {
+    RpcTraffic(RpcTrafficRecord),
     Notification {
         method: String,
         params: Value,
         pedelec_thread_id: Option<String>,
         provider_thread_id: Option<String>,
         provider_turn_id: Option<String>,
-    },
-    UnmatchedResponse {
-        id: crate::RpcId,
-        response: Value,
     },
     Stderr {
         text: String,
@@ -278,13 +275,6 @@ pub enum CodexRuntimeEvent {
         provider_thread_id: Option<String>,
         operation: String,
         message: String,
-    },
-    /// A server-to-client request was rejected explicitly. This is a
-    /// diagnostic event; rejection itself is not a transport failure because
-    /// the provider received a completed JSON-RPC error response.
-    ServerRequestRejected {
-        id: crate::RpcId,
-        method: String,
     },
     Disconnected {
         generation: u64,
@@ -1750,6 +1740,11 @@ fn run_event_worker(
     loop {
         match transport.recv_event_timeout(Duration::from_millis(50)) {
             Ok(RuntimeEvent::Rpc(event)) => match event {
+                RpcEvent::Traffic(record) => {
+                    if events.send(CodexRuntimeEvent::RpcTraffic(record)).is_err() {
+                        return;
+                    }
+                }
                 RpcEvent::Notification { method, params } => {
                     let decoded = decode_codex_notification(&mappings, &method, &params);
                     let protocol_error = decoded.iter().find_map(|event| match event {
@@ -1781,23 +1776,13 @@ fn run_event_worker(
                     // tools, terminal/create, or approval RPCs in this phase.
                     // Reject unsupported requests explicitly so Codex cannot
                     // remain blocked waiting for a client response.
-                    let request_id = request.id.clone();
                     let method = request.method.clone();
                     let response = transport.respond_error(
-                        request_id,
+                        request.id,
                         json!(-32601),
                         format!("Pedelec Codex client does not support {method}"),
                         Some(json!({ "method": method })),
                     );
-                    if events
-                        .send(CodexRuntimeEvent::ServerRequestRejected {
-                            id: request.id,
-                            method: request.method,
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
                     if response.is_err() {
                         // The response writer already marked the RPC peer
                         // disconnected. The reader/event side will emit the
@@ -1820,14 +1805,6 @@ fn run_event_worker(
                         send_disconnect(&transport, &mappings, &events, reason);
                     }
                     break;
-                }
-                RpcEvent::UnmatchedResponse { id, response } => {
-                    if events
-                        .send(CodexRuntimeEvent::UnmatchedResponse { id, response })
-                        .is_err()
-                    {
-                        return;
-                    }
                 }
             },
             Ok(RuntimeEvent::ProcessExit(exit)) => {

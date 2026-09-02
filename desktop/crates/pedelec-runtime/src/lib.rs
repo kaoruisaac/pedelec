@@ -30,7 +30,7 @@ pub use persistent_process::{
 };
 pub use rpc::{
     JsonLineWriter, RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent, RpcId, RpcPeer,
-    RpcServerRequest,
+    RpcServerRequest, RpcTrafficRecord,
 };
 pub use worker::{
     PersistentRuntimeController, RuntimeCommand, RuntimeControllerError, RuntimeEvent,

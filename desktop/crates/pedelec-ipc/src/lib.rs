@@ -3,7 +3,7 @@ use pedelec_core::{
     error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
     CreateAssetUploadInput, CreateThreadInput, EndThreadExecutionIntent, EndThreadInput,
     ListAssetsInput, PedelecError, PersistentRuntimeOperation, PrepareThreadInput,
-    PrepareThreadOutput, ProviderExecutionIntent, ProviderProcessTermination,
+    PrepareThreadOutput, ProviderExecutionIntent, ProviderProcessTermination, ProviderRpcTraffic,
     ProviderRuntimeDiagnostic, RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime,
     SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolInvocationOutcome,
     ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput,
@@ -12,7 +12,7 @@ use pedelec_runtime::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
     CodexRuntimeEvent, CodexRuntimeLaunchConfig, CodexSandboxMode, CodexSessionConfig,
     CodexTurnConfig, CodexTurnSandboxPolicy, CodexTurnStatus, ProviderRuntimeController,
-    ProviderRuntimeOwner, RuntimeRegistryError, CODEX_RUNTIME_KEY,
+    ProviderRuntimeOwner, RpcTrafficRecord, RuntimeRegistryError, CODEX_RUNTIME_KEY,
 };
 use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
@@ -279,6 +279,15 @@ impl CodexRuntimeDispatcher {
                     break;
                 }
                 match event {
+                    CodexRuntimeEvent::RpcTraffic(record) => {
+                        record_rpc_traffic(
+                            &runtime,
+                            pedelec_core::ProviderCode::Codex,
+                            controller.generation(),
+                            controller.process_id(),
+                            record,
+                        );
+                    }
                     CodexRuntimeEvent::TurnStarted {
                         pedelec_thread_id,
                         provider_thread_id,
@@ -433,21 +442,6 @@ impl CodexRuntimeDispatcher {
                             core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, error);
                         }
                     }
-                    CodexRuntimeEvent::ServerRequestRejected { method, .. } => {
-                        record_runtime_diagnostic(
-                            &runtime,
-                            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
-                                provider: pedelec_core::ProviderCode::Codex,
-                                runtime_generation: controller.generation(),
-                                process_id: controller.process_id(),
-                                thread_id: None,
-                                provider_thread_id: None,
-                                provider_turn_id: None,
-                                operation: method.clone(),
-                                summary: "unsupported server request was rejected".to_string(),
-                            },
-                        );
-                    }
                     CodexRuntimeEvent::Disconnected {
                         generation,
                         pid,
@@ -511,57 +505,15 @@ impl CodexRuntimeDispatcher {
                         );
                         break;
                     }
-                    CodexRuntimeEvent::Notification {
-                        method,
-                        params,
-                        pedelec_thread_id,
-                        provider_thread_id,
-                        provider_turn_id,
-                    } => {
-                        record_runtime_diagnostic(
-                            &runtime,
-                            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
-                                provider: pedelec_core::ProviderCode::Codex,
-                                runtime_generation: controller.generation(),
-                                process_id: controller.process_id(),
-                                thread_id: pedelec_thread_id,
-                                provider_thread_id,
-                                provider_turn_id,
-                                operation: method,
-                                summary: bounded_protocol_summary(&params),
-                            },
-                        );
-                    }
-                    CodexRuntimeEvent::UnmatchedResponse { id, response } => {
-                        record_runtime_diagnostic(
-                            &runtime,
-                            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
-                                provider: pedelec_core::ProviderCode::Codex,
-                                runtime_generation: controller.generation(),
-                                process_id: controller.process_id(),
-                                thread_id: None,
-                                provider_thread_id: None,
-                                provider_turn_id: None,
-                                operation: "unmatched_response".to_string(),
-                                summary: format!(
-                                    "rpc id {id:?}: {}",
-                                    bounded_protocol_summary(&response)
-                                ),
-                            },
-                        );
-                    }
+                    CodexRuntimeEvent::Notification { .. } => {}
                     CodexRuntimeEvent::Stderr { text } => {
                         record_runtime_diagnostic(
                             &runtime,
-                            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
+                            ProviderRuntimeDiagnostic::ProviderRuntimeStderr {
                                 provider: pedelec_core::ProviderCode::Codex,
                                 runtime_generation: controller.generation(),
                                 process_id: controller.process_id(),
-                                thread_id: None,
-                                provider_thread_id: None,
-                                provider_turn_id: None,
-                                operation: "stderr".to_string(),
-                                summary: truncate_diagnostic_text(&text),
+                                text,
                             },
                         );
                     }
@@ -858,6 +810,29 @@ fn record_runtime_diagnostic(runtime: &SharedCoreRuntime, diagnostic: ProviderRu
     }
 }
 
+pub(crate) fn record_rpc_traffic(
+    runtime: &SharedCoreRuntime,
+    provider: pedelec_core::ProviderCode,
+    runtime_generation: u64,
+    process_id: u32,
+    record: RpcTrafficRecord,
+) {
+    if let Ok(mut core) = runtime.lock() {
+        core.record_provider_rpc_traffic(ProviderRpcTraffic {
+            event_type: "provider_rpc_traffic".to_string(),
+            provider,
+            runtime_generation,
+            process_id,
+            thread_id: record.thread_id,
+            ts: record.ts,
+            direction: record.direction,
+            kind: record.kind,
+            message: record.message,
+            unmatched: record.unmatched.then_some(true),
+        });
+    }
+}
+
 fn mark_runtime_stopped(
     runtime: &SharedCoreRuntime,
     stopped_generations: &Mutex<HashSet<u64>>,
@@ -910,11 +885,6 @@ fn truncate_diagnostic_text(text: &str) -> String {
         end -= 1;
     }
     format!("{}…", &text[..end])
-}
-
-fn bounded_protocol_summary(value: &Value) -> String {
-    let text = serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string());
-    truncate_diagnostic_text(&text)
 }
 
 fn self_reduce_session_ready(

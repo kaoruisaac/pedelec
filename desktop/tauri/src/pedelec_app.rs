@@ -646,11 +646,12 @@ fn end_thread_from_monitor_with_dispatcher(
 }
 
 fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRuntime) {
-    let (event_rx, diagnostic_rx) = {
+    let (event_rx, diagnostic_rx, rpc_traffic_rx) = {
         let mut runtime = runtime.lock().unwrap();
         (
             runtime.subscribe_all_threads(),
             runtime.subscribe_provider_runtime_diagnostics(),
+            runtime.subscribe_provider_rpc_traffic(),
         )
     };
     let thread_event_app = app.clone();
@@ -659,13 +660,18 @@ fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRunt
             let _ = thread_event_app.emit("thread_event", event);
         }
     });
+    let diagnostic_app = app.clone();
     thread::spawn(move || {
         while let Ok(event) = diagnostic_rx.recv() {
-            // Keep the desktop monitor's existing event transport. Core IPC
-            // subscribers only receive semantic ThreadEvents; these
+            // Core IPC subscribers only receive semantic ThreadEvents; these
             // runtime-lifetime diagnostics are desktop-only and may be
             // thread-routable or global.
-            let _ = app.emit("thread_event", event);
+            let _ = diagnostic_app.emit("thread_event", event);
+        }
+    });
+    thread::spawn(move || {
+        while let Ok(event) = rpc_traffic_rx.recv() {
+            let _ = app.emit("provider_rpc_traffic", event);
         }
     });
 }

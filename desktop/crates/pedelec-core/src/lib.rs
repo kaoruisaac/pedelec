@@ -1174,11 +1174,30 @@ pub enum ProviderRuntimeEvent {
     },
 }
 
+/// Desktop-only raw RPC traffic for persistent provider runtimes. This is a
+/// live observability stream and deliberately does not belong to `ThreadEvent`
+/// or the provider runtime diagnostic contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRpcTraffic {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub provider: ProviderCode,
+    pub runtime_generation: u64,
+    pub process_id: u32,
+    pub thread_id: Option<String>,
+    pub ts: String,
+    pub direction: String,
+    pub kind: String,
+    pub message: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unmatched: Option<bool>,
+}
+
 /// Desktop-only diagnostics for a provider runtime. These events deliberately
 /// live outside `ThreadEvent`: a shared App Server has process-lifetime state
-/// and global protocol frames must not be attributed to an arbitrary Pedelec
-/// thread. The desktop monitor may still receive a copy with `threadId` when
-/// the frame can be routed safely.
+/// and process-global diagnostics must not be attributed to an arbitrary
+/// Pedelec thread.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "type",
@@ -1230,15 +1249,11 @@ pub enum ProviderRuntimeDiagnostic {
         provider_turn_id: Option<String>,
         status: String,
     },
-    ProviderRuntimeRawProtocol {
+    ProviderRuntimeStderr {
         provider: ProviderCode,
         runtime_generation: u64,
         process_id: u32,
-        thread_id: Option<String>,
-        provider_thread_id: Option<String>,
-        provider_turn_id: Option<String>,
-        operation: String,
-        summary: String,
+        text: String,
     },
     ProviderRuntimeError {
         provider: ProviderCode,
@@ -1257,12 +1272,13 @@ impl ProviderRuntimeDiagnostic {
     pub fn thread_id(&self) -> Option<&str> {
         match self {
             Self::ProviderRuntimeDisconnected { thread_id, .. }
-            | Self::ProviderRuntimeRawProtocol { thread_id, .. }
             | Self::ProviderRuntimeError { thread_id, .. } => thread_id.as_deref(),
             Self::ProviderRuntimeAttached { thread_id, .. }
             | Self::ProviderRuntimeTurnStarted { thread_id, .. }
             | Self::ProviderRuntimeTurnCompleted { thread_id, .. } => Some(thread_id),
-            Self::ProviderRuntimeStarted { .. } | Self::ProviderRuntimeStopped { .. } => None,
+            Self::ProviderRuntimeStarted { .. }
+            | Self::ProviderRuntimeStopped { .. }
+            | Self::ProviderRuntimeStderr { .. } => None,
         }
     }
 }
@@ -2859,6 +2875,7 @@ pub struct CoreRuntime {
     pub tool_request_broker: ToolRequestBroker,
     pub event_bus: EventBus,
     pub provider_runtime_diagnostics: ProviderRuntimeDiagnosticBus,
+    pub provider_rpc_traffic: ProviderRpcTrafficBus,
     pub running_processes: HashMap<String, RunningProviderProcess>,
     pub core_ipc_endpoint: Option<String>,
     pub core_ipc_runtime_file_path: Option<PathBuf>,
@@ -5324,6 +5341,17 @@ impl CoreRuntime {
     pub fn record_provider_runtime_diagnostic(&mut self, diagnostic: ProviderRuntimeDiagnostic) {
         self.provider_runtime_diagnostics.emit(diagnostic);
     }
+
+    /// Subscribes to desktop-only live raw RPC traffic. Unlike runtime
+    /// diagnostics this bus intentionally keeps no in-memory history because
+    /// durable protocol history already lives in per-session JSONL logs.
+    pub fn subscribe_provider_rpc_traffic(&mut self) -> mpsc::Receiver<ProviderRpcTraffic> {
+        self.provider_rpc_traffic.subscribe()
+    }
+
+    pub fn record_provider_rpc_traffic(&mut self, traffic: ProviderRpcTraffic) {
+        self.provider_rpc_traffic.emit(traffic);
+    }
 }
 
 fn append_provider_stderr(stderr: &mut String, truncated: &mut bool, text: &str) {
@@ -5528,6 +5556,27 @@ impl ProviderRuntimeDiagnosticBus {
 
     fn history(&self) -> Vec<ProviderRuntimeDiagnostic> {
         self.history.iter().cloned().collect()
+    }
+}
+
+/// Live-only fan-out for complete raw provider RPC frames used by the desktop
+/// Event Monitor. No history is retained here; session protocol JSONL is the
+/// durable source of truth.
+#[derive(Debug, Default)]
+pub struct ProviderRpcTrafficBus {
+    subscribers: Vec<mpsc::Sender<ProviderRpcTraffic>>,
+}
+
+impl ProviderRpcTrafficBus {
+    fn subscribe(&mut self) -> mpsc::Receiver<ProviderRpcTraffic> {
+        let (tx, rx) = mpsc::channel();
+        self.subscribers.push(tx);
+        rx
+    }
+
+    fn emit(&mut self, traffic: ProviderRpcTraffic) {
+        self.subscribers
+            .retain(|subscriber| subscriber.send(traffic.clone()).is_ok());
     }
 }
 

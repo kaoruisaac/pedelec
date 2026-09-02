@@ -6,7 +6,7 @@
 
 use crate::{
     PersistentProcessSpec, PersistentRuntimeController, ProviderRuntimeController,
-    RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent, RpcServerRequest,
+    RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent, RpcServerRequest, RpcTrafficRecord,
     RuntimeControllerError, RuntimeEvent,
 };
 use serde_json::{json, Value};
@@ -269,6 +269,7 @@ pub enum AcpTurnStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcpRuntimeEvent {
+    RpcTraffic(RpcTrafficRecord),
     SessionReady {
         pedelec_thread_id: String,
         provider_session_id: String,
@@ -1411,6 +1412,9 @@ fn run_event_worker(
 ) {
     while let Ok(event) = transport.recv_event() {
         match event {
+            RuntimeEvent::Rpc(RpcEvent::Traffic(record)) => {
+                let _ = events.send(AcpRuntimeEvent::RpcTraffic(record));
+            }
             RuntimeEvent::Rpc(RpcEvent::Notification { method, params }) => {
                 if method == "session/update" {
                     if handle_session_update(&mappings, &events, params) {
@@ -1440,15 +1444,6 @@ fn run_event_worker(
             }
             RuntimeEvent::Rpc(RpcEvent::Stderr { text }) => {
                 let _ = events.send(AcpRuntimeEvent::Stderr { text });
-            }
-            RuntimeEvent::Rpc(RpcEvent::UnmatchedResponse { id, response }) => {
-                let _ = events.send(AcpRuntimeEvent::Notification {
-                    method: "$/unmatched_response".to_string(),
-                    params: json!({ "id": format!("{id:?}"), "response": response }),
-                    pedelec_thread_id: None,
-                    provider_session_id: None,
-                    local_turn_id: None,
-                });
             }
             RuntimeEvent::Rpc(RpcEvent::Disconnected { reason }) => {
                 healthy.store(false, Ordering::Release);

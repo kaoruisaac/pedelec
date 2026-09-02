@@ -1,4 +1,4 @@
-use crate::PersistentRuntimeDispatcher;
+use crate::{record_rpc_traffic, PersistentRuntimeDispatcher};
 use pedelec_core::{
     build_persistent_user_prompt_with_bootstrap, error_codes, PedelecError,
     PersistentProviderSessionIntent, PersistentRuntimeOperation, ProviderCode,
@@ -1094,6 +1094,13 @@ fn handle_event(
     event: AcpRuntimeEvent,
 ) {
     match event {
+        AcpRuntimeEvent::RpcTraffic(record) => record_rpc_traffic(
+            runtime,
+            provider.provider_code(),
+            controller.generation(),
+            controller.process_id(),
+            record,
+        ),
         AcpRuntimeEvent::SessionReady { .. } => {}
         AcpRuntimeEvent::AssistantDelta {
             pedelec_thread_id,
@@ -1186,57 +1193,15 @@ fn handle_event(
                 },
             );
         }
-        AcpRuntimeEvent::Notification {
-            method,
-            params,
-            pedelec_thread_id,
-            provider_session_id,
-            local_turn_id,
-        } => record(
-            runtime,
-            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
-                provider: provider.provider_code(),
-                runtime_generation: controller.generation(),
-                process_id: controller.process_id(),
-                thread_id: pedelec_thread_id,
-                provider_thread_id: provider_session_id,
-                provider_turn_id: local_turn_id,
-                operation: method,
-                summary: bounded(&params),
-            },
-        ),
-        AcpRuntimeEvent::PermissionResolved {
-            pedelec_thread_id,
-            provider_session_id,
-            option_id,
-            decision,
-        } => record(
-            runtime,
-            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
-                provider: provider.provider_code(),
-                runtime_generation: controller.generation(),
-                process_id: controller.process_id(),
-                thread_id: Some(pedelec_thread_id),
-                provider_thread_id: Some(provider_session_id),
-                provider_turn_id: None,
-                operation: "session/request_permission".into(),
-                summary: bounded_text(&format!(
-                    "permission {:?} via option {}",
-                    decision, option_id
-                )),
-            },
-        ),
+        AcpRuntimeEvent::Notification { .. } => {}
+        AcpRuntimeEvent::PermissionResolved { .. } => {}
         AcpRuntimeEvent::Stderr { text } => record(
             runtime,
-            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
+            ProviderRuntimeDiagnostic::ProviderRuntimeStderr {
                 provider: provider.provider_code(),
                 runtime_generation: controller.generation(),
                 process_id: controller.process_id(),
-                thread_id: None,
-                provider_thread_id: None,
-                provider_turn_id: None,
-                operation: "stderr".into(),
-                summary: bounded_text(&text),
+                text,
             },
         ),
         AcpRuntimeEvent::ProtocolError {
@@ -1362,10 +1327,6 @@ fn reduce_session_ready(
             thread_id: thread.into(),
             provider_session_id: provider.into(),
         })
-}
-fn bounded(value: &Value) -> String {
-    let text = value.to_string();
-    bounded_text(&text)
 }
 fn bounded_text(text: &str) -> String {
     super::truncate_diagnostic_text(text)

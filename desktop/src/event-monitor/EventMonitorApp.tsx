@@ -14,7 +14,12 @@ import {
 } from "./eventMonitorFormatters";
 import { monitorEndThread, openThreadWorkspace, sendThreadText } from "./eventMonitorActions";
 import { createEventMonitorStore } from "./eventMonitorStore";
-import type { MonitorEvent, RuntimeSummary, ThreadViewModel } from "./eventMonitorStore";
+import type {
+  MonitorEvent,
+  ProviderRpcTraffic,
+  RuntimeSummary,
+  ThreadViewModel,
+} from "./eventMonitorStore";
 
 export function EventMonitorApp() {
   const monitor = createEventMonitorStore();
@@ -23,6 +28,7 @@ export function EventMonitorApp() {
     clearEndedThreads,
     selectThread,
     setGlobalError,
+    upsertRpcTraffic,
     upsertThreadEvent,
   } = monitor;
   const [debugPrompt, setDebugPrompt] = createSignal("");
@@ -108,16 +114,30 @@ export function EventMonitorApp() {
   }
 
   onMount(() => {
-    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
 
-    listen("thread_event", (event) => upsertThreadEvent(event.payload))
-      .then((cleanup) => {
-        unlisten = cleanup;
-      })
-      .catch(setGlobalError);
+    const registerListener = (
+      eventName: string,
+      handler: (payload: unknown) => void,
+    ): void => {
+      listen(eventName, (event) => handler(event.payload))
+        .then((cleanup) => {
+          if (disposed) {
+            cleanup();
+          } else {
+            unlisteners.push(cleanup);
+          }
+        })
+        .catch(setGlobalError);
+    };
+
+    registerListener("thread_event", upsertThreadEvent);
+    registerListener("provider_rpc_traffic", upsertRpcTraffic);
 
     onCleanup(() => {
-      if (unlisten) {
+      disposed = true;
+      for (const unlisten of unlisteners) {
         unlisten();
       }
     });
@@ -251,7 +271,8 @@ export function EventMonitorApp() {
                 onOpenWorkspace={handleOpenThreadWorkspace}
                 isStopPending={stoppingThreadIds().has(thread().threadId)}
                 onStopThread={handleStopThread}
-                runtimeDiagnostics={store.runtimeDiagnostics}
+                globalRpcTraffic={store.globalRpcTraffic}
+                runtimeStderr={store.runtimeStderr}
               />
             )}
           </Show>
@@ -279,9 +300,33 @@ function ThreadDetail(props: {
   onOpenWorkspace: (threadId: string) => Promise<void>;
   isStopPending: boolean;
   onStopThread: (threadId: string) => Promise<void>;
-  runtimeDiagnostics: MonitorEvent[];
+  globalRpcTraffic: ProviderRpcTraffic[];
+  runtimeStderr: MonitorEvent[];
 }) {
   const thread = () => props.thread;
+  const rpcTraffic = () => {
+    if (!thread().provider || thread().runtimeGeneration === undefined) {
+      return thread().rpcTraffic;
+    }
+    return [
+      ...thread().rpcTraffic,
+      ...props.globalRpcTraffic.filter(
+        (event) =>
+          event.provider === thread().provider &&
+          event.runtimeGeneration === thread().runtimeGeneration,
+      ),
+    ].sort((left, right) => right.ts.localeCompare(left.ts));
+  };
+  const runtimeStderr = () => {
+    if (!thread().provider || thread().runtimeGeneration === undefined) {
+      return [];
+    }
+    return props.runtimeStderr.filter(
+      (event) =>
+        event.provider === thread().provider &&
+        event.runtimeGeneration === thread().runtimeGeneration,
+    );
+  };
 
   return (
     <div class="event-monitor-detail">
@@ -368,12 +413,26 @@ function ThreadDetail(props: {
           </For>
         </MonitorBlock>
 
+        <MonitorBlock title="RPC Traffic" empty={rpcTraffic().length === 0}>
+          <For each={rpcTraffic()}>
+            {(event) => <pre class="event-monitor-json">{prettyJson(event)}</pre>}
+          </For>
+        </MonitorBlock>
+
         <MonitorBlock title="Stdout" empty={!thread().rawStdout}>
           <pre class="event-monitor-stream">{thread().rawStdout}</pre>
         </MonitorBlock>
 
-        <MonitorBlock title="Stderr" empty={!thread().rawStderr}>
-          <pre class="event-monitor-stream">{thread().rawStderr}</pre>
+        <MonitorBlock
+          title="Stderr"
+          empty={!thread().rawStderr && runtimeStderr().length === 0}
+        >
+          <Show when={thread().rawStderr}>
+            <pre class="event-monitor-stream">{thread().rawStderr}</pre>
+          </Show>
+          <For each={runtimeStderr()}>
+            {(event) => <pre class="event-monitor-stream">{event.text || ""}</pre>}
+          </For>
         </MonitorBlock>
 
         <MonitorBlock title="Tool Calls" empty={thread().toolCalls.length === 0}>
@@ -396,20 +455,6 @@ function ThreadDetail(props: {
                 <pre class="event-monitor-json">{prettyJson(event)}</pre>
               </div>
             )}
-          </For>
-        </MonitorBlock>
-
-        <MonitorBlock
-          title="Runtime Diagnostics"
-          empty={
-            thread().runtimeDiagnostics.length === 0 && props.runtimeDiagnostics.length === 0
-          }
-        >
-          <For each={thread().runtimeDiagnostics}>
-            {(event) => <pre class="event-monitor-json">{prettyJson(event)}</pre>}
-          </For>
-          <For each={props.runtimeDiagnostics.filter((event) => !event.threadId)}>
-            {(event) => <pre class="event-monitor-json">{prettyJson(event)}</pre>}
           </For>
         </MonitorBlock>
       </div>

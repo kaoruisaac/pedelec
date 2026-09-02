@@ -2,7 +2,8 @@ import { createStore, produce } from "solid-js/store";
 import type { ProviderCode } from "../settings/types";
 
 export const MAX_EVENTS_PER_THREAD = 300;
-export const MAX_RUNTIME_DIAGNOSTICS = 300;
+export const MAX_RPC_TRAFFIC = 300;
+export const MAX_RUNTIME_STDERR = 300;
 
 export interface MonitorEvent {
   type?: string;
@@ -21,9 +22,25 @@ export interface MonitorEvent {
   [key: string]: unknown;
 }
 
+export interface ProviderRpcTraffic {
+  type: "provider_rpc_traffic";
+  provider: ProviderCode;
+  runtimeGeneration: number;
+  processId: number;
+  threadId?: string;
+  ts: string;
+  direction: "client_to_provider" | "provider_to_client";
+  kind: "request" | "response" | "notification";
+  message: unknown;
+  unmatched?: boolean;
+  receivedAt: string;
+  [key: string]: unknown;
+}
+
 export interface ThreadViewModel {
   threadId: string;
   status: string;
+  provider?: ProviderCode;
   providerSessionId?: string;
   activeProviderTurnId?: string;
   runtimeProcessId?: number;
@@ -42,7 +59,7 @@ export interface ThreadViewModel {
   toolCalls: MonitorEvent[];
   toolResults: MonitorEvent[];
   errors: MonitorEvent[];
-  runtimeDiagnostics: MonitorEvent[];
+  rpcTraffic: ProviderRpcTraffic[];
 }
 
 export interface RuntimeSummary {
@@ -56,8 +73,8 @@ interface EventMonitorState {
   threadsById: Record<string, ThreadViewModel>;
   threadOrder: string[];
   totalEventCount: number;
-  runtimeDiagnostics: MonitorEvent[];
-  totalRuntimeDiagnosticCount: number;
+  globalRpcTraffic: ProviderRpcTraffic[];
+  runtimeStderr: MonitorEvent[];
   runtimeStatus: string;
   runtimeProcessId?: number;
   runtimeGeneration?: number;
@@ -71,6 +88,7 @@ export interface EventMonitorStore {
   setGlobalError: (error: unknown) => void;
   upsertThreadEvent: (event: unknown) => void;
   upsertRuntimeDiagnostic: (event: unknown) => void;
+  upsertRpcTraffic: (event: unknown) => void;
   clearEndedThreads: () => void;
 }
 
@@ -80,8 +98,8 @@ function createEmptyStore(): EventMonitorState {
     threadsById: {},
     threadOrder: [],
     totalEventCount: 0,
-    runtimeDiagnostics: [],
-    totalRuntimeDiagnosticCount: 0,
+    globalRpcTraffic: [],
+    runtimeStderr: [],
     runtimeStatus: "unknown",
     runtimeProcessId: undefined,
     runtimeGeneration: undefined,
@@ -199,12 +217,70 @@ export function createEventMonitorStore(): EventMonitorStore {
 
     setStore(
       produce((draft) => {
-        draft.runtimeDiagnostics = [eventWithReceivedAt, ...draft.runtimeDiagnostics].slice(
-          0,
-          MAX_RUNTIME_DIAGNOSTICS,
-        );
-        draft.totalRuntimeDiagnosticCount += 1;
+        if (eventWithReceivedAt.type === "provider_runtime_stderr") {
+          draft.runtimeStderr = [eventWithReceivedAt, ...draft.runtimeStderr].slice(
+            0,
+            MAX_RUNTIME_STDERR,
+          );
+        }
         applyDiagnosticToRuntimeSummary(draft, eventWithReceivedAt);
+      }),
+    );
+  }
+
+  function upsertRpcTraffic(event: unknown): void {
+    const receivedAt = new Date().toISOString();
+    const raw = (event as Record<string, unknown>) || {};
+    const eventWithReceivedAt = {
+      ...raw,
+      receivedAt,
+    } as ProviderRpcTraffic;
+
+    if (!isRpcTraffic(eventWithReceivedAt)) {
+      return;
+    }
+
+    const threadId = eventWithReceivedAt.threadId;
+    if (threadId) {
+      if (dismissedThreadIds.has(threadId)) {
+        return;
+      }
+      setStore(
+        produce((draft) => {
+          const existing = draft.threadsById[threadId];
+          const thread =
+            existing ||
+            createMonitorThreadViewModel({
+              threadId,
+              receivedAt,
+            });
+          thread.provider = eventWithReceivedAt.provider;
+          thread.runtimeProcessId = eventWithReceivedAt.processId;
+          thread.runtimeGeneration = eventWithReceivedAt.runtimeGeneration;
+          thread.rpcTraffic = [eventWithReceivedAt, ...thread.rpcTraffic].slice(
+            0,
+            MAX_RPC_TRAFFIC,
+          );
+          draft.threadsById[threadId] = thread;
+          if (!existing) {
+            draft.threadOrder = Object.values(draft.threadsById)
+              .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+              .map((item) => item.threadId);
+          }
+          if (!draft.selectedThreadId) {
+            draft.selectedThreadId = threadId;
+          }
+        }),
+      );
+      return;
+    }
+
+    setStore(
+      produce((draft) => {
+        draft.globalRpcTraffic = [eventWithReceivedAt, ...draft.globalRpcTraffic].slice(
+          0,
+          MAX_RPC_TRAFFIC,
+        );
       }),
     );
   }
@@ -257,6 +333,7 @@ export function createEventMonitorStore(): EventMonitorStore {
     setGlobalError,
     upsertThreadEvent,
     upsertRuntimeDiagnostic,
+    upsertRpcTraffic,
     clearEndedThreads,
   };
 }
@@ -271,6 +348,7 @@ function createMonitorThreadViewModel({
   return {
     threadId,
     status: "unknown",
+    provider: undefined,
     providerSessionId: undefined,
     activeProviderTurnId: undefined,
     runtimeProcessId: undefined,
@@ -289,17 +367,14 @@ function createMonitorThreadViewModel({
     toolCalls: [],
     toolResults: [],
     errors: [],
-    runtimeDiagnostics: [],
+    rpcTraffic: [],
   };
 }
 
 function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void {
   thread.events = [event, ...thread.events].slice(0, MAX_EVENTS_PER_THREAD);
-  if (isRuntimeDiagnostic(event)) {
-    thread.runtimeDiagnostics = [event, ...thread.runtimeDiagnostics].slice(
-      0,
-      MAX_EVENTS_PER_THREAD,
-    );
+  if (event.provider) {
+    thread.provider = event.provider;
   }
 
   switch (event.type) {
@@ -361,6 +436,9 @@ function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void 
       thread.runtimeProcessId = event.processId as number | undefined;
       thread.runtimeGeneration = event.runtimeGeneration as number | undefined;
       break;
+    case "provider_runtime_error":
+      thread.errors.push(event);
+      break;
     default:
       break;
   }
@@ -368,6 +446,18 @@ function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void 
 
 function isRuntimeDiagnostic(event: MonitorEvent): boolean {
   return typeof event.type === "string" && event.type.startsWith("provider_runtime_");
+}
+
+function isRpcTraffic(event: ProviderRpcTraffic): boolean {
+  return (
+    event.type === "provider_rpc_traffic" &&
+    isPersistentRuntimeProvider(event.provider) &&
+    typeof event.runtimeGeneration === "number" &&
+    typeof event.processId === "number" &&
+    typeof event.ts === "string" &&
+    (event.direction === "client_to_provider" || event.direction === "provider_to_client") &&
+    (event.kind === "request" || event.kind === "response" || event.kind === "notification")
+  );
 }
 
 function applyDiagnosticToRuntimeSummary(
