@@ -102,7 +102,7 @@ Desktop Runtime 啟動或 resume provider 工作
   ↓
 Provider 輸出 assistant text 或提出 tool call
   ↓
-SDK 觸發 onChat()、onStatus() 或 onTool()
+SDK 觸發 onChat()、onChatDelta()、onStatus() 或 onTool()
   ↓
 Runtime 發出 done / idle
   ↓
@@ -117,7 +117,7 @@ SDK 會替每個已接受的 turn 建立本機 `turnId`，方便 UI 將 callback
 
 1. Web App 在 `skills.tools` 宣告 tool。
 2. Core 在第一次 provider prompt 直接注入 `skills.guidance`、tool names、descriptions 與操作指示；初始 prompt 不含完整 argument schema。
-3. Agent 需要 schema 時執行 `pedelec-cli tool-spec <tool-name>`；呼叫 tool 時使用 `pedelec-cli tool-call <tool-name> '<json_args>'`。
+3. Agent 需要 schema 時執行 `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool-name>`；呼叫 tool 時使用 `pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool-name> '<json_args>'`。
 4. Core 發出標準化 tool event 並等待結果。
 5. SDK 將 session status 設為 `waiting_tool_result`。
 6. SDK 依序尋找 named handler、inline handler、generic fallback。

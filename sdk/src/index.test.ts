@@ -1009,8 +1009,10 @@ describe("Pedelec SDK", () => {
   it("prepare sends prepare_session and suppresses prepare chat output", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);
-    const text: string[] = [];
-    session.onChat((delta) => text.push(delta));
+    const deltas: string[] = [];
+    const messages: string[] = [];
+    session.onChatDelta((delta) => deltas.push(delta));
+    session.onChat((message) => messages.push(message));
 
     const prepare = session.prepare();
     const request = pageWindow.lastSent();
@@ -1023,12 +1025,19 @@ describe("Pedelec SDK", () => {
       type: "chat_delta",
       sessionId: "thread_1",
       seq: 1,
+      text: "PEDELEC_",
+    });
+    emitEvent(pageWindow, request, {
+      type: "chat_message",
+      sessionId: "thread_1",
+      seq: 2,
       text: "PEDELEC_PREPARED",
     });
-    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 2 });
+    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 3 });
 
     await prepare;
-    expect(text).toEqual([]);
+    expect(deltas).toEqual([]);
+    expect(messages).toEqual([]);
     expect(session.getStatus()).toBe("idle");
   });
 
@@ -1108,8 +1117,10 @@ describe("Pedelec SDK", () => {
   it("rejects prepare on an invalid acknowledgment before idle and suppresses prepare chat", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);
-    const text: string[] = [];
-    session.onChat((delta) => text.push(delta));
+    const deltas: string[] = [];
+    const messages: string[] = [];
+    session.onChatDelta((delta) => deltas.push(delta));
+    session.onChat((message) => messages.push(message));
 
     const prepare = session.prepare();
     const request = pageWindow.lastSent();
@@ -1118,12 +1129,18 @@ describe("Pedelec SDK", () => {
       type: "chat_delta",
       sessionId: "thread_1",
       seq: 1,
+      text: "Sure, PEDELEC_",
+    });
+    emitEvent(pageWindow, request, {
+      type: "chat_message",
+      sessionId: "thread_1",
+      seq: 2,
       text: "Sure, PEDELEC_PREPARED",
     });
     emitEvent(pageWindow, request, {
       type: "error",
       sessionId: "thread_1",
-      seq: 2,
+      seq: 3,
       error: {
         code: "PREPARE_ACK_INVALID",
         message: "provider did not acknowledge session preparation",
@@ -1133,12 +1150,13 @@ describe("Pedelec SDK", () => {
     emitEvent(pageWindow, request, {
       type: "status_changed",
       sessionId: "thread_1",
-      seq: 3,
+      seq: 4,
       status: "idle",
     });
 
     await expect(prepare).rejects.toMatchObject({ code: "PREPARE_ACK_INVALID" });
-    expect(text).toEqual([]);
+    expect(deltas).toEqual([]);
+    expect(messages).toEqual([]);
     expect(session.getStatus()).toBe("idle");
   });
 
@@ -1177,12 +1195,22 @@ describe("Pedelec SDK", () => {
     });
   });
 
-  it("passes context metadata to chat and status callbacks", async () => {
+  it("passes context metadata to completed chat and delta callbacks", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);
+    const chatTexts: string[] = [];
+    const deltaTexts: string[] = [];
     const chatContexts: any[] = [];
+    const deltaContexts: any[] = [];
     const statusContexts: any[] = [];
-    session.onChat((_text, ctx) => chatContexts.push(ctx));
+    session.onChat((text, ctx) => {
+      chatTexts.push(text);
+      chatContexts.push(ctx);
+    });
+    session.onChatDelta((text, ctx) => {
+      deltaTexts.push(text);
+      deltaContexts.push(ctx);
+    });
     session.onStatus((_status, ctx) => statusContexts.push(ctx));
 
     const firstTurn = await startTurn(session, pageWindow);
@@ -1199,17 +1227,34 @@ describe("Pedelec SDK", () => {
       type: "chat_delta",
       sessionId: "thread_1",
       seq: 1,
+      text: "hel",
+    });
+    emitEvent(pageWindow, firstTurn.request, {
+      type: "chat_message",
+      sessionId: "thread_1",
+      seq: 2,
       text: "hello",
     });
-    emitEvent(pageWindow, firstTurn.request, { type: "done", sessionId: "thread_1", seq: 2 });
+    emitEvent(pageWindow, firstTurn.request, { type: "done", sessionId: "thread_1", seq: 3 });
     await firstTurn.send;
 
+    expect(deltaTexts).toEqual(["hel"]);
+    expect(chatTexts).toEqual(["hello"]);
     const firstTurnId = statusContexts[0].turnId;
     expect(firstTurnId).toMatch(/^turn_/);
     expect(statusContexts[0].turnStartedAt).toEqual(expect.any(Number));
     expect(statusContexts[0].eventEmittedAt).toEqual(expect.any(Number));
-    expect(chatContexts[0]).toMatchObject({
+    expect(deltaContexts[0]).toMatchObject({
       type: "chat_delta",
+      source: "core",
+      sessionId: "thread_1",
+      turnId: firstTurnId,
+      turnStartedAt: statusContexts[0].turnStartedAt,
+      eventReceivedAt: expect.any(Number),
+      eventEmittedAt: expect.any(Number),
+    });
+    expect(chatContexts[0]).toMatchObject({
+      type: "chat_message",
       source: "core",
       sessionId: "thread_1",
       turnId: firstTurnId,
@@ -1225,35 +1270,45 @@ describe("Pedelec SDK", () => {
       turnId: firstTurnId,
       turnStartedAt: statusContexts[0].turnStartedAt,
     });
+    expect("seq" in deltaContexts[0]).toBe(false);
     expect("seq" in chatContexts[0]).toBe(false);
 
     const secondTurn = await startTurn(session, pageWindow);
-    emitEvent(pageWindow, secondTurn.request, { type: "done", sessionId: "thread_1", seq: 3 });
+    emitEvent(pageWindow, secondTurn.request, { type: "done", sessionId: "thread_1", seq: 4 });
     await secondTurn.send;
     expect(statusContexts.at(-2).turnId).not.toBe(firstTurnId);
   });
 
-  it("routes chat deltas to the matching session and drops duplicate seq", async () => {
+  it("routes both chat event types to the matching session and drops duplicate seq", async () => {
     const pedelec = new Pedelec();
     const { session: first } = await createProviderSession(pedelec, pageWindow, "codex", "thread_1");
     const { session: second, createRequest } = await createProviderSession(pedelec, pageWindow, "antigravity", "thread_2");
     const channelId = createRequest.channelId;
-    const firstText: string[] = [];
-    const secondText: string[] = [];
-    first.onChat((text) => firstText.push(text));
-    second.onChat((text) => secondText.push(text));
+    const firstDeltas: string[] = [];
+    const secondDeltas: string[] = [];
+    const firstMessages: string[] = [];
+    const secondMessages: string[] = [];
+    first.onChatDelta((text) => firstDeltas.push(text));
+    second.onChatDelta((text) => secondDeltas.push(text));
+    first.onChat((text) => firstMessages.push(text));
+    second.onChat((text) => secondMessages.push(text));
 
     const firstTurn = await startTurn(first, pageWindow);
     const secondTurn = await startTurn(second, pageWindow);
     pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, text: "a" });
     pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_2", seq: 1, text: "b" });
-    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, text: "duplicate" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, text: "duplicate delta" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_1", seq: 2, text: "alpha" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_2", seq: 2, text: "beta" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_1", seq: 2, text: "duplicate message" });
 
-    expect(firstText).toEqual(["a"]);
-    expect(secondText).toEqual(["b"]);
+    expect(firstDeltas).toEqual(["a"]);
+    expect(secondDeltas).toEqual(["b"]);
+    expect(firstMessages).toEqual(["alpha"]);
+    expect(secondMessages).toEqual(["beta"]);
 
-    emitEvent(pageWindow, firstTurn.request, { type: "done", sessionId: "thread_1", seq: 2 });
-    emitEvent(pageWindow, secondTurn.request, { type: "done", sessionId: "thread_2", seq: 2 });
+    emitEvent(pageWindow, firstTurn.request, { type: "done", sessionId: "thread_1", seq: 3 });
+    emitEvent(pageWindow, secondTurn.request, { type: "done", sessionId: "thread_2", seq: 3 });
     await firstTurn.send;
     await secondTurn.send;
   });
@@ -1262,7 +1317,7 @@ describe("Pedelec SDK", () => {
     const pedelec = new Pedelec();
     const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
     const text: string[] = [];
-    session.onChat((delta) => text.push(delta));
+    session.onChatDelta((delta) => text.push(delta));
 
     pageWindow.emitFromOtherSource({
       source: "pedelec-sdk-extension",

@@ -57,4 +57,5 @@ desktop.ini
 # Agents
 AGENTS.md
 CLAUDE.md
-.pedelec-sandbox
+.pedelec-runtime
+.pedelec-workspace.json

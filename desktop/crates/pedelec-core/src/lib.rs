@@ -3,15 +3,13 @@ use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-#[cfg(any(target_os = "macos", all(test, unix)))]
-use std::process::Stdio;
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -30,6 +28,7 @@ pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_OLLAMA_TIMEOUT_MS: u64 = 120_000;
 const OLLAMA_CONNECTION_CHECK_TIMEOUT_MS: u64 = 3_000;
 const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
+const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_KEY: &str = "skills.include_instructions";
 const OPENCODE_PERMISSION_ENV: &str = "OPENCODE_PERMISSION";
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 const PEDELEC_OPENCODE_AGENT: &str = "pedelec-runtime";
@@ -50,6 +49,8 @@ const MAX_PROVIDER_STDERR_BYTES: usize = 64 * 1024;
 const MAX_PREPARE_ASSISTANT_OUTPUT_BYTES: usize = 64 * 1024;
 const WORKSPACE_REMOVE_MAX_ATTEMPTS: usize = 10;
 const WORKSPACE_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
+const PROVIDER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const PROVIDER_PROBE_MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 
 /// Returns the root of Pedelec-owned runtime data inside a session workspace.
 pub fn workspace_runtime_data_root(workspace_path: &Path) -> PathBuf {
@@ -238,12 +239,17 @@ pub struct ThreadState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderAdapterState {
+pub struct ProviderSessionState {
     pub provider_session_id: Option<String>,
+    pub active_provider_turn_id: Option<String>,
     pub last_process_id: Option<u32>,
     #[serde(default)]
     pub has_user_message: bool,
 }
+
+/// Legacy name retained for downstream integrations during the lifecycle
+/// migration. New code should use [`ProviderSessionState`].
+pub type ProviderAdapterState = ProviderSessionState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -268,12 +274,56 @@ pub enum ProviderCode {
     Ollama,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderExecutionFamily {
+    LegacyCommand,
+    PersistentRuntime,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
     Default,
     Low,
     High,
+}
+
+/// Reasoning values accepted by the Codex App Server protocol. This is a
+/// typed representation of the persisted `-c model_reasoning_effort=...`
+/// setting; raw CLI fragments must not cross the persistent-runtime boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexReasoningEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl CodexReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistentApprovalPolicy {
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistentSandboxPolicy {
+    ReadOnly,
 }
 
 impl Default for EffortLevel {
@@ -587,6 +637,11 @@ pub enum ThreadEvent {
         thread_id: String,
         text: String,
     },
+    AssistantDelta {
+        seq: u64,
+        thread_id: String,
+        text: String,
+    },
     AssistantMessage {
         seq: u64,
         thread_id: String,
@@ -644,6 +699,7 @@ impl ThreadEvent {
             | ThreadEvent::StatusChanged { seq, .. }
             | ThreadEvent::RawStdout { seq, .. }
             | ThreadEvent::RawStderr { seq, .. }
+            | ThreadEvent::AssistantDelta { seq, .. }
             | ThreadEvent::AssistantMessage { seq, .. }
             | ThreadEvent::ToolCall { seq, .. }
             | ThreadEvent::ToolResult { seq, .. }
@@ -818,7 +874,7 @@ pub struct PrepareThreadStart {
     pub command: Option<CommandSpec>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CommandSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -826,6 +882,140 @@ pub struct CommandSpec {
     pub env: Vec<(String, String)>,
     pub prompt: String,
     pub stdin: String,
+}
+
+/// A provider operation admitted by Core.  Legacy providers carry the
+/// process-per-turn command they already use; persistent providers carry a
+/// semantic operation and never need a synthetic command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ProviderExecutionIntent {
+    LegacyCommand {
+        command: CommandSpec,
+        purpose: RunningProviderProcessPurpose,
+    },
+    PersistentRuntime {
+        operation: PersistentRuntimeOperation,
+    },
+}
+
+impl ProviderExecutionIntent {
+    pub fn operation_kind(&self) -> ProviderExecutionOperationKind {
+        match self {
+            Self::LegacyCommand { purpose, .. } => match purpose {
+                RunningProviderProcessPurpose::UserMessage => {
+                    ProviderExecutionOperationKind::UserTurn
+                }
+                RunningProviderProcessPurpose::Prepare => ProviderExecutionOperationKind::Prepare,
+            },
+            Self::PersistentRuntime { operation } => operation.kind(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderExecutionOperationKind {
+    UserTurn,
+    Prepare,
+    End,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PersistentProviderSessionIntent {
+    pub thread_id: String,
+    pub provider: ProviderCode,
+    pub provider_session_id: Option<String>,
+    pub workspace_path: PathBuf,
+    pub effort_level: EffortLevel,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<CodexReasoningEffort>,
+    pub approval_policy: PersistentApprovalPolicy,
+    pub sandbox_policy: PersistentSandboxPolicy,
+    pub host_instructions: String,
+    pub config: HashMap<String, Value>,
+    pub core_ipc_runtime_file_path: PathBuf,
+    pub tools: Vec<ToolDefinition>,
+    pub guidance: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PersistentProviderTurnIntent {
+    pub thread_id: String,
+    pub local_turn_id: String,
+    pub provider_session_id: Option<String>,
+    pub message: String,
+    pub session: PersistentProviderSessionIntent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PersistentProviderEndIntent {
+    pub thread_id: String,
+    pub provider: ProviderCode,
+    pub provider_session_id: Option<String>,
+    pub active_provider_turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PersistentRuntimeOperation {
+    EnsureSession {
+        session: PersistentProviderSessionIntent,
+    },
+    StartTurn {
+        turn: PersistentProviderTurnIntent,
+    },
+    EndSession {
+        session: PersistentProviderEndIntent,
+    },
+}
+
+impl PersistentRuntimeOperation {
+    pub fn provider(&self) -> &ProviderCode {
+        match self {
+            Self::EnsureSession { session } => &session.provider,
+            Self::StartTurn { turn } => &turn.session.provider,
+            Self::EndSession { session } => &session.provider,
+        }
+    }
+
+    pub fn kind(&self) -> ProviderExecutionOperationKind {
+        match self {
+            Self::EnsureSession { .. } => ProviderExecutionOperationKind::Prepare,
+            Self::StartTurn { .. } => ProviderExecutionOperationKind::UserTurn,
+            Self::EndSession { .. } => ProviderExecutionOperationKind::End,
+        }
+    }
+
+    pub fn thread_id(&self) -> &str {
+        match self {
+            Self::EnsureSession { session } => &session.thread_id,
+            Self::StartTurn { turn } => &turn.thread_id,
+            Self::EndSession { session } => &session.thread_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderExecutionStart {
+    pub output: SendTextOutput,
+    pub intent: ProviderExecutionIntent,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrepareExecutionStart {
+    pub output: PrepareThreadOutput,
+    pub intent: Option<ProviderExecutionIntent>,
+}
+
+#[derive(Debug, Clone)]
+pub enum EndThreadExecutionIntent {
+    LegacyProcess(Option<ProviderProcessStop>),
+    PersistentRuntime(PersistentRuntimeOperation),
+}
+
+#[derive(Debug, Clone)]
+pub struct EndThreadStart {
+    pub thread_id: String,
+    pub execution: EndThreadExecutionIntent,
 }
 
 #[derive(Debug, Clone)]
@@ -856,14 +1046,44 @@ pub(crate) struct RunningProviderProcess {
 /// Coordinates provider child termination with the Core lifecycle operation.
 ///
 /// The provider waiter owns the child handle and is responsible for waiting
-/// and reaping it. `end_thread()` can request termination while holding the
-/// runtime mutex, but must then wait for the waiter to finish without making
-/// the waiter reacquire that mutex on the cancellation path.
+/// and reaping it. The end orchestrator can request termination after taking
+/// this handle out of Core state, without making the waiter reacquire the
+/// Core mutex on the cancellation path.
 #[derive(Debug)]
 pub struct ProviderProcessTermination {
     cancelled: AtomicBool,
     completed: Mutex<bool>,
     changed: Condvar,
+}
+
+/// A legacy process cancellation handle detached from Core state. The
+/// process kill and waiter completion can therefore happen after the Core
+/// mutex has been released.
+#[derive(Debug, Clone)]
+pub struct ProviderProcessStop {
+    process_id: u32,
+    child: Arc<Mutex<Option<Child>>>,
+    termination: Arc<ProviderProcessTermination>,
+}
+
+impl ProviderProcessStop {
+    pub fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    pub fn stop(self) {
+        self.termination.cancel();
+        let killed_directly = self
+            .child
+            .lock()
+            .ok()
+            .and_then(|mut child| child.as_mut().map(|child| child.kill().is_ok()))
+            .unwrap_or(false);
+        if !killed_directly {
+            let _ = kill_process_by_id(self.process_id);
+        }
+        self.termination.wait_completed();
+    }
 }
 
 impl ProviderProcessTermination {
@@ -897,7 +1117,7 @@ impl ProviderProcessTermination {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RunningProviderProcessPurpose {
     UserMessage,
     Prepare,
@@ -908,6 +1128,149 @@ pub enum ThreadEventPartial {
     AssistantMessage { text: String },
     ProviderSessionIdUpdated { provider_session_id: String },
     ProviderError { error: PedelecError },
+}
+
+/// Protocol-neutral events emitted by a persistent provider runtime.
+/// Provider-specific JSON-RPC method names must not cross this boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderRuntimeEvent {
+    SessionReady {
+        thread_id: String,
+        provider_session_id: String,
+    },
+    TurnStarted {
+        thread_id: String,
+        provider_turn_id: String,
+    },
+    AssistantDelta {
+        thread_id: String,
+        provider_turn_id: Option<String>,
+        text: String,
+    },
+    AssistantMessage {
+        thread_id: String,
+        provider_turn_id: Option<String>,
+        text: String,
+    },
+    UsageUpdated {
+        thread_id: String,
+        provider_turn_id: Option<String>,
+        usage: Value,
+    },
+    TurnCompleted {
+        thread_id: String,
+        provider_turn_id: Option<String>,
+        success: bool,
+        error: Option<PedelecError>,
+    },
+    ProviderError {
+        thread_id: String,
+        provider_turn_id: Option<String>,
+        error: PedelecError,
+    },
+    RuntimeDisconnected {
+        thread_id: Option<String>,
+        error: PedelecError,
+    },
+}
+
+/// Desktop-only diagnostics for a provider runtime. These events deliberately
+/// live outside `ThreadEvent`: a shared App Server has process-lifetime state
+/// and global protocol frames must not be attributed to an arbitrary Pedelec
+/// thread. The desktop monitor may still receive a copy with `threadId` when
+/// the frame can be routed safely.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ProviderRuntimeDiagnostic {
+    ProviderRuntimeStarted {
+        provider: ProviderCode,
+        runtime_generation: u64,
+        process_id: u32,
+    },
+    ProviderRuntimeStopped {
+        provider: ProviderCode,
+        runtime_generation: u64,
+        process_id: u32,
+        reason: String,
+    },
+    ProviderRuntimeDisconnected {
+        provider: ProviderCode,
+        runtime_generation: u64,
+        process_id: u32,
+        thread_id: Option<String>,
+        provider_thread_id: Option<String>,
+        reason: String,
+    },
+    ProviderRuntimeAttached {
+        provider: ProviderCode,
+        runtime_generation: u64,
+        process_id: u32,
+        thread_id: String,
+        provider_thread_id: String,
+        resumed: bool,
+    },
+    ProviderRuntimeTurnStarted {
+        provider: ProviderCode,
+        runtime_generation: u64,
+        process_id: u32,
+        thread_id: String,
+        provider_thread_id: String,
+        provider_turn_id: String,
+    },
+    ProviderRuntimeTurnCompleted {
+        provider: ProviderCode,
+        runtime_generation: u64,
+        process_id: u32,
+        thread_id: String,
+        provider_thread_id: String,
+        provider_turn_id: Option<String>,
+        status: String,
+    },
+    ProviderRuntimeRawProtocol {
+        provider: ProviderCode,
+        runtime_generation: u64,
+        process_id: u32,
+        thread_id: Option<String>,
+        provider_thread_id: Option<String>,
+        provider_turn_id: Option<String>,
+        operation: String,
+        summary: String,
+    },
+    ProviderRuntimeError {
+        provider: ProviderCode,
+        runtime_generation: Option<u64>,
+        process_id: Option<u32>,
+        thread_id: Option<String>,
+        provider_thread_id: Option<String>,
+        provider_turn_id: Option<String>,
+        code: String,
+        message: String,
+        details: Option<Value>,
+    },
+}
+
+impl ProviderRuntimeDiagnostic {
+    pub fn thread_id(&self) -> Option<&str> {
+        match self {
+            Self::ProviderRuntimeDisconnected { thread_id, .. }
+            | Self::ProviderRuntimeRawProtocol { thread_id, .. }
+            | Self::ProviderRuntimeError { thread_id, .. } => thread_id.as_deref(),
+            Self::ProviderRuntimeAttached { thread_id, .. }
+            | Self::ProviderRuntimeTurnStarted { thread_id, .. }
+            | Self::ProviderRuntimeTurnCompleted { thread_id, .. } => Some(thread_id),
+            Self::ProviderRuntimeStarted { .. } | Self::ProviderRuntimeStopped { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingProviderOperation {
+    UserTurn,
+    Prepare,
 }
 
 enum ProviderTurnKind<'a> {
@@ -938,6 +1301,10 @@ impl Default for ProviderBootstrapCapabilities {
     }
 }
 
+/// Legacy process-per-turn provider adapters. The desktop application enables
+/// migrated persistent runtime families through [`CoreRuntime::new_for_application`];
+/// these adapters remain only for neutral/legacy embedding and compatibility
+/// coverage, never as the production desktop dispatch path.
 trait ProviderAdapter {
     fn code(&self) -> ProviderCode;
     fn capabilities(&self) -> ProviderCapabilities;
@@ -1300,6 +1667,8 @@ fn validate_antigravity_prompt_length(prompt: &str) -> Result<(), PedelecError> 
     ))
 }
 
+/// Neutral-constructor compatibility adapter. Production OpenCode execution
+/// is owned by the shared ACP dispatcher and never reaches this type.
 #[derive(Debug, Clone, Default)]
 struct OpenCodeProviderAdapter {
     stdout_buffer: String,
@@ -1401,6 +1770,8 @@ impl ProviderAdapter for OpenCodeProviderAdapter {
     }
 }
 
+/// Neutral-constructor compatibility adapter. Production Cursor execution is
+/// owned by the shared ACP dispatcher and never reaches this type.
 #[derive(Debug, Clone, Default)]
 struct CursorProviderAdapter {
     stdout_buffer: String,
@@ -2487,6 +2858,7 @@ pub struct CoreRuntime {
     pub tool_registry: ToolRegistryStore,
     pub tool_request_broker: ToolRequestBroker,
     pub event_bus: EventBus,
+    pub provider_runtime_diagnostics: ProviderRuntimeDiagnosticBus,
     pub running_processes: HashMap<String, RunningProviderProcess>,
     pub core_ipc_endpoint: Option<String>,
     pub core_ipc_runtime_file_path: Option<PathBuf>,
@@ -2500,6 +2872,16 @@ pub struct CoreRuntime {
     pub asset_download_tickets: HashMap<String, AssetDownloadTicket>,
     pub provider_path_value_override: Option<OsString>,
     pub test_provider_command: Option<CommandSpec>,
+    /// Providers in this set use semantic runtime intents. The application
+    /// owner enables migrated providers here; the neutral default is retained for tests and
+    /// embedders that intentionally exercise the legacy adapter path.
+    pub persistent_providers: HashSet<ProviderCode>,
+    pub pending_provider_operations: HashMap<String, PendingProviderOperation>,
+    pub provider_usage: HashMap<String, Value>,
+    /// Threads in this set have restored ended-thread diagnostic resources
+    /// and are waiting for the trusted dispatch boundary to admit the turn.
+    /// It lets a pre-admission failure restore the original Ended semantics.
+    pub debug_reactivating_threads: HashSet<String>,
 }
 
 impl CoreRuntime {
@@ -2507,6 +2889,44 @@ impl CoreRuntime {
         let mut runtime = Self::default();
         runtime.provider_readiness = ProviderReadiness::new_uninitialized();
         runtime
+    }
+
+    /// Runtime used by the desktop application. Keep `CoreRuntime::new()`
+    /// neutral for legacy/unit-test construction, while the production owner
+    /// explicitly enables completed provider migrations.
+    pub fn new_for_application() -> Self {
+        let mut runtime = Self::new();
+        runtime.persistent_providers.insert(ProviderCode::Codex);
+        runtime.persistent_providers.insert(ProviderCode::OpenCode);
+        runtime.persistent_providers.insert(ProviderCode::Cursor);
+        runtime
+    }
+
+    pub fn set_provider_execution_family(
+        &mut self,
+        provider: ProviderCode,
+        family: ProviderExecutionFamily,
+    ) {
+        match family {
+            ProviderExecutionFamily::LegacyCommand => {
+                self.persistent_providers.remove(&provider);
+            }
+            ProviderExecutionFamily::PersistentRuntime => {
+                self.persistent_providers.insert(provider);
+            }
+        }
+    }
+
+    pub fn provider_execution_family(&self, provider: &ProviderCode) -> ProviderExecutionFamily {
+        if self.persistent_providers.contains(provider) {
+            ProviderExecutionFamily::PersistentRuntime
+        } else {
+            ProviderExecutionFamily::LegacyCommand
+        }
+    }
+
+    pub fn use_persistent_provider_for_test(&mut self, provider: ProviderCode) {
+        self.set_provider_execution_family(provider, ProviderExecutionFamily::PersistentRuntime);
     }
 
     pub fn set_core_ipc_runtime(
@@ -2818,6 +3238,7 @@ impl CoreRuntime {
             state,
             ProviderAdapterState {
                 provider_session_id: None,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message: false,
             },
@@ -2886,11 +3307,29 @@ impl CoreRuntime {
                 serde_json::json!({"provider": provider_code_as_str(provider), "platform": std::env::consts::OS}),
             ));
         };
-        let Some(path) = scan.path.clone().filter(|_| scan.version.is_some()) else {
+        let Some(path) = scan
+            .path
+            .clone()
+            .filter(|_| scan.version.is_some())
+            .filter(|_| required_runtime_capability_is_available(provider, scan))
+        else {
             return Err(PedelecError::with_details(
                 error_codes::PROVIDER_TERMINAL_UNAVAILABLE,
-                "The provider CLI is not available from the latest scan.",
-                serde_json::json!({"provider": provider_code_as_str(provider), "platform": std::env::consts::OS}),
+                scan.error
+                    .as_deref()
+                    .unwrap_or("The provider CLI is not available from the latest scan."),
+                serde_json::json!({
+                    "provider": provider_code_as_str(provider),
+                    "platform": std::env::consts::OS,
+                    "requiredRuntimeCapability": required_runtime_capability(provider),
+                    "runtimeCapabilityAvailable": runtime_capability_available(provider, scan),
+                    "appServerCapability": (*provider == ProviderCode::Codex)
+                        .then_some(scan.app_server_capability)
+                        .flatten(),
+                    "acpCapability": matches!(provider, ProviderCode::OpenCode | ProviderCode::Cursor)
+                        .then_some(scan.acp_capability)
+                        .flatten(),
+                }),
             ));
         };
         if !is_provider_executable(&path) {
@@ -2916,6 +3355,7 @@ impl CoreRuntime {
         apply_provider_bootstrap_capabilities(
             &mut self.provider_scan,
             self.provider_resolved_path.as_ref(),
+            !self.persistent_providers.contains(&ProviderCode::OpenCode),
         );
         if is_initial_scan {
             self.provider_readiness.mark_ready();
@@ -3002,8 +3442,28 @@ impl CoreRuntime {
     }
 
     pub fn begin_send_text(&mut self, input: SendTextInput) -> Result<SendTextStart, PedelecError> {
+        if self.provider_execution_family_for_thread(&input.thread_id)?
+            == ProviderExecutionFamily::PersistentRuntime
+        {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_UNSUPPORTED,
+                "persistent providers must be started through the execution intent API",
+                serde_json::json!({ "threadId": input.thread_id }),
+            ));
+        }
         self.validate_normal_send_text_status(&input.thread_id)?;
         self.begin_send_text_start(input, None)
+    }
+
+    /// Admits a user turn and returns a provider-family-neutral execution
+    /// intent. This is the Core boundary used by IPC and future persistent
+    /// provider runtimes.
+    pub fn begin_send_text_intent(
+        &mut self,
+        input: SendTextInput,
+    ) -> Result<ProviderExecutionStart, PedelecError> {
+        self.validate_normal_send_text_status(&input.thread_id)?;
+        self.begin_send_text_intent_start(input, None)
     }
 
     /// Starts a user turn from the trusted desktop diagnostic boundary.
@@ -3016,6 +3476,15 @@ impl CoreRuntime {
         &mut self,
         input: SendTextInput,
     ) -> Result<SendTextStart, PedelecError> {
+        if self.provider_execution_family_for_thread(&input.thread_id)?
+            == ProviderExecutionFamily::PersistentRuntime
+        {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_UNSUPPORTED,
+                "persistent providers must be started through the execution intent API",
+                serde_json::json!({ "threadId": input.thread_id }),
+            ));
+        }
         let reactivate = self.validate_debug_send_text_status(&input.thread_id)?;
         if !reactivate {
             return self.begin_send_text_start(input, None);
@@ -3029,6 +3498,29 @@ impl CoreRuntime {
             // provider configuration is unavailable). Keep a failed retry in
             // the original ended state instead of leaving a partial registry.
             self.tool_registry.remove(&thread_id);
+            self.debug_reactivating_threads.remove(&thread_id);
+        }
+        result
+    }
+
+    /// Diagnostic variant of [`Self::begin_send_text_intent`]. It preserves
+    /// the trusted ended-thread reactivation and event-log behavior while
+    /// allowing a persistent provider to receive a semantic turn intent.
+    pub fn begin_debug_send_text_intent(
+        &mut self,
+        input: SendTextInput,
+    ) -> Result<ProviderExecutionStart, PedelecError> {
+        let reactivate = self.validate_debug_send_text_status(&input.thread_id)?;
+        if !reactivate {
+            return self.begin_send_text_intent(input);
+        }
+
+        let thread_id = input.thread_id.clone();
+        let event_log_path = self.restore_ended_thread_runtime(&thread_id)?;
+        let result = self.begin_send_text_intent_start(input, Some(event_log_path));
+        if result.is_err() {
+            self.tool_registry.remove(&thread_id);
+            self.debug_reactivating_threads.remove(&thread_id);
         }
         result
     }
@@ -3100,6 +3592,8 @@ impl CoreRuntime {
             .clone();
         let registry = ToolRegistry::load_from_skills_dir(workspace_skills_root(&workspace_path))?;
         self.tool_registry.insert(thread_id.to_string(), registry);
+        self.debug_reactivating_threads
+            .insert(thread_id.to_string());
         Ok(thread_event_log_path(&workspace_path, thread_id))
     }
 
@@ -3118,28 +3612,14 @@ impl CoreRuntime {
                 Err(error) => {
                     if reactivated_event_log_path.is_some() {
                         self.tool_registry.remove(&input.thread_id);
+                        self.debug_reactivating_threads.remove(&input.thread_id);
                     }
                     return Err(error);
                 }
             }
         };
 
-        {
-            let thread = self.thread_manager.thread_mut(&input.thread_id)?;
-            thread.status = ThreadStatus::Running;
-            thread.updated_at = Utc::now();
-        }
-        if let Some(event_log_path) = reactivated_event_log_path {
-            // Register before emitting Running so the complete revived turn,
-            // including its first lifecycle event, is written to a fresh log.
-            self.event_bus
-                .register_thread_log(&input.thread_id, event_log_path);
-        }
-        if let Some(provider_state) = self.thread_manager.provider_state_mut(&input.thread_id) {
-            provider_state.has_user_message = true;
-        }
-        self.event_bus
-            .emit_status_changed(&input.thread_id, ThreadStatus::Running);
+        self.mark_user_turn_started(&input.thread_id, reactivated_event_log_path)?;
 
         Ok(SendTextStart {
             output: SendTextOutput {
@@ -3149,10 +3629,100 @@ impl CoreRuntime {
         })
     }
 
+    fn begin_send_text_intent_start(
+        &mut self,
+        input: SendTextInput,
+        reactivated_event_log_path: Option<PathBuf>,
+    ) -> Result<ProviderExecutionStart, PedelecError> {
+        if self.provider_execution_family_for_thread(&input.thread_id)?
+            == ProviderExecutionFamily::LegacyCommand
+        {
+            let start = self.begin_send_text_start(input, reactivated_event_log_path)?;
+            return Ok(ProviderExecutionStart {
+                output: start.output,
+                intent: ProviderExecutionIntent::LegacyCommand {
+                    command: start.command,
+                    purpose: RunningProviderProcessPurpose::UserMessage,
+                },
+            });
+        }
+
+        let session = match self.build_persistent_session_intent(&input.thread_id) {
+            Ok(session) => session,
+            Err(error) => {
+                if reactivated_event_log_path.is_some() {
+                    self.tool_registry.remove(&input.thread_id);
+                    self.debug_reactivating_threads.remove(&input.thread_id);
+                }
+                return Err(error);
+            }
+        };
+        let provider_session_id = session.provider_session_id.clone();
+        let local_turn_id =
+            self.mark_user_turn_started(&input.thread_id, reactivated_event_log_path)?;
+        Ok(ProviderExecutionStart {
+            output: SendTextOutput {
+                thread_id: input.thread_id.clone(),
+            },
+            intent: ProviderExecutionIntent::PersistentRuntime {
+                operation: PersistentRuntimeOperation::StartTurn {
+                    turn: PersistentProviderTurnIntent {
+                        thread_id: input.thread_id,
+                        local_turn_id,
+                        provider_session_id,
+                        message: input.message,
+                        session,
+                    },
+                },
+            },
+        })
+    }
+
+    fn mark_user_turn_started(
+        &mut self,
+        thread_id: &str,
+        reactivated_event_log_path: Option<PathBuf>,
+    ) -> Result<String, PedelecError> {
+        {
+            let thread = self.thread_manager.thread_mut(thread_id)?;
+            thread.status = ThreadStatus::Running;
+            thread.updated_at = Utc::now();
+        }
+        if let Some(event_log_path) = reactivated_event_log_path {
+            self.event_bus
+                .register_thread_log(thread_id, event_log_path);
+        }
+        let local_turn_id = new_provider_turn_id();
+        if let Some(provider_state) = self.thread_manager.provider_state_mut(thread_id) {
+            provider_state.has_user_message = true;
+            provider_state.active_provider_turn_id = Some(local_turn_id.clone());
+        }
+        self.pending_provider_operations
+            .insert(thread_id.to_string(), PendingProviderOperation::UserTurn);
+        self.event_bus
+            .emit_status_changed(thread_id, ThreadStatus::Running);
+        Ok(local_turn_id)
+    }
+
+    /// Marks a trusted diagnostic turn as admitted by its provider dispatcher.
+    /// Until this point a dispatch failure must roll the thread back to Ended.
+    pub fn complete_provider_execution_dispatch(&mut self, thread_id: &str) {
+        self.debug_reactivating_threads.remove(thread_id);
+    }
+
     pub fn begin_prepare_thread(
         &mut self,
         input: PrepareThreadInput,
     ) -> Result<PrepareThreadStart, PedelecError> {
+        if self.provider_execution_family_for_thread(&input.thread_id)?
+            == ProviderExecutionFamily::PersistentRuntime
+        {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_UNSUPPORTED,
+                "persistent providers must be prepared through the execution intent API",
+                serde_json::json!({ "threadId": input.thread_id }),
+            ));
+        }
         {
             let thread = self.thread_manager.thread(&input.thread_id)?;
             match thread.status {
@@ -3210,6 +3780,8 @@ impl CoreRuntime {
         let thread = self.thread_manager.thread_mut(&input.thread_id)?;
         thread.status = ThreadStatus::Running;
         thread.updated_at = Utc::now();
+        self.pending_provider_operations
+            .insert(input.thread_id.clone(), PendingProviderOperation::Prepare);
         self.event_bus
             .emit_status_changed(&input.thread_id, ThreadStatus::Running);
 
@@ -3220,6 +3792,148 @@ impl CoreRuntime {
                 already_prepared: Some(false),
             },
             command: Some(command),
+        })
+    }
+
+    /// Admits a prepare operation. Persistent providers receive an
+    /// `EnsureSession` intent rather than a synthetic user turn.
+    pub fn begin_prepare_thread_intent(
+        &mut self,
+        input: PrepareThreadInput,
+    ) -> Result<PrepareExecutionStart, PedelecError> {
+        if self.provider_execution_family_for_thread(&input.thread_id)?
+            == ProviderExecutionFamily::LegacyCommand
+        {
+            let start = self.begin_prepare_thread(input)?;
+            return Ok(PrepareExecutionStart {
+                output: start.output,
+                intent: start
+                    .command
+                    .map(|command| ProviderExecutionIntent::LegacyCommand {
+                        command,
+                        purpose: RunningProviderProcessPurpose::Prepare,
+                    }),
+            });
+        }
+
+        {
+            let thread = self.thread_manager.thread(&input.thread_id)?;
+            match thread.status {
+                ThreadStatus::Running
+                | ThreadStatus::WaitingToolResult
+                | ThreadStatus::Starting => {
+                    return Err(PedelecError::with_details(
+                        error_codes::THREAD_BUSY,
+                        "thread is already running",
+                        serde_json::json!({ "threadId": input.thread_id }),
+                    ));
+                }
+                ThreadStatus::Ended => {
+                    return Err(PedelecError::with_details(
+                        error_codes::THREAD_ENDED,
+                        "thread has ended",
+                        serde_json::json!({ "threadId": input.thread_id }),
+                    ));
+                }
+                ThreadStatus::Stopping => {
+                    return Err(PedelecError::with_details(
+                        error_codes::THREAD_BUSY,
+                        "thread is stopping",
+                        serde_json::json!({ "threadId": input.thread_id }),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        let session = self.build_persistent_session_intent(&input.thread_id)?;
+        let thread_id = input.thread_id;
+        let thread = self.thread_manager.thread_mut(&thread_id)?;
+        thread.status = ThreadStatus::Running;
+        thread.updated_at = Utc::now();
+        self.pending_provider_operations
+            .insert(thread_id.clone(), PendingProviderOperation::Prepare);
+        self.event_bus
+            .emit_status_changed(&thread_id, ThreadStatus::Running);
+
+        Ok(PrepareExecutionStart {
+            output: PrepareThreadOutput {
+                thread_id: thread_id.clone(),
+                prepared: true,
+                already_prepared: Some(false),
+            },
+            intent: Some(ProviderExecutionIntent::PersistentRuntime {
+                operation: PersistentRuntimeOperation::EnsureSession { session },
+            }),
+        })
+    }
+
+    fn provider_execution_family_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<ProviderExecutionFamily, PedelecError> {
+        let provider = &self.thread_manager.thread(thread_id)?.provider;
+        Ok(self.provider_execution_family(provider))
+    }
+
+    fn build_persistent_session_intent(
+        &self,
+        thread_id: &str,
+    ) -> Result<PersistentProviderSessionIntent, PedelecError> {
+        let thread = self.thread_manager.thread(thread_id)?.clone();
+        let provider_state = self
+            .thread_manager
+            .provider_state(thread_id)
+            .cloned()
+            .ok_or_else(|| {
+                PedelecError::with_details(
+                    error_codes::PROVIDER_NOT_FOUND,
+                    "provider session state was not found for thread",
+                    serde_json::json!({ "threadId": thread_id }),
+                )
+            })?;
+        let registry = self.tool_registry.get(thread_id).ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::TOOL_NOT_FOUND,
+                "tool registry was not found for thread",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+        })?;
+        let (model, reasoning_effort) = match &thread.provider {
+            ProviderCode::Codex => parse_codex_session_settings(&thread.effort_args, thread_id)?,
+            _ => (
+                provider_model_from_effort_args(&thread.provider, &thread.effort_args),
+                None,
+            ),
+        };
+        let host_instructions = build_persistent_host_instructions(&thread, registry);
+        let core_ipc_runtime_file_path = self
+            .core_ipc_runtime_file_path
+            .clone()
+            .unwrap_or_else(default_runtime_file_path_for_provider);
+
+        Ok(PersistentProviderSessionIntent {
+            thread_id: thread.thread_id,
+            provider: thread.provider.clone(),
+            provider_session_id: provider_state.provider_session_id,
+            workspace_path: thread.workspace_path,
+            effort_level: thread.effort_level,
+            model,
+            reasoning_effort,
+            approval_policy: PersistentApprovalPolicy::Never,
+            sandbox_policy: PersistentSandboxPolicy::ReadOnly,
+            host_instructions,
+            config: if thread.provider == ProviderCode::Codex {
+                HashMap::from([(
+                    CODEX_SKILLS_INCLUDE_INSTRUCTIONS_KEY.to_string(),
+                    Value::Bool(false),
+                )])
+            } else {
+                HashMap::new()
+            },
+            core_ipc_runtime_file_path,
+            tools: registry.tools().cloned().collect(),
+            guidance: registry.guidance().map(ToOwned::to_owned),
         })
     }
 
@@ -3464,7 +4178,12 @@ impl CoreRuntime {
         purpose: RunningProviderProcessPurpose,
     ) {
         self.running_processes.remove(thread_id);
+        self.pending_provider_operations.remove(thread_id);
+        self.clear_active_provider_turn(thread_id);
         self.tool_request_broker.clear_thread(thread_id);
+        if self.rollback_debug_reactivation(thread_id) {
+            return;
+        }
         if purpose == RunningProviderProcessPurpose::Prepare {
             self.discard_failed_prepare_provider_session(thread_id);
         }
@@ -3544,6 +4263,8 @@ impl CoreRuntime {
         let Some(running) = running else {
             return;
         };
+        self.pending_provider_operations.remove(thread_id);
+        self.clear_active_provider_turn(thread_id);
         // A completed provider process means the provider turn is over. This
         // is distinct from a provider's child shell timing out while the
         // provider process remains alive, which does not reach this path.
@@ -3687,7 +4408,12 @@ impl CoreRuntime {
             self.discard_failed_prepare_provider_session(thread_id);
         }
         if purpose.is_some() {
+            self.pending_provider_operations.remove(thread_id);
+            self.clear_active_provider_turn(thread_id);
             self.tool_request_broker.clear_thread(thread_id);
+        }
+        if self.rollback_debug_reactivation(thread_id) {
+            return;
         }
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             if thread.process_id == Some(process_id) {
@@ -3720,6 +4446,455 @@ impl CoreRuntime {
                 }
             }
         }
+    }
+
+    /// Reduce a normalized persistent-runtime event into Pedelec state. This
+    /// method only performs short state/event mutations; provider I/O belongs
+    /// to the runtime executor that produced the event.
+    pub fn reduce_provider_runtime_event(
+        &mut self,
+        event: ProviderRuntimeEvent,
+    ) -> Result<(), PedelecError> {
+        match event {
+            ProviderRuntimeEvent::SessionReady {
+                thread_id,
+                provider_session_id,
+            } => self.reduce_runtime_session_ready(&thread_id, provider_session_id),
+            ProviderRuntimeEvent::TurnStarted {
+                thread_id,
+                provider_turn_id,
+            } => self.reduce_runtime_turn_started(&thread_id, provider_turn_id),
+            ProviderRuntimeEvent::AssistantDelta {
+                thread_id,
+                provider_turn_id,
+                text,
+            } => {
+                self.validate_runtime_turn(&thread_id, provider_turn_id.as_deref())?;
+                self.event_bus.emit_assistant_delta(&thread_id, text);
+                Ok(())
+            }
+            ProviderRuntimeEvent::AssistantMessage {
+                thread_id,
+                provider_turn_id,
+                text,
+            } => {
+                self.validate_runtime_turn(&thread_id, provider_turn_id.as_deref())?;
+                self.event_bus.emit_assistant_message(&thread_id, text);
+                Ok(())
+            }
+            ProviderRuntimeEvent::UsageUpdated {
+                thread_id,
+                provider_turn_id,
+                usage,
+            } => {
+                self.validate_runtime_turn(&thread_id, provider_turn_id.as_deref())?;
+                self.provider_usage.insert(thread_id, usage);
+                Ok(())
+            }
+            ProviderRuntimeEvent::TurnCompleted {
+                thread_id,
+                provider_turn_id,
+                success,
+                error,
+            } => {
+                let prepare_without_turn = self.pending_provider_operations.get(&thread_id)
+                    == Some(&PendingProviderOperation::Prepare)
+                    && self
+                        .thread_manager
+                        .provider_session_state(&thread_id)
+                        .and_then(|state| state.active_provider_turn_id.as_ref())
+                        .is_none();
+                if !prepare_without_turn {
+                    self.validate_runtime_turn_allow_stopping(
+                        &thread_id,
+                        provider_turn_id.as_deref(),
+                    )?;
+                }
+                if success {
+                    self.finish_persistent_operation(&thread_id, true, None)
+                } else {
+                    let error = error.unwrap_or_else(|| {
+                        PedelecError::new(
+                            error_codes::PROVIDER_REQUEST_FAILED,
+                            "provider turn failed",
+                        )
+                    });
+                    self.finish_persistent_operation(&thread_id, false, Some(error))
+                }
+            }
+            ProviderRuntimeEvent::ProviderError {
+                thread_id,
+                provider_turn_id,
+                error,
+            } => {
+                let prepare_without_turn = self.pending_provider_operations.get(&thread_id)
+                    == Some(&PendingProviderOperation::Prepare)
+                    && self
+                        .thread_manager
+                        .provider_session_state(&thread_id)
+                        .and_then(|state| state.active_provider_turn_id.as_ref())
+                        .is_none();
+                if !prepare_without_turn {
+                    self.validate_runtime_turn(&thread_id, provider_turn_id.as_deref())?;
+                }
+                self.finish_persistent_operation(&thread_id, false, Some(error))
+            }
+            ProviderRuntimeEvent::RuntimeDisconnected { thread_id, error } => {
+                if let Some(thread_id) = thread_id {
+                    self.thread_manager.thread(&thread_id)?;
+                    let is_persistent = self
+                        .thread_manager
+                        .thread(&thread_id)
+                        .map(|thread| {
+                            self.provider_execution_family(&thread.provider)
+                                == ProviderExecutionFamily::PersistentRuntime
+                        })
+                        .unwrap_or(false);
+                    if is_persistent {
+                        self.fail_persistent_runtime_thread(&thread_id, &error);
+                    }
+                } else {
+                    for thread_id in self.thread_manager.thread_ids() {
+                        let is_persistent = self
+                            .thread_manager
+                            .thread(&thread_id)
+                            .map(|thread| {
+                                self.provider_execution_family(&thread.provider)
+                                    == ProviderExecutionFamily::PersistentRuntime
+                            })
+                            .unwrap_or(false);
+                        if is_persistent {
+                            self.fail_persistent_runtime_thread(&thread_id, &error);
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn reduce_runtime_session_ready(
+        &mut self,
+        thread_id: &str,
+        provider_session_id: String,
+    ) -> Result<(), PedelecError> {
+        if provider_session_id.trim().is_empty() {
+            return Err(runtime_protocol_error(
+                thread_id,
+                "persistent provider returned an empty session id",
+            ));
+        }
+        let status = self.thread_manager.thread(thread_id)?.status.clone();
+        if matches!(status, ThreadStatus::Stopping | ThreadStatus::Ended) {
+            return Err(runtime_protocol_error(
+                thread_id,
+                "session ready event targets a thread that is stopping or ended",
+            ));
+        }
+        self.update_provider_session_id(thread_id, provider_session_id);
+
+        if self.pending_provider_operations.get(thread_id)
+            == Some(&PendingProviderOperation::Prepare)
+        {
+            self.pending_provider_operations.remove(thread_id);
+            self.clear_active_provider_turn(thread_id);
+            if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
+                if !matches!(thread.status, ThreadStatus::Ended | ThreadStatus::Stopping) {
+                    thread.status = ThreadStatus::Idle;
+                    thread.updated_at = Utc::now();
+                    self.event_bus
+                        .emit_status_changed(thread_id, ThreadStatus::Idle);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reduce_runtime_turn_started(
+        &mut self,
+        thread_id: &str,
+        provider_turn_id: String,
+    ) -> Result<(), PedelecError> {
+        if provider_turn_id.trim().is_empty() {
+            return Err(runtime_protocol_error(
+                thread_id,
+                "persistent provider returned an empty turn id",
+            ));
+        }
+        let thread = self.thread_manager.thread(thread_id)?;
+        if !matches!(
+            thread.status,
+            ThreadStatus::Running | ThreadStatus::WaitingToolResult
+        ) {
+            return Err(runtime_protocol_error(
+                thread_id,
+                "turn started for a thread that is not running",
+            ));
+        }
+        if self.pending_provider_operations.get(thread_id)
+            != Some(&PendingProviderOperation::UserTurn)
+        {
+            return Err(runtime_protocol_error(
+                thread_id,
+                "turn started without an admitted user turn",
+            ));
+        }
+        let active = self
+            .thread_manager
+            .provider_state(thread_id)
+            .and_then(|state| state.active_provider_turn_id.as_deref())
+            .ok_or_else(|| runtime_protocol_error(thread_id, "active provider turn is missing"))?;
+        if active.starts_with("local_") || active == provider_turn_id {
+            if let Some(state) = self.thread_manager.provider_state_mut(thread_id) {
+                state.active_provider_turn_id = Some(provider_turn_id);
+            }
+            Ok(())
+        } else {
+            Err(runtime_protocol_error(
+                thread_id,
+                "provider turn id does not match the active turn",
+            ))
+        }
+    }
+
+    fn validate_runtime_turn(
+        &self,
+        thread_id: &str,
+        provider_turn_id: Option<&str>,
+    ) -> Result<(), PedelecError> {
+        self.thread_manager.thread(thread_id)?;
+        let state = self
+            .thread_manager
+            .provider_state(thread_id)
+            .ok_or_else(|| {
+                runtime_protocol_error(thread_id, "provider session state is missing")
+            })?;
+        if !matches!(
+            self.thread_manager.thread(thread_id)?.status,
+            ThreadStatus::Running | ThreadStatus::WaitingToolResult
+        ) {
+            return Err(runtime_protocol_error(
+                thread_id,
+                "runtime event targets an inactive thread",
+            ));
+        }
+        let active = state.active_provider_turn_id.as_deref().ok_or_else(|| {
+            runtime_protocol_error(thread_id, "runtime event has no active provider turn")
+        })?;
+        if let Some(provider_turn_id) = provider_turn_id {
+            if active != provider_turn_id && !active.starts_with("local_") {
+                return Err(runtime_protocol_error(
+                    thread_id,
+                    "runtime event turn id does not match the active turn",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_runtime_turn_allow_stopping(
+        &self,
+        thread_id: &str,
+        provider_turn_id: Option<&str>,
+    ) -> Result<(), PedelecError> {
+        self.thread_manager.thread(thread_id)?;
+        let state = self
+            .thread_manager
+            .provider_session_state(thread_id)
+            .ok_or_else(|| {
+                runtime_protocol_error(thread_id, "provider session state is missing")
+            })?;
+        if !matches!(
+            self.thread_manager.thread(thread_id)?.status,
+            ThreadStatus::Running | ThreadStatus::WaitingToolResult | ThreadStatus::Stopping
+        ) {
+            return Err(runtime_protocol_error(
+                thread_id,
+                "runtime event targets an inactive thread",
+            ));
+        }
+        let active = state.active_provider_turn_id.as_deref().ok_or_else(|| {
+            runtime_protocol_error(thread_id, "runtime event has no active provider turn")
+        })?;
+        if let Some(provider_turn_id) = provider_turn_id {
+            if active != provider_turn_id && !active.starts_with("local_") {
+                return Err(runtime_protocol_error(
+                    thread_id,
+                    "runtime event turn id does not match the active turn",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_persistent_operation(
+        &mut self,
+        thread_id: &str,
+        success: bool,
+        error: Option<PedelecError>,
+    ) -> Result<(), PedelecError> {
+        let operation = self
+            .pending_provider_operations
+            .remove(thread_id)
+            .ok_or_else(|| runtime_protocol_error(thread_id, "provider operation is not active"))?;
+        self.clear_active_provider_turn(thread_id);
+        self.tool_request_broker.clear_thread(thread_id);
+
+        let stopping = self
+            .thread_manager
+            .thread(thread_id)
+            .map(|thread| thread.status == ThreadStatus::Stopping)
+            .unwrap_or(false);
+        if stopping {
+            return Ok(());
+        }
+
+        let next_status = if success || operation == PendingProviderOperation::Prepare {
+            ThreadStatus::Idle
+        } else {
+            ThreadStatus::Error
+        };
+        if let Some(error) = error {
+            self.emit_thread_provider_error(thread_id, error);
+        }
+        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
+            thread.status = next_status.clone();
+            thread.updated_at = Utc::now();
+        }
+        self.event_bus
+            .emit_status_changed(thread_id, next_status.clone());
+        if success && operation == PendingProviderOperation::UserTurn {
+            self.event_bus.emit_done(thread_id);
+        }
+        Ok(())
+    }
+
+    pub fn fail_provider_execution_dispatch(
+        &mut self,
+        thread_id: &str,
+        operation: ProviderExecutionOperationKind,
+        error: PedelecError,
+    ) {
+        if operation == ProviderExecutionOperationKind::End {
+            let _ = self.finish_end_thread(thread_id);
+            return;
+        }
+        if self.rollback_debug_reactivation(thread_id) {
+            self.emit_thread_provider_error(thread_id, error);
+            return;
+        }
+        self.pending_provider_operations.remove(thread_id);
+        self.clear_active_provider_turn(thread_id);
+        self.tool_request_broker.clear_thread(thread_id);
+        let status = match operation {
+            ProviderExecutionOperationKind::Prepare => ThreadStatus::Idle,
+            ProviderExecutionOperationKind::UserTurn => ThreadStatus::Error,
+            ProviderExecutionOperationKind::End => ThreadStatus::Ended,
+        };
+        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
+            thread.status = status.clone();
+            thread.process_id = None;
+            thread.updated_at = Utc::now();
+        }
+        if operation != ProviderExecutionOperationKind::End {
+            self.emit_thread_provider_error(thread_id, error);
+        }
+        self.event_bus.emit_status_changed(thread_id, status);
+    }
+
+    /// Applies a fatal failure to the Pedelec threads that belong to one
+    /// persistent provider runtime. Idle threads retain their provider
+    /// session identity and remain resumable; only active semantic work is
+    /// failed. A thread being explicitly ended is finalized locally because
+    /// the end operation has already taken ownership of its cleanup.
+    pub fn fail_persistent_runtime(&mut self, provider: ProviderCode, error: PedelecError) {
+        self.fail_persistent_runtime_except(provider, None, error);
+    }
+
+    /// Applies a runtime-generation failure while preserving one operation
+    /// that has already been admitted for the replacement generation. The
+    /// dispatcher uses this during the small race between observing the old
+    /// generation as unhealthy and starting a new one.
+    pub fn fail_persistent_runtime_except(
+        &mut self,
+        provider: ProviderCode,
+        excluded_thread_id: Option<&str>,
+        error: PedelecError,
+    ) {
+        let thread_ids = self.thread_manager.thread_ids();
+        for thread_id in thread_ids {
+            if excluded_thread_id == Some(thread_id.as_str()) {
+                continue;
+            }
+            let belongs_to_runtime = self
+                .thread_manager
+                .thread(&thread_id)
+                .map(|thread| {
+                    thread.provider == provider
+                        && self.provider_execution_family(&thread.provider)
+                            == ProviderExecutionFamily::PersistentRuntime
+                })
+                .unwrap_or(false);
+            if !belongs_to_runtime {
+                continue;
+            }
+            self.fail_persistent_runtime_thread(&thread_id, &error);
+        }
+    }
+
+    fn fail_persistent_runtime_thread(&mut self, thread_id: &str, error: &PedelecError) {
+        let Ok(status) = self
+            .thread_manager
+            .thread(thread_id)
+            .map(|thread| thread.status.clone())
+        else {
+            return;
+        };
+        if matches!(status, ThreadStatus::Ended | ThreadStatus::Idle) {
+            self.pending_provider_operations.remove(thread_id);
+            self.clear_active_provider_turn(thread_id);
+            self.tool_request_broker.clear_thread(thread_id);
+            return;
+        }
+        if status == ThreadStatus::Error
+            && !self.pending_provider_operations.contains_key(thread_id)
+            && self
+                .thread_manager
+                .provider_session_state(thread_id)
+                .and_then(|state| state.active_provider_turn_id.as_ref())
+                .is_none()
+        {
+            return;
+        }
+        if status == ThreadStatus::Stopping {
+            self.tool_request_broker
+                .clear_thread_with_error(thread_id, error.clone());
+            let _ = self.finish_end_thread(thread_id);
+            return;
+        }
+        if self.pending_provider_operations.get(thread_id)
+            == Some(&PendingProviderOperation::Prepare)
+        {
+            let _ = self.finish_persistent_operation(thread_id, false, Some(error.clone()));
+            return;
+        }
+
+        self.pending_provider_operations.remove(thread_id);
+        self.clear_active_provider_turn(thread_id);
+        self.tool_request_broker
+            .clear_thread_with_error(thread_id, error.clone());
+        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
+            thread.status = ThreadStatus::Error;
+            thread.process_id = None;
+            thread.updated_at = Utc::now();
+        }
+        self.event_bus
+            .emit_status_changed(thread_id, ThreadStatus::Error);
+        self.emit_thread_provider_error(thread_id, error.clone());
+    }
+
+    pub fn provider_usage(&self, thread_id: &str) -> Option<&Value> {
+        self.provider_usage.get(thread_id)
     }
 
     pub fn running_process_id(&self, thread_id: &str) -> Option<u32> {
@@ -3792,30 +4967,49 @@ impl CoreRuntime {
         }
     }
 
-    fn stop_running_process(&mut self, thread_id: &str) {
-        let Some(running) = self.running_processes.remove(thread_id) else {
-            return;
-        };
-
-        // The provider waiter owns the child wait/reap path. Mark the
-        // cancellation before terminating it so reader/waiter workers skip
-        // callbacks that would otherwise need Core's runtime mutex.
-        running.termination.cancel();
-        let killed_directly = running
-            .child
-            .lock()
-            .ok()
-            .and_then(|mut child| child.as_mut().map(|child| child.kill().is_ok()))
-            .unwrap_or(false);
-        if !killed_directly {
-            let _ = kill_process_by_id(running.process_id);
+    fn clear_active_provider_turn(&mut self, thread_id: &str) {
+        if let Some(provider_state) = self.thread_manager.provider_state_mut(thread_id) {
+            provider_state.active_provider_turn_id = None;
         }
-        running.termination.wait_completed();
     }
 
-    pub fn end_thread(&mut self, input: EndThreadInput) -> Result<(), PedelecError> {
+    fn rollback_debug_reactivation(&mut self, thread_id: &str) -> bool {
+        if !self.debug_reactivating_threads.remove(thread_id) {
+            return false;
+        }
+        self.pending_provider_operations.remove(thread_id);
+        self.clear_active_provider_turn(thread_id);
+        self.tool_request_broker.clear_thread(thread_id);
+        self.tool_registry.remove(thread_id);
+        self.event_bus.unregister_thread_log(thread_id);
+        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
+            thread.status = ThreadStatus::Ended;
+            thread.process_id = None;
+            thread.updated_at = Utc::now();
+        }
+        self.event_bus
+            .emit_status_changed(thread_id, ThreadStatus::Ended);
+        true
+    }
+
+    fn take_running_process_for_stop(&mut self, thread_id: &str) -> Option<ProviderProcessStop> {
+        let running = self.running_processes.remove(thread_id)?;
+        Some(ProviderProcessStop {
+            process_id: running.process_id,
+            child: running.child,
+            termination: running.termination,
+        })
+    }
+
+    /// Begins thread termination and returns the provider-side work that must
+    /// happen after the Core lock is released.
+    pub fn begin_end_thread(
+        &mut self,
+        input: EndThreadInput,
+    ) -> Result<EndThreadStart, PedelecError> {
         self.invalidate_asset_uploads_for_thread(&input.thread_id);
         self.invalidate_asset_downloads_for_thread(&input.thread_id);
+        let thread = self.thread_manager.thread(&input.thread_id)?.clone();
         {
             let thread = self.thread_manager.thread_mut(&input.thread_id)?;
             if thread.status != ThreadStatus::Ended {
@@ -3826,20 +5020,70 @@ impl CoreRuntime {
             }
         }
 
-        self.stop_running_process(&input.thread_id);
-        self.tool_request_broker.clear_thread(&input.thread_id);
-        self.tool_registry.remove(&input.thread_id);
+        let execution = match self.provider_execution_family(&thread.provider) {
+            ProviderExecutionFamily::LegacyCommand => EndThreadExecutionIntent::LegacyProcess(
+                self.take_running_process_for_stop(&input.thread_id),
+            ),
+            ProviderExecutionFamily::PersistentRuntime => {
+                EndThreadExecutionIntent::PersistentRuntime(
+                    PersistentRuntimeOperation::EndSession {
+                        session: PersistentProviderEndIntent {
+                            thread_id: input.thread_id.clone(),
+                            provider: thread.provider.clone(),
+                            provider_session_id: self
+                                .thread_manager
+                                .provider_state(&input.thread_id)
+                                .and_then(|state| state.provider_session_id.clone()),
+                            active_provider_turn_id: self
+                                .thread_manager
+                                .provider_state(&input.thread_id)
+                                .and_then(|state| state.active_provider_turn_id.clone()),
+                        },
+                    },
+                )
+            }
+        };
+        Ok(EndThreadStart {
+            thread_id: input.thread_id,
+            execution,
+        })
+    }
 
-        if let Ok(thread) = self.thread_manager.thread_mut(&input.thread_id) {
+    /// Finalizes termination after provider unsubscribe/interrupt/kill work
+    /// has completed. It is safe to call this after an end dispatch failure so
+    /// a thread cannot remain indefinitely in `Stopping`.
+    pub fn finish_end_thread(&mut self, thread_id: &str) -> Result<(), PedelecError> {
+        if self.thread_manager.thread(thread_id)?.status == ThreadStatus::Ended {
+            self.debug_reactivating_threads.remove(thread_id);
+            return Ok(());
+        }
+        self.debug_reactivating_threads.remove(thread_id);
+        self.pending_provider_operations.remove(thread_id);
+        self.clear_active_provider_turn(thread_id);
+        self.tool_request_broker.clear_thread(thread_id);
+        self.tool_registry.remove(thread_id);
+
+        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             thread.status = ThreadStatus::Ended;
             thread.process_id = None;
             thread.updated_at = Utc::now();
         }
         self.event_bus
-            .emit_status_changed(&input.thread_id, ThreadStatus::Ended);
-        self.event_bus.emit_ended(&input.thread_id);
-        self.event_bus.unregister_thread_log(&input.thread_id);
+            .emit_status_changed(thread_id, ThreadStatus::Ended);
+        self.event_bus.emit_ended(thread_id);
+        self.event_bus.unregister_thread_log(thread_id);
         Ok(())
+    }
+
+    /// Compatibility wrapper for direct Core users. IPC/Tauri should use
+    /// `begin_end_thread`, perform the returned work outside the mutex, and
+    /// then call `finish_end_thread`.
+    pub fn end_thread(&mut self, input: EndThreadInput) -> Result<(), PedelecError> {
+        let start = self.begin_end_thread(input)?;
+        if let EndThreadExecutionIntent::LegacyProcess(Some(stop)) = start.execution {
+            stop.stop();
+        }
+        self.finish_end_thread(&start.thread_id)
     }
 
     pub fn cleanup_stale_workspaces_for_app_start(&self) -> Vec<PedelecError> {
@@ -3870,6 +5114,10 @@ impl CoreRuntime {
 
     pub fn provider_state(&self, thread_id: &str) -> Option<&ProviderAdapterState> {
         self.thread_manager.provider_state(thread_id)
+    }
+
+    pub fn provider_session_state(&self, thread_id: &str) -> Option<&ProviderSessionState> {
+        self.thread_manager.provider_session_state(thread_id)
     }
 
     pub fn event_log_path(&self, thread_id: &str) -> Option<PathBuf> {
@@ -4060,6 +5308,22 @@ impl CoreRuntime {
     pub fn subscribe_all_threads(&mut self) -> mpsc::Receiver<ThreadEvent> {
         self.event_bus.subscribe_all()
     }
+
+    /// Subscribes to desktop-only persistent-provider diagnostics. This is
+    /// intentionally separate from the SDK ThreadEvent stream.
+    pub fn subscribe_provider_runtime_diagnostics(
+        &mut self,
+    ) -> mpsc::Receiver<ProviderRuntimeDiagnostic> {
+        self.provider_runtime_diagnostics.subscribe()
+    }
+
+    pub fn provider_runtime_diagnostic_history(&self) -> Vec<ProviderRuntimeDiagnostic> {
+        self.provider_runtime_diagnostics.history()
+    }
+
+    pub fn record_provider_runtime_diagnostic(&mut self, diagnostic: ProviderRuntimeDiagnostic) {
+        self.provider_runtime_diagnostics.emit(diagnostic);
+    }
 }
 
 fn append_provider_stderr(stderr: &mut String, truncated: &mut bool, text: &str) {
@@ -4151,7 +5415,19 @@ pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo
     let scan_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let path_value = path_override.unwrap_or_else(resolve_provider_path_value);
         let mut provider_scan = scan_external_providers(Some(path_value.clone()));
-        apply_provider_bootstrap_capabilities(&mut provider_scan, Some(&path_value));
+        let probe_legacy_opencode_flags = runtime
+            .lock()
+            .map(|runtime| {
+                !runtime
+                    .persistent_providers
+                    .contains(&ProviderCode::OpenCode)
+            })
+            .unwrap_or(false);
+        apply_provider_bootstrap_capabilities(
+            &mut provider_scan,
+            Some(&path_value),
+            probe_legacy_opencode_flags,
+        );
         (path_value, provider_scan)
     }));
 
@@ -4204,7 +5480,7 @@ pub struct CoreRuntimeOwner {
 impl CoreRuntimeOwner {
     pub fn new() -> Self {
         Self {
-            runtime: Arc::new(Mutex::new(CoreRuntime::new())),
+            runtime: Arc::new(Mutex::new(CoreRuntime::new_for_application())),
         }
     }
 
@@ -4215,10 +5491,50 @@ impl CoreRuntimeOwner {
 
 pub type SharedCoreRuntime = Arc<Mutex<CoreRuntime>>;
 
+/// Bounded in-memory fan-out for diagnostics that belong to a persistent
+/// provider runtime rather than to the semantic Pedelec ThreadEvent stream.
+#[derive(Debug)]
+pub struct ProviderRuntimeDiagnosticBus {
+    history: VecDeque<ProviderRuntimeDiagnostic>,
+    subscribers: Vec<mpsc::Sender<ProviderRuntimeDiagnostic>>,
+    max_entries: usize,
+}
+
+impl Default for ProviderRuntimeDiagnosticBus {
+    fn default() -> Self {
+        Self {
+            history: VecDeque::new(),
+            subscribers: Vec::new(),
+            max_entries: 512,
+        }
+    }
+}
+
+impl ProviderRuntimeDiagnosticBus {
+    fn subscribe(&mut self) -> mpsc::Receiver<ProviderRuntimeDiagnostic> {
+        let (tx, rx) = mpsc::channel();
+        self.subscribers.push(tx);
+        rx
+    }
+
+    fn emit(&mut self, diagnostic: ProviderRuntimeDiagnostic) {
+        self.history.push_back(diagnostic.clone());
+        while self.history.len() > self.max_entries {
+            self.history.pop_front();
+        }
+        self.subscribers
+            .retain(|subscriber| subscriber.send(diagnostic.clone()).is_ok());
+    }
+
+    fn history(&self) -> Vec<ProviderRuntimeDiagnostic> {
+        self.history.iter().cloned().collect()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ThreadManager {
     threads: HashMap<String, ThreadState>,
-    provider_states: HashMap<String, ProviderAdapterState>,
+    provider_sessions: HashMap<String, ProviderSessionState>,
     provider_adapters: HashMap<String, ProviderAdapterInstance>,
     next_thread_number: u64,
 }
@@ -4256,12 +5572,12 @@ impl ThreadManager {
         self.threads.keys().cloned().collect()
     }
 
-    pub fn insert_thread(&mut self, state: ThreadState, provider_state: ProviderAdapterState) {
+    pub fn insert_thread(&mut self, state: ThreadState, provider_session: ProviderSessionState) {
         let thread_id = state.thread_id.clone();
         let provider_adapter = ProviderAdapterInstance::new(state.provider.clone());
         self.threads.insert(thread_id.clone(), state);
-        self.provider_states
-            .insert(thread_id.clone(), provider_state);
+        self.provider_sessions
+            .insert(thread_id.clone(), provider_session);
         self.provider_adapters.insert(thread_id, provider_adapter);
     }
 
@@ -4285,12 +5601,25 @@ impl ThreadManager {
         })
     }
 
-    pub fn provider_state(&self, thread_id: &str) -> Option<&ProviderAdapterState> {
-        self.provider_states.get(thread_id)
+    pub fn provider_session_state(&self, thread_id: &str) -> Option<&ProviderSessionState> {
+        self.provider_sessions.get(thread_id)
     }
 
-    fn provider_state_mut(&mut self, thread_id: &str) -> Option<&mut ProviderAdapterState> {
-        self.provider_states.get_mut(thread_id)
+    pub fn provider_session_state_mut(
+        &mut self,
+        thread_id: &str,
+    ) -> Option<&mut ProviderSessionState> {
+        self.provider_sessions.get_mut(thread_id)
+    }
+
+    /// Compatibility name for legacy adapter callers.
+    pub fn provider_state(&self, thread_id: &str) -> Option<&ProviderSessionState> {
+        self.provider_session_state(thread_id)
+    }
+
+    /// Compatibility name for legacy adapter callers.
+    pub fn provider_state_mut(&mut self, thread_id: &str) -> Option<&mut ProviderSessionState> {
+        self.provider_session_state_mut(thread_id)
     }
 
     fn provider_adapter(&self, thread_id: &str) -> Result<&ProviderAdapterInstance, PedelecError> {
@@ -5791,6 +7120,27 @@ impl ToolRequestBroker {
         self.replayable
             .retain(|_, candidate| candidate.request.thread_id != thread_id);
     }
+
+    /// Remove pending invocations and wake every waiter with a terminal Core
+    /// error. Runtime failures use this instead of silently dropping the
+    /// sender, so a tool-call IPC request observes the actual provider failure
+    /// rather than being misreported as a local timeout.
+    pub fn clear_thread_with_error(&mut self, thread_id: &str, error: PedelecError) {
+        let request_ids = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.request.thread_id == thread_id)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        let outcome = ToolInvocationOutcome::CoreError(error);
+        for request_id in request_ids {
+            if let Some(mut pending) = self.pending.remove(&request_id) {
+                pending.broadcast(outcome.clone());
+            }
+        }
+        self.replayable
+            .retain(|_, candidate| candidate.request.thread_id != thread_id);
+    }
 }
 
 fn remaining_timeout(deadline: Instant) -> Duration {
@@ -5874,6 +7224,18 @@ impl EventBus {
         self.emit(
             thread_id,
             ThreadEvent::RawStderr {
+                seq,
+                thread_id: thread_id.to_string(),
+                text,
+            },
+        );
+    }
+
+    pub fn emit_assistant_delta(&mut self, thread_id: &str, text: String) {
+        let seq = self.next_seq(thread_id);
+        self.emit(
+            thread_id,
+            ThreadEvent::AssistantDelta {
                 seq,
                 thread_id: thread_id.to_string(),
                 text,
@@ -5966,6 +7328,17 @@ impl EventBus {
                 seq,
                 thread_id: thread_id.to_string(),
                 provider_session_id,
+            },
+        );
+    }
+
+    pub fn emit_done(&mut self, thread_id: &str) {
+        let seq = self.next_seq(thread_id);
+        self.emit(
+            thread_id,
+            ThreadEvent::Done {
+                seq,
+                thread_id: thread_id.to_string(),
             },
         );
     }
@@ -6344,6 +7717,10 @@ pub mod error_codes {
     pub const PROVIDER_PROCESS_STOP_FAILED: &str = "PROVIDER_PROCESS_STOP_FAILED";
     pub const PROVIDER_STDIN_CLOSED: &str = "PROVIDER_STDIN_CLOSED";
     pub const PROVIDER_COMMAND_FAILED: &str = "PROVIDER_COMMAND_FAILED";
+    pub const PROVIDER_RUNTIME_START_FAILED: &str = "PROVIDER_RUNTIME_START_FAILED";
+    pub const PROVIDER_RUNTIME_DISCONNECTED: &str = "PROVIDER_RUNTIME_DISCONNECTED";
+    pub const PROVIDER_PROTOCOL_ERROR: &str = "PROVIDER_PROTOCOL_ERROR";
+    pub const PROVIDER_REQUEST_FAILED: &str = "PROVIDER_REQUEST_FAILED";
     pub const PROVIDER_INSTALL_UNSUPPORTED: &str = "PROVIDER_INSTALL_UNSUPPORTED";
     pub const PROVIDER_INSTALLER_LAUNCH_FAILED: &str = "PROVIDER_INSTALLER_LAUNCH_FAILED";
     pub const PROVIDER_TERMINAL_UNSUPPORTED: &str = "PROVIDER_TERMINAL_UNSUPPORTED";
@@ -6369,7 +7746,6 @@ pub mod error_codes {
     pub const TOOLS_MD_NOT_FOUND: &str = "TOOLS_MD_NOT_FOUND";
     pub const TOOL_NOT_FOUND: &str = "TOOL_NOT_FOUND";
     pub const TOOL_ARGS_INVALID: &str = "TOOL_ARGS_INVALID";
-    pub const PEDELEC_THREAD_ID_NOT_FOUND: &str = "PEDELEC_THREAD_ID_NOT_FOUND";
     pub const TOOL_TIMEOUT: &str = "TOOL_TIMEOUT";
     pub const PENDING_TOOL_REQUEST_EXISTS: &str = "PENDING_TOOL_REQUEST_EXISTS";
     pub const PENDING_TOOL_REQUEST_NOT_FOUND: &str = "PENDING_TOOL_REQUEST_NOT_FOUND";
@@ -6421,6 +7797,94 @@ fn provider_code_as_str(provider: &ProviderCode) -> &'static str {
     }
 }
 
+fn new_provider_turn_id() -> String {
+    format!("local_{}", Uuid::new_v4().simple())
+}
+
+fn runtime_protocol_error(thread_id: &str, message: &str) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::PROVIDER_PROTOCOL_ERROR,
+        message,
+        serde_json::json!({ "threadId": thread_id }),
+    )
+}
+
+fn provider_model_from_effort_args(provider: &ProviderCode, args: &[String]) -> Option<String> {
+    let model_flag = if *provider == ProviderCode::Codex {
+        "-m"
+    } else {
+        "--model"
+    };
+    args.windows(2)
+        .find(|pair| pair[0] == model_flag)
+        .map(|pair| pair[1].clone())
+        .filter(|model| !model.trim().is_empty())
+}
+
+fn parse_codex_session_settings(
+    args: &[String],
+    thread_id: &str,
+) -> Result<(Option<String>, Option<CodexReasoningEffort>), PedelecError> {
+    validate_effort_tier(&ProviderCode::Codex, EffortLevel::Default, args).map_err(|error| {
+        PedelecError::with_details(
+            error_codes::INVALID_INPUT,
+            "Codex settings could not be mapped to typed App Server fields",
+            serde_json::json!({
+                "threadId": thread_id,
+                "provider": "codex",
+                "error": error,
+                "source": "effort_args",
+            }),
+        )
+    })?;
+
+    let mut model = None;
+    let mut effort = None;
+    for pair in args.chunks_exact(2) {
+        match pair[0].as_str() {
+            "-m" => {
+                if model.replace(pair[1].trim().to_string()).is_some() {
+                    return Err(PedelecError::with_details(
+                        error_codes::INVALID_INPUT,
+                        "Codex model setting is duplicated",
+                        serde_json::json!({ "threadId": thread_id, "provider": "codex" }),
+                    ));
+                }
+            }
+            "-c" => {
+                let raw = parse_codex_reasoning_effort(&pair[1]).ok_or_else(|| {
+                    PedelecError::with_details(
+                        error_codes::INVALID_INPUT,
+                        "Codex reasoning effort setting is invalid",
+                        serde_json::json!({
+                            "threadId": thread_id,
+                            "provider": "codex",
+                            "setting": pair[1],
+                        }),
+                    )
+                })?;
+                let parsed = match raw {
+                    "low" => CodexReasoningEffort::Low,
+                    "medium" => CodexReasoningEffort::Medium,
+                    "high" => CodexReasoningEffort::High,
+                    "xhigh" => CodexReasoningEffort::XHigh,
+                    "max" => CodexReasoningEffort::Max,
+                    _ => unreachable!("validate_effort_tier accepted an unknown Codex effort"),
+                };
+                if effort.replace(parsed).is_some() {
+                    return Err(PedelecError::with_details(
+                        error_codes::INVALID_INPUT,
+                        "Codex reasoning effort setting is duplicated",
+                        serde_json::json!({ "threadId": thread_id, "provider": "codex" }),
+                    ));
+                }
+            }
+            _ => unreachable!("validate_effort_tier accepted an unknown Codex setting"),
+        }
+    }
+    Ok((model, effort))
+}
+
 fn provider_display_name(provider: &ProviderCode) -> &'static str {
     match provider {
         ProviderCode::Codex => "Codex",
@@ -6449,6 +7913,13 @@ pub(crate) struct ProviderCli {
     version: Option<ProviderVersion>,
     error: Option<String>,
     bootstrap_capabilities: Option<ProviderBootstrapCapabilities>,
+    /// `Some(false)` means the executable was found and versioned, but it
+    /// cannot satisfy Pedelec's App Server-only Codex execution contract.
+    /// `None` is retained for synthetic/test snapshots created before the
+    /// capability probe existed.
+    app_server_capability: Option<bool>,
+    /// `Some(false)` means the provider lacks the required persistent ACP entrypoint.
+    acp_capability: Option<bool>,
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -6768,12 +8239,14 @@ fn scan_external_providers(path_value: Option<OsString>) -> HashMap<ProviderCode
 fn apply_provider_bootstrap_capabilities(
     provider_scan: &mut HashMap<ProviderCode, ProviderCli>,
     path_value: Option<&OsString>,
+    probe_legacy_opencode_flags: bool,
 ) {
     for provider in external_provider_codes() {
         let capability = provider_bootstrap_capability_for_scan(
             &provider,
             provider_scan.get(&provider),
             path_value,
+            probe_legacy_opencode_flags,
         );
         if let Some(scan) = provider_scan.get_mut(&provider) {
             scan.bootstrap_capabilities = Some(capability);
@@ -6785,12 +8258,16 @@ fn provider_bootstrap_capability_for_scan(
     provider: &ProviderCode,
     scan: Option<&ProviderCli>,
     path_value: Option<&OsString>,
+    probe_legacy_opencode_flags: bool,
 ) -> ProviderBootstrapCapabilities {
     let claude_flag_supported = scan.is_some_and(|scan| {
         provider_cli_supports_flag(scan, path_value, "--append-system-prompt", false)
     });
-    let opencode_flag_supported =
-        scan.is_some_and(|scan| provider_cli_supports_flag(scan, path_value, "--agent", true));
+    // The `opencode run --agent` probe belongs only to the neutral legacy
+    // adapter. The application uses OpenCode ACP and must not inspect or
+    // depend on process-per-turn CLI flags during production refresh.
+    let opencode_flag_supported = probe_legacy_opencode_flags
+        && scan.is_some_and(|scan| provider_cli_supports_flag(scan, path_value, "--agent", true));
     provider_bootstrap_capability_from_probe(
         provider,
         scan,
@@ -6856,7 +8333,10 @@ fn provider_cli_supports_flag(
         if is_opencode_run_flag {
             command.arg("run");
         }
-        let output = command.arg("--help").output().ok();
+        let output = run_bounded_provider_probe({
+            command.arg("--help");
+            command
+        });
         output.is_some_and(|output| {
             output.status.success()
                 && format!(
@@ -6880,9 +8360,13 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
     let mut candidates = provider_binary_lookup_candidates(program, &path_dirs);
     candidates.sort();
     candidates.dedup();
-    let recognized = candidates
+    let executable_candidates = candidates
         .into_iter()
         .filter(|path| is_provider_executable(path))
+        .collect::<Vec<_>>();
+    let has_executable = !executable_candidates.is_empty();
+    let recognized = executable_candidates
+        .into_iter()
         .filter_map(|path| {
             provider_cli_version(&path, Some(path_value)).map(|version| (path, version))
         })
@@ -6890,21 +8374,90 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
             left.cmp(right).then_with(|| left_path.cmp(right_path))
         });
     match recognized {
-        Some((path, version)) => ProviderCli {
-            path: Some(path),
-            version: Some(version),
-            error: None,
-            bootstrap_capabilities: None,
-        },
+        Some((path, version)) => {
+            let app_server_capability = if program == provider_program_name(&ProviderCode::Codex) {
+                Some(probe_codex_app_server_capability(&path, Some(path_value)))
+            } else {
+                None
+            };
+            let acp_capability = if program == provider_program_name(&ProviderCode::OpenCode)
+                || program == provider_program_name(&ProviderCode::Cursor)
+            {
+                Some(probe_acp_capability(&path, Some(path_value)))
+            } else {
+                None
+            };
+            let error = match (app_server_capability, acp_capability) {
+                (Some(false), _) => Some(
+                    "Codex executable does not expose the required `app-server` capability"
+                        .to_string(),
+                ),
+                (_, Some(false)) => Some(format!(
+                    "{program} executable does not expose the required `acp` capability"
+                )),
+                _ => None,
+            };
+            ProviderCli {
+                path: Some(path),
+                version: Some(version),
+                error,
+                bootstrap_capabilities: None,
+                app_server_capability,
+                acp_capability,
+            }
+        }
         None => ProviderCli {
             path: None,
             version: None,
-            error: Some(
-                "no provider CLI with a recognizable version was found in PATH".to_string(),
-            ),
+            error: Some(if has_executable {
+                format!("{program} executable version was unrecognized")
+            } else {
+                format!("{program} executable was not found in PATH")
+            }),
             bootstrap_capabilities: None,
+            app_server_capability: None,
+            acp_capability: None,
         },
     }
+}
+
+fn probe_codex_app_server_capability(path: &Path, path_value: Option<&OsString>) -> bool {
+    let output = run_bounded_provider_probe({
+        let mut command = provider_version_command(path, path_value);
+        command.arg("app-server").arg("--help");
+        command
+    });
+    let Some(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    text.contains("app-server")
+}
+
+fn probe_acp_capability(path: &Path, path_value: Option<&OsString>) -> bool {
+    let output = run_bounded_provider_probe({
+        let mut command = provider_version_command(path, path_value);
+        command.arg("acp").arg("--help");
+        command
+    });
+    let Some(output) = output else {
+        return false;
+    };
+    output.status.success()
+        && format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .to_ascii_lowercase()
+        .contains("acp")
 }
 
 fn is_provider_executable(path: &Path) -> bool {
@@ -6924,19 +8477,12 @@ fn is_provider_executable(path: &Path) -> bool {
 }
 
 fn provider_cli_version(path: &Path, path_value: Option<&OsString>) -> Option<ProviderVersion> {
-    let output = provider_version_command(path, path_value)
-        .arg("--version")
-        .output();
-    #[cfg(test)]
-    let output = output.ok().or_else(|| {
-        Some(std::process::Output {
-            status: success_exit_status(),
-            stdout: b"0.0.0".to_vec(),
-            stderr: Vec::new(),
-        })
-    })?;
-    #[cfg(not(test))]
-    let output = output.ok()?;
+    let output = run_bounded_provider_probe({
+        let mut command = provider_version_command(path, path_value);
+        command.arg("--version");
+        command
+    });
+    let output = output?;
     if !output.status.success() {
         return None;
     }
@@ -6946,14 +8492,69 @@ fn provider_cli_version(path: &Path, path_value: Option<&OsString>) -> Option<Pr
         String::from_utf8_lossy(&output.stderr)
     );
     let parsed = parse_provider_version(&text);
-    #[cfg(test)]
-    {
-        parsed.or_else(|| Some(ProviderVersion(vec![0])))
-    }
-    #[cfg(not(test))]
-    {
-        parsed
-    }
+    parsed
+}
+
+/// Run a provider discovery command with both a time and output bound. A
+/// provider executable is user-controlled and may be a wrapper that starts a
+/// long-lived process, so normal scans must never wait indefinitely or retain
+/// an unbounded help/version response.
+fn run_bounded_provider_probe(mut command: Command) -> Option<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let (stdout_sender, stdout_receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = stdout
+            .take(PROVIDER_PROBE_MAX_OUTPUT_BYTES)
+            .read_to_end(&mut output);
+        let _ = stdout_sender.send(output);
+    });
+    let (stderr_sender, stderr_receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = stderr
+            .take(PROVIDER_PROBE_MAX_OUTPUT_BYTES)
+            .read_to_end(&mut output);
+        let _ = stderr_sender.send(output);
+    });
+
+    let deadline = Instant::now() + PROVIDER_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    }?;
+
+    let stdout = stdout_receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()?;
+    let stderr = stderr_receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()?;
+    Some(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn provider_version_command(path: &Path, path_value: Option<&OsString>) -> Command {
@@ -7066,6 +8667,29 @@ fn list_provider_infos(path_value: Option<OsString>) -> Vec<ProviderInfo> {
     list_provider_infos_with_scan(&scan, path_value)
 }
 
+fn required_runtime_capability(provider: &ProviderCode) -> Option<&'static str> {
+    match provider {
+        ProviderCode::Codex => Some("app-server"),
+        ProviderCode::OpenCode | ProviderCode::Cursor => Some("acp"),
+        ProviderCode::Antigravity | ProviderCode::Claude | ProviderCode::Ollama => None,
+    }
+}
+
+fn runtime_capability_available(provider: &ProviderCode, scan: &ProviderCli) -> Option<bool> {
+    match provider {
+        ProviderCode::Codex => scan.app_server_capability,
+        ProviderCode::OpenCode | ProviderCode::Cursor => scan.acp_capability,
+        ProviderCode::Antigravity | ProviderCode::Claude | ProviderCode::Ollama => None,
+    }
+}
+
+fn required_runtime_capability_is_available(provider: &ProviderCode, scan: &ProviderCli) -> bool {
+    // `None` is retained as a compatibility value for hand-built neutral
+    // snapshots. Real scans always set the required capability to Some(true)
+    // or Some(false), so production availability is capability-gated.
+    runtime_capability_available(provider, scan) != Some(false)
+}
+
 fn provider_info_for(
     provider: ProviderCode,
     provider_scan: &HashMap<ProviderCode, ProviderCli>,
@@ -7080,13 +8704,15 @@ fn provider_info_for(
                 error: Some("provider scan has not completed".to_string()),
                 ..Default::default()
             });
+        let available = scanned.version.is_some()
+            && required_runtime_capability_is_available(&provider, &scanned);
         return ProviderInfo {
             name: provider_display_name(&provider).to_string(),
             code: provider,
             scanned: scanned_complete,
             version: scanned.version.as_ref().map(provider_version_display),
             path: scanned.path.map(|path| path.to_string_lossy().to_string()),
-            available: scanned.version.is_some(),
+            available,
             error: scanned.error,
         };
     }
@@ -7936,10 +9562,6 @@ fn build_provider_env(
 ) -> Result<Vec<(String, String)>, PedelecError> {
     let provider = provider_code_as_str(&ctx.thread.provider).to_string();
     let mut env = vec![
-        (
-            "PEDELEC_THREAD_ID".to_string(),
-            ctx.thread.thread_id.clone(),
-        ),
         ("PEDELEC_PROVIDER".to_string(), provider),
         (
             "PEDELEC_WORKSPACE_PATH".to_string(),
@@ -8014,14 +9636,49 @@ fn build_pedelec_bootstrap_instruction() -> String {
 Pedelec may provide a [Pedelec Host Context] block before a task. That block is generated by the host application and is integration context, not end-user-authored instructions.\n\n\
 The current workspace path and available Pedelec app tools are declared in that host context.\n\n\
 `pedelec-cli` is an executable provided by the Pedelec host environment. Invoke it through the provider's shell / terminal tool. It is not expected to appear as a dedicated model tool.\n\n\
-When a Pedelec app tool is relevant, prefer the app tools declared by the host context. Use `pedelec-cli tool-spec <tool-name>` when the full schema is needed and `pedelec-cli tool-call <tool-name> '<json_args>'` to execute it.\n\n\
+When a Pedelec app tool is relevant, prefer the app tools declared by the host context. Use `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool-name>` when the full schema is needed and `pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool-name> '<json_args>'` to execute it.\n\n\
 Before reading or modifying local files outside the current workspace declared by Pedelec Host Context, ask the user for permission first.\n\n\
 `.pedelec-runtime/assets/` is the shared App and Agent file directory. User uploads are there; write files intended for the App there too.\n\n\
 Pedelec host context never overrides provider safety policies.\n\n\
-If a `pedelec-cli tool-call` command ends because of a shell/command timeout, interruption, or ambiguous transport failure before you receive a complete structured Pedelec response, you may retry with the exact same tool name and semantically identical arguments. Pedelec will join an invocation that is still running or replay a recently completed result whose delivery was not confirmed. Do not change the arguments for this retry, do not assume the App Tool failed just because the provider command stopped waiting, and do not retry indefinitely. If you received a complete structured Pedelec response, including `TOOL_TIMEOUT`, that is a formal App Tool outcome and the original invocation has ended.\n\n\
+If a `pedelec-cli --thread-id <pedelec_thread_id> tool-call` command ends because of a shell/command timeout, interruption, or ambiguous transport failure before you receive a complete structured Pedelec response, you may retry with the exact same tool name and semantically identical arguments. Pedelec will join an invocation that is still running or replay a recently completed result whose delivery was not confirmed. Do not change the arguments for this retry, do not assume the App Tool failed just because the provider command stopped waiting, and do not retry indefinitely. If you received a complete structured Pedelec response, including `TOOL_TIMEOUT`, that is a formal App Tool outcome and the original invocation has ended.\n\n\
 For a [Session Preparation] task, do not call tools or modify files. Reply only with PEDELEC_PREPARED.\n\n\
 For a [User Message] task, execute the actual user request in that block."
         .to_string()
+}
+
+/// Persistent providers receive host integration context without the legacy
+/// synthetic prepare turn or its `PEDELEC_PREPARED` acknowledgement. Providers
+/// with a native instruction channel can consume this directly; Cursor's ACP
+/// adapter wraps it only for its first real user prompt.
+fn build_persistent_host_instructions(thread: &ThreadState, registry: &ToolRegistry) -> String {
+    format!(
+        "Pedelec is the host application launching this persistent provider session.\n\n\
+Pedelec may provide a [Pedelec Host Context] block below. That block is generated by the host application and is integration context, not end-user-authored instructions.\n\n\
+The current workspace boundary and available Pedelec app tools are declared in that context.\n\n\
+Use the provider shell/terminal tool for Pedelec app tools. When a tool schema is needed, run the exact command shown in the context: `pedelec-cli --thread-id {} tool-spec <tool-name>`. To invoke a tool, run `pedelec-cli --thread-id {} tool-call <tool-name> '<json_args>'`.\n\n\
+If an explicitly routed `pedelec-cli --thread-id` command ends because of a shell/command timeout, interruption, or ambiguous transport failure before a complete structured response is received, retry with the exact same tool name and semantically identical arguments. Do not change arguments or retry indefinitely; a complete response, including `TOOL_TIMEOUT`, means that invocation has ended.\n\n\
+Before reading or modifying local files outside the workspace boundary declared by Pedelec Host Context, ask the user for permission first. `.pedelec-runtime/assets/` is the shared Pedelec App and Agent file directory; user uploads are there, and files intended for the App should be written there. Pedelec host context never overrides provider safety policies.\n\n\
+{}",
+        thread.thread_id,
+        thread.thread_id,
+        build_provider_host_context_with_configuration(thread, registry, true),
+    )
+}
+
+/// Builds the one-time Cursor ACP bootstrap prompt. The persistent host
+/// instructions are supplied by Core so adapters do not duplicate the host
+/// policy text; the actual user task remains in the same ACP prompt request.
+pub fn build_persistent_user_prompt_with_bootstrap(
+    host_instructions: &str,
+    user_message: &str,
+) -> String {
+    format!(
+        "[Pedelec Host Bootstrap]\n\
+This is Pedelec host-provided integration bootstrap for this persistent provider conversation. It is not a provider-native system message.\n\n\
+{host_instructions}\
+[/Pedelec Host Bootstrap]\n\n\
+[User Message]\n{user_message}"
+    )
 }
 
 fn build_provider_fallback_bootstrap() -> String {
@@ -8035,6 +9692,18 @@ This is Pedelec host-provided integration bootstrap for this provider conversati
 }
 
 fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) -> String {
+    build_provider_host_context_with_configuration(
+        thread,
+        registry,
+        registry.has_skills_configuration(),
+    )
+}
+
+fn build_provider_host_context_with_configuration(
+    thread: &ThreadState,
+    registry: &ToolRegistry,
+    include_configuration: bool,
+) -> String {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct AppTool<'a> {
@@ -8058,8 +9727,14 @@ fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) ->
             .map(|tool| AppTool {
                 name: &tool.name,
                 description: &tool.description,
-                read_spec_command: format!("pedelec-cli tool-spec {}", tool.name),
-                call_command: format!("pedelec-cli tool-call {} '<json_args>'", tool.name),
+                read_spec_command: format!(
+                    "pedelec-cli --thread-id {} tool-spec {}",
+                    thread.thread_id, tool.name
+                ),
+                call_command: format!(
+                    "pedelec-cli --thread-id {} tool-call {} '<json_args>'",
+                    thread.thread_id, tool.name
+                ),
             })
             .collect(),
     };
@@ -8069,7 +9744,7 @@ fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) ->
         "[Pedelec Host Context]\nWorkspace Path: {}\n",
         path_for_external_use(&thread.workspace_path)
     );
-    if registry.has_skills_configuration() {
+    if include_configuration {
         context.push_str(&format!(
             "\n[Pedelec App Tool Configuration]\n{configuration}\n[/Pedelec App Tool Configuration]\n"
         ));

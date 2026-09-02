@@ -91,9 +91,17 @@
 
 [data-status="error"],
 [data-status="ended"],
+[data-status="disconnected"],
+[data-status="stopped"],
 [data-status="Error"],
 [data-status="Ended"] {
   color: #9f2d3a;
+}
+
+[data-status="attached"],
+[data-status="started"],
+[data-status="running"] {
+  color: #2d7a4f;
 }
 
 .event-monitor-global-error {

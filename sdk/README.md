@@ -121,8 +121,13 @@ const session = await pedelec.createSession({
 });
 
 session.onChat((text) => {
-  // Incremental text stream from the agent.
+  // One completed logical assistant message.
   console.log(text);
+});
+
+session.onChatDelta((delta) => {
+  // Optional best-effort incremental text for live UI.
+  console.log(delta);
 });
 
 session.onStatus((status) => {

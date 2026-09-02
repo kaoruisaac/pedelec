@@ -68,7 +68,7 @@ await session.prepare();
 - Concurrent calls 共用同一個 in-flight preparation promise。
 - User turn active 時呼叫會收到 `SESSION_BUSY`。
 - Session ended 後呼叫會收到 `SESSION_ENDED`。
-- Preparation turn 的 assistant text 不會送進 `onChat()`。
+- Preparation turn 的 assistant output 不會送進 `onChat()` 或 `onChatDelta()`。
 - Status event 仍可能顯示 preparation lifecycle。
 
 ```ts
@@ -97,22 +97,22 @@ SDK 依序：
 3. 建立 SDK-local turn metadata；
 4. 以 `ctx.source === "sdk"` 將 status 設為 `running`；
 5. 經 bridge 傳送 `send_text`；
-6. dispatch streamed chat、status、tool events；
+6. dispatch completed chat message、optional chat delta、status、tool events；
 7. 收到 `done` 或 `idle` 後 resolve；
 8. turn error、session ended 或 transport setup 失敗時 reject。
 
 ## Completion semantics
 
-`sendText()` 不回傳 assistant text，文字必須從 `onChat()` 取得。
+`sendText()` 不回傳 assistant text。完成的 logical message 使用 `onChat()`；只有需要 live incremental rendering 時才另外使用 `onChatDelta()`。
 
 ```ts
-let output = "";
-const offChat = session.onChat((delta) => {
-  output += delta;
+const completedMessages: string[] = [];
+const offChat = session.onChat((text) => {
+  completedMessages.push(text);
 });
 
 await session.sendText("Write a title.");
-console.log("Final accumulated output:", output);
+console.log("Completed assistant messages:", completedMessages);
 offChat();
 ```
 

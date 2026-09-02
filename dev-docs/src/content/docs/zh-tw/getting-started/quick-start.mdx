@@ -57,10 +57,14 @@ const session = await pedelec.createSession({
 ```ts
 let assistantText = "";
 
-const unsubscribeChat = session.onChat((delta, ctx) => {
+const unsubscribeChatDelta = session.onChatDelta((delta, ctx) => {
   assistantText += delta;
   renderAssistantMessage(assistantText);
   console.debug("turn", ctx.turnId, "received", delta.length, "characters");
+});
+
+const unsubscribeChat = session.onChat((text, ctx) => {
+  console.debug("completed message", ctx.turnId, text);
 });
 
 const unsubscribeStatus = session.onStatus((status, ctx) => {
@@ -110,6 +114,7 @@ try {
 ```ts
 await session.end();
 
+unsubscribeChatDelta();
 unsubscribeChat();
 unsubscribeStatus();
 unsubscribeError();
@@ -150,7 +155,7 @@ export async function connectAndRun(prompt: string) {
   activeSession = session;
 
   let text = "";
-  const offChat = session.onChat((delta) => {
+  const offChatDelta = session.onChatDelta((delta) => {
     text += delta;
     document.querySelector("#answer")!.textContent = text;
   });
@@ -166,7 +171,7 @@ export async function connectAndRun(prompt: string) {
   });
 
   disposeSessionHandlers = () => {
-    offChat();
+    offChatDelta();
     offStatus();
     offError();
     offEnded();

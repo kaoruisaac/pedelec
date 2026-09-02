@@ -36,6 +36,7 @@ uuid = { version = "1", features = ["v4", "v7", "std"] }
 pedelec-core.workspace = true
 pedelec-ipc.workspace = true
 pedelec-shared.workspace = true
+pedelec-runtime.workspace = true
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2"
 tauri-plugin-dialog = "2.7.2"

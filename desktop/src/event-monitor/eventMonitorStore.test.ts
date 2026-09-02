@@ -76,4 +76,90 @@ describe("event monitor store", () => {
     monitor.clearEndedThreads();
     expect(monitor.store.selectedThreadId).toBe("active-thread");
   });
+
+  it("keeps global runtime diagnostics out of arbitrary threads and routes attached diagnostics", () => {
+    const monitor = createEventMonitorStore();
+
+    monitor.upsertThreadEvent({
+      type: "provider_runtime_started",
+      provider: "codex",
+      processId: 1234,
+      runtimeGeneration: 7,
+    });
+    monitor.upsertThreadEvent({
+      type: "provider_runtime_attached",
+      provider: "codex",
+      threadId: "codex-thread",
+      providerThreadId: "provider-thread",
+      processId: 1234,
+      runtimeGeneration: 7,
+      resumed: true,
+    });
+
+    expect(monitor.store.runtimeStatus).toBe("attached");
+    expect(monitor.store.runtimeProcessId).toBe(1234);
+    expect(monitor.store.runtimeGeneration).toBe(7);
+    expect(monitor.store.totalEventCount).toBe(1);
+    expect(monitor.store.threadsById["codex-thread"]?.providerSessionId).toBe(
+      "provider-thread",
+    );
+    expect(monitor.store.threadsById["codex-thread"]?.runtimeDiagnostics).toHaveLength(1);
+    expect(monitor.store.runtimeDiagnostics).toHaveLength(2);
+    expect(monitor.store.runtimeDiagnostics[0]?.threadId).toBe("codex-thread");
+  });
+
+  it("keeps persistent runtime summaries isolated by provider", () => {
+    const monitor = createEventMonitorStore();
+
+    monitor.upsertRuntimeDiagnostic({
+      type: "provider_runtime_started",
+      provider: "codex",
+      processId: 100,
+      runtimeGeneration: 1,
+    });
+    monitor.upsertRuntimeDiagnostic({
+      type: "provider_runtime_started",
+      provider: "cursor",
+      processId: 200,
+      runtimeGeneration: 2,
+    });
+    monitor.upsertRuntimeDiagnostic({
+      type: "provider_runtime_disconnected",
+      provider: "codex",
+      processId: 100,
+      runtimeGeneration: 1,
+      reason: "crashed",
+    });
+
+    expect(monitor.store.runtimeByProvider.codex).toEqual({
+      status: "disconnected",
+      processId: 100,
+      generation: 1,
+    });
+    expect(monitor.store.runtimeByProvider.cursor).toEqual({
+      status: "started",
+      processId: 200,
+      generation: 2,
+    });
+    expect(monitor.store.runtimeByProvider.opencode).toBeUndefined();
+  });
+
+  it("bounds persistent runtime diagnostics", () => {
+    const monitor = createEventMonitorStore();
+
+    for (let index = 0; index < 350; index += 1) {
+      monitor.upsertThreadEvent({
+        type: "provider_runtime_raw_protocol",
+        provider: "codex",
+        operation: "notification",
+        summary: `frame-${index}`,
+        processId: 1234,
+        runtimeGeneration: 7,
+      });
+    }
+
+    expect(monitor.store.runtimeDiagnostics).toHaveLength(300);
+    expect(monitor.store.totalRuntimeDiagnosticCount).toBe(350);
+    expect(monitor.store.runtimeDiagnostics[0]?.summary).toBe("frame-349");
+  });
 });

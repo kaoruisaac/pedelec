@@ -417,12 +417,21 @@ test("autoEndOnDisconnect false keeps the native session but requires explicit r
   await waitFor(() => portB.sent.some((message) => message.requestId === "resume_1"));
   assert.equal(background.getSdkRouteCount(), 1);
 
-  background.dispatchSdkThreadEvent({ threadId: "thread_resume", type: "assistant_message", seq: 1, text: "resumed" });
+  background.dispatchSdkThreadEvent({ threadId: "thread_resume", type: "assistant_delta", seq: 1, text: "res" });
   assert.deepEqual(portB.sent.at(-1), {
     channelId: "channel_b",
     sessionId: "thread_resume",
     seq: 1,
     type: "chat_delta",
+    text: "res",
+  });
+
+  background.dispatchSdkThreadEvent({ threadId: "thread_resume", type: "assistant_message", seq: 2, text: "resumed" });
+  assert.deepEqual(portB.sent.at(-1), {
+    channelId: "channel_b",
+    sessionId: "thread_resume",
+    seq: 2,
+    type: "chat_message",
     text: "resumed",
   });
 });

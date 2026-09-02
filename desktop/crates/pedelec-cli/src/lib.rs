@@ -2,40 +2,7 @@ use pedelec_core::{error_codes, PedelecError, ToolCallInput, ToolSpecInput};
 use pedelec_ipc::{send_core_ipc_request, send_core_ipc_request_with_runtime_path, CoreIpcRequest};
 use serde::Serialize;
 use serde_json::Value;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-
-static PEDELEC_THREAD_ID_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-pub struct ThreadIdEnvGuard {
-    previous: Option<OsString>,
-    _lock: MutexGuard<'static, ()>,
-}
-
-impl ThreadIdEnvGuard {
-    pub fn set(value: Option<&str>) -> Self {
-        let lock = PEDELEC_THREAD_ID_ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os("PEDELEC_THREAD_ID");
-        match value {
-            Some(value) => std::env::set_var("PEDELEC_THREAD_ID", value),
-            None => std::env::remove_var("PEDELEC_THREAD_ID"),
-        }
-        Self {
-            previous,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for ThreadIdEnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var("PEDELEC_THREAD_ID", value),
-            None => std::env::remove_var("PEDELEC_THREAD_ID"),
-        }
-    }
-}
 
 #[derive(Debug, Serialize)]
 pub struct ToolCliResponse {
@@ -126,32 +93,55 @@ fn runtime_file_path_from_env() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+#[derive(Debug)]
 enum ToolCliCommand {
     Call(ToolCallInput),
     Spec(ToolSpecInput),
 }
 
+const TOOL_CLI_USAGE: &str = "usage: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name> OR pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> '<json_args>'";
+
 fn parse_tool_cli_args(args: &[String]) -> Result<ToolCliCommand, PedelecError> {
-    match args.get(1).map(String::as_str) {
-        Some("tool-call") => parse_tool_call_args(args).map(ToolCliCommand::Call),
-        Some("tool-spec") => parse_tool_spec_args(args).map(ToolCliCommand::Spec),
+    let thread_id = parse_thread_id_arg(args)?;
+    match args.get(3).map(String::as_str) {
+        Some("tool-call") => parse_tool_call_args(args, &thread_id).map(ToolCliCommand::Call),
+        Some("tool-spec") => parse_tool_spec_args(args, &thread_id).map(ToolCliCommand::Spec),
         _ => Err(PedelecError::new(
             error_codes::TOOL_ARGS_INVALID,
-            "usage: pedelec-cli tool-spec <tool_name> OR pedelec-cli tool-call <tool_name> '<json_args>'",
+            TOOL_CLI_USAGE,
         )),
     }
 }
 
-fn parse_tool_call_args(args: &[String]) -> Result<ToolCallInput, PedelecError> {
-    if args.len() != 4 {
+fn parse_thread_id_arg(args: &[String]) -> Result<String, PedelecError> {
+    if args.get(1).map(String::as_str) != Some("--thread-id") {
         return Err(PedelecError::new(
             error_codes::TOOL_ARGS_INVALID,
-            "usage: pedelec-cli tool-call <tool_name> '<json_args>'",
+            TOOL_CLI_USAGE,
         ));
     }
 
-    let thread_id = thread_id_from_env()?;
-    let json_args = serde_json::from_str::<Value>(&args[3]).map_err(|err| {
+    args.get(2)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            PedelecError::new(
+                error_codes::TOOL_ARGS_INVALID,
+                "pedelec-cli requires a non-empty --thread-id value.",
+            )
+        })
+}
+
+fn parse_tool_call_args(args: &[String], thread_id: &str) -> Result<ToolCallInput, PedelecError> {
+    if args.len() != 6 {
+        return Err(PedelecError::new(
+            error_codes::TOOL_ARGS_INVALID,
+            "usage: pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> '<json_args>'",
+        ));
+    }
+
+    let json_args = serde_json::from_str::<Value>(&args[5]).map_err(|err| {
         PedelecError::with_details(
             error_codes::TOOL_ARGS_INVALID,
             "tool args must be valid JSON",
@@ -160,37 +150,24 @@ fn parse_tool_call_args(args: &[String]) -> Result<ToolCallInput, PedelecError> 
     })?;
 
     Ok(ToolCallInput {
-        thread_id,
-        tool_name: args[2].clone(),
+        thread_id: thread_id.to_string(),
+        tool_name: args[4].clone(),
         args: json_args,
     })
 }
 
-fn parse_tool_spec_args(args: &[String]) -> Result<ToolSpecInput, PedelecError> {
-    if args.len() != 3 {
+fn parse_tool_spec_args(args: &[String], thread_id: &str) -> Result<ToolSpecInput, PedelecError> {
+    if args.len() != 5 {
         return Err(PedelecError::new(
             error_codes::TOOL_ARGS_INVALID,
-            "usage: pedelec-cli tool-spec <tool_name>",
+            "usage: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>",
         ));
     }
 
     Ok(ToolSpecInput {
-        thread_id: thread_id_from_env()?,
-        tool_name: args[2].clone(),
+        thread_id: thread_id.to_string(),
+        tool_name: args[4].clone(),
     })
-}
-
-fn thread_id_from_env() -> Result<String, PedelecError> {
-    std::env::var("PEDELEC_THREAD_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            PedelecError::new(
-                error_codes::PEDELEC_THREAD_ID_NOT_FOUND,
-                "PEDELEC_THREAD_ID is required for pedelec-cli tool-call.",
-            )
-        })
 }
 
 fn next_cli_request_id() -> String {
@@ -215,9 +192,10 @@ mod tests {
 
     #[test]
     fn invalid_json_args_return_tool_args_invalid() {
-        let _env = ThreadIdEnvGuard::set(Some("thread_1"));
         let response = run_tool_cli(vec![
             "pedelec-cli".into(),
+            "--thread-id".into(),
+            "thread_1".into(),
             "tool-call".into(),
             "get_app_state".into(),
             "{".into(),
@@ -228,28 +206,31 @@ mod tests {
     }
 
     #[test]
-    fn new_tool_call_format_reads_thread_id_from_env() {
-        let _env = ThreadIdEnvGuard::set(Some("thread_1"));
-
-        let input = parse_tool_call_args(&[
+    fn tool_call_format_reads_explicit_thread_id() {
+        let input = parse_tool_cli_args(&[
             "pedelec-cli".into(),
+            "--thread-id".into(),
+            "thread_1".into(),
             "tool-call".into(),
             "get_app_state".into(),
             "{}".into(),
         ])
         .unwrap();
 
+        let ToolCliCommand::Call(input) = input else {
+            panic!("expected tool call command");
+        };
         assert_eq!(input.thread_id, "thread_1");
         assert_eq!(input.tool_name, "get_app_state");
         assert_eq!(input.args, serde_json::json!({}));
     }
 
     #[test]
-    fn tool_spec_format_reads_thread_id_from_env() {
-        let _env = ThreadIdEnvGuard::set(Some("thread_1"));
-
+    fn tool_spec_format_reads_explicit_thread_id() {
         let command = parse_tool_cli_args(&[
             "pedelec-cli".into(),
+            "--thread-id".into(),
+            "thread_1".into(),
             "tool-spec".into(),
             "get_app_state".into(),
         ])
@@ -263,10 +244,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_thread_id_env_returns_specific_error() {
-        let _env = ThreadIdEnvGuard::set(None);
-
-        let err = parse_tool_call_args(&[
+    fn missing_thread_id_fails_explicitly() {
+        let err = parse_tool_cli_args(&[
             "pedelec-cli".into(),
             "tool-call".into(),
             "get_app_state".into(),
@@ -274,25 +253,23 @@ mod tests {
         ])
         .unwrap_err();
 
-        assert_eq!(err.code, error_codes::PEDELEC_THREAD_ID_NOT_FOUND);
-        assert_eq!(
-            err.message,
-            "PEDELEC_THREAD_ID is required for pedelec-cli tool-call."
-        );
+        assert_eq!(err.code, error_codes::TOOL_ARGS_INVALID);
+        assert!(err.message.contains("--thread-id"));
     }
 
     #[test]
-    fn blank_thread_id_env_returns_specific_error() {
-        let _env = ThreadIdEnvGuard::set(Some("   "));
-
-        let err = parse_tool_call_args(&[
+    fn blank_thread_id_fails_explicitly() {
+        let err = parse_tool_cli_args(&[
             "pedelec-cli".into(),
+            "--thread-id".into(),
+            "   ".into(),
             "tool-call".into(),
             "get_app_state".into(),
             "{}".into(),
         ])
         .unwrap_err();
 
-        assert_eq!(err.code, error_codes::PEDELEC_THREAD_ID_NOT_FOUND);
+        assert_eq!(err.code, error_codes::TOOL_ARGS_INVALID);
+        assert!(err.message.contains("non-empty"));
     }
 }

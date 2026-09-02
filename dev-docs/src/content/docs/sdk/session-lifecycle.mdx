@@ -74,7 +74,8 @@ Handlers are JavaScript functions and cannot survive reload. Resume first, then 
 ```ts
 const session = await pedelec.resumeSession(record.sessionId);
 
-const offChat = session.onChat(handleChat);
+const offChat = session.onChat(handleCompletedChat);
+const offChatDelta = session.onChatDelta(handleChatDelta);
 const offStatus = session.onStatus(handleStatus);
 const offError = session.onError(handleError);
 const offEnded = session.onEnded(handleEnded);

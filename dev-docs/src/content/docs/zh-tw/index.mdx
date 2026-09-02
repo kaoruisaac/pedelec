@@ -117,8 +117,13 @@ const session = await pedelec.createSession({
 });
 
 session.onChat((text) => {
-  // agent 的文字串流增量
+  // 一個完成的 logical assistant message
   console.log(text);
+});
+
+session.onChatDelta((delta) => {
+  // live UI 可選用的 best-effort 文字增量
+  console.log(delta);
 });
 
 session.onStatus((status) => {
@@ -274,16 +279,26 @@ type PedelecSettings = {
 
 ## 接收 Agent 回應
 
+使用 `onChat()` 接收完成的 logical assistant message：
+
+```ts
+session.onChat((text) => {
+  saveCompletedAssistantMessage(text);
+});
+```
+
+如果要做即時串流 UI，另外使用 `onChatDelta()` 累積文字增量：
+
 ```ts
 const chunks: string[] = [];
 
-session.onChat((text) => {
-  chunks.push(text);
+session.onChatDelta((delta) => {
+  chunks.push(delta);
   render(chunks.join(""));
 });
 ```
 
-`onChat()` 收到的是文字增量，不一定是一整句，也不一定是一整段。UI 通常需要自己累積成完整訊息。
+Delta delivery 是 best-effort，而且依 Provider 能力而定。Delta boundary 沒有語意，Pedelec 也不會根據後續 completed message 自行合成缺少的 suffix delta。
 
 ---
 
@@ -348,7 +363,7 @@ Pedelec 的 tool calling 流程是：
 
 1. Web App 在 `createSession` 提供 `skills: { guidance, tools }`。
 2. Desktop Runtime 驗證 manifest、在記憶體保存 ToolRegistry，並在首次 provider prompt 直接注入 guidance 與 tool index。
-3. Agent 需要前端資料或操作時，用 `pedelec-cli tool-spec <tool>` 取得完整 schema，再執行 `pedelec-cli tool-call ...`。
+3. Agent 需要前端資料或操作時，用 `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool>` 取得完整 schema，再執行 `pedelec-cli --thread-id <pedelec_thread_id> tool-call ...`。
 4. Desktop Runtime 收到 tool call 後，透過 native host 與 extension 送回 SDK。
 5. SDK 觸發 `session.onTool()`。
 6. Web App 執行對應工具並 return result。

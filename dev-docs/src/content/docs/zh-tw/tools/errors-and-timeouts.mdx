@@ -102,7 +102,7 @@ Handler 應在 deadline 前 settle，並自行實作 cancellation/cleanup。
 
 ### Provider command timeout 與 App Tool formal timeout
 
-Provider 的 shell 或 terminal 可能在 Core 的 `timeoutMs` deadline 前停止等待 `pedelec-cli tool-call`。這是 ambiguous transport failure，不代表 App Tool 已失敗。若 Agent 沒有收到完整 structured Pedelec response，可以用完全相同的 tool name 與語意完全相同的 arguments exact retry；Core 會 join 仍在執行的 invocation，或 replay 最近完成但尚未確認 delivery 的 result。不要改 arguments，也不要無限 retry。
+Provider 的 shell 或 terminal 可能在 Core 的 `timeoutMs` deadline 前停止等待 `pedelec-cli --thread-id <pedelec_thread_id> tool-call`。這是 ambiguous transport failure，不代表 App Tool 已失敗。若 Agent 沒有收到完整 structured Pedelec response，可以用完全相同的 tool name 與語意完全相同的 arguments exact retry；Core 會 join 仍在執行的 invocation，或 replay 最近完成但尚未確認 delivery 的 result。不要改 arguments，也不要無限 retry。
 
 Core 到達 App Tool 的 `timeoutMs` 時，會回傳正式的 `TOOL_TIMEOUT` structured error。收到 `TOOL_TIMEOUT` 代表原 invocation 已結束，不是繼續同一 invocation 的 in-flight retry 指示。只有 IPC delivery 未確認的 result 可能在短時間內 replay；成功 delivery 的 result 不會作為一般 deduplication cache 保留。
 

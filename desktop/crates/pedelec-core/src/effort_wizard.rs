@@ -1049,12 +1049,7 @@ mod tests {
         }
         assert_eq!(
             manifest.providers[&WizardProviderCode::Codex].profiles.low,
-            vec![
-                "-m",
-                "gpt-5.6-luna",
-                "-c",
-                "model_reasoning_effort=\"max\""
-            ]
+            vec!["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"max\""]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Claude]

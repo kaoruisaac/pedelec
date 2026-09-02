@@ -35,7 +35,7 @@ pub fn tool_definitions_with_web_search(vision: bool, web_search_enabled: bool) 
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Run a restricted Pedelec CLI command. This is not a full shell; only pedelec-cli tool-spec and pedelec-cli tool-call commands are allowed.",
+                "description": "Run a restricted Pedelec CLI command. This is not a full shell; only pedelec-cli --thread-id <pedelec_thread_id> tool-spec and pedelec-cli --thread-id <pedelec_thread_id> tool-call commands are allowed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -290,7 +290,7 @@ fn parse_restricted_bash_command(command: &str) -> Result<Vec<String>, AgentErro
 fn unsupported_shell_syntax(message: &str) -> AgentError {
     AgentError::new(
         "UNSUPPORTED_SHELL_SYNTAX",
-        format!("{message} Use only: pedelec-cli tool-spec <tool_name> or pedelec-cli tool-call <tool_name> ..."),
+        format!("{message} Use only: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name> or pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ..."),
     )
 }
 
@@ -300,26 +300,43 @@ fn validate_pedelec_cli_command(argv: &[String]) -> Result<(), AgentError> {
             "COMMAND_NOT_ALLOWED",
             "Only pedelec-cli tool commands are allowed.",
             serde_json::json!({ "allowed": [
-                "pedelec-cli tool-spec <tool_name>",
-                "pedelec-cli tool-call <tool_name> ..."
+                "pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>",
+                "pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ..."
             ] }),
         ));
     }
 
-    match argv.get(1).map(String::as_str) {
-        Some("tool-spec") if argv.len() == 3 && !argv[2].trim().is_empty() => Ok(()),
+    if argv.get(1).map(String::as_str) != Some("--thread-id") {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "usage: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name> OR pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ...",
+        ));
+    }
+    if argv
+        .get(2)
+        .map(String::as_str)
+        .is_none_or(|thread_id| thread_id.trim().is_empty())
+    {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "pedelec-cli requires a non-empty --thread-id value.",
+        ));
+    }
+
+    match argv.get(3).map(String::as_str) {
+        Some("tool-spec") if argv.len() == 5 && !argv[4].trim().is_empty() => Ok(()),
         Some("tool-spec") => Err(AgentError::new(
             "INVALID_ARGUMENT",
-            "usage: pedelec-cli tool-spec <tool_name>",
+            "usage: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>",
         )),
-        Some("tool-call") if argv.len() >= 3 && !argv[2].trim().is_empty() => Ok(()),
+        Some("tool-call") if argv.len() >= 5 && !argv[4].trim().is_empty() => Ok(()),
         Some("tool-call") => Err(AgentError::new(
             "INVALID_ARGUMENT",
-            "usage: pedelec-cli tool-call <tool_name> ...",
+            "usage: pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ...",
         )),
         _ => Err(AgentError::with_details(
             "COMMAND_NOT_ALLOWED",
-            "Only pedelec-cli tool-spec and pedelec-cli tool-call commands are allowed.",
+            "Only pedelec-cli --thread-id <pedelec_thread_id> tool-spec and pedelec-cli --thread-id <pedelec_thread_id> tool-call commands are allowed.",
             serde_json::json!({ "command": argv }),
         )),
     }
@@ -516,7 +533,7 @@ mod tests {
         let result = execute_tool(
             "bash",
             &serde_json::json!({
-                "command": "pedelec-cli tool-call get_page '{\"id\":1}'"
+                "command": "pedelec-cli --thread-id thread_explicit tool-call get_page '{\"id\":1}'"
             }),
             "session_inner",
             &sandbox,
@@ -527,10 +544,11 @@ mod tests {
         assert_eq!(result.content["ok"], true);
         let args = std::fs::read_to_string(capture).unwrap();
         assert!(args.contains("tool-call"));
+        assert!(args.contains("--thread-id"));
+        assert!(args.contains("thread_explicit"));
         assert!(args.contains("get_page"));
         assert!(args.contains("id"));
         assert!(args.contains("1"));
-        assert!(!args.contains("thread_outer"));
         assert!(!args.contains("session_inner"));
     }
 
@@ -560,7 +578,7 @@ mod tests {
 
         let err = execute_tool(
             "bash",
-            &serde_json::json!({ "command": "pedelec-cli tool-spec foo && rm -rf /" }),
+            &serde_json::json!({ "command": "pedelec-cli --thread-id thread_inner tool-spec foo && rm -rf /" }),
             "session_inner",
             &sandbox,
             &cfg,
@@ -573,29 +591,70 @@ mod tests {
     #[test]
     fn parses_single_and_double_quoted_arguments() {
         let single = parse_restricted_bash_command(
-            "pedelec-cli tool-call ask_user '{\"question\":\"要繼續嗎？\"}'",
+            "pedelec-cli --thread-id thread_1 tool-call ask_user '{\"question\":\"要繼續嗎？\"}'",
         )
         .unwrap();
         assert_eq!(
             single,
             vec![
                 "pedelec-cli",
+                "--thread-id",
+                "thread_1",
                 "tool-call",
                 "ask_user",
                 "{\"question\":\"要繼續嗎？\"}"
             ]
         );
 
-        let double =
-            parse_restricted_bash_command("pedelec-cli tool-spec \"get current page\"").unwrap();
-        assert_eq!(double, vec!["pedelec-cli", "tool-spec", "get current page"]);
+        let double = parse_restricted_bash_command(
+            "pedelec-cli --thread-id thread_1 tool-spec \"get current page\"",
+        )
+        .unwrap();
+        assert_eq!(
+            double,
+            vec![
+                "pedelec-cli",
+                "--thread-id",
+                "thread_1",
+                "tool-spec",
+                "get current page"
+            ]
+        );
     }
 
     #[test]
     fn parser_rejects_command_substitution() {
-        let err = parse_restricted_bash_command("pedelec-cli tool-spec $(cat secret)").unwrap_err();
+        let err = parse_restricted_bash_command(
+            "pedelec-cli --thread-id thread_1 tool-spec $(cat secret)",
+        )
+        .unwrap_err();
 
         assert_eq!(err.code, "UNSUPPORTED_SHELL_SYNTAX");
+    }
+
+    #[test]
+    fn restricted_command_requires_explicit_thread_id() {
+        let err = validate_pedelec_cli_command(&[
+            "pedelec-cli".into(),
+            "tool-spec".into(),
+            "get_page".into(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.code, "INVALID_ARGUMENT");
+        assert!(err.message.contains("--thread-id"));
+
+        let err = validate_pedelec_cli_command(&[
+            "pedelec-cli".into(),
+            "--thread-id".into(),
+            "   ".into(),
+            "tool-spec".into(),
+            "get_page".into(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.code, "INVALID_ARGUMENT");
+        assert!(err.message.contains("non-empty"));
     }
 
     #[test]

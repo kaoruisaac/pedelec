@@ -69,7 +69,7 @@ prepare(): Promise<void>
 - concurrent prepare calls 共用 promise；
 - active user turn 時 reject `SESSION_BUSY`；
 - ended 後 reject `SESSION_ENDED`；
-- preparation chat delta 不送到 `onChat()`；
+- preparation assistant message 不送到 `onChat()`，delta 也不送到 `onChatDelta()`；
 - 仍可 emit status/error；
 - 只有 Desktop 驗證 provider 回覆 trim 後完全等於 `PEDELEC_PREPARED` 才 resolve（前後 whitespace 允許）；
 - 不是 `sendText()` 必要前置。
@@ -88,7 +88,7 @@ sendText(text: string): Promise<void>
 
 開始一個 user turn。Completion/idle 後 resolve；turn failed、session ended 或已有 active turn 時 reject。
 
-Text output 由 `onChat()` 提供。
+完成的 assistant message 由 `onChat()` 提供；Provider 有提供增量串流時，best-effort fragment 另外由 `onChatDelta()` 提供。
 
 ```ts
 await session.sendText("Analyze the current page.");
@@ -156,15 +156,33 @@ onChat(
 ): () => void
 ```
 
-註冊 incremental text handler，回傳 unsubscribe function。
+註冊 completed assistant-message handler，回傳 unsubscribe function。每個 `text` 都是一個完整的 logical provider message。
 
 ```ts
-const off = session.onChat((delta, ctx) => {
-  transcript.append(ctx.turnId, delta);
+const off = session.onChat((text, ctx) => {
+  transcript.addCompleted(ctx.turnId, text);
 });
 ```
 
 Preparation output 不送到 chat handlers。
+
+## `onChatDelta()`
+
+```ts
+onChatDelta(
+  handler: (text: string, ctx: ChatDeltaEventContext) => void,
+): () => void
+```
+
+註冊 best-effort incremental assistant-text handler。Delta delivery 依 Provider 能力而定，chunk boundary 沒有語意，completed message 也不代表 Pedelec 會合成缺少的 delta。
+
+```ts
+const off = session.onChatDelta((delta, ctx) => {
+  transcript.appendLive(ctx.turnId, delta);
+});
+```
+
+Preparation output 不送到 delta handlers。
 
 ## `onTool()`
 

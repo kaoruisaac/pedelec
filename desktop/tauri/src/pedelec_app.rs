@@ -24,9 +24,12 @@ use pedelec_core::{
     UpdateSettingsInput,
 };
 use pedelec_ipc::{
-    prepare_provider_process, start_core_ipc_server_with_services, start_debug_provider_process,
-    start_provider_process,
+    end_thread_with_dispatcher, prepare_provider_process_with_dispatcher,
+    start_core_ipc_server_with_services_and_dispatcher,
+    start_debug_provider_process_with_dispatcher, start_provider_process_with_dispatcher,
+    PersistentRuntimeDispatcher, ProviderRuntimeDispatcher, RejectPersistentRuntimeDispatcher,
 };
+use pedelec_runtime::ProviderRuntimeOwner;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -44,6 +47,10 @@ pub fn run() {
     let runtime = runtime_owner.runtime();
     let runtime_for_setup = runtime.clone();
     let runtime_for_exit = runtime.clone();
+    let provider_runtime_owner = ProviderRuntimeOwner::new();
+    let provider_runtime_dispatcher =
+        ProviderRuntimeDispatcher::new(provider_runtime_owner.clone(), runtime_for_setup.clone());
+    let provider_runtime_for_exit = provider_runtime_dispatcher.clone();
     let effort_wizard_owner = EffortWizardOwner::new();
     let effort_wizard_for_exit = effort_wizard_owner.clone();
 
@@ -58,6 +65,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(runtime_owner)
+        .manage(provider_runtime_owner)
+        .manage(provider_runtime_dispatcher.clone())
         .manage(effort_wizard_owner)
         .invoke_handler(tauri::generate_handler![
             create_thread,
@@ -159,14 +168,17 @@ pub fn run() {
             let _asset_upload_server = start_asset_upload_server(runtime_for_setup.clone());
             let platform_services =
                 Arc::new(TauriCoreIpcPlatformServices::new(app.handle().clone()));
-            let _ipc_handle =
-                start_core_ipc_server_with_services(runtime_for_setup.clone(), platform_services)
-                    .map_err(|err| {
-                    tauri::Error::from(std::io::Error::other(format!(
-                        "cannot start Core IPC server: {}",
-                        err.message
-                    )))
-                })?;
+            let _ipc_handle = start_core_ipc_server_with_services_and_dispatcher(
+                runtime_for_setup.clone(),
+                platform_services,
+                Arc::new(provider_runtime_dispatcher.clone()),
+            )
+            .map_err(|err| {
+                tauri::Error::from(std::io::Error::other(format!(
+                    "cannot start Core IPC server: {}",
+                    err.message
+                )))
+            })?;
             forward_thread_events_to_tauri(app.handle().clone(), runtime_for_setup.clone());
             #[cfg(debug_assertions)]
             eprintln!(
@@ -269,6 +281,7 @@ pub fn run() {
                     api.prevent_exit();
                 } else {
                     effort_wizard_for_exit.cancel_active();
+                    let _provider_runtime_shutdown_errors = provider_runtime_for_exit.shutdown();
                     let _errors = runtime_for_exit.lock().unwrap().cleanup_for_app_exit();
                     #[cfg(debug_assertions)]
                     for err in _errors {
@@ -516,6 +529,7 @@ fn check_ollama_connection(
 #[tauri::command]
 fn send_text(
     state: State<'_, CoreRuntimeOwner>,
+    provider_runtime: State<'_, ProviderRuntimeDispatcher>,
     input: SendTextInput,
 ) -> Result<SendTextOutput, PedelecError> {
     state
@@ -523,27 +537,41 @@ fn send_text(
         .lock()
         .unwrap()
         .authorize_thread_access(&input.thread_id, None)?;
-    start_provider_process(state.runtime(), input)
+    start_provider_process_with_dispatcher(
+        state.runtime(),
+        Arc::new(provider_runtime.inner().clone()),
+        input,
+    )
 }
 
 #[tauri::command]
 fn debug_send_text(
     state: State<'_, CoreRuntimeOwner>,
+    provider_runtime: State<'_, ProviderRuntimeDispatcher>,
     input: SendTextInput,
 ) -> Result<SendTextOutput, PedelecError> {
-    debug_start_provider_process(state.runtime(), input)
+    start_debug_provider_process_with_dispatcher(
+        state.runtime(),
+        Arc::new(provider_runtime.inner().clone()),
+        input,
+    )
 }
 
 fn debug_start_provider_process(
     runtime: SharedCoreRuntime,
     input: SendTextInput,
 ) -> Result<SendTextOutput, PedelecError> {
-    start_debug_provider_process(runtime, input)
+    start_debug_provider_process_with_dispatcher(
+        runtime,
+        Arc::new(RejectPersistentRuntimeDispatcher),
+        input,
+    )
 }
 
 #[tauri::command]
 fn prepare_thread(
     state: State<'_, CoreRuntimeOwner>,
+    provider_runtime: State<'_, ProviderRuntimeDispatcher>,
     input: PrepareThreadInput,
 ) -> Result<PrepareThreadOutput, PedelecError> {
     state
@@ -551,7 +579,11 @@ fn prepare_thread(
         .lock()
         .unwrap()
         .authorize_thread_access(&input.thread_id, None)?;
-    prepare_provider_process(state.runtime(), input)
+    prepare_provider_process_with_dispatcher(
+        state.runtime(),
+        Arc::new(provider_runtime.inner().clone()),
+        input,
+    )
 }
 
 #[tauri::command]
@@ -570,6 +602,7 @@ fn submit_tool_result(
 #[tauri::command]
 fn end_thread(
     state: State<'_, CoreRuntimeOwner>,
+    provider_runtime: State<'_, ProviderRuntimeDispatcher>,
     input: EndThreadInput,
 ) -> Result<(), PedelecError> {
     state
@@ -577,15 +610,24 @@ fn end_thread(
         .lock()
         .unwrap()
         .authorize_thread_access(&input.thread_id, None)?;
-    state.runtime().lock().unwrap().end_thread(input)
+    end_thread_with_dispatcher(
+        state.runtime(),
+        Arc::new(provider_runtime.inner().clone()),
+        input,
+    )
 }
 
 #[tauri::command]
 fn monitor_end_thread(
     state: State<'_, CoreRuntimeOwner>,
+    provider_runtime: State<'_, ProviderRuntimeDispatcher>,
     input: EndThreadInput,
 ) -> Result<(), PedelecError> {
-    end_thread_from_monitor(&state.runtime(), input)
+    end_thread_from_monitor_with_dispatcher(
+        &state.runtime(),
+        Arc::new(provider_runtime.inner().clone()),
+        input,
+    )
 }
 
 fn end_thread_from_monitor(
@@ -595,10 +637,34 @@ fn end_thread_from_monitor(
     runtime.lock().unwrap().end_thread(input)
 }
 
+fn end_thread_from_monitor_with_dispatcher(
+    runtime: &SharedCoreRuntime,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    input: EndThreadInput,
+) -> Result<(), PedelecError> {
+    end_thread_with_dispatcher(Arc::clone(runtime), persistent_dispatcher, input)
+}
+
 fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRuntime) {
-    let event_rx = runtime.lock().unwrap().subscribe_all_threads();
+    let (event_rx, diagnostic_rx) = {
+        let mut runtime = runtime.lock().unwrap();
+        (
+            runtime.subscribe_all_threads(),
+            runtime.subscribe_provider_runtime_diagnostics(),
+        )
+    };
+    let thread_event_app = app.clone();
     thread::spawn(move || {
         while let Ok(event) = event_rx.recv() {
+            let _ = thread_event_app.emit("thread_event", event);
+        }
+    });
+    thread::spawn(move || {
+        while let Ok(event) = diagnostic_rx.recv() {
+            // Keep the desktop monitor's existing event transport. Core IPC
+            // subscribers only receive semantic ThreadEvents; these
+            // runtime-lifetime diagnostics are desktop-only and may be
+            // thread-routable or global.
             let _ = app.emit("thread_event", event);
         }
     });
@@ -792,6 +858,7 @@ mod debug_send_text_tests {
             },
             ProviderAdapterState {
                 provider_session_id: None,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message: false,
             },

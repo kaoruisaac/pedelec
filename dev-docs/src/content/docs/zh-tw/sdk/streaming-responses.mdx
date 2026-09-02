@@ -1,22 +1,37 @@
 ---
 title: 串流回應
-description: 累積 chat delta、依 turn 與 session 分組、安全 unsubscribe，並避免常見 streaming UI 錯誤。
+description: 使用 best-effort chat delta 即時更新 UI，同時把完成的 assistant message 當成權威輸出。
 sidebar:
   order: 5
 ---
 
-`session.onChat()` 會在 active user turn 中接收 incremental assistant text。
+Pedelec 將 assistant output 分成兩個 callback：`session.onChat()` 接收完成的 logical assistant message；`session.onChatDelta()` 則在 Provider 提供真實增量串流時接收 best-effort incremental text。
+
+不要把 delta 當成權威的完成回應。Provider 可能只提供完成訊息，也可能對同一份 logical output 同時提供 deltas 與 completed message。
 
 ## Signature
 
 ```ts
-const unsubscribe = session.onChat((text, ctx) => {
-  // text 是一個 delta
+const offChat = session.onChat((text, ctx) => {
+  // text 是一個完整的 logical assistant message
+  // ctx.type === "chat_message"
+});
+
+const offChatDelta = session.onChatDelta((delta, ctx) => {
+  // delta 是一個 incremental fragment
+  // ctx.type === "chat_delta"
 });
 ```
 
 ```ts
 type ChatEventContext = PedelecEventContext & {
+  type: "chat_message";
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+
+type ChatDeltaEventContext = PedelecEventContext & {
   type: "chat_delta";
   turnId: string;
   turnStartedAt: number;
@@ -24,32 +39,46 @@ type ChatEventContext = PedelecEventContext & {
 };
 ```
 
-Delta 可能是一個字、標點、數個句子或其他任意 chunk。Chunk boundary 沒有語意。
+Delta 可能只有幾個字元、標點、一個詞或更大的 chunk。Chunk boundary 沒有語意。Pedelec 會保留 Provider 傳來的 delta，不會因為後續 completed message 多了文字，就自行補出缺少的 suffix delta。
 
-## 累積一個 response
+## 累積一個即時 response
+
+如果 UI 要在 Provider 還在生成時就更新畫面，使用 `onChatDelta()`：
 
 ```ts
 let assistantText = "";
 
-const offChat = session.onChat((delta) => {
+const offChatDelta = session.onChatDelta((delta) => {
   assistantText += delta;
   renderAssistantMessage(assistantText);
 });
 
 await session.sendText("Explain this screen.");
-offChat();
+offChatDelta();
 ```
 
 不要每個 delta 都建立一個 message bubble。
 
 ```ts
 // 錯誤：會產生大量極短訊息。
-session.onChat((delta) => {
+session.onChatDelta((delta) => {
   messages.push({ role: "assistant", text: delta });
 });
 ```
 
-每個 turn 建立一個 assistant message，再 append delta。
+每個 turn 建立一個 live assistant message，再 append delta。
+
+## 以完成訊息作為權威結果
+
+如果應用程式需要 Provider 的完成語意輸出，直接訂閱 `onChat()`：
+
+```ts
+session.onChat((text) => {
+  saveCompletedAssistantMessage(text);
+});
+```
+
+Delta delivery 是 best-effort，而且依 Provider 能力而定。不要把 completed message 與已累積 delta 的差異視為「漏掉、應該補發」的 delta。
 
 ## 依 turn 分組
 
@@ -63,7 +92,7 @@ type AssistantMessage = {
 
 const messages = new Map<string, AssistantMessage>();
 
-session.onChat((delta, ctx) => {
+session.onChatDelta((delta, ctx) => {
   const key = `${ctx.sessionId}:${ctx.turnId}`;
   const current = messages.get(key) ?? {
     id: key,
@@ -90,8 +119,12 @@ session.onChat((delta, ctx) => {
 即使 handler 已附著在特定 session，每個 callback 仍包含 `ctx.sessionId`，方便 generic store 與 logging。
 
 ```ts
-session.onChat((delta, ctx) => {
+session.onChatDelta((delta, ctx) => {
   transcriptStore.append(ctx.sessionId, ctx.turnId, delta);
+});
+
+session.onChat((text, ctx) => {
+  transcriptStore.commit(ctx.sessionId, ctx.turnId, text);
 });
 ```
 
@@ -114,7 +147,7 @@ Delta 很頻繁時可能造成過多 framework render。先確保 correctness，
 let buffer = "";
 let scheduled = false;
 
-session.onChat((delta) => {
+session.onChatDelta((delta) => {
   buffer += delta;
   if (scheduled) return;
 
@@ -126,17 +159,19 @@ session.onChat((delta) => {
 });
 ```
 
-不要丟失最後文字。使用 batching 時，可在 `sendText()` completion 強制最後一次 render。
+如果 Provider 提供 completed message，`onChat()` 是校正最終 rendered text 的權威來源。`sendText()` completion 仍由一般 turn completion/status events 驅動，不由任一 chat callback 決定。
 
 ## Unsubscribe 與 component cleanup
 
 每個 registration 都回傳 cleanup function：
 
 ```ts
-const offChat = session.onChat(handleDelta);
+const offChat = session.onChat(handleCompletedMessage);
+const offChatDelta = session.onChatDelta(handleDelta);
 
 onComponentCleanup(() => {
   offChat();
+  offChatDelta();
 });
 ```
 
@@ -146,26 +181,12 @@ Component 重複 mount 卻不 cleanup，會造成 duplicate append 與 memory gr
 
 ## Error 與 completion boundary
 
-沒有專用的「message complete」callback。請用 `sendText()` promise 或 status 回到 `idle` 作為 turn boundary。
+`onChat()` 是 completed-message callback，但不會決定 `sendText()` 是否 resolve。Turn completion 仍由 `done` / `idle` 與一般 error/ended events 驅動。
 
-```ts
-let text = "";
-const off = session.onChat((delta) => (text += delta));
-
-try {
-  await session.sendText(prompt);
-  saveCompletedAssistantMessage(text);
-} catch (error) {
-  saveInterruptedAssistantMessage(text, error);
-} finally {
-  off();
-}
-```
-
-失敗 turn 仍可能已輸出 partial text。產品需決定保留、標記 interrupted 或丟棄。
+失敗 turn 仍可能已輸出 partial deltas。產品需決定保留、標記 interrupted 或丟棄這份 live partial response。SDK contract 不會從 deltas 合成 completed message。
 
 ## HTML 與 Markdown safety
 
-Delta 是 provider 產生的 plain text。若將累積內容 render 成 Markdown 或 HTML，必須使用和其他 untrusted model output 相同的 sanitization 與 CSP。不要未經可信 sanitizer 直接放進 `innerHTML`。
+Assistant messages 與 deltas 都是 provider 產生的 plain text。若將內容 render 成 Markdown 或 HTML，必須使用和其他 untrusted model output 相同的 sanitization 與 CSP。不要未經可信 sanitizer 直接放進 `innerHTML`。
 
 下一頁：[Session 狀態與 Events](./status-and-events/)。

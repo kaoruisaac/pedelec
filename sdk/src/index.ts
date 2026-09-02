@@ -254,6 +254,13 @@ export type PedelecEventContext = {
 const MAX_ASSET_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 export type ChatEventContext = PedelecEventContext & {
+  type: "chat_message";
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+
+export type ChatDeltaEventContext = PedelecEventContext & {
   type: "chat_delta";
   turnId: string;
   turnStartedAt: number;
@@ -295,6 +302,13 @@ type ResponseMessage = {
 type SessionEvent =
   | {
       type: "chat_delta";
+      channelId: string;
+      sessionId: string;
+      seq?: number;
+      text: string;
+    }
+  | {
+      type: "chat_message";
       channelId: string;
       sessionId: string;
       seq?: number;
@@ -380,6 +394,7 @@ type EventDispatchMeta = {
 };
 
 type ChatHandler = (text: string, ctx: ChatEventContext) => void;
+type ChatDeltaHandler = (text: string, ctx: ChatDeltaEventContext) => void;
 type GenericToolHandler<TToolName extends string = string> = (
   tool: TToolName,
   args: unknown,
@@ -981,6 +996,7 @@ export class PedelecSession<TToolName extends string = string> {
   private inlineToolHandlers = new Map<string, ToolSpecificHandler>();
   private readonly namedToolHandlers = new Map<string, ToolSpecificHandler>();
   private readonly chatHandlers = new Set<ChatHandler>();
+  private readonly chatDeltaHandlers = new Set<ChatDeltaHandler>();
   private readonly errorHandlers = new Set<ErrorHandler>();
   private readonly statusHandlers = new Set<StatusHandler>();
   private readonly endedHandlers = new Set<EndedHandler>();
@@ -1090,6 +1106,11 @@ export class PedelecSession<TToolName extends string = string> {
   onChat(handler: ChatHandler): () => void {
     this.chatHandlers.add(handler);
     return () => this.chatHandlers.delete(handler);
+  }
+
+  onChatDelta(handler: ChatDeltaHandler): () => void {
+    this.chatDeltaHandlers.add(handler);
+    return () => this.chatDeltaHandlers.delete(handler);
   }
 
   onTool(handler: GenericToolHandler<TToolName>): () => void;
@@ -1243,6 +1264,16 @@ export class PedelecSession<TToolName extends string = string> {
   handleEvent(event: SessionEvent, meta: EventDispatchMeta = { source: "sdk" }): void {
     if (event.type === "chat_delta") {
       const turn = this.requireActiveTurn("chat_delta", meta);
+      if (!turn) return;
+      if (turn.kind === "prepare") return;
+      for (const handler of this.chatDeltaHandlers) {
+        handler(event.text, this.createChatDeltaContext(meta, turn));
+      }
+      return;
+    }
+
+    if (event.type === "chat_message") {
+      const turn = this.requireActiveTurn("chat_message", meta);
       if (!turn) return;
       if (turn.kind === "prepare") return;
       for (const handler of this.chatHandlers) {
@@ -1449,7 +1480,7 @@ export class PedelecSession<TToolName extends string = string> {
     }
   }
 
-  private requireActiveTurn(type: "chat_delta" | "tool_call", meta: EventDispatchMeta): ActiveTurn | null {
+  private requireActiveTurn(type: "chat_delta" | "chat_message" | "tool_call", meta: EventDispatchMeta): ActiveTurn | null {
     if (this.activeTurn) return this.activeTurn;
 
     this.emitError(
@@ -1482,6 +1513,17 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   private createChatContext(meta: EventDispatchMeta, turn: ActiveTurn): ChatEventContext {
+    return {
+      ...this.createBaseContext(meta, turn),
+      type: "chat_message",
+      turnId: turn.turnId,
+      turnStartedAt: turn.turnStartedAt,
+      eventReceivedAt: meta.eventReceivedAt ?? Date.now(),
+      source: "core",
+    };
+  }
+
+  private createChatDeltaContext(meta: EventDispatchMeta, turn: ActiveTurn): ChatDeltaEventContext {
     return {
       ...this.createBaseContext(meta, turn),
       type: "chat_delta",
@@ -1540,6 +1582,7 @@ export class PedelecSession<TToolName extends string = string> {
 function isSessionEvent(message: PortMessage): message is SessionEvent {
   return (
     message.type === "chat_delta" ||
+    message.type === "chat_message" ||
     message.type === "status_changed" ||
     message.type === "tool_call" ||
     message.type === "done" ||

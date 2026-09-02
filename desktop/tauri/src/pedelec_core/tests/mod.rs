@@ -43,6 +43,11 @@ mod tests {
         assert!(instruction
             .contains("`.pedelec-runtime/assets/` is the shared App and Agent file directory"));
         assert!(!instruction.contains("`assets/` is the shared App and Agent file directory"));
+        assert!(instruction
+            .contains("pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool-name>"));
+        assert!(instruction.contains(
+            "pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool-name> '<json_args>'"
+        ));
     }
 
     #[test]
@@ -120,6 +125,8 @@ mod tests {
                 version: Some(ProviderVersion(vec![1, 2, 3])),
                 error: None,
                 bootstrap_capabilities: None,
+                app_server_capability: None,
+                acp_capability: None,
             },
         )]);
 
@@ -143,6 +150,93 @@ mod tests {
     }
 
     #[test]
+    fn codex_without_app_server_capability_is_unavailable_without_a_legacy_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_path = test_codex_path(temp.path(), false);
+        let providers = list_provider_infos(Some(provider_path.clone()));
+        let codex = providers
+            .iter()
+            .find(|provider| provider.code == ProviderCode::Codex)
+            .unwrap();
+
+        assert!(codex.scanned);
+        assert_eq!(codex.version.as_deref(), Some("9.9.9"));
+        assert!(!codex.available);
+        assert!(codex
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("app-server")));
+
+        let mut runtime = CoreRuntime {
+            provider_path_value_override: Some(provider_path),
+            ..CoreRuntime::new_for_application()
+        };
+        runtime.refresh_providers();
+        let error = runtime
+            .provider_executable_path(&ProviderCode::Codex)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_TERMINAL_UNAVAILABLE);
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("appServerCapability")),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            runtime.provider_execution_family(&ProviderCode::Codex),
+            ProviderExecutionFamily::PersistentRuntime
+        );
+    }
+
+    #[test]
+    fn application_runtime_routes_codex_opencode_and_cursor_persistently() {
+        let runtime = CoreRuntime::new_for_application();
+        assert_eq!(
+            runtime.provider_execution_family(&ProviderCode::Codex),
+            ProviderExecutionFamily::PersistentRuntime
+        );
+        assert_eq!(
+            runtime.provider_execution_family(&ProviderCode::OpenCode),
+            ProviderExecutionFamily::PersistentRuntime
+        );
+        assert_eq!(
+            runtime.provider_execution_family(&ProviderCode::Cursor),
+            ProviderExecutionFamily::PersistentRuntime
+        );
+    }
+
+    #[test]
+    fn provider_runtime_diagnostics_are_serialized_and_bounded() {
+        let mut runtime = CoreRuntime::new();
+        let receiver = runtime.subscribe_provider_runtime_diagnostics();
+
+        for generation in 0..520 {
+            runtime.record_provider_runtime_diagnostic(
+                ProviderRuntimeDiagnostic::ProviderRuntimeStarted {
+                    provider: ProviderCode::Codex,
+                    runtime_generation: generation,
+                    process_id: generation as u32,
+                },
+            );
+        }
+
+        let history = runtime.provider_runtime_diagnostic_history();
+        assert_eq!(history.len(), 512);
+        assert_eq!(history.first().unwrap().thread_id(), None);
+        assert_eq!(history.last().unwrap().thread_id(), None);
+        assert_eq!(
+            serde_json::to_value(history.last().unwrap()).unwrap()["type"],
+            json!("provider_runtime_started")
+        );
+        assert_eq!(
+            serde_json::to_value(history.last().unwrap()).unwrap()["runtimeGeneration"],
+            json!(519)
+        );
+        assert_eq!(receiver.try_iter().count(), 520);
+    }
+
+    #[test]
     fn provider_bootstrap_modes_cover_internal_defaults_and_probe_fallbacks() {
         let runtime = CoreRuntime::default();
         assert_eq!(
@@ -159,6 +253,8 @@ mod tests {
             version: Some(ProviderVersion(vec![1])),
             error: None,
             bootstrap_capabilities: None,
+            app_server_capability: None,
+            acp_capability: None,
         };
         assert_eq!(
             provider_bootstrap_capability_from_probe(
@@ -230,6 +326,8 @@ mod tests {
                 version: Some(ProviderVersion(version)),
                 error: None,
                 bootstrap_capabilities: None,
+                app_server_capability: None,
+                acp_capability: None,
             };
             assert_eq!(
                 provider_bootstrap_capability_from_probe(
@@ -498,7 +596,7 @@ mod tests {
         assert!(!start.command.args.iter().any(|arg| arg == "--last"));
         assert_provider_instruction_present(&start.command);
         assert!(start.command.stdin.ends_with("hello"));
-        assert_env(&start.command, "PEDELEC_THREAD_ID", "thread_codex_new");
+        assert_eq!(env_value(&start.command, "PEDELEC_THREAD_ID"), None);
         assert_env(&start.command, "PEDELEC_PROVIDER", "codex");
         assert_env(
             &start.command,
@@ -530,6 +628,8 @@ mod tests {
                 version: Some(ProviderVersion(vec![1, 2, 3])),
                 error: None,
                 bootstrap_capabilities: None,
+                app_server_capability: None,
+                acp_capability: None,
             },
         );
 
@@ -1360,6 +1460,8 @@ mod tests {
                 bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
                     privileged_bootstrap: ProviderBootstrapMode::AntigravityWorkspaceAgent,
                 }),
+                app_server_capability: None,
+                acp_capability: None,
             },
         );
         let workspace = runtime.thread_workspace_path(thread_id).unwrap();
@@ -1450,6 +1552,8 @@ mod tests {
                 bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
                     privileged_bootstrap: ProviderBootstrapMode::AntigravityWorkspaceAgent,
                 }),
+                app_server_capability: None,
+                acp_capability: None,
             },
         );
 
@@ -1498,6 +1602,8 @@ mod tests {
                 version: Some(ProviderVersion(vec![1, 1, 5])),
                 error: None,
                 bootstrap_capabilities: None,
+                app_server_capability: None,
+                acp_capability: None,
             },
         );
         let command = runtime
@@ -1556,6 +1662,7 @@ mod tests {
             second,
             ProviderAdapterState {
                 provider_session_id: None,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message: false,
             },
@@ -2459,7 +2566,7 @@ mod tests {
         assert_provider_instruction_present(&start.command);
         assert!(!start.command.args.iter().any(|arg| arg == message));
         assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
-        assert_env(&start.command, "PEDELEC_THREAD_ID", "thread_ollama_new");
+        assert_eq!(env_value(&start.command, "PEDELEC_THREAD_ID"), None);
         assert_env(&start.command, "PEDELEC_PROVIDER", "ollama");
         assert_env(&start.command, "OLLAMA_API_KEY", "ollama_test_key");
         assert!(!start
@@ -2542,7 +2649,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_resume_uses_provider_session_id_and_outer_thread_env() {
+    fn ollama_resume_uses_provider_session_id_without_thread_routing_env() {
         let temp = tempfile::tempdir().unwrap();
         let provider_session_id = "0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176";
         let mut runtime = runtime_with_provider_thread(
@@ -2580,7 +2687,7 @@ mod tests {
         assert_eq!(start.command.prompt, "continue");
         assert_eq!(start.command.stdin, "continue");
         assert_provider_instruction_absent(&start.command);
-        assert_env(&start.command, "PEDELEC_THREAD_ID", "thread_outer");
+        assert_eq!(env_value(&start.command, "PEDELEC_THREAD_ID"), None);
         assert_env(&start.command, "OLLAMA_API_KEY", "ollama_test_key");
         assert_ne!(provider_session_id, "thread_outer");
     }
@@ -2756,6 +2863,25 @@ mod tests {
 
         assert!(!cursor.available);
         assert_eq!(cursor.path, None);
+    }
+
+    #[test]
+    fn cursor_scan_requires_the_acp_entrypoint_without_legacy_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_path = test_cursor_path(temp.path(), false);
+        let providers = list_provider_infos(Some(provider_path));
+        let cursor = providers
+            .iter()
+            .find(|provider| provider.code == ProviderCode::Cursor)
+            .unwrap();
+
+        assert!(cursor.scanned);
+        assert_eq!(cursor.version.as_deref(), Some("9.9.9"));
+        assert!(!cursor.available);
+        assert!(cursor
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("acp")));
     }
 
     #[test]
@@ -4369,8 +4495,11 @@ mod tests {
 
         assert!(instruction.contains("[Pedelec Host Context]"));
         assert!(instruction.contains("[Pedelec App Tool Configuration]"));
-        assert!(instruction.contains("pedelec-cli tool-spec get_app_state"));
-        assert!(instruction.contains("pedelec-cli tool-call get_app_state '<json_args>'"));
+        assert!(instruction
+            .contains("pedelec-cli --thread-id thread_with_tools_md tool-spec get_app_state"));
+        assert!(instruction.contains(
+            "pedelec-cli --thread-id thread_with_tools_md tool-call get_app_state '<json_args>'"
+        ));
         assert!(!instruction.contains("[Pedelec Runtime Rules]"));
         assert!(!instruction
             .contains("All of the following content is executed under the Pedelec Runtime"));
@@ -4449,6 +4578,24 @@ mod tests {
         let stdout_value = serde_json::to_value(stdout_event).unwrap();
         assert_eq!(stdout_value["type"], json!("raw_stdout"));
         assert_eq!(stdout_value["threadId"], json!("thread_abc123"));
+
+        let delta_value = serde_json::to_value(ThreadEvent::AssistantDelta {
+            seq: 3,
+            thread_id: "thread_abc123".into(),
+            text: "hel".into(),
+        })
+        .unwrap();
+        assert_eq!(delta_value["type"], json!("assistant_delta"));
+        assert_eq!(delta_value["text"], json!("hel"));
+
+        let message_value = serde_json::to_value(ThreadEvent::AssistantMessage {
+            seq: 4,
+            thread_id: "thread_abc123".into(),
+            text: "hello".into(),
+        })
+        .unwrap();
+        assert_eq!(message_value["type"], json!("assistant_message"));
+        assert_eq!(message_value["text"], json!("hello"));
 
         let session_event = ThreadEvent::ProviderSessionIdUpdated {
             seq: 3,
@@ -6524,6 +6671,7 @@ mod tests {
             },
             ProviderAdapterState {
                 provider_session_id: None,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message: false,
             },
@@ -7384,13 +7532,84 @@ mod tests {
     }
 
     fn test_provider_path(root: &Path, program: &str) -> OsString {
+        if program == "codex" {
+            return test_codex_path(root, true);
+        }
         let bin_dir = root.join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
         #[cfg(windows)]
-        let program_name = format!("{program}.exe");
+        let program_name = format!("{program}.cmd");
         #[cfg(not(windows))]
         let program_name = program.to_string();
-        fs::write(bin_dir.join(program_name), b"fake provider").unwrap();
+        #[cfg(windows)]
+        let contents = "@echo off\necho 9.9.9\n";
+        #[cfg(not(windows))]
+        let contents = "#!/bin/sh\nprintf '9.9.9\\n'\n";
+        let path = bin_dir.join(program_name);
+        fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        env::join_paths([bin_dir]).unwrap()
+    }
+
+    fn test_codex_path(root: &Path, app_server_supported: bool) -> OsString {
+        let bin_dir = root.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        #[cfg(windows)]
+        let contents = if app_server_supported {
+            "@echo off\nif \"%1\"==\"app-server\" echo app-server\nif not \"%1\"==\"app-server\" echo 9.9.9\n"
+        } else {
+            "@echo off\necho 9.9.9\n"
+        };
+        #[cfg(not(windows))]
+        let contents = if app_server_supported {
+            "#!/bin/sh\nif [ \"$1\" = app-server ]; then printf 'app-server\\n'; else printf '9.9.9\\n'; fi\n"
+        } else {
+            "#!/bin/sh\nprintf '9.9.9\\n'\n"
+        };
+        #[cfg(windows)]
+        let program_name = "codex.cmd";
+        #[cfg(not(windows))]
+        let program_name = "codex";
+        let path = bin_dir.join(program_name);
+        fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        env::join_paths([bin_dir]).unwrap()
+    }
+
+    fn test_cursor_path(root: &Path, acp_supported: bool) -> OsString {
+        let bin_dir = root.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        #[cfg(windows)]
+        let contents = if acp_supported {
+            "@echo off\nif \"%1\"==\"acp\" echo acp\nif not \"%1\"==\"acp\" echo 9.9.9\n"
+        } else {
+            "@echo off\necho 9.9.9\n"
+        };
+        #[cfg(not(windows))]
+        let contents = if acp_supported {
+            "#!/bin/sh\nif [ \"$1\" = acp ]; then printf 'acp\\n'; else printf '9.9.9\\n'; fi\n"
+        } else {
+            "#!/bin/sh\nprintf '9.9.9\\n'\n"
+        };
+        #[cfg(windows)]
+        let program_name = "cursor-agent.cmd";
+        #[cfg(not(windows))]
+        let program_name = "cursor-agent";
+        let path = bin_dir.join(program_name);
+        fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         env::join_paths([bin_dir]).unwrap()
     }
 
@@ -7494,6 +7713,7 @@ mod tests {
             },
             ProviderAdapterState {
                 provider_session_id: None,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message: false,
             },
@@ -7673,6 +7893,7 @@ mod tests {
             },
             ProviderAdapterState {
                 provider_session_id,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message,
             },
@@ -7699,6 +7920,8 @@ mod tests {
                     bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
                         privileged_bootstrap,
                     }),
+                    app_server_capability: None,
+                    acp_capability: None,
                 },
             );
         }
@@ -7731,8 +7954,9 @@ mod tests {
         for value in [&command.prompt] {
             assert!(value.contains("[Pedelec Host Context]"));
             assert!(value.contains("[Pedelec App Tool Configuration]"));
-            assert!(value.contains("pedelec-cli tool-spec get_app_state"));
-            assert!(value.contains("pedelec-cli tool-call get_app_state '<json_args>'"));
+            assert!(value.contains("pedelec-cli --thread-id "));
+            assert!(value.contains(" tool-spec get_app_state"));
+            assert!(value.contains(" tool-call get_app_state '<json_args>'"));
             assert!(!value.contains("[Pedelec Runtime Rules]"));
             assert!(!value
                 .contains("All of the following content is executed under the Pedelec Runtime"));
@@ -7748,6 +7972,813 @@ mod tests {
             assert!(!value.contains("./skills/pedelec-cli.md"));
             assert!(!value.contains("pedelec-cli.md"));
         }
+    }
+
+    #[test]
+    fn legacy_send_intent_keeps_the_existing_command_spec() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_legacy_intent";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.test_provider_command = Some(CommandSpec {
+            program: "codex".into(),
+            args: vec!["exec".into()],
+            cwd: temp.path().to_path_buf(),
+            env: Vec::new(),
+            prompt: "prompt".into(),
+            stdin: "stdin".into(),
+        });
+
+        let start = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "legacy".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            start.intent,
+            ProviderExecutionIntent::LegacyCommand {
+                command: CommandSpec { .. },
+                purpose: RunningProviderProcessPurpose::UserMessage,
+            }
+        ));
+        assert_eq!(
+            runtime.thread_status(thread_id),
+            Some(ThreadStatus::Running)
+        );
+    }
+
+    #[test]
+    fn persistent_send_returns_a_semantic_intent_without_a_command_spec() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_intent";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+
+        let start = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "hello persistent".into(),
+            })
+            .unwrap();
+        match start.intent {
+            ProviderExecutionIntent::PersistentRuntime {
+                operation: PersistentRuntimeOperation::StartTurn { turn },
+            } => {
+                assert_eq!(turn.thread_id, thread_id);
+                assert_eq!(turn.message, "hello persistent");
+                assert!(turn.local_turn_id.starts_with("local_"));
+            }
+            other => panic!("expected persistent turn intent, got {other:?}"),
+        }
+        assert_eq!(
+            runtime.thread_status(thread_id),
+            Some(ThreadStatus::Running)
+        );
+        assert_eq!(runtime.active_process_id(thread_id), None);
+    }
+
+    #[test]
+    fn persistent_codex_prepare_maps_typed_session_config_and_native_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_prepare_config";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .effort_args = vec![
+            "-m".into(),
+            "gpt-test".into(),
+            "-c".into(),
+            "model_reasoning_effort=\"xhigh\"".into(),
+        ];
+
+        let start = runtime
+            .begin_prepare_thread_intent(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        let ProviderExecutionIntent::PersistentRuntime {
+            operation: PersistentRuntimeOperation::EnsureSession { session },
+        } = start.intent.unwrap()
+        else {
+            panic!("expected a persistent Codex ensure-session intent");
+        };
+
+        assert_eq!(session.model.as_deref(), Some("gpt-test"));
+        assert_eq!(session.reasoning_effort, Some(CodexReasoningEffort::XHigh));
+        assert_eq!(session.approval_policy, PersistentApprovalPolicy::Never);
+        assert_eq!(session.sandbox_policy, PersistentSandboxPolicy::ReadOnly);
+        assert_eq!(
+            session.config.get("skills.include_instructions"),
+            Some(&json!(false))
+        );
+        assert!(session
+            .host_instructions
+            .contains("pedelec-cli --thread-id thread_persistent_prepare_config tool-spec"));
+        assert!(session
+            .host_instructions
+            .contains("pedelec-cli --thread-id thread_persistent_prepare_config tool-call"));
+        assert!(!session.host_instructions.contains("[Session Preparation]"));
+        assert!(!session.host_instructions.contains("PEDELEC_PREPARED"));
+    }
+
+    #[test]
+    fn persistent_opencode_prepare_send_and_end_are_semantic_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_opencode";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::OpenCode,
+            None,
+            None,
+        );
+        runtime.use_persistent_provider_for_test(ProviderCode::OpenCode);
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .effort_args = vec!["--model".into(), "openai/gpt-5".into()];
+
+        let prepare = runtime
+            .begin_prepare_thread_intent(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        let Some(ProviderExecutionIntent::PersistentRuntime {
+            operation: PersistentRuntimeOperation::EnsureSession { session },
+        }) = prepare.intent
+        else {
+            panic!("expected OpenCode EnsureSession");
+        };
+        assert_eq!(session.provider, ProviderCode::OpenCode);
+        assert_eq!(session.model.as_deref(), Some("openai/gpt-5"));
+        assert!(session.config.is_empty());
+        assert!(!session.host_instructions.contains("PEDELEC_PREPARED"));
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::SessionReady {
+                thread_id: thread_id.into(),
+                provider_session_id: "open-session".into(),
+            })
+            .unwrap();
+
+        let send = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "first user task".into(),
+            })
+            .unwrap();
+        let ProviderExecutionIntent::PersistentRuntime {
+            operation: PersistentRuntimeOperation::StartTurn { turn },
+        } = send.intent
+        else {
+            panic!("expected OpenCode StartTurn");
+        };
+        assert_eq!(turn.message, "first user task");
+        assert!(!turn.message.contains("Pedelec Host"));
+
+        let end = runtime
+            .begin_end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            end.execution,
+            EndThreadExecutionIntent::PersistentRuntime(
+                PersistentRuntimeOperation::EndSession { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn persistent_cursor_prepare_send_and_end_are_semantic_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_cursor";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Cursor,
+            None,
+            Some("cursor-model".into()),
+        );
+        runtime.use_persistent_provider_for_test(ProviderCode::Cursor);
+
+        let prepare = runtime
+            .begin_prepare_thread_intent(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        let Some(ProviderExecutionIntent::PersistentRuntime {
+            operation: PersistentRuntimeOperation::EnsureSession { session },
+        }) = prepare.intent
+        else {
+            panic!("expected Cursor EnsureSession");
+        };
+        assert_eq!(session.provider, ProviderCode::Cursor);
+        assert_eq!(session.model.as_deref(), Some("cursor-model"));
+        assert!(!session.host_instructions.contains("PEDELEC_PREPARED"));
+
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::SessionReady {
+                thread_id: thread_id.into(),
+                provider_session_id: "cursor-session".into(),
+            })
+            .unwrap();
+        let send = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "first Cursor task".into(),
+            })
+            .unwrap();
+        let ProviderExecutionIntent::PersistentRuntime {
+            operation: PersistentRuntimeOperation::StartTurn { turn },
+        } = send.intent
+        else {
+            panic!("expected Cursor StartTurn");
+        };
+        assert_eq!(turn.message, "first Cursor task");
+        assert_eq!(turn.provider_session_id, Some("cursor-session".into()));
+
+        let end = runtime
+            .begin_end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            end.execution,
+            EndThreadExecutionIntent::PersistentRuntime(
+                PersistentRuntimeOperation::EndSession { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn normalized_persistent_completion_emits_done_and_returns_to_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_complete";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        let events = runtime.event_bus.subscribe(thread_id);
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "hello".into(),
+            })
+            .unwrap();
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnStarted {
+                thread_id: thread_id.into(),
+                provider_turn_id: "provider-turn-1".into(),
+            })
+            .unwrap();
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::AssistantDelta {
+                thread_id: thread_id.into(),
+                provider_turn_id: Some("provider-turn-1".into()),
+                text: "ans".into(),
+            })
+            .unwrap();
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::AssistantMessage {
+                thread_id: thread_id.into(),
+                provider_turn_id: Some("provider-turn-1".into()),
+                text: "answer".into(),
+            })
+            .unwrap();
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.into(),
+                provider_turn_id: Some("provider-turn-1".into()),
+                success: true,
+                error: None,
+            })
+            .unwrap();
+
+        let emitted = collect_available_core_events(&events);
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+        assert_eq!(
+            runtime
+                .provider_state(thread_id)
+                .unwrap()
+                .active_provider_turn_id,
+            None
+        );
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            ThreadEvent::AssistantDelta { text, .. } if text == "ans"
+        )));
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            ThreadEvent::AssistantMessage { text, .. } if text == "answer"
+        )));
+        assert!(emitted
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::Done { .. })));
+    }
+
+    #[test]
+    fn normalized_persistent_failure_moves_user_turn_to_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_failure";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        let events = runtime.event_bus.subscribe(thread_id);
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "fail".into(),
+            })
+            .unwrap();
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.into(),
+                provider_turn_id: None,
+                success: false,
+                error: Some(PedelecError::new(
+                    error_codes::PROVIDER_REQUEST_FAILED,
+                    "provider rejected turn",
+                )),
+            })
+            .unwrap();
+
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Error));
+        assert_eq!(
+            runtime
+                .provider_state(thread_id)
+                .unwrap()
+                .active_provider_turn_id,
+            None
+        );
+        assert!(collect_available_core_events(&events).iter().any(|event| matches!(
+            event,
+            ThreadEvent::Error { error, .. } if error.code == error_codes::PROVIDER_REQUEST_FAILED
+        )));
+    }
+
+    #[test]
+    fn completion_while_stopping_does_not_return_to_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_stopping";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "stop me".into(),
+            })
+            .unwrap();
+        let turn_id = runtime
+            .provider_state(thread_id)
+            .unwrap()
+            .active_provider_turn_id
+            .clone();
+        let end = runtime
+            .begin_end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            end.execution,
+            EndThreadExecutionIntent::PersistentRuntime(_)
+        ));
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.into(),
+                provider_turn_id: turn_id,
+                success: true,
+                error: None,
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.thread_status(thread_id),
+            Some(ThreadStatus::Stopping)
+        );
+        runtime.finish_end_thread(thread_id).unwrap();
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Ended));
+    }
+
+    #[test]
+    fn persistent_prepare_failure_returns_to_idle_without_error_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_prepare";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        let events = runtime.event_bus.subscribe(thread_id);
+        let start = runtime
+            .begin_prepare_thread_intent(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            start.intent,
+            Some(ProviderExecutionIntent::PersistentRuntime {
+                operation: PersistentRuntimeOperation::EnsureSession { .. }
+            })
+        ));
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
+                thread_id: thread_id.into(),
+                provider_turn_id: None,
+                error: PedelecError::new(
+                    error_codes::PROVIDER_REQUEST_FAILED,
+                    "session creation failed",
+                ),
+            })
+            .unwrap();
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+        assert!(collect_available_core_events(&events)
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::Error { .. })));
+    }
+
+    #[test]
+    fn multiple_persistent_threads_can_run_but_each_thread_is_single_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            "thread_persistent_a",
+            ProviderCode::Codex,
+            None,
+            None,
+        );
+        let second = "thread_persistent_b";
+        let second_path = temp.path().join("workspace").join(second);
+        fs::create_dir_all(workspace_logs_root(&second_path)).unwrap();
+        let now = chrono::Utc::now();
+        runtime.thread_manager.insert_thread(
+            ThreadState {
+                thread_id: second.into(),
+                provider: ProviderCode::Codex,
+                effort_level: EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: second_path,
+                skills: Vec::new(),
+                status: ThreadStatus::Idle,
+                process_id: None,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: None,
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+                last_process_id: None,
+                has_user_message: false,
+            },
+        );
+        runtime
+            .tool_registry
+            .insert(second, ToolRegistry::default());
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        for thread_id in ["thread_persistent_a", second] {
+            runtime
+                .begin_send_text_intent(SendTextInput {
+                    thread_id: thread_id.into(),
+                    message: "run".into(),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            runtime.thread_status("thread_persistent_a"),
+            Some(ThreadStatus::Running)
+        );
+        assert_eq!(runtime.thread_status(second), Some(ThreadStatus::Running));
+        let busy = runtime.begin_send_text_intent(SendTextInput {
+            thread_id: "thread_persistent_a".into(),
+            message: "duplicate".into(),
+        });
+        assert_eq!(busy.unwrap_err().code, error_codes::THREAD_BUSY);
+    }
+
+    #[test]
+    fn ended_debug_send_reactivates_resources_and_returns_persistent_intent() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_debug";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Codex,
+            Some("provider-session".into()),
+            None,
+        );
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        assert!(runtime.tool_registry.get(thread_id).is_none());
+        let start = runtime
+            .begin_debug_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "diagnose".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            start.intent,
+            ProviderExecutionIntent::PersistentRuntime {
+                operation: PersistentRuntimeOperation::StartTurn { .. }
+            }
+        ));
+        assert!(runtime.tool_registry.get(thread_id).is_some());
+        assert_eq!(
+            runtime.thread_status(thread_id),
+            Some(ThreadStatus::Running)
+        );
+    }
+
+    #[test]
+    fn normal_persistent_send_rejects_ended_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_normal_ended";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        let error = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "must reject".into(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::THREAD_ENDED);
+    }
+
+    #[test]
+    fn persistent_runtime_disconnect_fanout_preserves_idle_and_fails_active_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let idle_id = "thread_runtime_idle";
+        let running_id = "thread_runtime_running";
+        let waiting_id = "thread_runtime_waiting";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            idle_id,
+            ProviderCode::Codex,
+            Some("provider-idle".into()),
+            None,
+        );
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+
+        let base_thread = runtime.thread_manager.thread(idle_id).unwrap().clone();
+        let base_provider_state = runtime
+            .thread_manager
+            .provider_state(idle_id)
+            .unwrap()
+            .clone();
+        for (thread_id, status, provider_session_id) in [
+            (running_id, ThreadStatus::Running, "provider-running"),
+            (
+                waiting_id,
+                ThreadStatus::WaitingToolResult,
+                "provider-waiting",
+            ),
+        ] {
+            let mut thread = base_thread.clone();
+            thread.thread_id = thread_id.into();
+            thread.workspace_path = temp.path().join("workspace").join(thread_id);
+            thread.status = status;
+            fs::create_dir_all(workspace_logs_root(&thread.workspace_path)).unwrap();
+            let mut provider_state = base_provider_state.clone();
+            provider_state.provider_session_id = Some(provider_session_id.into());
+            provider_state.active_provider_turn_id = Some(format!("turn-{thread_id}"));
+            provider_state.has_user_message = true;
+            runtime.thread_manager.insert_thread(thread, provider_state);
+        }
+        runtime
+            .pending_provider_operations
+            .insert(running_id.into(), PendingProviderOperation::UserTurn);
+        runtime
+            .pending_provider_operations
+            .insert(waiting_id.into(), PendingProviderOperation::UserTurn);
+        let waiting_tool_wait = match runtime
+            .tool_request_broker
+            .begin_or_join(
+                waiting_id.into(),
+                "shell".into(),
+                json!({"command":"pwd"}),
+                1000,
+            )
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            ToolInvocationRegistration::Joined(_) => panic!("test request unexpectedly joined"),
+            ToolInvocationRegistration::Replayed(_) => {
+                panic!("test request unexpectedly replayed")
+            }
+        };
+        let events = runtime.subscribe_all_threads();
+
+        runtime.fail_persistent_runtime(
+            ProviderCode::Codex,
+            PedelecError::new(
+                error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+                "runtime disconnected in test",
+            ),
+        );
+
+        assert_eq!(runtime.thread_status(idle_id), Some(ThreadStatus::Idle));
+        assert_eq!(
+            runtime
+                .provider_state(idle_id)
+                .unwrap()
+                .provider_session_id
+                .as_deref(),
+            Some("provider-idle")
+        );
+        assert_eq!(
+            runtime
+                .provider_state(idle_id)
+                .unwrap()
+                .active_provider_turn_id,
+            None
+        );
+        for thread_id in [running_id, waiting_id] {
+            assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Error));
+            assert_eq!(
+                runtime
+                    .provider_state(thread_id)
+                    .unwrap()
+                    .active_provider_turn_id,
+                None
+            );
+        }
+        assert!(!runtime.pending_provider_operations.contains_key(running_id));
+        assert!(!runtime.pending_provider_operations.contains_key(waiting_id));
+        assert!(!runtime
+            .tool_request_broker
+            .has_pending_for_thread(waiting_id));
+        assert!(matches!(
+            waiting_tool_wait.result_rx.recv().unwrap(),
+            ToolInvocationOutcome::CoreError(error)
+                if error.code == error_codes::PROVIDER_RUNTIME_DISCONNECTED
+        ));
+        let emitted = collect_available_core_events(&events);
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            ThreadEvent::Error { thread_id, error, .. }
+                if thread_id == running_id
+                    && error.code == error_codes::PROVIDER_RUNTIME_DISCONNECTED
+        )));
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            ThreadEvent::Error { thread_id, error, .. }
+                if thread_id == waiting_id
+                    && error.code == error_codes::PROVIDER_RUNTIME_DISCONNECTED
+        )));
+        assert!(!emitted.iter().any(|event| matches!(
+            event,
+            ThreadEvent::Error { thread_id, .. } if thread_id == idle_id
+        )));
+    }
+
+    #[test]
+    fn runtime_disconnect_during_prepare_returns_to_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_runtime_prepare";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        runtime
+            .begin_prepare_thread_intent(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        let error = PedelecError::new(
+            error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+            "runtime disconnected during prepare",
+        );
+
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::RuntimeDisconnected {
+                thread_id: Some(thread_id.into()),
+                error,
+            })
+            .unwrap();
+
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+        assert!(!runtime.pending_provider_operations.contains_key(thread_id));
+    }
+
+    #[test]
+    fn interrupted_completion_while_stopping_does_not_return_to_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_runtime_stopping";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Codex,
+            Some("provider-session".into()),
+            None,
+        );
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "active".into(),
+            })
+            .unwrap();
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnStarted {
+                thread_id: thread_id.into(),
+                provider_turn_id: "provider-turn".into(),
+            })
+            .unwrap();
+        let end = runtime
+            .begin_end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.thread_status(thread_id),
+            Some(ThreadStatus::Stopping)
+        );
+
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.into(),
+                provider_turn_id: Some("provider-turn".into()),
+                success: false,
+                error: Some(PedelecError::new(
+                    error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+                    "interrupted in test",
+                )),
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.thread_status(thread_id),
+            Some(ThreadStatus::Stopping)
+        );
+        assert_eq!(
+            runtime
+                .provider_state(thread_id)
+                .unwrap()
+                .active_provider_turn_id,
+            None
+        );
+
+        runtime.finish_end_thread(&end.thread_id).unwrap();
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Ended));
+    }
+
+    #[test]
+    fn failed_debug_dispatch_restores_ended_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_debug_rollback";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Codex,
+            Some("provider-session".into()),
+            None,
+        );
+        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        runtime
+            .begin_debug_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "diagnose".into(),
+            })
+            .unwrap();
+        assert!(runtime.tool_registry.get(thread_id).is_some());
+
+        runtime.fail_provider_execution_dispatch(
+            thread_id,
+            ProviderExecutionOperationKind::UserTurn,
+            PedelecError::new(
+                error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+                "debug runtime unavailable",
+            ),
+        );
+
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Ended));
+        assert!(runtime.tool_registry.get(thread_id).is_none());
+        assert!(!runtime.debug_reactivating_threads.contains(thread_id));
+        assert_eq!(runtime.event_log_path(thread_id), None);
+        assert_eq!(
+            runtime
+                .provider_state(thread_id)
+                .unwrap()
+                .provider_session_id
+                .as_deref(),
+            Some("provider-session")
+        );
     }
 
     fn collect_available_core_events(event_rx: &mpsc::Receiver<ThreadEvent>) -> Vec<ThreadEvent> {

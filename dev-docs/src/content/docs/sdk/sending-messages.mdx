@@ -68,7 +68,7 @@ Important behavior:
 - Concurrent calls share the same in-flight preparation promise.
 - Calling it while a user turn is active rejects with `SESSION_BUSY`.
 - Calling it after session end rejects with `SESSION_ENDED`.
-- Assistant text emitted during the preparation turn is not delivered through `onChat()`.
+- Assistant output emitted during the preparation turn is not delivered through either `onChat()` or `onChatDelta()`.
 - Status events can still show the preparation lifecycle.
 
 ```ts
@@ -97,22 +97,22 @@ The SDK performs these steps:
 3. creates SDK-local turn metadata;
 4. sets status to `running` with `ctx.source === "sdk"`;
 5. sends `send_text` through the bridge;
-6. dispatches streamed chat, status, and tool events;
+6. dispatches completed chat messages, optional chat deltas, status, and tool events;
 7. resolves when a `done` event or `idle` status completes the active turn;
 8. rejects if the turn errors, the session ends, or transport setup fails.
 
 ## Completion semantics
 
-`sendText()` does not return the assistant text. Read text through `onChat()`.
+`sendText()` does not return the assistant text. Use `onChat()` for completed logical messages; use `onChatDelta()` separately only when you need live incremental rendering.
 
 ```ts
-let output = "";
-const offChat = session.onChat((delta) => {
-  output += delta;
+const completedMessages: string[] = [];
+const offChat = session.onChat((text) => {
+  completedMessages.push(text);
 });
 
 await session.sendText("Write a title.");
-console.log("Final accumulated output:", output);
+console.log("Completed assistant messages:", completedMessages);
 offChat();
 ```
 

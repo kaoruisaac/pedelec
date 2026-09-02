@@ -69,7 +69,7 @@ Behavior:
 - concurrent prepare calls share one promise;
 - rejects with `SESSION_BUSY` during an active user turn;
 - rejects with `SESSION_ENDED` after end;
-- hides preparation chat deltas from `onChat()`;
+- hides preparation assistant messages from `onChat()` and deltas from `onChatDelta()`;
 - can emit status/error events;
 - resolves only after Desktop verifies the provider's exact `PEDELEC_PREPARED` acknowledgment (surrounding whitespace is allowed);
 - is not required before `sendText()`.
@@ -90,7 +90,7 @@ Starts one user turn.
 
 The promise resolves after a completion/idle event and rejects when the turn fails, the session ends, or another turn is already active.
 
-Text output is delivered through `onChat()`.
+Completed assistant messages are delivered through `onChat()`. Best-effort incremental fragments, when the provider exposes them, are delivered separately through `onChatDelta()`.
 
 ```ts
 await session.sendText("Analyze the current page.");
@@ -158,15 +158,33 @@ onChat(
 ): () => void
 ```
 
-Registers an incremental text handler and returns an unsubscribe function.
+Registers a completed assistant-message handler and returns an unsubscribe function. Each `text` value is one complete logical provider message.
 
 ```ts
-const off = session.onChat((delta, ctx) => {
-  transcript.append(ctx.turnId, delta);
+const off = session.onChat((text, ctx) => {
+  transcript.addCompleted(ctx.turnId, text);
 });
 ```
 
 Preparation output is not delivered to chat handlers.
+
+## `onChatDelta()`
+
+```ts
+onChatDelta(
+  handler: (text: string, ctx: ChatDeltaEventContext) => void,
+): () => void
+```
+
+Registers a best-effort incremental assistant-text handler. Delta delivery depends on the provider, chunk boundaries have no semantic meaning, and completed messages do not imply synthetic missing deltas.
+
+```ts
+const off = session.onChatDelta((delta, ctx) => {
+  transcript.appendLive(ctx.turnId, delta);
+});
+```
+
+Preparation output is not delivered to delta handlers.
 
 ## `onTool()`
 

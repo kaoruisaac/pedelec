@@ -1,16 +1,22 @@
 use encoding_rs::Encoding;
 use pedelec_core::{
     error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
-    CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError,
-    PrepareThreadInput, PrepareThreadOutput, ProviderProcessTermination,
-    RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime, SubmitToolResultInput,
-    SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolInvocationOutcome,
+    CreateAssetUploadInput, CreateThreadInput, EndThreadExecutionIntent, EndThreadInput,
+    ListAssetsInput, PedelecError, PersistentRuntimeOperation, PrepareThreadInput,
+    PrepareThreadOutput, ProviderExecutionIntent, ProviderProcessTermination,
+    ProviderRuntimeDiagnostic, RunningProviderProcessPurpose, SendTextInput, SharedCoreRuntime,
+    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput, ToolInvocationOutcome,
     ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput,
+};
+use pedelec_runtime::{
+    CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
+    CodexRuntimeEvent, CodexRuntimeLaunchConfig, CodexSandboxMode, CodexSessionConfig,
+    CodexTurnConfig, CodexTurnSandboxPolicy, CodexTurnStatus, ProviderRuntimeController,
+    ProviderRuntimeOwner, RuntimeRegistryError, CODEX_RUNTIME_KEY,
 };
 use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(test)]
 use std::collections::HashSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -28,12 +34,1075 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod opencode;
+pub use opencode::{
+    AcpProviderKind, AcpRuntimeDispatcher, CursorRuntimeDispatcher, OpenCodeRuntimeDispatcher,
+    CURSOR_RUNTIME_KEY, OPENCODE_RUNTIME_KEY,
+};
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub const CORE_IPC_PROTOCOL: &str = "pedelec-core-ipc-v1";
 pub const CORE_IPC_HOST: &str = "127.0.0.1";
 pub const MAX_CORE_IPC_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// The IPC layer owns dispatch orchestration, while the desktop runtime owns
+/// the persistent provider implementation. Implementations must enqueue or
+/// otherwise accept the semantic operation without requiring the Core mutex.
+pub trait PersistentRuntimeDispatcher: Send + Sync + 'static {
+    fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError>;
+}
+
+/// Production provider router sharing one desktop-owned runtime registry.
+#[derive(Debug, Clone)]
+pub struct ProviderRuntimeDispatcher {
+    codex: CodexRuntimeDispatcher,
+    opencode: OpenCodeRuntimeDispatcher,
+    cursor: CursorRuntimeDispatcher,
+}
+
+impl ProviderRuntimeDispatcher {
+    pub fn new(owner: ProviderRuntimeOwner, core_runtime: SharedCoreRuntime) -> Self {
+        Self {
+            codex: CodexRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
+            opencode: OpenCodeRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
+            cursor: CursorRuntimeDispatcher::new(owner, core_runtime),
+        }
+    }
+
+    pub fn shutdown(&self) -> Vec<String> {
+        self.opencode.record_shutdown_diagnostic();
+        self.cursor.record_shutdown_diagnostic();
+        self.codex.shutdown()
+    }
+}
+
+impl PersistentRuntimeDispatcher for ProviderRuntimeDispatcher {
+    fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
+        match operation.provider() {
+            pedelec_core::ProviderCode::Codex => self.codex.dispatch(operation),
+            pedelec_core::ProviderCode::OpenCode => self.opencode.dispatch(operation),
+            pedelec_core::ProviderCode::Cursor => self.cursor.dispatch(operation),
+            provider => Err(PedelecError::with_details(
+                error_codes::PROVIDER_RUNTIME_START_FAILED,
+                "provider has not migrated to a persistent production runtime",
+                serde_json::json!({"provider": provider}),
+            )),
+        }
+    }
+}
+
+/// Production Codex dispatcher. It owns no Core state beyond a shared handle,
+/// and never performs provider I/O while the Core mutex is held.
+#[derive(Debug, Clone)]
+pub struct CodexRuntimeDispatcher {
+    owner: ProviderRuntimeOwner,
+    core_runtime: SharedCoreRuntime,
+    program_override: Option<PathBuf>,
+    process_cwd: PathBuf,
+    typed_controller: Arc<Mutex<Option<Arc<CodexAppServerController>>>>,
+    event_pumps: Arc<Mutex<HashSet<u64>>>,
+    stopped_generations: Arc<Mutex<HashSet<u64>>>,
+}
+
+impl CodexRuntimeDispatcher {
+    pub fn new(owner: ProviderRuntimeOwner, core_runtime: SharedCoreRuntime) -> Self {
+        Self {
+            owner,
+            core_runtime,
+            program_override: None,
+            process_cwd: std::env::temp_dir(),
+            typed_controller: Arc::new(Mutex::new(None)),
+            event_pumps: Arc::new(Mutex::new(HashSet::new())),
+            stopped_generations: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Deterministic fake-server seam for protocol tests. Production callers
+    /// should let the completed provider scan select the Codex executable.
+    #[doc(hidden)]
+    pub fn with_program_for_test(mut self, program: impl Into<PathBuf>) -> Self {
+        self.program_override = Some(program.into());
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_process_cwd_for_test(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.process_cwd = cwd.into();
+        self
+    }
+
+    fn controller_for(
+        &self,
+        runtime_file: &Path,
+        operation_thread_id: &str,
+    ) -> Result<Arc<CodexAppServerController>, PedelecError> {
+        // A caller may reach the dispatcher before the old generation's
+        // event-pump thread has delivered its disconnect event. Reduce its
+        // Core impact before installing a replacement, otherwise the stale
+        // pump would be correctly ignored but active old-generation threads
+        // could remain stuck in Running/WaitingToolResult.
+        self.fail_unhealthy_controller(Some(operation_thread_id));
+        let program_override = self.program_override.clone();
+        let core_runtime = Arc::clone(&self.core_runtime);
+        let process_cwd = self.process_cwd.clone();
+        let runtime_file = runtime_file.to_path_buf();
+        let typed_controller = Arc::clone(&self.typed_controller);
+        self.owner
+            .get_or_init(CODEX_RUNTIME_KEY, move || {
+                let program = match program_override {
+                    Some(program) => program,
+                    None => core_runtime
+                        .lock()
+                        .map_err(|_| {
+                            RuntimeRegistryError::Initialization(
+                                "Core runtime mutex was poisoned".to_string(),
+                            )
+                        })?
+                        .provider_executable_path(&pedelec_core::ProviderCode::Codex)
+                        .map_err(|error| {
+                            RuntimeRegistryError::Initialization(format!(
+                                "{} ({})",
+                                error.message, error.code
+                            ))
+                        })?,
+                };
+                let mut launch = CodexRuntimeLaunchConfig::new(program, process_cwd);
+                launch = launch.with_env("PEDELEC_PROVIDER", "codex");
+                launch = launch.with_env(
+                    "PEDELEC_CORE_IPC_RUNTIME_FILE",
+                    runtime_file.to_string_lossy().into_owned(),
+                );
+                if let Some(path) = std::env::var_os("PATH") {
+                    launch = launch.with_env("PATH", path);
+                }
+                let controller = CodexAppServerController::spawn(launch)
+                    .map_err(|error| RuntimeRegistryError::Initialization(error.to_string()))?;
+                *typed_controller.lock().map_err(|_| {
+                    RuntimeRegistryError::Initialization(
+                        "Codex controller mutex was poisoned".to_string(),
+                    )
+                })? = Some(Arc::clone(&controller));
+                Ok(controller as std::sync::Arc<dyn ProviderRuntimeController>)
+            })
+            .map_err(|error| runtime_registry_error_to_pedelec(error, "startup"))?;
+        self.typed_controller
+            .lock()
+            .map_err(|_| {
+                PedelecError::new(
+                    error_codes::PROVIDER_PROTOCOL_ERROR,
+                    "Codex controller mutex was poisoned",
+                )
+            })?
+            .clone()
+            .ok_or_else(|| {
+                runtime_registry_error_to_pedelec(
+                    RuntimeRegistryError::Initialization(
+                        "Codex controller was not installed".to_string(),
+                    ),
+                    "startup",
+                )
+            })
+    }
+
+    fn fail_unhealthy_controller(&self, excluded_thread_id: Option<&str>) {
+        let controller = self
+            .typed_controller
+            .lock()
+            .ok()
+            .and_then(|controller| controller.clone())
+            .filter(|controller| !controller.is_healthy());
+        let Some(controller) = controller else {
+            return;
+        };
+        let error = PedelecError::with_details(
+            error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+            "Codex App Server runtime disconnected",
+            serde_json::json!({
+                "provider": "codex",
+                "operation": "runtime",
+                "runtimeGeneration": controller.generation(),
+                "processId": controller.process_id(),
+                "reason": "replacement requested before disconnect event was reduced",
+            }),
+        );
+        if let Ok(mut core) = self.core_runtime.lock() {
+            core.fail_persistent_runtime_except(
+                pedelec_core::ProviderCode::Codex,
+                excluded_thread_id,
+                error,
+            );
+        }
+    }
+
+    fn start_event_pump(&self, controller: Arc<CodexAppServerController>) {
+        let generation = controller.generation();
+        let should_start = self
+            .event_pumps
+            .lock()
+            .map(|mut generations| generations.insert(generation))
+            .unwrap_or(false);
+        if !should_start {
+            return;
+        }
+        let runtime = Arc::clone(&self.core_runtime);
+        record_runtime_diagnostic(
+            &runtime,
+            ProviderRuntimeDiagnostic::ProviderRuntimeStarted {
+                provider: pedelec_core::ProviderCode::Codex,
+                runtime_generation: generation,
+                process_id: controller.process_id(),
+            },
+        );
+        let runtime = Arc::clone(&self.core_runtime);
+        let current_controller = Arc::clone(&self.typed_controller);
+        let event_pumps = Arc::clone(&self.event_pumps);
+        let stopped_generations = Arc::clone(&self.stopped_generations);
+        let generation = controller.generation();
+        thread::spawn(move || {
+            while let Ok(event) = controller.recv_event() {
+                // Keep the generation identity held through the reduction.
+                // A check followed by an unlocked Core mutation could let an
+                // old callback land after a replacement controller is
+                // installed.
+                let current = match current_controller.lock() {
+                    Ok(current) => current,
+                    Err(_) => break,
+                };
+                if !current
+                    .as_ref()
+                    .is_some_and(|active| active.generation() == generation)
+                {
+                    // A late event from an older runtime generation must not
+                    // mutate a replacement generation's Core state.
+                    break;
+                }
+                match event {
+                    CodexRuntimeEvent::TurnStarted {
+                        pedelec_thread_id,
+                        provider_thread_id,
+                        provider_turn_id,
+                    } => {
+                        record_runtime_diagnostic(
+                            &runtime,
+                            ProviderRuntimeDiagnostic::ProviderRuntimeTurnStarted {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: controller.generation(),
+                                process_id: controller.process_id(),
+                                thread_id: pedelec_thread_id.clone(),
+                                provider_thread_id: provider_thread_id.clone(),
+                                provider_turn_id: provider_turn_id.clone(),
+                            },
+                        );
+                        if let Ok(mut core) = runtime.lock() {
+                            let _ = core.reduce_provider_runtime_event(
+                                pedelec_core::ProviderRuntimeEvent::TurnStarted {
+                                    thread_id: pedelec_thread_id,
+                                    provider_turn_id,
+                                },
+                            );
+                        }
+                    }
+                    CodexRuntimeEvent::AssistantDelta {
+                        pedelec_thread_id,
+                        provider_turn_id,
+                        text,
+                        ..
+                    } => {
+                        if let Ok(mut core) = runtime.lock() {
+                            let _ = core.reduce_provider_runtime_event(
+                                pedelec_core::ProviderRuntimeEvent::AssistantDelta {
+                                    thread_id: pedelec_thread_id,
+                                    provider_turn_id,
+                                    text,
+                                },
+                            );
+                        }
+                    }
+                    CodexRuntimeEvent::AssistantMessage {
+                        pedelec_thread_id,
+                        provider_turn_id,
+                        text,
+                        ..
+                    } => {
+                        if let Ok(mut core) = runtime.lock() {
+                            let _ = core.reduce_provider_runtime_event(
+                                pedelec_core::ProviderRuntimeEvent::AssistantMessage {
+                                    thread_id: pedelec_thread_id,
+                                    provider_turn_id,
+                                    text,
+                                },
+                            );
+                        }
+                    }
+                    CodexRuntimeEvent::UsageUpdated {
+                        pedelec_thread_id,
+                        provider_turn_id,
+                        usage,
+                        ..
+                    } => {
+                        if let Ok(mut core) = runtime.lock() {
+                            let _ = core.reduce_provider_runtime_event(
+                                pedelec_core::ProviderRuntimeEvent::UsageUpdated {
+                                    thread_id: pedelec_thread_id,
+                                    provider_turn_id,
+                                    usage,
+                                },
+                            );
+                        }
+                    }
+                    CodexRuntimeEvent::TurnCompleted {
+                        pedelec_thread_id,
+                        provider_thread_id,
+                        provider_turn_id,
+                        status,
+                        error,
+                    } => {
+                        record_runtime_diagnostic(
+                            &runtime,
+                            ProviderRuntimeDiagnostic::ProviderRuntimeTurnCompleted {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: controller.generation(),
+                                process_id: controller.process_id(),
+                                thread_id: pedelec_thread_id.clone(),
+                                provider_thread_id: provider_thread_id.clone(),
+                                provider_turn_id: provider_turn_id.clone(),
+                                status: codex_turn_status_label(status).to_string(),
+                            },
+                        );
+                        let success = status == CodexTurnStatus::Completed;
+                        let error = if success {
+                            None
+                        } else {
+                            Some(codex_turn_completion_error(
+                                &pedelec_thread_id,
+                                &provider_thread_id,
+                                provider_turn_id.as_deref(),
+                                status,
+                                error,
+                                controller.generation(),
+                                controller.process_id(),
+                            ))
+                        };
+                        if let Ok(mut core) = runtime.lock() {
+                            let _ = core.reduce_provider_runtime_event(
+                                pedelec_core::ProviderRuntimeEvent::TurnCompleted {
+                                    thread_id: pedelec_thread_id,
+                                    provider_turn_id,
+                                    success,
+                                    error,
+                                },
+                            );
+                        }
+                    }
+                    CodexRuntimeEvent::ProtocolError {
+                        pedelec_thread_id,
+                        provider_thread_id,
+                        operation,
+                        message,
+                    } => {
+                        controller.retire_for_protocol_error();
+                        let error = PedelecError::with_details(
+                            error_codes::PROVIDER_PROTOCOL_ERROR,
+                            message,
+                            serde_json::json!({
+                                "provider": "codex",
+                                "operation": operation,
+                                "stage": "stream",
+                                "providerThreadId": provider_thread_id,
+                                "runtimeGeneration": controller.generation(),
+                                "processId": controller.process_id(),
+                            }),
+                        );
+                        record_runtime_diagnostic(
+                            &runtime,
+                            ProviderRuntimeDiagnostic::ProviderRuntimeError {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: Some(controller.generation()),
+                                process_id: Some(controller.process_id()),
+                                thread_id: pedelec_thread_id,
+                                provider_thread_id,
+                                provider_turn_id: None,
+                                code: error_codes::PROVIDER_PROTOCOL_ERROR.to_string(),
+                                message: error.message.clone(),
+                                details: error.details.clone(),
+                            },
+                        );
+                        if let Ok(mut core) = runtime.lock() {
+                            core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, error);
+                        }
+                    }
+                    CodexRuntimeEvent::ServerRequestRejected { method, .. } => {
+                        record_runtime_diagnostic(
+                            &runtime,
+                            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: controller.generation(),
+                                process_id: controller.process_id(),
+                                thread_id: None,
+                                provider_thread_id: None,
+                                provider_turn_id: None,
+                                operation: method.clone(),
+                                summary: "unsupported server request was rejected".to_string(),
+                            },
+                        );
+                    }
+                    CodexRuntimeEvent::Disconnected {
+                        generation,
+                        pid,
+                        attachments,
+                        reason,
+                    } => {
+                        let reason_text = format!("{reason:?}");
+                        record_runtime_diagnostic(
+                            &runtime,
+                            ProviderRuntimeDiagnostic::ProviderRuntimeDisconnected {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: generation,
+                                process_id: pid,
+                                thread_id: None,
+                                provider_thread_id: None,
+                                reason: reason_text.clone(),
+                            },
+                        );
+                        for attachment in &attachments {
+                            record_runtime_diagnostic(
+                                &runtime,
+                                ProviderRuntimeDiagnostic::ProviderRuntimeDisconnected {
+                                    provider: pedelec_core::ProviderCode::Codex,
+                                    runtime_generation: generation,
+                                    process_id: pid,
+                                    thread_id: Some(attachment.pedelec_thread_id.clone()),
+                                    provider_thread_id: Some(attachment.provider_thread_id.clone()),
+                                    reason: reason_text.clone(),
+                                },
+                            );
+                        }
+                        let error = PedelecError::with_details(
+                            error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+                            "Codex App Server runtime disconnected",
+                            serde_json::json!({
+                                "provider": "codex",
+                                "operation": "runtime",
+                                "runtimeGeneration": generation,
+                                "processId": pid,
+                                "reason": reason_text,
+                                "attachments": attachments
+                                    .iter()
+                                    .map(|attachment| {
+                                        serde_json::json!({
+                                            "pedelecThreadId": attachment.pedelec_thread_id,
+                                            "providerThreadId": attachment.provider_thread_id,
+                                        })
+                                    })
+                                    .collect::<Vec<_>>(),
+                            }),
+                        );
+                        if let Ok(mut core) = runtime.lock() {
+                            core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, error);
+                        }
+                        mark_runtime_stopped(
+                            &runtime,
+                            &stopped_generations,
+                            generation,
+                            pid,
+                            "runtime disconnected",
+                        );
+                        break;
+                    }
+                    CodexRuntimeEvent::Notification {
+                        method,
+                        params,
+                        pedelec_thread_id,
+                        provider_thread_id,
+                        provider_turn_id,
+                    } => {
+                        record_runtime_diagnostic(
+                            &runtime,
+                            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: controller.generation(),
+                                process_id: controller.process_id(),
+                                thread_id: pedelec_thread_id,
+                                provider_thread_id,
+                                provider_turn_id,
+                                operation: method,
+                                summary: bounded_protocol_summary(&params),
+                            },
+                        );
+                    }
+                    CodexRuntimeEvent::UnmatchedResponse { id, response } => {
+                        record_runtime_diagnostic(
+                            &runtime,
+                            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: controller.generation(),
+                                process_id: controller.process_id(),
+                                thread_id: None,
+                                provider_thread_id: None,
+                                provider_turn_id: None,
+                                operation: "unmatched_response".to_string(),
+                                summary: format!(
+                                    "rpc id {id:?}: {}",
+                                    bounded_protocol_summary(&response)
+                                ),
+                            },
+                        );
+                    }
+                    CodexRuntimeEvent::Stderr { text } => {
+                        record_runtime_diagnostic(
+                            &runtime,
+                            ProviderRuntimeDiagnostic::ProviderRuntimeRawProtocol {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: controller.generation(),
+                                process_id: controller.process_id(),
+                                thread_id: None,
+                                provider_thread_id: None,
+                                provider_turn_id: None,
+                                operation: "stderr".to_string(),
+                                summary: truncate_diagnostic_text(&text),
+                            },
+                        );
+                    }
+                }
+            }
+            if let Ok(mut generations) = event_pumps.lock() {
+                generations.remove(&generation);
+            }
+        });
+    }
+}
+
+impl PersistentRuntimeDispatcher for CodexRuntimeDispatcher {
+    fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
+        if let PersistentRuntimeOperation::EndSession { session } = &operation {
+            if session.provider != pedelec_core::ProviderCode::Codex {
+                return Err(PedelecError::new(
+                    error_codes::PROVIDER_UNSUPPORTED,
+                    "Codex runtime received a non-Codex end operation",
+                ));
+            }
+            return self.dispatch_end_session(session);
+        }
+
+        let (thread_id, runtime_file) = match &operation {
+            PersistentRuntimeOperation::EnsureSession { session } => {
+                if session.provider != pedelec_core::ProviderCode::Codex {
+                    return Err(PedelecError::new(
+                        error_codes::PROVIDER_UNSUPPORTED,
+                        "Codex runtime received a non-Codex session",
+                    ));
+                }
+                (
+                    session.thread_id.clone(),
+                    session.core_ipc_runtime_file_path.clone(),
+                )
+            }
+            PersistentRuntimeOperation::StartTurn { turn } => {
+                if turn.session.provider != pedelec_core::ProviderCode::Codex {
+                    return Err(PedelecError::new(
+                        error_codes::PROVIDER_UNSUPPORTED,
+                        "Codex runtime received a non-Codex turn",
+                    ));
+                }
+                (
+                    turn.thread_id.clone(),
+                    turn.session.core_ipc_runtime_file_path.clone(),
+                )
+            }
+            PersistentRuntimeOperation::EndSession { .. } => {
+                unreachable!("persistent Codex end operations are handled before session dispatch")
+            }
+        };
+
+        let controller = self.controller_for(&runtime_file, &thread_id)?;
+        // Install the pump after the controller is in the registry, so the
+        // controller remains alive for its entire receive loop. Starting it
+        // for every operation also makes a runtime replacement observable if
+        // a later operation is the first one to reach the dispatcher.
+        self.start_event_pump(Arc::clone(&controller));
+
+        match operation {
+            PersistentRuntimeOperation::EnsureSession { session } => {
+                let config = codex_session_config(&session)?;
+                let result = controller.ensure_session(
+                    &thread_id,
+                    session.provider_session_id.as_deref(),
+                    &config,
+                );
+                match result {
+                    Ok(result) => {
+                        let provider_thread_id = result.provider_thread_id.clone();
+                        self.core_runtime
+                            .lock()
+                            .map_err(|_| {
+                                PedelecError::new(
+                                    error_codes::CORE_RUNTIME_UNAVAILABLE,
+                                    "Core runtime mutex was poisoned",
+                                )
+                            })?
+                            .reduce_provider_runtime_event(
+                                pedelec_core::ProviderRuntimeEvent::SessionReady {
+                                    thread_id: thread_id.clone(),
+                                    provider_session_id: provider_thread_id.clone(),
+                                },
+                            )?;
+                        self.record_runtime_diagnostic(
+                            ProviderRuntimeDiagnostic::ProviderRuntimeAttached {
+                                provider: pedelec_core::ProviderCode::Codex,
+                                runtime_generation: controller.generation(),
+                                process_id: controller.process_id(),
+                                thread_id,
+                                provider_thread_id,
+                                resumed: result.resumed,
+                            },
+                        );
+                        Ok(())
+                    }
+                    Err(error) => Err(codex_error_to_pedelec_with_context(
+                        error,
+                        Some(&controller),
+                        &thread_id,
+                        session.provider_session_id.as_deref(),
+                        None,
+                        "admission",
+                    )),
+                }
+            }
+            PersistentRuntimeOperation::StartTurn { turn } => {
+                let config = codex_session_config(&turn.session)?;
+                let session = controller
+                    .ensure_session(&thread_id, turn.provider_session_id.as_deref(), &config)
+                    .map_err(|error| {
+                        codex_error_to_pedelec_with_context(
+                            error,
+                            Some(&controller),
+                            &thread_id,
+                            turn.provider_session_id.as_deref(),
+                            None,
+                            "admission",
+                        )
+                    })?;
+                if let Err(error) = self_reduce_session_ready(
+                    &self.core_runtime,
+                    &thread_id,
+                    &session.provider_thread_id,
+                ) {
+                    return Err(error);
+                }
+                self.record_runtime_diagnostic(
+                    ProviderRuntimeDiagnostic::ProviderRuntimeAttached {
+                        provider: pedelec_core::ProviderCode::Codex,
+                        runtime_generation: controller.generation(),
+                        process_id: controller.process_id(),
+                        thread_id: thread_id.clone(),
+                        provider_thread_id: session.provider_thread_id.clone(),
+                        resumed: session.resumed,
+                    },
+                );
+                let turn_config = CodexTurnConfig {
+                    input: turn.message,
+                    cwd: turn.session.workspace_path,
+                    model: turn.session.model,
+                    effort: turn.session.reasoning_effort.map(|effort| match effort {
+                        pedelec_core::CodexReasoningEffort::Low => CodexReasoningEffort::Low,
+                        pedelec_core::CodexReasoningEffort::Medium => CodexReasoningEffort::Medium,
+                        pedelec_core::CodexReasoningEffort::High => CodexReasoningEffort::High,
+                        pedelec_core::CodexReasoningEffort::XHigh => CodexReasoningEffort::XHigh,
+                        pedelec_core::CodexReasoningEffort::Max => CodexReasoningEffort::Max,
+                    }),
+                    approval_policy: CodexApprovalPolicy::Never,
+                    sandbox_policy: CodexTurnSandboxPolicy::DangerFullAccess,
+                };
+                controller
+                    .start_turn(
+                        &thread_id,
+                        &session.provider_thread_id,
+                        &turn.local_turn_id,
+                        &turn_config,
+                    )
+                    .map_err(|error| {
+                        codex_error_to_pedelec_with_context(
+                            error,
+                            Some(&controller),
+                            &thread_id,
+                            Some(&session.provider_thread_id),
+                            None,
+                            "admission",
+                        )
+                    })?;
+                Ok(())
+            }
+            PersistentRuntimeOperation::EndSession { .. } => Ok(()),
+        }
+    }
+}
+
+impl CodexRuntimeDispatcher {
+    fn record_runtime_diagnostic(&self, diagnostic: ProviderRuntimeDiagnostic) {
+        record_runtime_diagnostic(&self.core_runtime, diagnostic);
+    }
+
+    /// Stops the app-lifetime Codex runtime and publishes the lifecycle
+    /// diagnostic before the owner closes its registry. The runtime is not
+    /// stopped when the last Pedelec session ends.
+    pub fn shutdown(&self) -> Vec<String> {
+        let controller = self
+            .typed_controller
+            .lock()
+            .ok()
+            .and_then(|controller| controller.clone());
+        if let Some(controller) = controller {
+            let generation = controller.generation();
+            let process_id = controller.process_id();
+            mark_runtime_stopped(
+                &self.core_runtime,
+                &self.stopped_generations,
+                generation,
+                process_id,
+                "desktop shutdown",
+            );
+        }
+        self.owner.shutdown()
+    }
+
+    fn current_controller(&self) -> Option<Arc<CodexAppServerController>> {
+        self.typed_controller
+            .lock()
+            .ok()
+            .and_then(|controller| controller.clone())
+            .filter(|controller| controller.is_healthy())
+    }
+
+    fn dispatch_end_session(
+        &self,
+        session: &pedelec_core::PersistentProviderEndIntent,
+    ) -> Result<(), PedelecError> {
+        let Some(controller) = self.current_controller() else {
+            if session.active_provider_turn_id.is_some() {
+                let error = runtime_disconnect_end_error(
+                    session,
+                    "the active Codex turn has no healthy runtime generation",
+                    None,
+                );
+                if let Ok(mut core) = self.core_runtime.lock() {
+                    core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, error.clone());
+                }
+                return Err(error);
+            }
+            // An idle detached session must not cause a new App Server to be
+            // started solely for unsubscribe cleanup.
+            return Ok(());
+        };
+
+        match controller.end_session(
+            &session.thread_id,
+            session.active_provider_turn_id.as_deref(),
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // Any inability to prove an active interrupt is a hard safety
+                // failure. Stop the shared generation and reduce every active
+                // Codex thread; Core finalizes the target end operation.
+                controller.retire_for_protocol_error();
+                let mapped =
+                    runtime_disconnect_end_error(session, &error.to_string(), Some(&controller));
+                if let Ok(mut core) = self.core_runtime.lock() {
+                    core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, mapped);
+                }
+                Err(codex_error_to_pedelec_with_context(
+                    error,
+                    Some(&controller),
+                    &session.thread_id,
+                    session.provider_session_id.as_deref(),
+                    session.active_provider_turn_id.as_deref(),
+                    "end",
+                ))
+            }
+        }
+    }
+}
+
+fn runtime_disconnect_end_error(
+    session: &pedelec_core::PersistentProviderEndIntent,
+    message: &str,
+    controller: Option<&CodexAppServerController>,
+) -> PedelecError {
+    let mut details = serde_json::json!({
+        "provider": "codex",
+        "operation": "end",
+        "threadId": session.thread_id,
+        "reason": message,
+    });
+    if let Some(provider_session_id) = &session.provider_session_id {
+        details["providerThreadId"] = serde_json::json!(provider_session_id);
+    }
+    if let Some(provider_turn_id) = &session.active_provider_turn_id {
+        details["providerTurnId"] = serde_json::json!(provider_turn_id);
+    }
+    if let Some(controller) = controller {
+        details["runtimeGeneration"] = serde_json::json!(controller.generation());
+        details["processId"] = serde_json::json!(controller.process_id());
+    }
+    PedelecError::with_details(
+        error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+        "Codex App Server runtime was hard-stopped after active interruption could not be confirmed",
+        details,
+    )
+}
+
+fn record_runtime_diagnostic(runtime: &SharedCoreRuntime, diagnostic: ProviderRuntimeDiagnostic) {
+    if let Ok(mut core) = runtime.lock() {
+        core.record_provider_runtime_diagnostic(diagnostic);
+    }
+}
+
+fn mark_runtime_stopped(
+    runtime: &SharedCoreRuntime,
+    stopped_generations: &Mutex<HashSet<u64>>,
+    generation: u64,
+    process_id: u32,
+    reason: &str,
+) {
+    let should_emit = stopped_generations
+        .lock()
+        .map(|mut generations| {
+            if !generations.insert(generation) {
+                return false;
+            }
+            if generations.len() > 2048 {
+                generations.clear();
+                generations.insert(generation);
+            }
+            true
+        })
+        .unwrap_or(true);
+    if should_emit {
+        record_runtime_diagnostic(
+            runtime,
+            ProviderRuntimeDiagnostic::ProviderRuntimeStopped {
+                provider: pedelec_core::ProviderCode::Codex,
+                runtime_generation: generation,
+                process_id,
+                reason: reason.to_string(),
+            },
+        );
+    }
+}
+
+fn codex_turn_status_label(status: CodexTurnStatus) -> &'static str {
+    match status {
+        CodexTurnStatus::Completed => "completed",
+        CodexTurnStatus::Failed => "failed",
+        CodexTurnStatus::Interrupted => "interrupted",
+    }
+}
+
+const MAX_RUNTIME_DIAGNOSTIC_TEXT_BYTES: usize = 4096;
+
+fn truncate_diagnostic_text(text: &str) -> String {
+    if text.len() <= MAX_RUNTIME_DIAGNOSTIC_TEXT_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_RUNTIME_DIAGNOSTIC_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+fn bounded_protocol_summary(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string());
+    truncate_diagnostic_text(&text)
+}
+
+fn self_reduce_session_ready(
+    runtime: &SharedCoreRuntime,
+    thread_id: &str,
+    provider_thread_id: &str,
+) -> Result<(), PedelecError> {
+    runtime
+        .lock()
+        .map_err(|_| {
+            PedelecError::new(
+                error_codes::CORE_RUNTIME_UNAVAILABLE,
+                "Core runtime mutex was poisoned",
+            )
+        })?
+        .reduce_provider_runtime_event(pedelec_core::ProviderRuntimeEvent::SessionReady {
+            thread_id: thread_id.to_string(),
+            provider_session_id: provider_thread_id.to_string(),
+        })
+}
+
+fn codex_session_config(
+    session: &pedelec_core::PersistentProviderSessionIntent,
+) -> Result<CodexSessionConfig, PedelecError> {
+    let effort = session.reasoning_effort.map(|effort| match effort {
+        pedelec_core::CodexReasoningEffort::Low => CodexReasoningEffort::Low,
+        pedelec_core::CodexReasoningEffort::Medium => CodexReasoningEffort::Medium,
+        pedelec_core::CodexReasoningEffort::High => CodexReasoningEffort::High,
+        pedelec_core::CodexReasoningEffort::XHigh => CodexReasoningEffort::XHigh,
+        pedelec_core::CodexReasoningEffort::Max => CodexReasoningEffort::Max,
+    });
+    let approval_policy = match session.approval_policy {
+        pedelec_core::PersistentApprovalPolicy::Never => CodexApprovalPolicy::Never,
+    };
+    let sandbox = match session.sandbox_policy {
+        pedelec_core::PersistentSandboxPolicy::ReadOnly => CodexSandboxMode::ReadOnly,
+    };
+    let config = CodexSessionConfig {
+        model: session.model.clone(),
+        effort,
+        cwd: session.workspace_path.clone(),
+        approval_policy,
+        sandbox,
+        developer_instructions: session.host_instructions.clone(),
+        config: session.config.clone(),
+    };
+    config
+        .validate()
+        .map_err(|error| codex_error_to_pedelec(error, None))?;
+    Ok(config)
+}
+
+fn runtime_registry_error_to_pedelec(error: RuntimeRegistryError, operation: &str) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::PROVIDER_RUNTIME_START_FAILED,
+        "Codex App Server runtime could not be started",
+        serde_json::json!({
+            "provider": "codex",
+            "operation": operation,
+            "error": error.to_string(),
+        }),
+    )
+}
+
+fn codex_error_to_pedelec(
+    error: CodexRuntimeError,
+    controller: Option<&CodexAppServerController>,
+) -> PedelecError {
+    let (code, operation) = match &error {
+        CodexRuntimeError::RuntimeStart { operation, .. } => {
+            (error_codes::PROVIDER_RUNTIME_START_FAILED, operation)
+        }
+        CodexRuntimeError::RuntimeDisconnected { operation, .. } => {
+            (error_codes::PROVIDER_RUNTIME_DISCONNECTED, operation)
+        }
+        CodexRuntimeError::Protocol { operation, .. } => {
+            (error_codes::PROVIDER_PROTOCOL_ERROR, operation)
+        }
+        CodexRuntimeError::Request { operation, .. } => {
+            (error_codes::PROVIDER_REQUEST_FAILED, operation)
+        }
+    };
+    let mut details = serde_json::json!({
+        "provider": "codex",
+        "operation": operation,
+        "error": error.to_string(),
+    });
+    if let CodexRuntimeError::Request {
+        details: Some(rpc_details),
+        ..
+    } = &error
+    {
+        details["rpc"] = rpc_details.clone();
+    }
+    if let Some(controller) = controller {
+        details["runtimeGeneration"] = serde_json::json!(controller.generation());
+        details["processId"] = serde_json::json!(controller.process_id());
+    }
+    PedelecError::with_details(code, error.to_string(), details)
+}
+
+fn codex_error_to_pedelec_with_context(
+    error: CodexRuntimeError,
+    controller: Option<&CodexAppServerController>,
+    thread_id: &str,
+    provider_thread_id: Option<&str>,
+    provider_turn_id: Option<&str>,
+    stage: &str,
+) -> PedelecError {
+    let mut mapped = codex_error_to_pedelec(error.clone(), controller);
+    let mut details = mapped
+        .details
+        .take()
+        .unwrap_or_else(|| serde_json::json!({}));
+    details["provider"] = serde_json::json!("codex");
+    details["threadId"] = serde_json::json!(thread_id);
+    details["stage"] = serde_json::json!(stage);
+    if let Some(provider_thread_id) = provider_thread_id {
+        details["providerThreadId"] = serde_json::json!(provider_thread_id);
+    }
+    if let Some(provider_turn_id) = provider_turn_id {
+        details["providerTurnId"] = serde_json::json!(provider_turn_id);
+    }
+    mapped.details = Some(details);
+    mapped
+}
+
+fn codex_turn_completion_error(
+    thread_id: &str,
+    provider_thread_id: &str,
+    provider_turn_id: Option<&str>,
+    status: CodexTurnStatus,
+    codex_error: Option<Value>,
+    runtime_generation: u64,
+    process_id: u32,
+) -> PedelecError {
+    let message = codex_error
+        .as_ref()
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            match status {
+                CodexTurnStatus::Failed => "Codex turn failed",
+                CodexTurnStatus::Interrupted => "Codex turn was interrupted",
+                CodexTurnStatus::Completed => "Codex turn failed",
+            }
+            .to_string()
+        });
+    let mut details = serde_json::json!({
+        "provider": "codex",
+        "operation": "turn",
+        "stage": "completed",
+        "threadId": thread_id,
+        "providerThreadId": provider_thread_id,
+        "runtimeGeneration": runtime_generation,
+        "processId": process_id,
+        "status": match status {
+            CodexTurnStatus::Completed => "completed",
+            CodexTurnStatus::Failed => "failed",
+            CodexTurnStatus::Interrupted => "interrupted",
+        },
+    });
+    if let Some(provider_turn_id) = provider_turn_id {
+        details["providerTurnId"] = serde_json::json!(provider_turn_id);
+    }
+    if let Some(codex_error) = codex_error {
+        details["codexError"] = codex_error;
+    }
+    PedelecError::with_details(error_codes::PROVIDER_REQUEST_FAILED, message, details)
+}
+
+#[derive(Debug, Default)]
+pub struct RejectPersistentRuntimeDispatcher;
+
+impl PersistentRuntimeDispatcher for RejectPersistentRuntimeDispatcher {
+    fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
+        Err(PedelecError::with_details(
+            error_codes::PROVIDER_RUNTIME_START_FAILED,
+            "persistent provider runtime dispatcher is unavailable",
+            serde_json::json!({
+                "threadId": operation.thread_id(),
+                "operation": format!("{:?}", operation.kind())
+            }),
+        ))
+    }
+}
 
 /// Desktop capabilities that Core IPC can invoke without coupling the Core
 /// runtime to a particular desktop toolkit.
@@ -172,10 +1241,38 @@ pub fn start_core_ipc_server_with_services(
     )
 }
 
+pub fn start_core_ipc_server_with_services_and_dispatcher(
+    runtime: SharedCoreRuntime,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+) -> Result<CoreIpcServerHandle, PedelecError> {
+    let runtime_file_path = default_runtime_file_path()?;
+    start_core_ipc_server_with_runtime_path_services_and_dispatcher(
+        runtime,
+        runtime_file_path,
+        platform_services,
+        persistent_dispatcher,
+    )
+}
+
 pub fn start_core_ipc_server_with_runtime_path_and_services(
     runtime: SharedCoreRuntime,
     runtime_file_path: impl Into<PathBuf>,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
+) -> Result<CoreIpcServerHandle, PedelecError> {
+    start_core_ipc_server_with_runtime_path_services_and_dispatcher(
+        runtime,
+        runtime_file_path,
+        platform_services,
+        Arc::new(RejectPersistentRuntimeDispatcher),
+    )
+}
+
+pub fn start_core_ipc_server_with_runtime_path_services_and_dispatcher(
+    runtime: SharedCoreRuntime,
+    runtime_file_path: impl Into<PathBuf>,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
 ) -> Result<CoreIpcServerHandle, PedelecError> {
     let listener = TcpListener::bind((CORE_IPC_HOST, 0)).map_err(|err| {
         PedelecError::with_details(
@@ -213,8 +1310,14 @@ pub fn start_core_ipc_server_with_runtime_path_and_services(
             };
             let runtime = Arc::clone(&runtime);
             let platform_services = Arc::clone(&platform_services);
+            let persistent_dispatcher = Arc::clone(&persistent_dispatcher);
             thread::spawn(move || {
-                let _ = handle_core_ipc_connection(stream, runtime, platform_services);
+                let _ = handle_core_ipc_connection(
+                    stream,
+                    runtime,
+                    platform_services,
+                    persistent_dispatcher,
+                );
             });
         }
     });
@@ -350,6 +1453,7 @@ fn handle_core_ipc_connection(
     stream: TcpStream,
     runtime: SharedCoreRuntime,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
 ) -> io::Result<()> {
     let reader_stream = stream.try_clone()?;
     let mut reader = BufReader::new(reader_stream);
@@ -415,6 +1519,7 @@ fn handle_core_ipc_connection(
                     request,
                     Arc::clone(&runtime),
                     Arc::clone(&platform_services),
+                    Arc::clone(&persistent_dispatcher),
                 ),
                 tool_delivery_request_id: None,
             }
@@ -498,13 +1603,19 @@ fn parse_core_ipc_request(value: Value) -> Result<CoreIpcRequest, CoreIpcRespons
 
 #[allow(dead_code)]
 fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) -> CoreIpcResponse {
-    handle_core_ipc_request_with_services(request, runtime, Arc::new(NoopCoreIpcPlatformServices))
+    handle_core_ipc_request_with_services(
+        request,
+        runtime,
+        Arc::new(NoopCoreIpcPlatformServices),
+        Arc::new(RejectPersistentRuntimeDispatcher),
+    )
 }
 
 fn handle_core_ipc_request_with_services(
     request: CoreIpcRequest,
     runtime: SharedCoreRuntime,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
 ) -> CoreIpcResponse {
     match request.r#type.as_str() {
         "pick_workspace_folder" => {
@@ -541,8 +1652,13 @@ fn handle_core_ipc_request_with_services(
         ),
         "send_text" => match decode_payload::<SendTextInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
-                .and_then(|_| start_provider_process(runtime, input))
-            {
+                .and_then(|_| {
+                    start_provider_process_with_dispatcher(
+                        runtime,
+                        Arc::clone(&persistent_dispatcher),
+                        input,
+                    )
+                }) {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },
@@ -550,8 +1666,13 @@ fn handle_core_ipc_request_with_services(
         },
         "prepare_thread" => match decode_payload::<PrepareThreadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
-                .and_then(|_| prepare_provider_process(runtime, input))
-            {
+                .and_then(|_| {
+                    prepare_provider_process_with_dispatcher(
+                        runtime,
+                        Arc::clone(&persistent_dispatcher),
+                        input,
+                    )
+                }) {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },
@@ -586,8 +1707,9 @@ fn handle_core_ipc_request_with_services(
         },
         "end_thread" => match decode_payload::<EndThreadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
-                .and_then(|_| runtime.lock().unwrap().end_thread(input))
-            {
+                .and_then(|_| {
+                    end_thread_with_dispatcher(runtime, Arc::clone(&persistent_dispatcher), input)
+                }) {
                 Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
                 Err(err) => error_response(&request.request_id, err),
             },
@@ -812,33 +1934,48 @@ pub fn start_provider_process(
     runtime: SharedCoreRuntime,
     input: SendTextInput,
 ) -> Result<pedelec_core::SendTextOutput, PedelecError> {
+    start_provider_process_with_dispatcher(
+        runtime,
+        Arc::new(RejectPersistentRuntimeDispatcher),
+        input,
+    )
+}
+
+pub fn start_provider_process_with_dispatcher(
+    runtime: SharedCoreRuntime,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    input: SendTextInput,
+) -> Result<pedelec_core::SendTextOutput, PedelecError> {
     wait_for_provider_readiness(&runtime)?;
     let thread_id = input.thread_id.clone();
-    let start = runtime.lock().unwrap().begin_send_text(input)?;
-    start_provider_process_from_start(runtime, thread_id, start)
+    let start = runtime.lock().unwrap().begin_send_text_intent(input)?;
+    dispatch_provider_execution(runtime, persistent_dispatcher, thread_id, start.intent)?;
+    Ok(start.output)
 }
 
 pub fn start_debug_provider_process(
     runtime: SharedCoreRuntime,
     input: SendTextInput,
 ) -> Result<pedelec_core::SendTextOutput, PedelecError> {
-    wait_for_provider_readiness(&runtime)?;
-    let thread_id = input.thread_id.clone();
-    let start = runtime.lock().unwrap().begin_debug_send_text(input)?;
-    start_provider_process_from_start(runtime, thread_id, start)
+    start_debug_provider_process_with_dispatcher(
+        runtime,
+        Arc::new(RejectPersistentRuntimeDispatcher),
+        input,
+    )
 }
 
-fn start_provider_process_from_start(
+pub fn start_debug_provider_process_with_dispatcher(
     runtime: SharedCoreRuntime,
-    thread_id: String,
-    start: pedelec_core::SendTextStart,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    input: SendTextInput,
 ) -> Result<pedelec_core::SendTextOutput, PedelecError> {
-    start_provider_process_with_command(
-        runtime,
-        thread_id,
-        start.command,
-        RunningProviderProcessPurpose::UserMessage,
-    )?;
+    wait_for_provider_readiness(&runtime)?;
+    let thread_id = input.thread_id.clone();
+    let start = runtime
+        .lock()
+        .unwrap()
+        .begin_debug_send_text_intent(input)?;
+    dispatch_provider_execution(runtime, persistent_dispatcher, thread_id, start.intent)?;
     Ok(start.output)
 }
 
@@ -846,19 +1983,96 @@ pub fn prepare_provider_process(
     runtime: SharedCoreRuntime,
     input: PrepareThreadInput,
 ) -> Result<PrepareThreadOutput, PedelecError> {
+    prepare_provider_process_with_dispatcher(
+        runtime,
+        Arc::new(RejectPersistentRuntimeDispatcher),
+        input,
+    )
+}
+
+pub fn prepare_provider_process_with_dispatcher(
+    runtime: SharedCoreRuntime,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    input: PrepareThreadInput,
+) -> Result<PrepareThreadOutput, PedelecError> {
     wait_for_provider_readiness(&runtime)?;
     let thread_id = input.thread_id.clone();
-    let start = runtime.lock().unwrap().begin_prepare_thread(input)?;
-    let Some(command) = start.command else {
+    let start = runtime.lock().unwrap().begin_prepare_thread_intent(input)?;
+    let Some(intent) = start.intent else {
         return Ok(start.output);
     };
-    start_provider_process_with_command(
-        runtime,
-        thread_id,
-        command,
-        RunningProviderProcessPurpose::Prepare,
-    )?;
+    dispatch_provider_execution(runtime, persistent_dispatcher, thread_id, intent)?;
     Ok(start.output)
+}
+
+pub fn end_thread_with_dispatcher(
+    runtime: SharedCoreRuntime,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    input: EndThreadInput,
+) -> Result<(), PedelecError> {
+    let start = runtime.lock().unwrap().begin_end_thread(input)?;
+    let thread_id = start.thread_id.clone();
+    match start.execution {
+        EndThreadExecutionIntent::LegacyProcess(stop) => {
+            if let Some(stop) = stop {
+                stop.stop();
+            }
+            runtime.lock().unwrap().finish_end_thread(&thread_id)
+        }
+        EndThreadExecutionIntent::PersistentRuntime(operation) => {
+            let dispatch_result = persistent_dispatcher.dispatch(operation);
+            if let Err(error) = dispatch_result {
+                // End is a safety operation: a failed unsubscribe must not
+                // leave the Pedelec thread permanently in Stopping.
+                runtime.lock().unwrap().finish_end_thread(&thread_id)?;
+                return Err(error);
+            }
+            runtime.lock().unwrap().finish_end_thread(&thread_id)
+        }
+    }
+}
+
+fn dispatch_provider_execution(
+    runtime: SharedCoreRuntime,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    thread_id: String,
+    intent: ProviderExecutionIntent,
+) -> Result<(), PedelecError> {
+    let operation = intent.operation_kind();
+    match intent {
+        ProviderExecutionIntent::LegacyCommand { command, purpose } => {
+            let result = start_provider_process_with_command(
+                Arc::clone(&runtime),
+                thread_id.clone(),
+                command,
+                purpose,
+            );
+            if result.is_ok() {
+                runtime
+                    .lock()
+                    .unwrap()
+                    .complete_provider_execution_dispatch(&thread_id);
+            }
+            result
+        }
+        ProviderExecutionIntent::PersistentRuntime {
+            operation: runtime_operation,
+        } => {
+            if let Err(error) = persistent_dispatcher.dispatch(runtime_operation) {
+                runtime.lock().unwrap().fail_provider_execution_dispatch(
+                    &thread_id,
+                    operation,
+                    error.clone(),
+                );
+                return Err(error);
+            }
+            runtime
+                .lock()
+                .unwrap()
+                .complete_provider_execution_dispatch(&thread_id);
+            Ok(())
+        }
+    }
 }
 
 fn start_provider_process_with_command(
@@ -2112,6 +3326,7 @@ mod tests {
             },
             pedelec_core::ProviderAdapterState {
                 provider_session_id: None,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message: false,
             },

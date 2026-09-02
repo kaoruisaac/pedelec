@@ -2,6 +2,7 @@ import { createStore, produce } from "solid-js/store";
 import type { ProviderCode } from "../settings/types";
 
 export const MAX_EVENTS_PER_THREAD = 300;
+export const MAX_RUNTIME_DIAGNOSTICS = 300;
 
 export interface MonitorEvent {
   type?: string;
@@ -11,6 +12,10 @@ export interface MonitorEvent {
   status?: string;
   text?: string;
   providerSessionId?: string;
+  activeProviderTurnId?: string;
+  runtimeProcessId?: number;
+  runtimeGeneration?: number;
+  runtimeAttached?: boolean;
   source?: "provider" | "core";
   provider?: ProviderCode;
   [key: string]: unknown;
@@ -33,6 +38,13 @@ export interface ThreadViewModel {
   toolCalls: MonitorEvent[];
   toolResults: MonitorEvent[];
   errors: MonitorEvent[];
+  runtimeDiagnostics: MonitorEvent[];
+}
+
+export interface RuntimeSummary {
+  status: string;
+  processId?: number;
+  generation?: number;
 }
 
 interface EventMonitorState {
@@ -40,6 +52,12 @@ interface EventMonitorState {
   threadsById: Record<string, ThreadViewModel>;
   threadOrder: string[];
   totalEventCount: number;
+  runtimeDiagnostics: MonitorEvent[];
+  totalRuntimeDiagnosticCount: number;
+  runtimeStatus: string;
+  runtimeProcessId?: number;
+  runtimeGeneration?: number;
+  runtimeByProvider: Partial<Record<ProviderCode, RuntimeSummary>>;
   globalError: string | null;
 }
 
@@ -48,6 +66,7 @@ export interface EventMonitorStore {
   selectThread: (threadId: string) => void;
   setGlobalError: (error: unknown) => void;
   upsertThreadEvent: (event: unknown) => void;
+  upsertRuntimeDiagnostic: (event: unknown) => void;
   clearEndedThreads: () => void;
 }
 
@@ -57,6 +76,12 @@ function createEmptyStore(): EventMonitorState {
     threadsById: {},
     threadOrder: [],
     totalEventCount: 0,
+    runtimeDiagnostics: [],
+    totalRuntimeDiagnosticCount: 0,
+    runtimeStatus: "unknown",
+    runtimeProcessId: undefined,
+    runtimeGeneration: undefined,
+    runtimeByProvider: {},
     globalError: null,
   };
 }
@@ -79,6 +104,11 @@ export function createEventMonitorStore(): EventMonitorStore {
       ...((event as Record<string, unknown>) || {}),
       receivedAt,
     };
+
+    if (isRuntimeDiagnostic(eventWithReceivedAt)) {
+      upsertRuntimeDiagnostic(eventWithReceivedAt);
+      return;
+    }
 
     if (!eventWithReceivedAt.threadId) {
       setGlobalError({
@@ -121,6 +151,56 @@ export function createEventMonitorStore(): EventMonitorStore {
         if (!draft.selectedThreadId) {
           draft.selectedThreadId = threadId;
         }
+      }),
+    );
+  }
+
+  function upsertRuntimeDiagnostic(event: unknown): void {
+    const receivedAt = new Date().toISOString();
+    const eventWithReceivedAt: MonitorEvent = {
+      ...((event as Record<string, unknown>) || {}),
+      receivedAt: (event as MonitorEvent)?.receivedAt || receivedAt,
+    };
+
+    if (!isRuntimeDiagnostic(eventWithReceivedAt)) {
+      return;
+    }
+
+    const threadId = eventWithReceivedAt.threadId;
+    if (threadId && !dismissedThreadIds.has(threadId)) {
+      setStore(
+        produce((draft) => {
+          const existing = draft.threadsById[threadId];
+          const thread =
+            existing ||
+            createMonitorThreadViewModel({
+              threadId,
+              receivedAt: eventWithReceivedAt.receivedAt,
+            });
+          thread.updatedAt = eventWithReceivedAt.receivedAt;
+          thread.eventCount += 1;
+          thread.lastEventType = eventWithReceivedAt.type || "unknown";
+          applyEventToThread(thread, eventWithReceivedAt);
+          draft.threadsById[threadId] = thread;
+          draft.totalEventCount += 1;
+          draft.threadOrder = Object.values(draft.threadsById)
+            .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+            .map((item) => item.threadId);
+          if (!draft.selectedThreadId) {
+            draft.selectedThreadId = threadId;
+          }
+        }),
+      );
+    }
+
+    setStore(
+      produce((draft) => {
+        draft.runtimeDiagnostics = [eventWithReceivedAt, ...draft.runtimeDiagnostics].slice(
+          0,
+          MAX_RUNTIME_DIAGNOSTICS,
+        );
+        draft.totalRuntimeDiagnosticCount += 1;
+        applyDiagnosticToRuntimeSummary(draft, eventWithReceivedAt);
       }),
     );
   }
@@ -172,6 +252,7 @@ export function createEventMonitorStore(): EventMonitorStore {
     selectThread,
     setGlobalError,
     upsertThreadEvent,
+    upsertRuntimeDiagnostic,
     clearEndedThreads,
   };
 }
@@ -200,11 +281,18 @@ function createMonitorThreadViewModel({
     toolCalls: [],
     toolResults: [],
     errors: [],
+    runtimeDiagnostics: [],
   };
 }
 
 function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void {
   thread.events = [event, ...thread.events].slice(0, MAX_EVENTS_PER_THREAD);
+  if (isRuntimeDiagnostic(event)) {
+    thread.runtimeDiagnostics = [event, ...thread.runtimeDiagnostics].slice(
+      0,
+      MAX_EVENTS_PER_THREAD,
+    );
+  }
 
   switch (event.type) {
     case "created":
@@ -241,9 +329,104 @@ function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void 
     case "ended":
       thread.status = "ended";
       break;
+    case "provider_runtime_attached":
+      thread.providerSessionId = event.providerThreadId as string | undefined;
+      thread.runtimeProcessId = event.processId as number | undefined;
+      thread.runtimeGeneration = event.runtimeGeneration as number | undefined;
+      thread.runtimeAttached = true;
+      break;
+    case "provider_runtime_turn_started":
+      thread.providerSessionId = event.providerThreadId as string | undefined;
+      thread.activeProviderTurnId = event.providerTurnId as string | undefined;
+      thread.runtimeProcessId = event.processId as number | undefined;
+      thread.runtimeGeneration = event.runtimeGeneration as number | undefined;
+      thread.runtimeAttached = true;
+      break;
+    case "provider_runtime_turn_completed":
+      thread.activeProviderTurnId = undefined;
+      thread.runtimeProcessId = event.processId as number | undefined;
+      thread.runtimeGeneration = event.runtimeGeneration as number | undefined;
+      break;
+    case "provider_runtime_disconnected":
+      thread.runtimeAttached = false;
+      thread.activeProviderTurnId = undefined;
+      thread.runtimeProcessId = event.processId as number | undefined;
+      thread.runtimeGeneration = event.runtimeGeneration as number | undefined;
+      break;
     default:
       break;
   }
+}
+
+function isRuntimeDiagnostic(event: MonitorEvent): boolean {
+  return typeof event.type === "string" && event.type.startsWith("provider_runtime_");
+}
+
+function applyDiagnosticToRuntimeSummary(
+  state: EventMonitorState,
+  event: MonitorEvent,
+): void {
+  state.runtimeProcessId = event.processId as number | undefined;
+  state.runtimeGeneration = event.runtimeGeneration as number | undefined;
+  const provider = event.provider;
+  if (isPersistentRuntimeProvider(provider)) {
+    const summary = state.runtimeByProvider[provider] || { status: "unknown" };
+    summary.processId = event.processId as number | undefined;
+    summary.generation = event.runtimeGeneration as number | undefined;
+    state.runtimeByProvider[provider] = summary;
+  }
+  switch (event.type) {
+    case "provider_runtime_started":
+      state.runtimeStatus = "started";
+      if (isPersistentRuntimeProvider(provider)) {
+        state.runtimeByProvider[provider]!.status = "started";
+      }
+      break;
+    case "provider_runtime_stopped":
+      state.runtimeStatus = "stopped";
+      if (isPersistentRuntimeProvider(provider)) {
+        state.runtimeByProvider[provider]!.status = "stopped";
+      }
+      break;
+    case "provider_runtime_disconnected":
+      state.runtimeStatus = "disconnected";
+      if (isPersistentRuntimeProvider(provider)) {
+        state.runtimeByProvider[provider]!.status = "disconnected";
+      }
+      break;
+    case "provider_runtime_attached":
+      state.runtimeStatus = "attached";
+      if (isPersistentRuntimeProvider(provider)) {
+        state.runtimeByProvider[provider]!.status = "attached";
+      }
+      break;
+    case "provider_runtime_turn_started":
+      state.runtimeStatus = "running";
+      if (isPersistentRuntimeProvider(provider)) {
+        state.runtimeByProvider[provider]!.status = "running";
+      }
+      break;
+    case "provider_runtime_turn_completed":
+      state.runtimeStatus = "attached";
+      if (isPersistentRuntimeProvider(provider)) {
+        state.runtimeByProvider[provider]!.status = "attached";
+      }
+      break;
+    case "provider_runtime_error":
+      state.runtimeStatus = "error";
+      if (isPersistentRuntimeProvider(provider)) {
+        state.runtimeByProvider[provider]!.status = "error";
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+function isPersistentRuntimeProvider(
+  provider: unknown,
+): provider is "codex" | "opencode" | "cursor" {
+  return provider === "codex" || provider === "opencode" || provider === "cursor";
 }
 
 function normalizeError(error: unknown): string {

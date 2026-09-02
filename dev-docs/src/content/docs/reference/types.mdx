@@ -405,8 +405,23 @@ type PedelecEventContext = {
 
 ### `ChatEventContext`
 
+Context for completed `onChat()` messages.
+
 ```ts
 type ChatEventContext = PedelecEventContext & {
+  type: "chat_message";
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+```
+
+### `ChatDeltaEventContext`
+
+Context for best-effort incremental `onChatDelta()` fragments.
+
+```ts
+type ChatDeltaEventContext = PedelecEventContext & {
   type: "chat_delta";
   turnId: string;
   turnStartedAt: number;

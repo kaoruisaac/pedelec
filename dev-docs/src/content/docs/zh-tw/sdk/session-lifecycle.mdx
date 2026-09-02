@@ -74,7 +74,8 @@ JavaScript function 無法跨 reload 保存。Resume 後重新 attach：
 ```ts
 const session = await pedelec.resumeSession(record.sessionId);
 
-const offChat = session.onChat(handleChat);
+const offChat = session.onChat(handleCompletedChat);
+const offChatDelta = session.onChatDelta(handleChatDelta);
 const offStatus = session.onStatus(handleStatus);
 const offError = session.onError(handleError);
 const offEnded = session.onEnded(handleEnded);

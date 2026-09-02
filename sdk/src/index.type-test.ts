@@ -2,6 +2,7 @@ import {
   Pedelec,
   defineTool,
   type ChatEventContext,
+  type ChatDeltaEventContext,
   type EndedEventContext,
   type ErrorEventContext,
   type PedelecEventContext,
@@ -74,9 +75,20 @@ async function typedOnToolNameFromCreateSession() {
 
   session.onChat((_text, ctx) => {
     const chatCtx: ChatEventContext = ctx;
+    const messageType: "chat_message" = ctx.type;
     const receivedAt: number = ctx.eventReceivedAt;
     void receivedAt;
+    void messageType;
     void chatCtx;
+  });
+
+  session.onChatDelta((_text, ctx) => {
+    const chatDeltaCtx: ChatDeltaEventContext = ctx;
+    const deltaType: "chat_delta" = ctx.type;
+    const receivedAt: number = ctx.eventReceivedAt;
+    void receivedAt;
+    void deltaType;
+    void chatDeltaCtx;
   });
 
   session.onStatus((_status, ctx) => {

@@ -405,8 +405,23 @@ type PedelecEventContext = {
 
 ### `ChatEventContext`
 
+`onChat()` completed message 的 context。
+
 ```ts
 type ChatEventContext = PedelecEventContext & {
+  type: "chat_message";
+  turnId: string;
+  turnStartedAt: number;
+  eventReceivedAt: number;
+};
+```
+
+### `ChatDeltaEventContext`
+
+`onChatDelta()` best-effort incremental fragment 的 context。
+
+```ts
+type ChatDeltaEventContext = PedelecEventContext & {
   type: "chat_delta";
   turnId: string;
   turnStartedAt: number;

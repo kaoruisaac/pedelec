@@ -3,7 +3,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pedelec_cli::{run_tool_cli_with_runtime_file_path, ThreadIdEnvGuard};
+    use pedelec_cli::run_tool_cli_with_runtime_file_path;
     use pedelec_core::{
         workspace_assets_root, workspace_logs_root, CommandSpec, CoreRuntime, CreateThreadOutput,
         CreateThreadSkillsInput, CreateThreadToolInput, EffortLevel, PedelecSettings,
@@ -481,8 +481,6 @@ mod tests {
 
         let mut subscription = subscribe_to_thread(&runtime_path, &output.thread_id);
         install_test_provider_command(&runtime, &output.thread_id, true, false);
-        let _thread_env = ThreadIdEnvGuard::set(Some(&output.thread_id));
-
         let send = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
                 request_id: "phase09_send".into(),
@@ -504,10 +502,13 @@ mod tests {
         );
 
         let first_tool_runtime_path = runtime_path.clone();
+        let first_tool_thread_id = output.thread_id.clone();
         let first_tool_handle = thread::spawn(move || {
             run_tool_cli_with_runtime_file_path(
                 vec![
                     "pedelec-cli".into(),
+                    "--thread-id".into(),
+                    first_tool_thread_id,
                     "tool-call".into(),
                     "update_counter".into(),
                     r#"{"delta":2}"#.into(),
@@ -550,6 +551,8 @@ mod tests {
         let duplicate = run_tool_cli_with_runtime_file_path(
             vec![
                 "pedelec-cli".into(),
+                "--thread-id".into(),
+                output.thread_id.clone(),
                 "tool-call".into(),
                 "get_app_state".into(),
                 "{}".into(),
@@ -676,10 +679,11 @@ mod tests {
             20,
         );
 
-        let _env = ThreadIdEnvGuard::set(Some("thread_tool_timeout_cli"));
         let response = run_tool_cli_with_runtime_file_path(
             vec![
                 "pedelec-cli".into(),
+                "--thread-id".into(),
+                "thread_tool_timeout_cli".into(),
                 "tool-call".into(),
                 "get_app_state".into(),
                 "{}".into(),
@@ -1546,6 +1550,155 @@ mod tests {
     }
 
     #[test]
+    fn persistent_dispatch_receives_an_intent_and_user_turn_is_admitted_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_persistent_ipc",
+            ThreadStatus::Idle,
+            1000,
+        );
+        runtime
+            .lock()
+            .unwrap()
+            .use_persistent_provider_for_test(ProviderCode::Codex);
+        let dispatcher = Arc::new(RecordingPersistentDispatcher::default());
+
+        let output = start_provider_process_with_dispatcher(
+            Arc::clone(&runtime),
+            dispatcher.clone(),
+            SendTextInput {
+                thread_id: "thread_persistent_ipc".into(),
+                message: "hello".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(output.thread_id, "thread_persistent_ipc");
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_status("thread_persistent_ipc"),
+            Some(ThreadStatus::Running)
+        );
+        let operations = dispatcher.operations.lock().unwrap();
+        assert!(matches!(
+            operations.first(),
+            Some(PersistentRuntimeOperation::StartTurn { .. })
+        ));
+    }
+
+    #[test]
+    fn persistent_dispatch_failure_rolls_a_user_turn_into_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_persistent_dispatch_failure",
+            ThreadStatus::Idle,
+            1000,
+        );
+        runtime
+            .lock()
+            .unwrap()
+            .use_persistent_provider_for_test(ProviderCode::Codex);
+        let dispatcher = Arc::new(RecordingPersistentDispatcher {
+            operations: Mutex::new(Vec::new()),
+            error: true,
+        });
+
+        let error = start_provider_process_with_dispatcher(
+            Arc::clone(&runtime),
+            dispatcher,
+            SendTextInput {
+                thread_id: "thread_persistent_dispatch_failure".into(),
+                message: "hello".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, error_codes::PROVIDER_RUNTIME_START_FAILED);
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_status("thread_persistent_dispatch_failure"),
+            Some(ThreadStatus::Error)
+        );
+    }
+
+    #[test]
+    fn persistent_prepare_dispatch_failure_returns_to_idle_with_provider_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_persistent_prepare_dispatch_failure",
+            ThreadStatus::Idle,
+            1000,
+        );
+        runtime
+            .lock()
+            .unwrap()
+            .use_persistent_provider_for_test(ProviderCode::Codex);
+        let event_rx = runtime
+            .lock()
+            .unwrap()
+            .event_bus
+            .subscribe("thread_persistent_prepare_dispatch_failure");
+        let dispatcher = Arc::new(RecordingPersistentDispatcher {
+            operations: Mutex::new(Vec::new()),
+            error: true,
+        });
+
+        let error = prepare_provider_process_with_dispatcher(
+            Arc::clone(&runtime),
+            dispatcher,
+            PrepareThreadInput {
+                thread_id: "thread_persistent_prepare_dispatch_failure".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, error_codes::PROVIDER_RUNTIME_START_FAILED);
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_status("thread_persistent_prepare_dispatch_failure"),
+            Some(ThreadStatus::Idle)
+        );
+        let events = collect_events_until(&event_rx, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ThreadEvent::StatusChanged {
+                        status: ThreadStatus::Idle,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ThreadEvent::Error { error, .. }
+                if error.code == error_codes::PROVIDER_RUNTIME_START_FAILED
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ThreadEvent::StatusChanged {
+                status: ThreadStatus::Idle,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn mock_process_failure_sets_error_and_rejects_later_send() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
@@ -1666,6 +1819,26 @@ mod tests {
         assert!(!workspace_path.exists());
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingPersistentDispatcher {
+        operations: Mutex<Vec<PersistentRuntimeOperation>>,
+        error: bool,
+    }
+
+    impl PersistentRuntimeDispatcher for RecordingPersistentDispatcher {
+        fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
+            self.operations.lock().unwrap().push(operation);
+            if self.error {
+                Err(PedelecError::new(
+                    error_codes::PROVIDER_RUNTIME_START_FAILED,
+                    "test dispatcher rejected operation",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     fn insert_thread_with_registry(
         runtime: &Arc<Mutex<CoreRuntime>>,
         temp: &Path,
@@ -1696,6 +1869,7 @@ mod tests {
             },
             ProviderAdapterState {
                 provider_session_id: None,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message: false,
             },

@@ -994,6 +994,7 @@ mod tests {
             },
             ProviderAdapterState {
                 provider_session_id: None,
+                active_provider_turn_id: None,
                 last_process_id: None,
                 has_user_message: false,
             },

@@ -112,8 +112,13 @@ const session = await pedelec.createSession({
 });
 
 session.onChat((text) => {
-  // Incremental text stream from the agent.
+  // One completed logical assistant message.
   console.log(text);
+});
+
+session.onChatDelta((delta) => {
+  // Optional best-effort incremental text for live UI.
+  console.log(delta);
 });
 
 session.onStatus((status) => {
@@ -269,16 +274,26 @@ type PedelecSettings = {
 
 ## Receiving Agent Responses
 
+Use `onChat()` for completed logical assistant messages:
+
+```ts
+session.onChat((text) => {
+  saveCompletedAssistantMessage(text);
+});
+```
+
+For a live streaming UI, subscribe separately with `onChatDelta()` and accumulate the fragments:
+
 ```ts
 const chunks: string[] = [];
 
-session.onChat((text) => {
-  chunks.push(text);
+session.onChatDelta((delta) => {
+  chunks.push(delta);
   render(chunks.join(""));
 });
 ```
 
-`onChat()` receives incremental text. It may not be a complete sentence or a complete paragraph. The UI usually needs to accumulate chunks into a complete message.
+Delta delivery is best-effort and provider-dependent. Delta boundaries have no semantic meaning, and Pedelec does not synthesize missing suffixes from a later completed message.
 
 ---
 
@@ -343,7 +358,7 @@ Pedelec's tool calling flow is:
 
 1. The Web App provides `skills: { guidance, tools }` when creating a session.
 2. The Desktop Runtime validates the manifest, stores its ToolRegistry in memory, and injects the guidance and tool index into the first provider prompt.
-3. When the agent needs frontend data or an action, it uses `pedelec-cli tool-spec <tool>` for the full schema, then executes `pedelec-cli tool-call ...` locally.
+3. When the agent needs frontend data or an action, it uses `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool>` for the full schema, then executes `pedelec-cli --thread-id <pedelec_thread_id> tool-call ...` locally.
 4. After the Desktop Runtime receives the tool call, it sends it back to the SDK through the native host and extension.
 5. The SDK triggers `session.onTool()`.
 6. The Web App executes the corresponding tool and returns the result.

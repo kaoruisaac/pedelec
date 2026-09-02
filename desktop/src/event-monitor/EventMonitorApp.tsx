@@ -14,7 +14,7 @@ import {
 } from "./eventMonitorFormatters";
 import { monitorEndThread, openThreadWorkspace, sendThreadText } from "./eventMonitorActions";
 import { createEventMonitorStore } from "./eventMonitorStore";
-import type { MonitorEvent, ThreadViewModel } from "./eventMonitorStore";
+import type { MonitorEvent, RuntimeSummary, ThreadViewModel } from "./eventMonitorStore";
 
 export function EventMonitorApp() {
   const monitor = createEventMonitorStore();
@@ -139,6 +139,17 @@ export function EventMonitorApp() {
         </div>
         <div class="event-monitor-metrics" aria-label="Monitor status">
           <Metric label="Core IPC" value="unknown" status="unknown" />
+          <RuntimeMetric label="Codex Runtime" summary={store.runtimeByProvider.codex} />
+          <RuntimeMetric label="OpenCode Runtime" summary={store.runtimeByProvider.opencode} />
+          <RuntimeMetric label="Cursor Runtime" summary={store.runtimeByProvider.cursor} />
+          <Metric
+            label="Latest Runtime PID / Gen"
+            value={
+              store.runtimeProcessId !== undefined || store.runtimeGeneration !== undefined
+                ? `${formatValue(store.runtimeProcessId)} / ${formatValue(store.runtimeGeneration)}`
+                : "-"
+            }
+          />
           <Metric label="Total sessions" value={threadList().length} />
           <Metric label="Total events" value={store.totalEventCount} />
         </div>
@@ -240,6 +251,7 @@ export function EventMonitorApp() {
                 onOpenWorkspace={handleOpenThreadWorkspace}
                 isStopPending={stoppingThreadIds().has(thread().threadId)}
                 onStopThread={handleStopThread}
+                runtimeDiagnostics={store.runtimeDiagnostics}
               />
             )}
           </Show>
@@ -267,6 +279,7 @@ function ThreadDetail(props: {
   onOpenWorkspace: (threadId: string) => Promise<void>;
   isStopPending: boolean;
   onStopThread: (threadId: string) => Promise<void>;
+  runtimeDiagnostics: MonitorEvent[];
 }) {
   const thread = () => props.thread;
 
@@ -301,6 +314,25 @@ function ThreadDetail(props: {
           <SummaryItem label="Thread ID" value={thread().threadId} />
           <SummaryItem label="Status" value={thread().status} status={thread().status} />
           <SummaryItem label="Provider Session ID" value={thread().providerSessionId} />
+          <SummaryItem label="Provider Turn ID" value={thread().activeProviderTurnId} />
+          <SummaryItem
+            label="Runtime PID / Gen"
+            value={
+              thread().runtimeProcessId !== undefined || thread().runtimeGeneration !== undefined
+                ? `${formatValue(thread().runtimeProcessId)} / ${formatValue(thread().runtimeGeneration)}`
+                : undefined
+            }
+          />
+          <SummaryItem
+            label="Runtime Attached"
+            value={
+              thread().runtimeAttached === undefined
+                ? undefined
+                : thread().runtimeAttached
+                  ? "yes"
+                  : "no"
+            }
+          />
           <SummaryItem label="Created At" value={formatTimestamp(thread().createdAt)} />
           <SummaryItem label="Updated At" value={formatTimestamp(thread().updatedAt)} />
           <SummaryItem label="Event Count" value={thread().eventCount} />
@@ -366,8 +398,32 @@ function ThreadDetail(props: {
             )}
           </For>
         </MonitorBlock>
+
+        <MonitorBlock
+          title="Runtime Diagnostics"
+          empty={
+            thread().runtimeDiagnostics.length === 0 && props.runtimeDiagnostics.length === 0
+          }
+        >
+          <For each={thread().runtimeDiagnostics}>
+            {(event) => <pre class="event-monitor-json">{prettyJson(event)}</pre>}
+          </For>
+          <For each={props.runtimeDiagnostics.filter((event) => !event.threadId)}>
+            {(event) => <pre class="event-monitor-json">{prettyJson(event)}</pre>}
+          </For>
+        </MonitorBlock>
       </div>
     </div>
+  );
+}
+
+function RuntimeMetric(props: { label: string; summary?: RuntimeSummary }) {
+  return (
+    <Metric
+      label={props.label}
+      value={props.summary?.status || "unknown"}
+      status={props.summary?.status || "unknown"}
+    />
   );
 }
 

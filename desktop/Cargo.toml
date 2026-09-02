@@ -8,6 +8,7 @@ members = [
   "crates/pedelec-agent",
   "crates/pedelec-cli",
   "crates/pedelec-native-host",
+  "crates/pedelec-runtime",
 ]
 
 [workspace.package]
@@ -31,3 +32,4 @@ uuid = { version = "1", features = ["v4", "v7", "std"] }
 pedelec-shared = { path = "crates/pedelec-shared" }
 pedelec-core = { path = "crates/pedelec-core" }
 pedelec-ipc = { path = "crates/pedelec-ipc" }
+pedelec-runtime = { path = "crates/pedelec-runtime" }

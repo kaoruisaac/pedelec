@@ -1027,8 +1027,11 @@ function createBackground(runtimeChrome, options = {}) {
   function sdkEventFromThreadEvent(event) {
     if (!event?.threadId) return null;
     const base = { sessionId: event.threadId, seq: event.seq };
-    if (event.type === "assistant_message") {
+    if (event.type === "assistant_delta") {
       return { ...base, type: "chat_delta", text: event.text || "" };
+    }
+    if (event.type === "assistant_message") {
+      return { ...base, type: "chat_message", text: event.text || "" };
     }
     if (event.type === "status_changed") {
       return { ...base, type: "status_changed", status: sdkStatusFromCoreStatus(event.status) };

@@ -102,7 +102,7 @@ Desktop runtime starts/resumes provider work
   ↓
 Provider emits assistant output and/or a tool call
   ↓
-SDK dispatches onChat(), onStatus(), or onTool()
+SDK dispatches onChat(), onChatDelta(), onStatus(), or onTool()
   ↓
 Runtime emits done/idle
   ↓
@@ -117,7 +117,7 @@ Only one active turn is allowed per session. A second `sendText()` while the fir
 
 1. The application included a tool definition in `skills.tools`.
 2. Core injects `skills.guidance`, tool names, descriptions, and calling instructions into the first provider prompt. The initial prompt omits complete argument schemas.
-3. When it needs a schema, the agent runs `pedelec-cli tool-spec <tool-name>`; it calls a tool with `pedelec-cli tool-call <tool-name> '<json_args>'`.
+3. When it needs a schema, the agent runs `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool-name>`; it calls a tool with `pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool-name> '<json_args>'`.
 4. Core emits a normalized tool event and waits for a result.
 5. The SDK sets the session status to `waiting_tool_result`.
 6. The SDK selects a handler in this order: named handler, inline handler, generic fallback.
