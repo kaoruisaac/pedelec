@@ -571,6 +571,19 @@ impl CodexAppServerController {
 
         let (events_tx, events_rx) = mpsc::channel();
         let mappings = Arc::new(Mutex::new(SessionMappings::default()));
+        transport.set_protocol_owner_resolver({
+            let mappings = Arc::clone(&mappings);
+            Arc::new(move |frame: &Value| {
+                let params = frame.get("params")?;
+                let provider_thread_id = notification_thread_id(params, params.get("turn"))?;
+                mappings
+                    .lock()
+                    .ok()?
+                    .provider_to_pedelec
+                    .get(&provider_thread_id)
+                    .cloned()
+            })
+        });
         let healthy = Arc::new(AtomicBool::new(true));
         let event_transport = Arc::clone(&transport);
         let event_mappings = Arc::clone(&mappings);
@@ -675,6 +688,8 @@ impl CodexAppServerController {
             }
         }
 
+        self.transport
+            .register_protocol_log(pedelec_thread_id, "codex", &config.cwd);
         let requested_provider_thread_id = provider_thread_id.map(str::to_string);
         let (operation, method, params) = match provider_thread_id {
             Some(provider_thread_id) => (
@@ -690,7 +705,7 @@ impl CodexAppServerController {
         };
         let result = self
             .transport
-            .request(method, params, self.control_timeout)
+            .request_scoped(pedelec_thread_id, method, params, self.control_timeout)
             .map_err(|error| self.map_request_error(operation, error))?;
         let provider_thread_id = match parse_provider_thread_id(operation, &result) {
             Ok(provider_thread_id) => provider_thread_id,
@@ -1929,6 +1944,45 @@ done
         }
     }
 
+    fn protocol_records(workspace: &Path, thread_id: &str) -> Vec<Value> {
+        let log_dir = workspace.join(".pedelec-runtime").join("logs");
+        let path = fs::read_dir(log_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(&format!("-{thread_id}-")))
+            })
+            .unwrap();
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn assert_protocol_request_has_response(records: &[Value], method: &str) {
+        let request = records
+            .iter()
+            .find(|record| {
+                record["direction"] == "client_to_provider"
+                    && record["kind"] == "request"
+                    && record["message"]["method"] == method
+            })
+            .unwrap_or_else(|| panic!("missing protocol request for {method}"));
+        let request_id = request["message"]["id"].clone();
+        assert!(
+            records.iter().any(|record| {
+                record["direction"] == "provider_to_client"
+                    && record["kind"] == "response"
+                    && record["message"]["id"] == request_id
+            }),
+            "missing protocol response for {method}"
+        );
+    }
+
     #[test]
     fn start_params_are_typed_and_do_not_include_legacy_cli_args() {
         let params = build_thread_start_params(&CodexSessionConfig {
@@ -2039,6 +2093,19 @@ done
         assert!(mappings.register("pedelec-b", "codex-a").is_err());
         mappings.remove_pedelec("pedelec-a");
         assert!(mappings.provider_to_pedelec.is_empty());
+    }
+
+    #[test]
+    fn notification_thread_id_supports_direct_and_nested_turn_shapes() {
+        assert_eq!(
+            notification_thread_id(&json!({"threadId":"direct"}), None).as_deref(),
+            Some("direct")
+        );
+        let params = json!({"turn":{"threadId":"nested"}});
+        assert_eq!(
+            notification_thread_id(&params, params.get("turn")).as_deref(),
+            Some("nested")
+        );
     }
 
     #[test]
@@ -2445,6 +2512,24 @@ done
             turn_request["params"]["sandboxPolicy"],
             json!({ "type": "dangerFullAccess" })
         );
+        let records = protocol_records(fixture._directory.path(), "pedelec-a");
+        assert_protocol_request_has_response(&records, "thread/start");
+        assert_protocol_request_has_response(&records, "turn/start");
+        assert!(records.iter().any(|record| {
+            record["direction"] == "provider_to_client"
+                && record["kind"] == "notification"
+                && record["message"]["method"] == "turn/started"
+        }));
+        assert!(records.iter().any(|record| {
+            record["direction"] == "provider_to_client"
+                && record["kind"] == "notification"
+                && record["message"]["method"] == "item/agentMessage/delta"
+        }));
+        assert!(records.iter().any(|record| {
+            record["direction"] == "provider_to_client"
+                && record["kind"] == "notification"
+                && record["message"]["method"] == "turn/completed"
+        }));
         controller.shutdown().unwrap();
     }
 
@@ -2596,6 +2681,9 @@ done
                 "thread/unsubscribe"
             ]
         );
+        let records = protocol_records(fixture._directory.path(), "pedelec-a");
+        assert_protocol_request_has_response(&records, "turn/interrupt");
+        assert_protocol_request_has_response(&records, "thread/unsubscribe");
         controller.shutdown().unwrap();
     }
 

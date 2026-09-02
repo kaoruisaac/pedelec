@@ -1,12 +1,17 @@
 use crate::jsonl::{JsonLineChannel, JsonLineError, JsonLineEvent};
 use crate::persistent_process::PersistentWriter;
+use chrono::Utc;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Controls the envelope emitted by [`RpcPeer`]. Codex App Server uses the
 /// historical bare shape while ACP requires strict JSON-RPC 2.0 envelopes.
@@ -109,13 +114,56 @@ impl fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
+type OwnerResolver = Arc<dyn Fn(&Value) -> Option<String> + Send + Sync>;
+
+struct PendingRequest {
+    reply: mpsc::SyncSender<Result<Value, RpcError>>,
+    owner: Option<String>,
+}
+
+const MAX_LATE_RESPONSE_OWNERS: usize = 1024;
+
+#[derive(Default)]
+struct RpcCorrelationState {
+    pending: HashMap<RpcId, PendingRequest>,
+    late_response_owners: HashMap<RpcId, String>,
+    late_response_order: VecDeque<RpcId>,
+}
+
+impl RpcCorrelationState {
+    fn remember_late_response_owner(&mut self, id: RpcId, owner: Option<String>) {
+        let Some(owner) = owner else {
+            return;
+        };
+        self.late_response_owners.insert(id.clone(), owner);
+        self.late_response_order.push_back(id);
+        while self.late_response_order.len() > MAX_LATE_RESPONSE_OWNERS {
+            if let Some(expired) = self.late_response_order.pop_front() {
+                self.late_response_owners.remove(&expired);
+            }
+        }
+    }
+
+    fn take_late_response_owner(&mut self, id: &RpcId) -> Option<String> {
+        self.late_response_owners.remove(id)
+    }
+}
+
+#[derive(Default)]
+struct ProtocolLogState {
+    writers: HashMap<String, std::fs::File>,
+    resolver: Option<OwnerResolver>,
+    server_request_owners: HashMap<RpcId, String>,
+}
+
 struct RpcInner {
     writer: Mutex<Arc<dyn JsonLineWriter>>,
     next_id: AtomicU64,
-    pending: Mutex<HashMap<RpcId, mpsc::SyncSender<Result<Value, RpcError>>>>,
+    correlations: Mutex<RpcCorrelationState>,
     disconnected: Mutex<Option<RpcDisconnectReason>>,
     events: mpsc::Sender<RpcEvent>,
     envelope_mode: RpcEnvelopeMode,
+    protocol_logs: Mutex<ProtocolLogState>,
 }
 
 /// A writer abstraction keeps `RpcPeer` reusable with persistent process
@@ -171,10 +219,11 @@ impl RpcPeer {
         let inner = Arc::new(RpcInner {
             writer: Mutex::new(writer),
             next_id: AtomicU64::new(1),
-            pending: Mutex::new(HashMap::new()),
+            correlations: Mutex::new(RpcCorrelationState::default()),
             disconnected: Mutex::new(None),
             events: events_tx,
             envelope_mode,
+            protocol_logs: Mutex::new(ProtocolLogState::default()),
         });
         let peer = Self {
             inner: Arc::clone(&inner),
@@ -190,12 +239,34 @@ impl RpcPeer {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, RpcError> {
-        let method = method.into();
+        self.request_with_owner(None, method.into(), params, timeout)
+    }
+
+    pub fn request_scoped(
+        &self,
+        owner: impl Into<String>,
+        method: impl Into<String>,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, RpcError> {
+        self.request_with_owner(Some(owner.into()), method.into(), params, timeout)
+    }
+
+    fn request_with_owner(
+        &self,
+        owner: Option<String>,
+        method: String,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, RpcError> {
         let id = RpcId::Number(
             i64::try_from(self.inner.next_id.fetch_add(1, Ordering::Relaxed))
                 .expect("RPC request id overflowed i64"),
         );
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let request =
+            self.envelope(json!({ "id": id.as_value(), "method": method, "params": params }));
+        let effective_owner = owner.or_else(|| resolve_protocol_owner(&self.inner, &request));
         {
             let disconnected = self
                 .inner
@@ -205,16 +276,20 @@ impl RpcPeer {
             if let Some(reason) = disconnected.clone() {
                 return Err(RpcError::Disconnected { reason });
             }
-            let mut pending = self
+            let mut correlations = self
                 .inner
-                .pending
+                .correlations
                 .lock()
-                .expect("RPC pending mutex poisoned");
-            pending.insert(id.clone(), reply_tx);
+                .expect("RPC correlation mutex poisoned");
+            correlations.pending.insert(
+                id.clone(),
+                PendingRequest {
+                    reply: reply_tx,
+                    owner: effective_owner.clone(),
+                },
+            );
         }
 
-        let request =
-            self.envelope(json!({ "id": id.as_value(), "method": method, "params": params }));
         let write_result = self
             .inner
             .writer
@@ -222,19 +297,25 @@ impl RpcPeer {
             .expect("RPC writer mutex poisoned")
             .write_json(&request);
         if let Err(error) = write_result {
-            self.remove_pending(&id);
+            let _ = self.remove_pending(&id);
             self.mark_disconnected(RpcDisconnectReason::TransportIo(error.clone()));
             return Err(RpcError::Write { error });
         }
+        self.log_protocol_frame(
+            "client_to_provider",
+            "request",
+            &request,
+            effective_owner.as_deref(),
+        );
 
         match reply_rx.recv_timeout(timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.remove_pending(&id);
+                self.timeout_pending(&id);
                 Err(RpcError::RequestTimeout { id, method })
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.remove_pending(&id);
+                let _ = self.remove_pending(&id);
                 Err(RpcError::Disconnected {
                     reason: self.disconnect_reason(),
                 })
@@ -244,11 +325,22 @@ impl RpcPeer {
 
     pub fn notify(&self, method: impl Into<String>, params: Value) -> Result<(), RpcError> {
         let request = self.envelope(json!({ "method": method.into(), "params": params }));
-        self.write_or_disconnect(&request)
+        self.write_or_disconnect(&request)?;
+        self.log_protocol_frame("client_to_provider", "notification", &request, None);
+        Ok(())
     }
 
     pub fn respond_success(&self, id: RpcId, result: Value) -> Result<(), RpcError> {
-        self.write_or_disconnect(&self.envelope(json!({ "id": id.as_value(), "result": result })))
+        let response = self.envelope(json!({ "id": id.as_value(), "result": result }));
+        let owner = self.take_server_request_owner(&id);
+        self.write_or_disconnect(&response)?;
+        self.log_protocol_frame(
+            "client_to_provider",
+            "response",
+            &response,
+            owner.as_deref(),
+        );
+        Ok(())
     }
 
     pub fn respond_error(
@@ -264,7 +356,69 @@ impl RpcPeer {
         if let Some(data) = data {
             error.insert("data".to_string(), data);
         }
-        self.write_or_disconnect(&self.envelope(json!({ "id": id.as_value(), "error": error })))
+        let response = self.envelope(json!({ "id": id.as_value(), "error": error }));
+        let owner = self.take_server_request_owner(&id);
+        self.write_or_disconnect(&response)?;
+        self.log_protocol_frame(
+            "client_to_provider",
+            "response",
+            &response,
+            owner.as_deref(),
+        );
+        Ok(())
+    }
+
+    pub fn register_protocol_log(&self, owner: &str, provider: &str, workspace: &Path) {
+        if self
+            .inner
+            .protocol_logs
+            .lock()
+            .expect("RPC protocol log mutex poisoned")
+            .writers
+            .contains_key(owner)
+        {
+            return;
+        }
+        let logs_root = workspace.join(".pedelec-runtime").join("logs");
+        if fs::create_dir_all(&logs_root).is_err() {
+            return;
+        }
+        let safe_provider = provider
+            .to_ascii_lowercase()
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        let path = logs_root.join(format!(
+            "protocol-{safe_provider}-{owner}-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        let Ok(file) = OpenOptions::new().create_new(true).append(true).open(path) else {
+            return;
+        };
+        self.inner
+            .protocol_logs
+            .lock()
+            .expect("RPC protocol log mutex poisoned")
+            .writers
+            .entry(owner.to_string())
+            .or_insert(file);
+    }
+
+    pub fn set_protocol_owner_resolver(
+        &self,
+        resolver: Arc<dyn Fn(&Value) -> Option<String> + Send + Sync>,
+    ) {
+        self.inner
+            .protocol_logs
+            .lock()
+            .expect("RPC protocol log mutex poisoned")
+            .resolver = Some(resolver);
     }
 
     pub fn recv_event(&self) -> Result<RpcEvent, mpsc::RecvError> {
@@ -328,12 +482,45 @@ impl RpcPeer {
         value
     }
 
-    fn remove_pending(&self, id: &RpcId) {
+    fn log_protocol_frame(
+        &self,
+        direction: &str,
+        kind: &str,
+        message: &Value,
+        explicit_owner: Option<&str>,
+    ) {
+        log_protocol_frame(&self.inner, direction, kind, message, explicit_owner);
+    }
+
+    fn take_server_request_owner(&self, id: &RpcId) -> Option<String> {
         self.inner
-            .pending
+            .protocol_logs
             .lock()
-            .expect("RPC pending mutex poisoned")
-            .remove(id);
+            .expect("RPC protocol log mutex poisoned")
+            .server_request_owners
+            .remove(id)
+    }
+
+    fn remove_pending(&self, id: &RpcId) -> Option<PendingRequest> {
+        self.inner
+            .correlations
+            .lock()
+            .expect("RPC correlation mutex poisoned")
+            .pending
+            .remove(id)
+    }
+
+    fn timeout_pending(&self, id: &RpcId) {
+        let mut correlations = self
+            .inner
+            .correlations
+            .lock()
+            .expect("RPC correlation mutex poisoned");
+        let owner = correlations
+            .pending
+            .remove(id)
+            .and_then(|pending| pending.owner);
+        correlations.remember_late_response_owner(id.clone(), owner);
     }
 
     fn disconnect_reason(&self) -> RpcDisconnectReason {
@@ -433,6 +620,22 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
         }
         match id {
             Some(id) => {
+                let owner = resolve_protocol_owner(inner, &frame);
+                log_protocol_frame(
+                    inner,
+                    "provider_to_client",
+                    "request",
+                    &frame,
+                    owner.as_deref(),
+                );
+                if let Some(owner) = owner {
+                    inner
+                        .protocol_logs
+                        .lock()
+                        .expect("RPC protocol log mutex poisoned")
+                        .server_request_owners
+                        .insert(id.clone(), owner);
+                }
                 let params = object.get("params").cloned().unwrap_or(Value::Null);
                 inner
                     .events
@@ -446,6 +649,7 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
                     })?;
             }
             None => {
+                log_protocol_frame(inner, "provider_to_client", "notification", &frame, None);
                 let params = object.get("params").cloned().unwrap_or(Value::Null);
                 inner
                     .events
@@ -477,13 +681,32 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
     } else {
         Ok(object.get("result").cloned().expect("validated RPC result"))
     };
-    let waiter = inner
-        .pending
-        .lock()
-        .expect("RPC pending mutex poisoned")
-        .remove(&id);
-    if let Some(waiter) = waiter {
-        let _ = waiter.send(response);
+    let (pending, late_owner) = {
+        let mut correlations = inner
+            .correlations
+            .lock()
+            .expect("RPC correlation mutex poisoned");
+        let pending = correlations.pending.remove(&id);
+        let late_owner = if pending.is_none() {
+            correlations.take_late_response_owner(&id)
+        } else {
+            None
+        };
+        (pending, late_owner)
+    };
+    let owner = pending
+        .as_ref()
+        .and_then(|pending| pending.owner.clone())
+        .or(late_owner);
+    log_protocol_frame(
+        inner,
+        "provider_to_client",
+        "response",
+        &frame,
+        owner.as_deref(),
+    );
+    if let Some(pending) = pending {
+        let _ = pending.reply.send(response);
     } else {
         let response = match response {
             Ok(response) => response,
@@ -495,6 +718,50 @@ fn dispatch_frame(inner: &Arc<RpcInner>, frame: Value) -> Result<(), RpcError> {
     }
 
     Ok(())
+}
+
+fn resolve_protocol_owner(inner: &Arc<RpcInner>, frame: &Value) -> Option<String> {
+    let resolver = inner
+        .protocol_logs
+        .lock()
+        .expect("RPC protocol log mutex poisoned")
+        .resolver
+        .clone();
+    resolver.and_then(|resolver| resolver(frame))
+}
+
+fn log_protocol_frame(
+    inner: &Arc<RpcInner>,
+    direction: &str,
+    kind: &str,
+    message: &Value,
+    explicit_owner: Option<&str>,
+) {
+    let owner = explicit_owner
+        .map(str::to_string)
+        .or_else(|| resolve_protocol_owner(inner, message));
+    let Some(owner) = owner else {
+        return;
+    };
+    let record = json!({
+        "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "direction": direction,
+        "kind": kind,
+        "message": message,
+    });
+    let Ok(mut bytes) = serde_json::to_vec(&record) else {
+        return;
+    };
+    bytes.push(b'\n');
+    let mut state = inner
+        .protocol_logs
+        .lock()
+        .expect("RPC protocol log mutex poisoned");
+    let Some(writer) = state.writers.get_mut(&owner) else {
+        return;
+    };
+    let _ = writer.write_all(&bytes);
+    let _ = writer.flush();
 }
 
 fn parse_remote_error(error: &Value) -> Result<RpcError, RpcError> {
@@ -525,13 +792,19 @@ fn mark_disconnected(inner: &Arc<RpcInner>, reason: RpcDisconnectReason) {
             return;
         }
         *disconnected = Some(reason.clone());
-        std::mem::take(&mut *inner.pending.lock().expect("RPC pending mutex poisoned"))
+        let mut correlations = inner
+            .correlations
+            .lock()
+            .expect("RPC correlation mutex poisoned");
+        correlations.late_response_owners.clear();
+        correlations.late_response_order.clear();
+        std::mem::take(&mut correlations.pending)
     };
     let error = RpcError::Disconnected {
         reason: reason.clone(),
     };
-    for (_, waiter) in pending {
-        let _ = waiter.send(Err(error.clone()));
+    for (_, pending) in pending {
+        let _ = pending.reply.send(Err(error.clone()));
     }
     let _ = inner.events.send(RpcEvent::Disconnected { reason });
 }

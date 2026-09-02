@@ -14,6 +14,8 @@ type DemoChatMessage = {
   sessionId: string;
   role: ChatRole;
   text: string;
+  turnId?: string;
+  completed?: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -406,9 +408,13 @@ export default function App() {
       return;
     }
 
-    const disposeChat = session.onChat((text) => {
-      appendAssistantDelta(session.sessionId, text);
-      appendSessionEvent(session.sessionId, "assistant_delta_received", { text });
+    const disposeChatDelta = session.onChatDelta((text, ctx) => {
+      appendAssistantDelta(session.sessionId, text, ctx.turnId);
+      appendSessionEvent(session.sessionId, "assistant_delta_received", { text, turnId: ctx.turnId });
+    });
+    const disposeChat = session.onChat((text, ctx) => {
+      appendAssistantMessage(session.sessionId, text, ctx.turnId);
+      appendSessionEvent(session.sessionId, "assistant_message_received", { text, turnId: ctx.turnId });
     });
     const disposeStatus = session.onStatus((status) => {
       updateSession(session.sessionId, (current) => ({ ...current, status, updatedAt: Date.now() }));
@@ -424,6 +430,7 @@ export default function App() {
     const disposeSelectedTextTool = session.onTool("get_selected_text", (args) => handleTool(session.sessionId, "get_selected_text", args));
     const disposeTool = session.onTool((tool, args) => handleTool(session.sessionId, tool, args));
     const dispose = () => {
+      disposeChatDelta();
       disposeChat();
       disposeStatus();
       disposeError();
@@ -562,12 +569,12 @@ export default function App() {
     setSessions((current) => current.map((session) => (session.sessionId === sessionId ? updater(session) : session)));
   }
 
-  function appendAssistantDelta(sessionId: string, text: string) {
+  function appendAssistantDelta(sessionId: string, text: string, turnId: string) {
     updateSession(sessionId, (session) => {
       const now = Date.now();
       const last = session.transcript.at(-1);
       const transcript =
-        last?.role === "assistant"
+        last?.role === "assistant" && last.turnId === turnId && !last.completed
           ? [
               ...session.transcript.slice(0, -1),
               {
@@ -576,7 +583,41 @@ export default function App() {
                 updatedAt: now,
               },
             ]
-          : [...session.transcript, makeMessage(sessionId, "assistant", text)];
+          : [
+              ...session.transcript,
+              {
+                ...makeMessage(sessionId, "assistant", text),
+                turnId,
+                completed: false,
+              },
+            ];
+      return { ...session, transcript, updatedAt: now };
+    });
+  }
+
+  function appendAssistantMessage(sessionId: string, text: string, turnId: string) {
+    updateSession(sessionId, (session) => {
+      const now = Date.now();
+      const last = session.transcript.at(-1);
+      const transcript =
+        last?.role === "assistant" && last.turnId === turnId && !last.completed
+          ? [
+              ...session.transcript.slice(0, -1),
+              {
+                ...last,
+                text,
+                completed: true,
+                updatedAt: now,
+              },
+            ]
+          : [
+              ...session.transcript,
+              {
+                ...makeMessage(sessionId, "assistant", text),
+                turnId,
+                completed: true,
+              },
+            ];
       return { ...session, transcript, updatedAt: now };
     });
   }

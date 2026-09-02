@@ -2885,8 +2885,10 @@ dependencies = [
 name = "pedelec-runtime"
 version = "0.2.12"
 dependencies = [
+ "chrono",
  "serde_json",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

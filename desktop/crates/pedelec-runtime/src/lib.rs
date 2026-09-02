@@ -41,6 +41,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::fs;
     use std::io::BufRead;
     use std::io::{self, Cursor, Read};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -290,11 +291,204 @@ mod tests {
     }
 
     #[test]
+    fn protocol_jsonl_routes_matching_responses_and_server_request_responses_per_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let (input_tx, input_rx) = mpsc::channel();
+        let (written_tx, written_rx) = mpsc::channel();
+        let peer = test_peer_with_mode(input_rx, written_tx, RpcEnvelopeMode::JsonRpc2);
+        peer.register_protocol_log("thread-a", "cursor", temp.path());
+        peer.register_protocol_log("thread-b", "cursor", temp.path());
+        peer.set_protocol_owner_resolver(Arc::new(|frame| {
+            match frame
+                .get("params")
+                .and_then(|params| params.get("sessionId"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("session-a") => Some("thread-a".to_string()),
+                Some("session-b") => Some("thread-b".to_string()),
+                _ => None,
+            }
+        }));
+
+        let peer_a = peer.clone();
+        let request_a = thread::spawn(move || {
+            peer_a.request(
+                "session/prompt",
+                json!({"sessionId":"session-a","sentinel":"prompt-a"}),
+                Duration::from_secs(1),
+            )
+        });
+        let peer_b = peer.clone();
+        let request_b = thread::spawn(move || {
+            peer_b.request(
+                "session/prompt",
+                json!({"sessionId":"session-b","sentinel":"prompt-b"}),
+                Duration::from_secs(1),
+            )
+        });
+
+        let mut requests = HashMap::new();
+        for _ in 0..2 {
+            let frame: serde_json::Value =
+                serde_json::from_slice(&written_rx.recv().unwrap()).unwrap();
+            requests.insert(
+                frame["params"]["sentinel"].as_str().unwrap().to_string(),
+                frame["id"].clone(),
+            );
+        }
+        input_tx
+            .send(
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"sentinel\":\"response-b\"}}}}\n",
+                    requests["prompt-b"]
+                )
+                .into_bytes(),
+            )
+            .unwrap();
+        input_tx
+            .send(
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"sentinel\":\"response-a\"}}}}\n",
+                    requests["prompt-a"]
+                )
+                .into_bytes(),
+            )
+            .unwrap();
+        request_a.join().unwrap().unwrap();
+        request_b.join().unwrap().unwrap();
+
+        input_tx
+            .send(br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-a","sentinel":"update-a"}}
+"#.to_vec())
+            .unwrap();
+        assert!(matches!(
+            peer.recv_event_timeout(Duration::from_secs(1)).unwrap(),
+            RpcEvent::Notification { .. }
+        ));
+        input_tx
+            .send(br#"{"jsonrpc":"2.0","id":"permission-a","method":"session/request_permission","params":{"sessionId":"session-a","sentinel":"permission-a"}}
+"#.to_vec())
+            .unwrap();
+        assert!(matches!(
+            peer.recv_event_timeout(Duration::from_secs(1)).unwrap(),
+            RpcEvent::ServerRequest(_)
+        ));
+        peer.respond_success(
+            RpcId::String("permission-a".into()),
+            json!({"sentinel":"permission-response-a"}),
+        )
+        .unwrap();
+        let _: serde_json::Value = serde_json::from_slice(&written_rx.recv().unwrap()).unwrap();
+
+        let log_dir = temp.path().join(".pedelec-runtime").join("logs");
+        let mut logs = HashMap::new();
+        for entry in fs::read_dir(log_dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            logs.insert(name, fs::read_to_string(path).unwrap());
+        }
+        let log_a = logs
+            .iter()
+            .find(|(name, _)| name.contains("thread-a"))
+            .map(|(_, body)| body)
+            .unwrap();
+        let log_b = logs
+            .iter()
+            .find(|(name, _)| name.contains("thread-b"))
+            .map(|(_, body)| body)
+            .unwrap();
+        assert!(log_a.contains("prompt-a"));
+        assert!(log_a.contains("response-a"));
+        assert!(log_a.contains("update-a"));
+        assert!(log_a.contains("permission-a"));
+        assert!(log_a.contains("permission-response-a"));
+        assert!(!log_a.contains("prompt-b"));
+        assert!(!log_a.contains("response-b"));
+        assert!(log_b.contains("prompt-b"));
+        assert!(log_b.contains("response-b"));
+        assert!(!log_b.contains("prompt-a"));
+        assert!(!log_b.contains("response-a"));
+
+        for line in log_a.lines().chain(log_b.lines()) {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(record
+                .get("ts")
+                .and_then(serde_json::Value::as_str)
+                .is_some());
+            assert!(matches!(
+                record.get("direction").and_then(serde_json::Value::as_str),
+                Some("client_to_provider" | "provider_to_client")
+            ));
+            assert!(matches!(
+                record.get("kind").and_then(serde_json::Value::as_str),
+                Some("request" | "response" | "notification")
+            ));
+            assert!(record.get("message").is_some());
+        }
+    }
+
+    #[test]
+    fn protocol_jsonl_preserves_bare_codex_envelope_and_logging_failure_is_non_fatal() {
+        let temp = tempfile::tempdir().unwrap();
+        let (input_tx, input_rx) = mpsc::channel();
+        let (written_tx, written_rx) = mpsc::channel();
+        let peer = test_peer_with_mode(input_rx, written_tx, RpcEnvelopeMode::Bare);
+        peer.register_protocol_log("thread-codex", "codex", temp.path());
+        let request_peer = peer.clone();
+        let request = thread::spawn(move || {
+            request_peer.request_scoped(
+                "thread-codex",
+                "thread/start",
+                json!({"sentinel":"raw-bootstrap"}),
+                Duration::from_secs(1),
+            )
+        });
+        let frame: serde_json::Value = serde_json::from_slice(&written_rx.recv().unwrap()).unwrap();
+        assert!(frame.get("jsonrpc").is_none());
+        input_tx
+            .send(
+                format!(
+                    "{{\"id\":{},\"result\":{{\"thread\":{{\"id\":\"codex-thread\"}}}}}}\n",
+                    frame["id"]
+                )
+                .into_bytes(),
+            )
+            .unwrap();
+        request.join().unwrap().unwrap();
+        let log_dir = temp.path().join(".pedelec-runtime").join("logs");
+        let path = fs::read_dir(log_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let body = fs::read_to_string(path).unwrap();
+        assert!(body.contains("raw-bootstrap"));
+        assert!(!body.contains("\"jsonrpc\""));
+
+        let bad_workspace = temp.path().join("not-a-directory");
+        fs::write(&bad_workspace, "file").unwrap();
+        peer.register_protocol_log("unwritable", "codex", &bad_workspace);
+        peer.notify("still/works", json!({})).unwrap();
+        let _: serde_json::Value = serde_json::from_slice(&written_rx.recv().unwrap()).unwrap();
+    }
+
+    #[test]
     fn request_timeout_removes_pending_and_late_response_is_unmatched() {
+        let temp = tempfile::tempdir().unwrap();
         let (input_tx, input_rx) = mpsc::channel();
         let (written_tx, written_rx) = mpsc::channel();
         let peer = test_peer(input_rx, written_tx);
-        let timed_out = peer.request("slow", json!({}), Duration::from_millis(20));
+        peer.register_protocol_log("thread-timeout", "codex", temp.path());
+        peer.set_protocol_owner_resolver(Arc::new(|frame| {
+            (frame["params"]["threadId"] == "provider-timeout")
+                .then(|| "thread-timeout".to_string())
+        }));
+        let timed_out = peer.request(
+            "slow",
+            json!({"threadId":"provider-timeout"}),
+            Duration::from_millis(20),
+        );
         assert!(matches!(timed_out, Err(RpcError::RequestTimeout { .. })));
         let first_request: serde_json::Value =
             serde_json::from_slice(&written_rx.recv().unwrap()).unwrap();
@@ -312,6 +506,18 @@ mod tests {
             peer.recv_event_timeout(Duration::from_secs(1)).unwrap(),
             RpcEvent::UnmatchedResponse { .. }
         ));
+        let log_dir = temp.path().join(".pedelec-runtime").join("logs");
+        let body = fs::read_to_string(
+            fs::read_dir(log_dir)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path(),
+        )
+        .unwrap();
+        assert!(body.contains("provider-timeout"));
+        assert!(body.contains("late"));
 
         let second_peer = peer.clone();
         let second =

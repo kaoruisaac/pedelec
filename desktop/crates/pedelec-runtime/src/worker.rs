@@ -6,6 +6,7 @@ use crate::persistent_process::{
 use crate::rpc::{RpcEnvelopeMode, RpcError, RpcEvent, RpcId, RpcPeer};
 use serde_json::Value;
 use std::fmt;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,6 +15,13 @@ use std::time::Duration;
 #[derive(Debug)]
 pub enum RuntimeCommand {
     Request {
+        method: String,
+        params: Value,
+        timeout: Duration,
+        reply: Sender<Result<Value, RpcError>>,
+    },
+    RequestScoped {
+        owner: String,
         method: String,
         params: Value,
         timeout: Duration,
@@ -81,6 +89,7 @@ pub struct PersistentRuntimeController {
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     event_worker: Mutex<Option<thread::JoinHandle<()>>>,
     process: Arc<PersistentProcess>,
+    peer: RpcPeer,
 }
 
 impl fmt::Debug for PersistentRuntimeController {
@@ -124,7 +133,7 @@ impl PersistentRuntimeController {
             .name(format!("pedelec-runtime-events-{}", process.generation()))
             .spawn(move || forward_events(event_peer, exit_rx, events_tx))
             .expect("could not start runtime event worker");
-        let command_peer = peer;
+        let command_peer = peer.clone();
         let command_worker = thread::Builder::new()
             .name(format!("pedelec-runtime-worker-{}", process.generation()))
             .spawn({
@@ -139,6 +148,7 @@ impl PersistentRuntimeController {
             worker: Mutex::new(Some(command_worker)),
             event_worker: Mutex::new(Some(event_worker)),
             process,
+            peer,
         })
     }
 
@@ -179,6 +189,41 @@ impl PersistentRuntimeController {
             .recv()
             .map_err(|_| RuntimeControllerError::WorkerChannelClosed)?
             .map_err(RuntimeControllerError::Rpc)
+    }
+
+    pub fn request_scoped(
+        &self,
+        owner: impl Into<String>,
+        method: impl Into<String>,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeControllerError> {
+        let owner = owner.into();
+        let method = method.into();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.commands
+            .send(RuntimeCommand::RequestScoped {
+                owner,
+                method,
+                params,
+                timeout,
+                reply: reply_tx,
+            })
+            .map_err(|_| RuntimeControllerError::CommandChannelClosed)?;
+        reply_rx
+            .recv()
+            .map_err(|_| RuntimeControllerError::WorkerChannelClosed)?
+            .map_err(RuntimeControllerError::Rpc)
+    }
+    pub fn register_protocol_log(&self, owner: &str, provider: &str, workspace: &Path) {
+        self.peer.register_protocol_log(owner, provider, workspace);
+    }
+
+    pub fn set_protocol_owner_resolver(
+        &self,
+        resolver: Arc<dyn Fn(&Value) -> Option<String> + Send + Sync>,
+    ) {
+        self.peer.set_protocol_owner_resolver(resolver);
     }
 
     pub fn notify(
@@ -317,6 +362,21 @@ fn command_loop(
                     .name("pedelec-runtime-rpc-command".to_string())
                     .spawn(move || {
                         let _ = reply.send(request_peer.request(method, params, timeout));
+                    });
+            }
+            RuntimeCommand::RequestScoped {
+                owner,
+                method,
+                params,
+                timeout,
+                reply,
+            } => {
+                let request_peer = peer.clone();
+                let _ = thread::Builder::new()
+                    .name("pedelec-runtime-rpc-command".to_string())
+                    .spawn(move || {
+                        let _ =
+                            reply.send(request_peer.request_scoped(owner, method, params, timeout));
                     });
             }
             RuntimeCommand::Notification {

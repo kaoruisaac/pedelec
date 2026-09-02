@@ -25,6 +25,10 @@ export interface ThreadViewModel {
   threadId: string;
   status: string;
   providerSessionId?: string;
+  activeProviderTurnId?: string;
+  runtimeProcessId?: number;
+  runtimeGeneration?: number;
+  runtimeAttached?: boolean;
   createdAt: string;
   updatedAt: string;
   eventCount: number;
@@ -268,6 +272,10 @@ function createMonitorThreadViewModel({
     threadId,
     status: "unknown",
     providerSessionId: undefined,
+    activeProviderTurnId: undefined,
+    runtimeProcessId: undefined,
+    runtimeGeneration: undefined,
+    runtimeAttached: undefined,
     createdAt: receivedAt,
     updatedAt: receivedAt,
     eventCount: 0,

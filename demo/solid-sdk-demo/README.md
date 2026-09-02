@@ -2,12 +2,14 @@
 
 This demo is a small SolidJS playground for validating the browser `pedelec` SDK through the Pedelec Chrome extension.
 
+The transcript follows the current SDK chat contract: `onChatDelta()` is used for best-effort incremental rendering, while `onChat()` supplies completed logical assistant messages and reconciles the final text.
+
 It demonstrates:
 
 - SDK initialization and extension diagnostics
 - `createSession` and `resumeSession`
 - multiple independent sessions
-- `sendText`, streaming chat deltas, session errors, and ended sessions
+- `sendText`, completed chat messages, streaming chat deltas, session errors, and ended sessions
 - frontend tool handlers and tool result/error display
 - per-session transcript, tool call log, error log, and debug event log
 - selecting an optional application-owned workspace with `workspaceFolderPicker()`

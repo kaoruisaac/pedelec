@@ -580,6 +580,21 @@ impl AcpController {
         let (events_tx, events_rx) = mpsc::channel();
         let worker_events_tx = events_tx.clone();
         let mappings = Arc::new(Mutex::new(AcpMappings::default()));
+        transport.set_protocol_owner_resolver({
+            let mappings = Arc::clone(&mappings);
+            Arc::new(move |frame: &Value| {
+                let provider_session_id = frame
+                    .get("params")
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_str)?;
+                mappings
+                    .lock()
+                    .ok()?
+                    .provider_to_pedelec
+                    .get(provider_session_id)
+                    .cloned()
+            })
+        });
         let healthy = Arc::new(AtomicBool::new(true));
         let event_worker = thread::Builder::new()
             .name(format!("pedelec-acp-events-{}", transport.generation()))
@@ -679,6 +694,8 @@ impl AcpController {
             ));
         }
 
+        self.transport
+            .register_protocol_log(pedelec_thread_id, &self.provider_label, &config.cwd);
         let cwd = config.cwd.to_string_lossy();
         let (method, params) = match persisted_provider_session_id {
             Some(session_id) => {
@@ -697,7 +714,7 @@ impl AcpController {
         };
         let response = self
             .transport
-            .request(method, params, self.control_timeout)
+            .request_scoped(pedelec_thread_id, method, params, self.control_timeout)
             .map_err(|error| request_error(method, error))?;
         let provider_session_id = match persisted_provider_session_id {
             Some(session_id) => {
@@ -2285,6 +2302,45 @@ mod tests {
         }
     }
 
+    fn protocol_records(workspace: &Path, thread_id: &str) -> Vec<Value> {
+        let log_dir = workspace.join(".pedelec-runtime").join("logs");
+        let path = fs::read_dir(log_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(&format!("-{thread_id}-")))
+            })
+            .unwrap();
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn assert_protocol_request_has_response(records: &[Value], method: &str) {
+        let request = records
+            .iter()
+            .find(|record| {
+                record["direction"] == "client_to_provider"
+                    && record["kind"] == "request"
+                    && record["message"]["method"] == method
+            })
+            .unwrap_or_else(|| panic!("missing protocol request for {method}"));
+        let request_id = request["message"]["id"].clone();
+        assert!(
+            records.iter().any(|record| {
+                record["direction"] == "provider_to_client"
+                    && record["kind"] == "response"
+                    && record["message"]["id"] == request_id
+            }),
+            "missing protocol response for {method}"
+        );
+    }
+
     #[test]
     fn fake_agent_covers_initialize_new_prompt_updates_permission_and_usage() {
         let fixture = FakeAcpAgent::new(true);
@@ -2305,6 +2361,16 @@ mod tests {
                 .unwrap(),
             AcpRuntimeEvent::SessionReady { .. }
         ));
+        controller
+            .set_config_option(
+                &session_id,
+                &AcpConfigOptionUpdate {
+                    config_id: "provider-model".into(),
+                    value: json!("fake/selected"),
+                },
+            )
+            .unwrap();
+        controller.set_mode(&session_id, "agent-mode").unwrap();
         controller
             .start_turn("thread-1", &session_id, "local_1", "hello")
             .unwrap();
@@ -2362,6 +2428,16 @@ mod tests {
             .iter()
             .filter(|frame| frame.get("method").is_some())
             .all(|frame| frame["jsonrpc"] == "2.0"));
+        let records = protocol_records(&workspace, "thread-1");
+        assert_protocol_request_has_response(&records, "session/new");
+        assert_protocol_request_has_response(&records, "session/set_config_option");
+        assert_protocol_request_has_response(&records, "session/set_mode");
+        assert_protocol_request_has_response(&records, "session/prompt");
+        assert!(records.iter().any(|record| {
+            record["direction"] == "provider_to_client"
+                && record["kind"] == "notification"
+                && record["message"]["method"] == "session/update"
+        }));
 
         controller
             .start_turn("thread-1", &session_id, "local_2", "cancel me")
@@ -2899,6 +2975,24 @@ mod tests {
             completed.get("thread-2").map(String::as_str),
             Some("local_2")
         );
+        let first_records = protocol_records(&workspace, "thread-1");
+        let second_records = protocol_records(&workspace, "thread-2");
+        assert_protocol_request_has_response(&first_records, "session/prompt");
+        assert_protocol_request_has_response(&second_records, "session/prompt");
+        let first_log = first_records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let second_log = second_records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(first_log.contains("concurrent-first"));
+        assert!(!first_log.contains("concurrent-second"));
+        assert!(second_log.contains("concurrent-second"));
+        assert!(!second_log.contains("concurrent-first"));
         controller.shutdown().unwrap();
     }
 
