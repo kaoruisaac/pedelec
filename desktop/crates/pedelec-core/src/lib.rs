@@ -29,6 +29,13 @@ pub const DEFAULT_OLLAMA_TIMEOUT_MS: u64 = 120_000;
 const OLLAMA_CONNECTION_CHECK_TIMEOUT_MS: u64 = 3_000;
 const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
 const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_KEY: &str = "skills.include_instructions";
+const CODEX_PROJECT_DOC_MAX_BYTES_KEY: &str = "project_doc_max_bytes";
+const CODEX_INCLUDE_PERMISSIONS_INSTRUCTIONS_KEY: &str = "include_permissions_instructions";
+const CODEX_INCLUDE_APPS_INSTRUCTIONS_KEY: &str = "include_apps_instructions";
+const CODEX_INCLUDE_COLLABORATION_MODE_INSTRUCTIONS_KEY: &str =
+    "include_collaboration_mode_instructions";
+const CODEX_FEATURES_PLUGINS_KEY: &str = "features.plugins";
+const CODEX_FEATURES_APPS_KEY: &str = "features.apps";
 const OPENCODE_PERMISSION_ENV: &str = "OPENCODE_PERMISSION";
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 const PEDELEC_OPENCODE_AGENT: &str = "pedelec-runtime";
@@ -3994,10 +4001,30 @@ impl CoreRuntime {
             sandbox_policy: PersistentSandboxPolicy::ReadOnly,
             host_instructions,
             config: if thread.provider == ProviderCode::Codex {
-                HashMap::from([(
-                    CODEX_SKILLS_INCLUDE_INSTRUCTIONS_KEY.to_string(),
-                    Value::Bool(false),
-                )])
+                HashMap::from([
+                    (
+                        CODEX_SKILLS_INCLUDE_INSTRUCTIONS_KEY.to_string(),
+                        Value::Bool(false),
+                    ),
+                    (
+                        CODEX_PROJECT_DOC_MAX_BYTES_KEY.to_string(),
+                        Value::from(0_u64),
+                    ),
+                    (
+                        CODEX_INCLUDE_PERMISSIONS_INSTRUCTIONS_KEY.to_string(),
+                        Value::Bool(false),
+                    ),
+                    (
+                        CODEX_INCLUDE_APPS_INSTRUCTIONS_KEY.to_string(),
+                        Value::Bool(false),
+                    ),
+                    (
+                        CODEX_INCLUDE_COLLABORATION_MODE_INSTRUCTIONS_KEY.to_string(),
+                        Value::Bool(false),
+                    ),
+                    (CODEX_FEATURES_PLUGINS_KEY.to_string(), Value::Bool(false)),
+                    (CODEX_FEATURES_APPS_KEY.to_string(), Value::Bool(false)),
+                ])
             } else {
                 HashMap::new()
             },

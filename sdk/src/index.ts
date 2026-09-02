@@ -3,6 +3,7 @@ import { PEDELEC_EXTENSION_ID } from "./extension-id.js";
 import { SDK_VERSION } from "./version.generated.js";
 
 const SDK_EXTERNAL_PORT_NAME = "pedelec-sdk-external";
+const PAGE_ACTIVITY_MESSAGE_TYPE = "page_activity";
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 
 export type PedelecOptions = {
@@ -519,6 +520,8 @@ export class Pedelec {
   private readonly lastSeqBySession = new Map<string, number>();
   private nextRequestNumber = 1;
   private port: RuntimePort | null = null;
+  private pageActivityListenersAttached = false;
+  private lastReportedPageActive: boolean | null = null;
 
   constructor(options: PedelecOptions = {}) {
     this.pageWindow = typeof window === "undefined" ? null : window;
@@ -529,6 +532,7 @@ export class Pedelec {
       return;
     }
 
+    this.attachPageActivityListeners();
     this.connectExtension();
   }
 
@@ -677,6 +681,56 @@ export class Pedelec {
   unregisterSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.lastSeqBySession.delete(sessionId);
+  }
+
+  private attachPageActivityListeners(): void {
+    if (this.pageActivityListenersAttached || !this.pageWindow) return;
+    this.pageActivityListenersAttached = true;
+
+    this.pageWindow.addEventListener("focus", () => {
+      if (!this.isDocumentHidden()) this.reportPageActivity(true, { force: true });
+    });
+    this.pageWindow.document?.addEventListener("visibilitychange", () => {
+      if (this.isDocumentHidden()) {
+        this.reportPageActivity(false);
+        return;
+      }
+      if (this.isDocumentFocused()) this.reportPageActivity(true);
+    });
+  }
+
+  private isDocumentHidden(): boolean {
+    const doc = this.pageWindow?.document;
+    if (!doc) return true;
+    if (typeof doc.hidden === "boolean") return doc.hidden;
+    return doc.visibilityState === "hidden";
+  }
+
+  private isDocumentFocused(): boolean {
+    const doc = this.pageWindow?.document;
+    if (!doc || typeof doc.hasFocus !== "function") return false;
+    try {
+      return doc.hasFocus();
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  private isPageForegroundActive(): boolean {
+    return !this.isDocumentHidden() && this.isDocumentFocused();
+  }
+
+  private reportPageActivity(active: boolean, options: { force?: boolean } = {}): void {
+    if (!this.port) return;
+    if (!options.force && this.lastReportedPageActive === active) return;
+
+    try {
+      this.port.postMessage({ type: PAGE_ACTIVITY_MESSAGE_TYPE, active });
+      this.lastReportedPageActive = active;
+    } catch (err) {
+      const error = normalizeError(err, "EXTENSION_DISCONNECTED", "Pedelec extension disconnected.");
+      this.handleDisconnect(this.port, error);
+    }
   }
 
   private resolveCreateSessionInput(input: CreateSessionInput):
@@ -862,9 +916,11 @@ export class Pedelec {
       port.onMessage.addListener((message) => this.handlePortMessage(port, message));
       port.onDisconnect.addListener(() => this.handleDisconnect(port));
       this.port = port;
+      this.reportPageActivity(this.isPageForegroundActive(), { force: true });
       return port;
     } catch (err) {
       this.port = null;
+      this.lastReportedPageActive = null;
       throw normalizeError(err, "EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable.");
     }
   }
@@ -937,6 +993,7 @@ export class Pedelec {
       "Pedelec extension disconnected."
     );
     this.port = null;
+    this.lastReportedPageActive = null;
 
     this.invalidateSessions(error);
     for (const [requestId, pending] of this.pendingRequests) {

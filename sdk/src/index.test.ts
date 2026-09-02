@@ -3,7 +3,24 @@ import { PEDELEC_EXTENSION_ID } from "./extension-id";
 import { Pedelec, defineTool, type PedelecAvailability, type ToolCallContext } from "./index";
 import { SDK_VERSION } from "./version.generated";
 
-type Listener<T> = (value: T) => void;
+class MockDocument {
+  visibilityState: DocumentVisibilityState = "visible";
+  hidden = false;
+  focused = true;
+  listeners: Record<string, Array<() => void>> = {};
+
+  hasFocus(): boolean {
+    return this.focused;
+  }
+
+  addEventListener(type: string, listener: () => void): void {
+    (this.listeners[type] ??= []).push(listener);
+  }
+
+  dispatch(type: string): void {
+    for (const listener of this.listeners[type] ?? []) listener();
+  }
+}
 
 class MockWindow {
   location = { origin: "https://app.example.test" };
@@ -11,13 +28,22 @@ class MockWindow {
   queuedPorts: MockRuntimePort[] = [];
   queuedConnectErrors: unknown[] = [];
   connectCalls: Array<{ extensionId: string; connectInfo: { name: string } }> = [];
+  listeners: Record<string, Array<() => void>> = {};
+  document = new MockDocument();
 
   postMessage(_message: any, _targetOrigin: string): void {
     throw new Error("window.postMessage should not be used by the SDK transport");
   }
 
-  addEventListener(_type: string, _listener: Listener<MessageEvent>): void {
-    throw new Error("window.addEventListener should not be used by the SDK transport");
+  addEventListener(type: string, listener: () => void): void {
+    if (type === "message") {
+      throw new Error("window.addEventListener should not be used by the SDK transport");
+    }
+    (this.listeners[type] ??= []).push(listener);
+  }
+
+  dispatch(type: string): void {
+    for (const listener of this.listeners[type] ?? []) listener();
   }
 
   emitFromExtension(message: any): void {
@@ -39,6 +65,36 @@ class MockWindow {
   queueConnectFailure(error: unknown): void {
     this.queuedConnectErrors.push(error);
   }
+}
+
+function requestMessages(port: MockRuntimePort): any[] {
+  return port.sent.filter((message) => message?.type !== "page_activity");
+}
+
+function setPageHidden(pageWindow: MockWindow): void {
+  pageWindow.document.hidden = true;
+  pageWindow.document.visibilityState = "hidden";
+  pageWindow.document.focused = false;
+  pageWindow.document.dispatch("visibilitychange");
+}
+
+function setPageVisible(pageWindow: MockWindow, focused = true): void {
+  pageWindow.document.hidden = false;
+  pageWindow.document.visibilityState = "visible";
+  pageWindow.document.focused = focused;
+  pageWindow.document.dispatch("visibilitychange");
+}
+
+function focusPage(pageWindow: MockWindow): void {
+  pageWindow.document.hidden = false;
+  pageWindow.document.visibilityState = "visible";
+  pageWindow.document.focused = true;
+  pageWindow.dispatch("focus");
+}
+
+function blurPage(pageWindow: MockWindow): void {
+  pageWindow.document.focused = false;
+  pageWindow.dispatch("blur");
 }
 
 class MockRuntimePort {
@@ -168,6 +224,108 @@ describe("Pedelec SDK", () => {
 
   it("uses the production extension id by default", () => {
     expect(PEDELEC_EXTENSION_ID).toBe("ogccgaminlphbkeghldidiiimajfdpag");
+  });
+
+  it("reports the initial page activity state on connection", () => {
+    new Pedelec();
+    expect(pageWindow.port.sent).toEqual([{ type: "page_activity", active: true }]);
+  });
+
+  it("reports inactivity for an initial hidden page", () => {
+    pageWindow.document.hidden = true;
+    pageWindow.document.visibilityState = "hidden";
+    pageWindow.document.focused = false;
+    new Pedelec();
+    expect(pageWindow.port.sent).toEqual([{ type: "page_activity", active: false }]);
+  });
+
+  it("reports inactivity when the page becomes hidden", () => {
+    new Pedelec();
+    setPageHidden(pageWindow);
+    expect(pageWindow.port.sent.at(-1)).toEqual({ type: "page_activity", active: false });
+  });
+
+  it("reports activity when the page returns to the visible foreground", () => {
+    new Pedelec();
+    setPageHidden(pageWindow);
+    setPageVisible(pageWindow, true);
+    expect(pageWindow.port.sent.filter((message) => message.type === "page_activity").map((message) => message.active)).toEqual([
+      true,
+      false,
+      true,
+    ]);
+  });
+
+  it("can reactivate the Pedelec tab context from window focus while visible", () => {
+    new Pedelec();
+    setPageHidden(pageWindow);
+    setPageVisible(pageWindow, false);
+    expect(pageWindow.port.sent.at(-1)).toEqual({ type: "page_activity", active: false });
+    focusPage(pageWindow);
+    expect(pageWindow.port.sent.at(-1)).toEqual({ type: "page_activity", active: true });
+  });
+
+  it("does not report inactivity from window.blur alone", () => {
+    new Pedelec();
+    const before = pageWindow.port.sent.slice();
+    blurPage(pageWindow);
+    expect(pageWindow.port.sent).toEqual(before);
+    expect(pageWindow.port.sent.at(-1)).toEqual({ type: "page_activity", active: true });
+  });
+
+  it("re-asserts page activity on window.focus even if already reported active", () => {
+    new Pedelec();
+    expect(pageWindow.port.sent).toEqual([{ type: "page_activity", active: true }]);
+    blurPage(pageWindow);
+    expect(pageWindow.port.sent.filter((message) => message.type === "page_activity").map((message) => message.active)).toEqual([
+      true,
+    ]);
+    focusPage(pageWindow);
+    expect(pageWindow.port.sent.filter((message) => message.type === "page_activity")).toEqual([
+      { type: "page_activity", active: true },
+      { type: "page_activity", active: true },
+    ]);
+  });
+
+  it("does not create pending SDK requests or session events for activity messages", async () => {
+    const pedelec = new Pedelec();
+    const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
+    expect(createRequest.requestId).toMatch(/^sdk_\d+_1$/);
+    expect(createRequest).toHaveProperty("channelId");
+
+    const activity = pageWindow.port.sent.find((message) => message.type === "page_activity");
+    expect(activity).toEqual({ type: "page_activity", active: true });
+    expect(activity).not.toHaveProperty("requestId");
+    expect(activity).not.toHaveProperty("channelId");
+    expect(activity).not.toHaveProperty("sessionId");
+
+    const errors: unknown[] = [];
+    const chats: string[] = [];
+    session.onError((error) => errors.push(error));
+    session.onChat((text) => chats.push(text));
+    setPageHidden(pageWindow);
+    pageWindow.emitFromExtension({
+      type: "page_activity",
+      active: true,
+      sessionId: session.sessionId,
+      seq: 99,
+      channelId: createRequest.channelId,
+    });
+    await nextTick();
+    expect(errors).toEqual([]);
+    expect(chats).toEqual([]);
+  });
+
+  it("does not report page activity outside a browser page", async () => {
+    delete (globalThis as any).window;
+    delete (globalThis as any).chrome;
+    const pedelec = new Pedelec();
+    await expect(pedelec.getApprovalStatus()).resolves.toEqual({
+      installed: false,
+      approved: false,
+      origin: null,
+      appConnected: false,
+    });
   });
 
   it("posts runtime messages and creates a session", async () => {
@@ -308,7 +466,7 @@ describe("Pedelec SDK", () => {
       code: "INVALID_INPUT",
       message: "workspace.path must be a string",
     });
-    expect(pageWindow.port.sent).toHaveLength(0);
+    expect(requestMessages(pageWindow.port)).toHaveLength(0);
   });
 
   it("does not forward the removed sandbox input or expose its picker alias", async () => {
@@ -428,10 +586,10 @@ describe("Pedelec SDK", () => {
     const settings = pedelec.getSettings();
     const approval = pedelec.getApprovalStatus();
     expect(pageWindow.connectCalls).toHaveLength(2);
-    expect(portB.sent.map((message) => message.type)).toEqual(["get_settings", "get_approval_status"]);
+    expect(requestMessages(portB).map((message) => message.type)).toEqual(["get_settings", "get_approval_status"]);
 
-    const settingsRequest = portB.sent[0];
-    const approvalRequest = portB.sent[1];
+    const settingsRequest = requestMessages(portB)[0];
+    const approvalRequest = requestMessages(portB)[1];
     respondSettings(pageWindow, settingsRequest);
     respondOk(pageWindow, approvalRequest, {
       installed: true,
@@ -454,8 +612,8 @@ describe("Pedelec SDK", () => {
     portA.disconnect();
 
     expect(pageWindow.port).toBe(portB);
-    expect(portB.sent).toHaveLength(1);
-    respondSettings(pageWindow, portB.sent[0]);
+    expect(requestMessages(portB)).toHaveLength(1);
+    respondSettings(pageWindow, requestMessages(portB)[0]);
     await expect(request).resolves.toEqual({ defaultProvider: null });
   });
 
@@ -476,7 +634,7 @@ describe("Pedelec SDK", () => {
     portA.disconnect();
 
     const second = pedelec.checkAvailability();
-    const approvalRequest = portB.sent[0];
+    const approvalRequest = requestMessages(portB)[0];
     expect(approvalRequest).toMatchObject({ type: "get_approval_status" });
     respondOk(pageWindow, approvalRequest, {
       installed: true,
@@ -485,7 +643,7 @@ describe("Pedelec SDK", () => {
       appConnected: true,
     });
     await nextTick();
-    const settingsRequest = portB.sent[1];
+    const settingsRequest = requestMessages(portB)[1];
     expect(settingsRequest).toMatchObject({ type: "get_settings" });
     respondSettings(pageWindow, settingsRequest);
 
@@ -506,11 +664,11 @@ describe("Pedelec SDK", () => {
     portA.disconnect();
 
     const parentRequest = pedelec.getSettings();
-    respondSettings(pageWindow, portB.sent[0]);
+    respondSettings(pageWindow, requestMessages(portB)[0]);
     await parentRequest;
 
     await expect(session.sendText("must fail")).rejects.toMatchObject({ code: "SESSION_ENDED" });
-    expect(portB.sent.map((message) => message.type)).toEqual(["get_settings"]);
+    expect(requestMessages(portB).map((message) => message.type)).toEqual(["get_settings"]);
   });
 
   it("requires explicit resume to bind a disconnected session to the replacement Port", async () => {
@@ -522,14 +680,14 @@ describe("Pedelec SDK", () => {
     portA.disconnect();
 
     const resumedPromise = pedelec.resumeSession(session.sessionId);
-    const resumeRequest = portB.sent[0];
+    const resumeRequest = requestMessages(portB)[0];
     expect(resumeRequest).toMatchObject({ type: "resume_session", sessionId: session.sessionId });
     respondOk(pageWindow, resumeRequest, { sessionId: session.sessionId });
     const resumed = await resumedPromise;
     expect(resumed).not.toBe(session);
 
     const send = resumed.sendText("after resume");
-    const sendRequest = portB.sent[1];
+    const sendRequest = requestMessages(portB)[1];
     respondOk(pageWindow, sendRequest);
     emitEvent(pageWindow, sendRequest, { type: "done", sessionId: session.sessionId, seq: 1 });
     await send;
@@ -953,7 +1111,7 @@ describe("Pedelec SDK", () => {
       approval: { approved: false },
       desktop: { available: true, launchAttempted: true },
     });
-    expect(pageWindow.port.sent).toHaveLength(1);
+    expect(requestMessages(pageWindow.port)).toHaveLength(1);
   });
 
   it("probes Desktop after approval and resolves Desktop failures", async () => {
@@ -973,7 +1131,7 @@ describe("Pedelec SDK", () => {
       desktop: { available: false, launchAttempted: true },
       error: { code: "NATIVE_HOST_UNAVAILABLE" },
     });
-    expect(pageWindow.port.sent.map((request) => request.type)).toEqual(["get_approval_status", "get_settings"]);
+    expect(requestMessages(pageWindow.port).map((request) => request.type)).toEqual(["get_approval_status", "get_settings"]);
   });
 
   it("reports availability only when the settings probe succeeds", async () => {
@@ -1003,7 +1161,7 @@ describe("Pedelec SDK", () => {
       desktop: { available: false, launchAttempted: false },
       error: { code: "APPROVAL_STORAGE_ERROR" },
     });
-    expect(pageWindow.port.sent).toHaveLength(1);
+    expect(requestMessages(pageWindow.port)).toHaveLength(1);
   });
 
   it("prepare sends prepare_session and suppresses prepare chat output", async () => {

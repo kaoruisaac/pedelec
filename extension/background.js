@@ -36,7 +36,7 @@ const MAX_EVENTS = 80;
 const SDK_INTERNAL_PORT_NAME = "pedelec-sdk-internal";
 const SDK_EXTERNAL_PORT_NAME = "pedelec-sdk-external";
 const APPROVED_ORIGINS_STORAGE_KEY = "approvedOrigins";
-const LATEST_PROVIDER_ERROR_STORAGE_KEY = "latestProviderError";
+const PROVIDER_ERROR_BY_TAB_STORAGE_KEY = "providerErrorByTab";
 const DEFAULT_APPROVAL_TIMEOUT_MS = 60000;
 
 function createBackground(runtimeChrome, options = {}) {
@@ -58,6 +58,9 @@ function createBackground(runtimeChrome, options = {}) {
   const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
   let pendingApproval = null;
   let providerErrorOperation = Promise.resolve();
+  let activeSdkTabId = null;
+  let providerErrorByTab = Object.create(null);
+  let providerErrorCacheLoaded = false;
 
   let state = {
     connected: false,
@@ -326,6 +329,206 @@ function createBackground(runtimeChrome, options = {}) {
     return event?.type === "error" && event?.source === "provider";
   }
 
+  function normalizeTabId(tabId) {
+    return typeof tabId === "number" && Number.isInteger(tabId) && tabId >= 0 ? tabId : null;
+  }
+
+  function tabIdFromSender(sender) {
+    return normalizeTabId(sender?.tab?.id);
+  }
+
+  function tabIdKey(tabId) {
+    return String(tabId);
+  }
+
+  function hasSdkPortForTab(tabId) {
+    for (const context of sdkContextsByPort.values()) {
+      if (context?.tabId === tabId) return true;
+    }
+    return false;
+  }
+
+  function hasActiveSdkPortForTab(tabId) {
+    for (const context of sdkContextsByPort.values()) {
+      if (context?.tabId === tabId && context.pageActive === true) return true;
+    }
+    return false;
+  }
+
+  function tabIdsForSession(sessionId) {
+    const routes = sdkRoutesBySession.get(sessionId);
+    if (!routes) return [];
+    const tabIds = new Set();
+    for (const port of routes.keys()) {
+      const tabId = sdkContextsByPort.get(port)?.tabId;
+      if (typeof tabId === "number") tabIds.add(tabId);
+    }
+    return Array.from(tabIds);
+  }
+
+  async function getCurrentBrowserTabId() {
+    const tabsApi = runtimeChrome.tabs;
+    if (!tabsApi?.query) return null;
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (tabId) => {
+        if (settled) return;
+        settled = true;
+        resolve(normalizeTabId(tabId));
+      };
+
+      const done = (tabs) => {
+        if (runtimeChrome.runtime?.lastError) {
+          finish(null);
+          return;
+        }
+        finish(Array.isArray(tabs) ? tabs[0]?.id : null);
+      };
+
+      try {
+        const maybePromise = tabsApi.query({ active: true, lastFocusedWindow: true }, done);
+        if (maybePromise?.then) {
+          maybePromise.then(done, () => finish(null));
+        }
+      } catch (_err) {
+        finish(null);
+      }
+    });
+  }
+
+  function visibleProviderErrorFromRecord(record) {
+    if (!record || typeof record.provider !== "string" || typeof record.message !== "string") {
+      return null;
+    }
+    return {
+      provider: record.provider,
+      message: record.message,
+    };
+  }
+
+  function popupProviderErrorForTab(tabId) {
+    const currentTabId = normalizeTabId(tabId);
+    if (currentTabId == null || !hasSdkPortForTab(currentTabId)) return null;
+    return visibleProviderErrorFromRecord(providerErrorByTab[tabIdKey(currentTabId)]);
+  }
+
+  function isSameProviderErrorOccurrence(record, event) {
+    return Boolean(
+      record &&
+      event &&
+      typeof record.threadId === "string" &&
+      record.threadId === event.threadId &&
+      typeof record.seq === "number" &&
+      record.seq === event.seq
+    );
+  }
+
+  function retainedProviderErrorRecord(event, providerError) {
+    return {
+      provider: providerError.provider,
+      message: providerError.message,
+      threadId: event.threadId,
+      seq: event.seq,
+      autoPopupConsumed: false,
+    };
+  }
+
+  async function resolvePopupProviderError() {
+    return popupProviderErrorForTab(await getCurrentBrowserTabId());
+  }
+
+  async function broadcastResolvedPopupProviderError() {
+    if (popupPorts.size === 0) return;
+    broadcastProviderErrorState(await resolvePopupProviderError());
+  }
+
+  async function loadProviderErrorByTab() {
+    if (providerErrorCacheLoaded) return providerErrorByTab;
+    providerErrorCacheLoaded = true;
+    if (!hasSessionStorage()) {
+      providerErrorByTab = Object.create(null);
+      return providerErrorByTab;
+    }
+    try {
+      const result = await sessionStorageGet(PROVIDER_ERROR_BY_TAB_STORAGE_KEY);
+      const stored = result?.[PROVIDER_ERROR_BY_TAB_STORAGE_KEY];
+      providerErrorByTab = stored && typeof stored === "object" && !Array.isArray(stored)
+        ? { ...stored }
+        : Object.create(null);
+    } catch (_err) {
+      providerErrorByTab = Object.create(null);
+    }
+    return providerErrorByTab;
+  }
+
+  async function persistProviderErrorByTab() {
+    if (!hasSessionStorage()) return;
+    await sessionStorageSet({ [PROVIDER_ERROR_BY_TAB_STORAGE_KEY]: providerErrorByTab });
+  }
+
+  function setActiveSdkTabId(nextTabId) {
+    if (activeSdkTabId === nextTabId) return false;
+    activeSdkTabId = nextTabId;
+    return true;
+  }
+
+  function refreshPopupProviderErrorState() {
+    if (!hasSessionStorage() || popupPorts.size === 0) return Promise.resolve();
+    return enqueueProviderErrorOperation(async () => {
+      await loadProviderErrorByTab();
+      await broadcastResolvedPopupProviderError();
+    });
+  }
+
+  function handleSdkPageActivity(port, message) {
+    const context = sdkContextsByPort.get(port);
+    if (!context || context.tabId == null) return;
+
+    context.pageActive = message?.active === true;
+    if (context.pageActive) {
+      setActiveSdkTabId(context.tabId);
+      if (!hasSessionStorage()) return;
+      enqueueProviderErrorOperation(async () => {
+        await loadProviderErrorByTab();
+        await maybeOpenProviderErrorPopupForTab(context.tabId);
+        if (popupPorts.size > 0) {
+          await broadcastResolvedPopupProviderError();
+        }
+      });
+      return;
+    }
+
+    if (activeSdkTabId === context.tabId && !hasActiveSdkPortForTab(context.tabId)) {
+      if (setActiveSdkTabId(null)) refreshPopupProviderErrorState();
+    }
+  }
+
+  function forgetProviderErrorForTab(tabId) {
+    if (!hasSessionStorage()) return Promise.resolve();
+    return enqueueProviderErrorOperation(async () => {
+      await loadProviderErrorByTab();
+      const key = tabIdKey(tabId);
+      if (Object.prototype.hasOwnProperty.call(providerErrorByTab, key)) {
+        delete providerErrorByTab[key];
+        await persistProviderErrorByTab();
+      }
+      await broadcastResolvedPopupProviderError();
+    });
+  }
+
+  function handleSdkTabPortDisconnect(tabId) {
+    if (hasSdkPortForTab(tabId)) {
+      if (activeSdkTabId === tabId && !hasActiveSdkPortForTab(tabId)) {
+        if (setActiveSdkTabId(null)) refreshPopupProviderErrorState();
+      }
+      return;
+    }
+
+    if (activeSdkTabId === tabId) setActiveSdkTabId(null);
+    forgetProviderErrorForTab(tabId);
+  }
+
   function getUnknownProviderErrorMessage() {
     try {
       const message = runtimeChrome.i18n?.getMessage("unknownProviderError");
@@ -357,11 +560,18 @@ function createBackground(runtimeChrome, options = {}) {
     if (!hasSessionStorage()) return;
     return enqueueProviderErrorOperation(async () => {
       try {
-        const result = await sessionStorageGet(LATEST_PROVIDER_ERROR_STORAGE_KEY);
+        await loadProviderErrorByTab();
+        if (!popupPorts.has(port)) return;
+        let providerError = null;
+        try {
+          providerError = await resolvePopupProviderError();
+        } catch (_err) {
+          providerError = null;
+        }
         if (!popupPorts.has(port)) return;
         port.postMessage({
           type: "provider_error_state",
-          providerError: result?.[LATEST_PROVIDER_ERROR_STORAGE_KEY] || null,
+          providerError,
         });
       } catch (_err) {
         // Provider errors are an optional popup side effect.
@@ -370,12 +580,33 @@ function createBackground(runtimeChrome, options = {}) {
   }
 
   async function openProviderErrorPopup() {
-    if (!runtimeChrome.action?.openPopup) return;
+    if (!runtimeChrome.action?.openPopup) return false;
     try {
       await runtimeChrome.action.openPopup();
+      return true;
     } catch (_err) {
-      // The error remains in session storage for the next manual popup open.
+      // Leave the occurrence eligible so a later successful open can still notify once.
+      return false;
     }
+  }
+
+  async function maybeOpenProviderErrorPopupForTab(tabId) {
+    const currentTabId = normalizeTabId(tabId);
+    if (currentTabId == null || !hasSdkPortForTab(currentTabId)) return false;
+
+    const key = tabIdKey(currentTabId);
+    const record = providerErrorByTab[key];
+    if (!record || record.autoPopupConsumed === true) return false;
+
+    const actualTabId = await getCurrentBrowserTabId();
+    if (actualTabId !== currentTabId) return false;
+
+    const opened = await openProviderErrorPopup();
+    if (!opened) return false;
+
+    record.autoPopupConsumed = true;
+    await persistProviderErrorByTab();
+    return true;
   }
 
   function enqueueProviderErrorOperation(operation) {
@@ -390,18 +621,45 @@ function createBackground(runtimeChrome, options = {}) {
     if (!isProviderErrorEvent(event) || !hasSessionStorage()) return;
     const providerError = providerErrorStateFromEvent(event);
     if (!providerError) return;
+    const tabIds = tabIdsForSession(event.threadId);
+    if (tabIds.length === 0) return;
 
     enqueueProviderErrorOperation(async () => {
-      await sessionStorageSet({ [LATEST_PROVIDER_ERROR_STORAGE_KEY]: providerError });
-      broadcastProviderErrorState(providerError);
-      await openProviderErrorPopup();
+      await loadProviderErrorByTab();
+      for (const tabId of tabIds) {
+        const key = tabIdKey(tabId);
+        const existing = providerErrorByTab[key];
+        if (!isSameProviderErrorOccurrence(existing, event)) {
+          providerErrorByTab[key] = retainedProviderErrorRecord(event, providerError);
+        }
+      }
+      await persistProviderErrorByTab();
+      const currentTabId = await getCurrentBrowserTabId();
+      if (popupPorts.size > 0) {
+        broadcastProviderErrorState(popupProviderErrorForTab(currentTabId));
+      }
+      if (currentTabId != null && tabIds.includes(currentTabId)) {
+        await maybeOpenProviderErrorPopupForTab(currentTabId);
+      }
     });
   }
 
   function dismissProviderError() {
     if (!hasSessionStorage()) return Promise.resolve();
     return enqueueProviderErrorOperation(async () => {
-      await sessionStorageRemove(LATEST_PROVIDER_ERROR_STORAGE_KEY);
+      await loadProviderErrorByTab();
+      const currentTabId = await getCurrentBrowserTabId();
+      if (currentTabId == null || !hasSdkPortForTab(currentTabId)) {
+        broadcastProviderErrorState(null);
+        return;
+      }
+      const key = tabIdKey(currentTabId);
+      if (!Object.prototype.hasOwnProperty.call(providerErrorByTab, key)) {
+        broadcastProviderErrorState(null);
+        return;
+      }
+      delete providerErrorByTab[key];
+      await persistProviderErrorByTab();
       broadcastProviderErrorState(null);
     });
   }
@@ -994,6 +1252,7 @@ function createBackground(runtimeChrome, options = {}) {
   }
 
   function disconnectSdkPort(port) {
+    const tabId = sdkContextsByPort.get(port)?.tabId;
     sdkPorts.delete(port);
     sdkContextsByPort.delete(port);
     const channels = sdkChannelsByPort.get(port);
@@ -1022,6 +1281,8 @@ function createBackground(runtimeChrome, options = {}) {
       }
       broadcastPopupApprovalState();
     }
+
+    if (tabId != null) handleSdkTabPortDisconnect(tabId);
   }
 
   function sdkEventFromThreadEvent(event) {
@@ -1116,6 +1377,11 @@ function createBackground(runtimeChrome, options = {}) {
   }
 
   async function handleSdkMessage(port, message, options = {}) {
+    if (message?.type === "page_activity") {
+      handleSdkPageActivity(port, message);
+      return;
+    }
+
     const requestId = message?.requestId || "";
     const channelId = message?.channelId || "";
     const context = sdkContextsByPort.get(port) || {};
@@ -1402,6 +1668,8 @@ function createBackground(runtimeChrome, options = {}) {
     sdkContextsByPort.set(port, {
       origin,
       approvalRequired: true,
+      tabId: tabIdFromSender(port.sender),
+      pageActive: false,
     });
 
     port.onMessage.addListener((message) => {
@@ -1438,6 +1706,7 @@ function createBackground(runtimeChrome, options = {}) {
     getSdkRouteCount: () => sdkRoutesBySession.size,
     getNativeRequestCount: () => pendingRequests.size,
     getActiveThreadCount: () => activeThreadIds.size,
+    getActiveSdkTabId: () => activeSdkTabId,
     hasReconnectTimer: () => Boolean(reconnectTimer),
   };
 }

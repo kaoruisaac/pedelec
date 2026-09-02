@@ -8226,10 +8226,23 @@ mod tests {
         assert_eq!(session.reasoning_effort, Some(CodexReasoningEffort::XHigh));
         assert_eq!(session.approval_policy, PersistentApprovalPolicy::Never);
         assert_eq!(session.sandbox_policy, PersistentSandboxPolicy::ReadOnly);
-        assert_eq!(
-            session.config.get("skills.include_instructions"),
-            Some(&json!(false))
-        );
+        assert_eq!(session.config.len(), 7);
+        for key in [
+            "skills.include_instructions",
+            "include_permissions_instructions",
+            "include_apps_instructions",
+            "include_collaboration_mode_instructions",
+            "features.plugins",
+            "features.apps",
+        ] {
+            assert_eq!(session.config.get(key), Some(&json!(false)), "key={key}");
+        }
+        assert_eq!(session.config.get("project_doc_max_bytes"), Some(&json!(0)));
+        assert!(!session.config.contains_key("tool_output_token_limit"));
+        assert!(!session
+            .config
+            .keys()
+            .any(|key| key.starts_with("mcp_servers")));
         assert!(session
             .host_instructions
             .contains("pedelec-cli --thread-id thread_persistent_prepare_config tool-spec"));
