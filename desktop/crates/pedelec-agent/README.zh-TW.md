@@ -1,8 +1,22 @@
 # pedelec-agent 使用說明
 
-`pedelec-agent` 是 Pedelec 的輕量 Native Provider。它可以獨立從終端機執行，透過 Ollama 呼叫本機模型，並以 read-only 工具讀取指定 sandbox 內的文字檔，或透過 `pedelec-cli` 呼叫 Pedelec host app tools。
+`pedelec-agent` 是 Pedelec Desktop 管理的 persistent local server。它以 JSON-RPC 執行，透過 Ollama 呼叫本機模型，並以 read-only 工具讀取指定 sandbox 內的文字檔，或透過 `pedelec-cli` 呼叫 Pedelec host app tools。
 
-MVP 不會修改、刪除、搬移檔案，也不會執行任意 shell command。stdout 永遠只輸出 JSONL。
+同一 process 可承載多個 AgentSession；不同 session 可同時執行 turn，同一 session 同時間最多一個 active turn。stdout 只能出現 JSON-RPC 2.0 frames；diagnostics 走 stderr。
+
+MVP 不會修改、刪除、搬移檔案，也不會執行任意 shell command。
+
+## Architecture
+
+Pedelec Desktop 啟動並管理：
+
+```bash
+pedelec-agent serve --provider ollama
+```
+
+這不是一般使用者面對的 chat CLI。Client 是 Desktop persistent runtime：先 `initialize`，再為每個 Core thread `session/open`、`turn/start`、`session/close`；process 結束時 `shutdown`。
+
+同一 generation / process 可同時承載多個 session。Ollama settings 更新會 retire 目前 generation，下一次 prepare/turn 才會 lazy spawn 下一支 process。
 
 ## 建置
 
@@ -12,103 +26,88 @@ MVP 不會修改、刪除、搬移檔案，也不會執行任意 shell command�
 cargo build --manifest-path desktop/Cargo.toml -p pedelec-agent
 ```
 
-## 基本用法
+## 啟動
 
-建立新 session 時不傳 session ID，`pedelec-agent` 會自行產生 UUID v7：
+唯一 production 入口：
 
 ```bash
-printf '%s' '請讀取 README.md 並整理重點' | \
+OLLAMA_API_KEY=ollama pedelec-agent serve --provider ollama
+```
+
+或在 repo 內：
+
+```bash
+OLLAMA_API_KEY=ollama \
 cargo run --manifest-path desktop/Cargo.toml -p pedelec-agent -- \
-  --sandbox .
+  serve --provider ollama
 ```
 
-也可以保留 `run` 作為相容入口：
+Transport 是 stdin/stdout 上的 JSON Lines JSON-RPC 2.0。
 
-```bash
-printf '%s' '請列出這個 sandbox 內有哪些文字檔' | \
-cargo run --manifest-path desktop/Cargo.toml -p pedelec-agent -- \
-  run \
-  --sandbox .
+已移除、且不會再接受：
+
+- `pedelec-agent run`
+- 從 stdin 一次讀完整 prompt
+- `--session-id` / `--sandbox` / `--model` / `--jsonl` one-shot 參數
+- 舊 `AgentEvent` JSONL stdout protocol
+
+## Protocol
+
+Client 必須先 `initialize`（ownerless），再對個別 thread 做 session/turn RPCs。
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"pedelec-desktop"}}}
 ```
 
-若已經 build 出 binary：
-
-```bash
-printf '%s' '請讀 README.md' | pedelec-agent --sandbox .
+```json
+{"jsonrpc":"2.0","id":2,"method":"session/open","params":{
+  "threadId":"t000001",
+  "sessionId":null,
+  "model":"qwen2.5-coder:7b",
+  "workspacePath":".",
+  "hostInstructions":"..."
+}}
 ```
 
-resume 既有 session 時使用 `--session-id`：
+`sessionId` 為 `null` 時建立新 session；傳既有 UUID v7 則 resume。選中的 model 必須支援 tool calling，否則 `session/open` 失敗。vision 為 optional。
 
-```bash
-printf '%s' '繼續剛才的分析' | pedelec-agent \
-  --session-id 0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176 \
-  --sandbox .
+Turn 使用 Core `local_turn_id`，server 不會另造 provider turn ID：
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"turn/start","params":{
+  "threadId":"t000001",
+  "sessionId":"0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176",
+  "turnId":"local_...",
+  "message":"請讀取 README.md 並整理重點"
+}}
 ```
 
-## 常用選項
+成功 admission 的 wire 順序固定為：
 
-```bash
-pedelec-agent [run] \
-  --session-id <uuid-v7> \
-  --sandbox <path> \
-  --provider ollama \
-  --model <model> \
-  --jsonl \
-  --env-file .env.local \
-  --pedelec-cli <path> \
-  --core-runtime-file <path>
+1. `turn/start` success response
+2. `turn/started` notification
+3. 之後才會出現 async `turn/assistant_delta` / `turn/usage` / `turn/tool_call` / `turn/tool_result` / `turn/assistant_message` / `turn/completed`
+
+`session/close` 只 detach runtime attachment，不會刪除 durable session：
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"session/close","params":{"threadId":"t000001","sessionId":"0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176"}}
 ```
 
-| 選項 | 說明 |
-| --- | --- |
-| stdin | 使用者訊息，從 stdin 讀取至 EOF。 |
-| `--session-id` | optional。提供既有 UUID v7 時 resume；省略時建立新 session。 |
-| `--sandbox` | 限制 agent 只能讀取此目錄內的檔案。 |
-| `--provider` | MVP 支援 `ollama`。 |
-| `--model` | Ollama model name，例如 `qwen2.5-coder:7b`。 |
-| `--jsonl` | 保留參數；stdout 永遠都是 JSONL。 |
-| `--env-file` | 指定 env file，預設 `.env.local`。 |
-| `--pedelec-cli` | 指定 `pedelec-cli` 路徑。 |
-| `--core-runtime-file` | 呼叫 `pedelec-cli` 時傳入的 runtime file。 |
+結束 process：
 
-舊格式 `pedelec-agent run "prompt"`、`pedelec-agent "prompt"`、`pedelec-agent run <session_id> "prompt"` 與 `pedelec-agent <session_id> "prompt"` 不再是正式格式。Prompt 必須透過 stdin 傳入。
-
-## `.env.local` 範例
-
-```dotenv
-PEDELEC_AGENT_PROVIDER=ollama
-PEDELEC_AGENT_MODEL=qwen2.5-coder:7b
-
-PEDELEC_AGENT_SANDBOX=.
-PEDELEC_AGENT_MAX_TRANSCRIPT_BYTES=1048576
-PEDELEC_AGENT_MAX_TOOL_ROUNDS=8
-
-PEDELEC_CLI_PATH=
-PEDELEC_CORE_RUNTIME_FILE=
-PEDELEC_AGENT_PEDELEC_CLI_TIMEOUT_MS=60000
+```json
+{"jsonrpc":"2.0","id":5,"method":"shutdown","params":{}}
 ```
 
-設定優先序：
+Developer 可用以上 JSON-RPC line 手動測 protocol，但不要把它當成一般 user-facing chat CLI。
 
-```txt
-CLI arguments > process env > .env.local > internal default
-```
+## Sessions
 
-Ollama Base URL 與 Timeout 不使用 `.env.local` 或 process env；`pedelec-agent` 會直接讀取 `~/.pedelec/settings.json` 的 `providerSettings.ollama`，缺少欄位時使用內建預設值。
-
-Ollama API key 只從 process env 的 `OLLAMA_API_KEY` 讀取，不從 `.env.local` 讀取，也沒有 CLI 參數。使用本機 Ollama 時仍需提供任意非空值，例如：
-
-```bash
-OLLAMA_API_KEY=ollama pedelec-agent --sandbox . --provider ollama --model qwen2.5-coder:7b
-```
-
-`TAVILY_API_KEY` 為選填，且也只讀取 process env。Desktop App 使用者可在 **Settings > Ollama** 設定它；直接執行 agent 時可自行設定環境變數。有 key 時才會提供 `web.search`，固定使用 Tavily basic search、最多 5 筆結果及 `chunks_per_source: 1`。每個模型回合最多可搜尋 10 次，可能消耗 Tavily credits。
-
-使用 Ollama Cloud 時，`~/.pedelec/settings.json` 的 `providerSettings.ollama.baseUrl` 應為 `https://ollama.com`，不可包含 `/api`；`pedelec-agent` 會呼叫 `{baseUrl}/api/chat` 並送出 `Authorization: Bearer <OLLAMA_API_KEY>`。
-
-session 儲存位置不可透過 CLI 或環境變數覆寫，固定由 Pedelec home 推導。
-
-## Session 與 Transcript
+- 同一 process 可有多個 session。
+- 每個 session 同時間最多一個 active turn。
+- Durable history 是 committed-turn records，不是舊的 message-by-message transcript。
+- 舊 session schema / 舊 transcript format 不相容，也不做 migration。若目錄中有舊資料，請建立新 session。
 
 資料固定寫在：
 
@@ -121,71 +120,36 @@ session 儲存位置不可透過 CLI 或環境變數覆寫，固定由 Pedelec h
           <uuid-v7>/
             session.json
             transcript.jsonl
-            events.jsonl
 ```
 
-`YYYY/MM` 由 UUID v7 內含 timestamp 的 UTC 年月推導。resume 時會直接用 UUID v7 定位 session 目錄，不掃描 session tree，也不使用 index。
+`YYYY/MM` 由 UUID v7 內含 timestamp 的 UTC 年月推導。resume 時會直接用 UUID v7 定位 session 目錄。
 
-resume 時會沿用既有 `provider`、`model` 與 `sandboxPath`；如果 CLI 傳入不同 sandbox/model/provider，會回傳錯誤。
+## Ollama
 
-## JSONL stdout 範例
+- 選中的 model 必須支援 tools；`session/open` 會硬性檢查。
+- vision 為 optional；有能力時才提供圖像工具。
+- endpoint / timeout / credentials 屬於 server generation config。Ollama Base URL 與 Timeout 讀取 `~/.pedelec/settings.json` 的 `providerSettings.ollama`，缺少欄位時使用內建預設值。
+- Ollama API key 只從 process env 的 `OLLAMA_API_KEY` 讀取。使用本機 Ollama 時仍需提供任意非空值，例如 `ollama`。
+- `TAVILY_API_KEY` 為選填 process env；有 key 時才會提供 `web.search`。
+- Desktop 更新 Ollama settings 會 retire 目前 generation，不會立刻 spawn 下一支 process。
 
-stdout 每一行都是一個 JSON object：
+可選 `.env.local` 僅用於 runtime limits，例如：
 
-```jsonl
-{"type":"session","sessionId":"0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176","resumed":false}
-{"type":"status","status":"running"}
-{"type":"tool_call","tool":"fs.read_text_file","args":{"path":"README.md"}}
-{"type":"tool_result","tool":"fs.read_text_file","ok":true,"result":{"path":"README.md","text":"...","truncated":false}}
-{"type":"assistant_message","text":"README.md 的重點是..."}
-{"type":"status","status":"done"}
-{"type":"done"}
+```dotenv
+PEDELEC_AGENT_PROVIDER=ollama
+PEDELEC_AGENT_MAX_TRANSCRIPT_BYTES=1048576
+PEDELEC_AGENT_MAX_TOOL_ROUNDS=8
+PEDELEC_CLI_PATH=
+PEDELEC_CORE_RUNTIME_FILE=
+PEDELEC_AGENT_PEDELEC_CLI_TIMEOUT_MS=60000
 ```
 
-錯誤也會用 JSONL 輸出：
-
-```jsonl
-{"type":"error","error":{"code":"CONFIG_ERROR","message":"Model is required"}}
-```
-
-## 範例
-
-讀取 sandbox 內的 README：
-
-```bash
-printf '%s' '請讀取 README.md 並用條列整理重點' | \
-OLLAMA_API_KEY=ollama \
-pedelec-agent \
-  --sandbox .
-```
-
-指定 Ollama model：
-
-```bash
-printf '%s' '請閱讀 sdk/src/index.ts 並說明 Pedelec SDK 的主要 API' | \
-OLLAMA_API_KEY=ollama \
-pedelec-agent \
-  --sandbox . \
-  --provider ollama \
-  --model qwen2.5-coder:7b
-```
-
-透過 `pedelec-cli` 呼叫 host app tool：
-
-```bash
-printf '%s' '請呼叫 get_current_page 並整理目前頁面資訊' | \
-OLLAMA_API_KEY=ollama \
-pedelec-agent \
-  --sandbox . \
-  --pedelec-cli ./desktop/target/debug/pedelec-cli \
-  --core-runtime-file ~/.pedelec/runtime.json
-```
+使用 Ollama Cloud 時，`~/.pedelec/settings.json` 的 `providerSettings.ollama.baseUrl` 應為 `https://ollama.com`，不可包含 `/api`。
 
 ## 限制
 
 - 只支援 Ollama provider。
-- 不支援 streaming；完成後輸出 `assistant_message`。
-- Prompt 只支援 stdin。
+- stdout 只輸出 JSON-RPC；不要把 diagnostics 寫進 stdout。
 - 不會修改檔案。
 - 不會讀取 sandbox 以外的路徑。
 - `bash` 是受限 command runner，只允許 `pedelec-cli --thread-id <pedelec_thread_id> tool-spec` 與 `pedelec-cli --thread-id <pedelec_thread_id> tool-call`，不開放任意 shell。

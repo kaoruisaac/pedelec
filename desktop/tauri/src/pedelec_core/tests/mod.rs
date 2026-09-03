@@ -199,17 +199,11 @@ mod tests {
             ProviderCode::OpenCode,
             ProviderCode::Cursor,
             ProviderCode::Claude,
+            ProviderCode::Ollama,
         ] {
             assert_eq!(
                 runtime.provider_execution_family(&provider),
                 ProviderExecutionFamily::PersistentRuntime,
-                "provider={provider:?}"
-            );
-        }
-        for provider in [ProviderCode::Ollama] {
-            assert_eq!(
-                runtime.provider_execution_family(&provider),
-                ProviderExecutionFamily::LegacyCommand,
                 "provider={provider:?}"
             );
         }
@@ -513,6 +507,11 @@ mod tests {
             )
             .privileged_bootstrap,
             ProviderBootstrapMode::UserPromptFallback
+        );
+        assert_eq!(
+            provider_bootstrap_capability_from_probe(&ProviderCode::Ollama, None, true, true)
+                .privileged_bootstrap,
+            ProviderBootstrapMode::NativeSystemPrompt
         );
     }
 
@@ -1059,7 +1058,6 @@ mod tests {
             ),
             ("cursor", ProviderCode::Cursor, Some("gpt-5")),
             ("claude", ProviderCode::Claude, Some("sonnet")),
-            ("ollama", ProviderCode::Ollama, Some("qwen3:8b")),
         ];
         let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
         let external = r"C:\Users\kaoru\OneDrive\桌面\test";
@@ -1101,7 +1099,7 @@ mod tests {
                 ProviderCode::Codex => Some("--cd"),
                 ProviderCode::OpenCode => Some("--dir"),
                 ProviderCode::Cursor => Some("--workspace"),
-                ProviderCode::Ollama => Some("--sandbox"),
+                ProviderCode::Ollama => unreachable!("Ollama has no legacy command spec"),
                 ProviderCode::Antigravity | ProviderCode::Claude => None,
             };
             if let Some(path_flag) = path_flag {
@@ -1132,12 +1130,6 @@ mod tests {
                 ProviderCode::Cursor,
                 Some("gpt-5"),
                 "cursor-session",
-            ),
-            (
-                "ollama",
-                ProviderCode::Ollama,
-                Some("qwen3:8b"),
-                "ollama-session",
             ),
         ];
         let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
@@ -1179,8 +1171,9 @@ mod tests {
                 ProviderCode::Codex => "--cd",
                 ProviderCode::OpenCode => "--dir",
                 ProviderCode::Cursor => "--workspace",
-                ProviderCode::Ollama => "--sandbox",
-                ProviderCode::Antigravity | ProviderCode::Claude => unreachable!(),
+                ProviderCode::Ollama | ProviderCode::Antigravity | ProviderCode::Claude => {
+                    unreachable!()
+                }
             };
             assert!(start
                 .command
@@ -2862,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_new_command_uses_pedelec_agent_model_workspace_and_stdin_prompt() {
+    fn ollama_never_builds_a_legacy_one_shot_command() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
@@ -2871,72 +2864,37 @@ mod tests {
             None,
             Some("qwen3-14b-32k:latest".into()),
         );
-        let message = "line 1\n{\"quote\":\"hello \\\"world\\\"\"}\n中文";
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_ollama_new".into(),
-                message: message.into(),
-            })
-            .unwrap();
-
-        let workspace_path = temp.path().join("workspace").join("thread_ollama_new");
-        assert_eq!(start.command.program, "pedelec-agent");
         assert_eq!(
-            start.command.args,
-            vec![
-                "--provider",
-                "ollama",
-                "--model",
-                "qwen3-14b-32k:latest",
-                "--sandbox",
-                workspace_path.to_str().unwrap(),
-            ]
+            runtime.provider_execution_family(&ProviderCode::Ollama),
+            ProviderExecutionFamily::PersistentRuntime
         );
-        assert_eq!(start.command.cwd, workspace_path);
-        assert!(start.command.stdin.ends_with(message));
-        assert_provider_instruction_present(&start.command);
-        assert!(!start.command.args.iter().any(|arg| arg == message));
-        assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
-        assert_eq!(env_value(&start.command, "PEDELEC_THREAD_ID"), None);
-        assert_env(&start.command, "PEDELEC_PROVIDER", "ollama");
-        assert_env(&start.command, "OLLAMA_API_KEY", "ollama_test_key");
-        assert!(!start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "ollama_test_key"));
-        assert!(!start.command.prompt.contains("ollama_test_key"));
-        assert!(env_value(&start.command, "PATH")
-            .unwrap()
-            .contains(".pedelec"));
-    }
-
-    #[test]
-    fn ollama_provider_command_started_event_does_not_include_api_key() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_ollama_command_event",
+        runtime.set_provider_execution_family(
             ProviderCode::Ollama,
-            None,
-            Some("qwen3:8b".into()),
+            ProviderExecutionFamily::LegacyCommand,
         );
-        let event_rx = runtime.event_bus.subscribe("thread_ollama_command_event");
+        assert_eq!(
+            runtime.provider_execution_family(&ProviderCode::Ollama),
+            ProviderExecutionFamily::PersistentRuntime
+        );
+
+        let legacy = runtime.begin_send_text(SendTextInput {
+            thread_id: "thread_ollama_new".into(),
+            message: "must not spawn pedelec-agent one-shot".into(),
+        });
+        assert_eq!(legacy.unwrap_err().code, error_codes::PROVIDER_UNSUPPORTED);
+
         let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_ollama_command_event".into(),
-                message: "hello".into(),
+            .begin_send_text_intent(SendTextInput {
+                thread_id: "thread_ollama_new".into(),
+                message: "hello persistent".into(),
             })
             .unwrap();
-
-        runtime.emit_provider_command_started("thread_ollama_command_event", 123, &start.command);
-        let events = collect_available_core_events(&event_rx);
-        let payload = serde_json::to_string(&events).unwrap();
-
-        assert!(payload.contains("pedelec-agent"));
-        assert!(!payload.contains("ollama_test_key"));
-        assert!(!payload.contains("OLLAMA_API_KEY"));
+        match start.intent {
+            ProviderExecutionIntent::PersistentRuntime { .. } => {}
+            ProviderExecutionIntent::LegacyCommand { command, .. } => {
+                panic!("Ollama must not fall back to {command:?}")
+            }
+        }
     }
 
     #[cfg(windows)]
@@ -2947,9 +2905,9 @@ mod tests {
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
             thread_id,
-            ProviderCode::Ollama,
+            ProviderCode::Codex,
             None,
-            Some("qwen3:8b".into()),
+            Some("gpt-5".into()),
         );
         let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
         let external = r"C:\Users\kaoru\OneDrive\桌面\test";
@@ -2981,51 +2939,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_resume_uses_provider_session_id_without_thread_routing_env() {
-        let temp = tempfile::tempdir().unwrap();
-        let provider_session_id = "0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_outer",
-            ProviderCode::Ollama,
-            Some(provider_session_id.into()),
-            Some("model-a".into()),
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_outer".into(),
-                message: "continue".into(),
-            })
-            .unwrap();
-
-        assert_eq!(
-            start.command.args,
-            vec![
-                "--provider",
-                "ollama",
-                "--model",
-                "model-a",
-                "--sandbox",
-                temp.path()
-                    .join("workspace")
-                    .join("thread_outer")
-                    .to_str()
-                    .unwrap(),
-                "--session-id",
-                provider_session_id,
-            ]
-        );
-        assert_eq!(start.command.prompt, "continue");
-        assert_eq!(start.command.stdin, "continue");
-        assert_provider_instruction_absent(&start.command);
-        assert_eq!(env_value(&start.command, "PEDELEC_THREAD_ID"), None);
-        assert_env(&start.command, "OLLAMA_API_KEY", "ollama_test_key");
-        assert_ne!(provider_session_id, "thread_outer");
-    }
-
-    #[test]
-    fn ollama_requires_explicit_model_before_spawning() {
+    fn ollama_requires_explicit_model_before_persistent_prepare() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
@@ -3036,7 +2950,7 @@ mod tests {
         );
 
         let err = runtime
-            .begin_send_text(SendTextInput {
+            .begin_send_text_intent(SendTextInput {
                 thread_id: "thread_ollama_no_model".into(),
                 message: "hello".into(),
             })
@@ -3052,7 +2966,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_parser_maps_only_pedelec_agent_public_events() {
+    fn ollama_ignores_legacy_agent_event_stdout() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = runtime_with_provider_thread(
             temp.path(),
@@ -3068,18 +2982,11 @@ mod tests {
             concat!(
                 "{\"type\":\"session\",\"sessionId\":\"0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176\",\"resumed\":false}\r\n",
                 "{\"type\":\"assistant_message\",\"text\":\"hello\"}\n",
-                "{\"type\":\"status\",\"status\":\"running\"}\n",
-                "{\"type\":\"tool_call\",\"tool\":\"pedelec_cli.tool_call\",\"args\":{\"message\":\"ignore\"}}\n",
-                "{\"type\":\"tool_result\",\"tool\":\"pedelec_cli.tool_call\",\"ok\":true,\"result\":{\"message\":\"ignore\"}}\n",
-                "{\"type\":\"done\"}\n"
+                "{\"type\":\"error\",\"error\":{\"code\":\"OLLAMA_UNAVAILABLE\",\"message\":\"Ollama request failed\"}}\n",
+                "{not-json}\n"
             )
             .into(),
         );
-        runtime.emit_provider_stdout(
-            "thread_ollama_parse",
-            "{\"type\":\"assistant_message\",\"text\":\"chunk".into(),
-        );
-        runtime.emit_provider_stdout("thread_ollama_parse", "ed\"}\n".into());
 
         assert_eq!(
             runtime
@@ -3087,72 +2994,21 @@ mod tests {
                 .unwrap()
                 .provider_session_id
                 .as_deref(),
-            Some("0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176")
+            None
         );
         let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "hello")
-        ));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "chunked")
-        ));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::RawStdout { .. })));
         assert!(events.iter().all(|event| {
             !matches!(
                 event,
-                ThreadEvent::ToolCall { .. } | ThreadEvent::ToolResult { .. }
+                ThreadEvent::AssistantMessage { .. }
+                    | ThreadEvent::Error { .. }
+                    | ThreadEvent::ToolCall { .. }
+                    | ThreadEvent::ToolResult { .. }
             )
         }));
-        assert!(events.iter().all(
-            |event| !matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "ignore")
-        ));
-    }
-
-    #[test]
-    fn ollama_parser_preserves_structured_error_and_rejects_invalid_json() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_ollama_error",
-            ProviderCode::Ollama,
-            None,
-            Some("model-a".into()),
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_ollama_error");
-
-        runtime.emit_provider_stdout(
-            "thread_ollama_error",
-            r#"{"type":"error","error":{"code":"OLLAMA_UNAVAILABLE","message":"Ollama request failed","details":{"status":500,"message":"body message"}}}"#
-                .to_string()
-                + "\n",
-        );
-        runtime.emit_provider_stdout("thread_ollama_error", "{not-json}\n".into());
-
-        let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                ThreadEvent::Error {
-                    source: ThreadErrorSource::Provider { provider: ProviderCode::Ollama }, error, ..
-                }
-                    if error.code == "OLLAMA_UNAVAILABLE"
-                        && error.message == "Ollama request failed"
-                        && error.details.as_ref().and_then(|details| details.get("status")) == Some(&json!(500))
-            )
-        }));
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                ThreadEvent::Error {
-                    source: ThreadErrorSource::Provider { provider: ProviderCode::Ollama }, error, ..
-                }
-                    if error.code == error_codes::PROVIDER_COMMAND_FAILED
-                        && error.message == "pedelec-agent emitted invalid JSON"
-                        && error.details.as_ref().and_then(|details| details.get("line")) == Some(&json!("{not-json}"))
-            )
-        }));
-        assert!(events.iter().all(
-            |event| !matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "body message")
-        ));
     }
 
     #[test]
@@ -8138,7 +7994,6 @@ mod tests {
             ProviderCode::OpenCode,
             ProviderCode::Cursor,
             ProviderCode::Claude,
-            ProviderCode::Ollama,
         ] {
             let thread_id = format!("thread_root_error_{provider:?}");
             let mut runtime =
@@ -8622,6 +8477,106 @@ mod tests {
         };
         assert_eq!(turn.message, "first Cursor task");
         assert_eq!(turn.provider_session_id, Some("cursor-session".into()));
+
+        let end = runtime
+            .begin_end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            end.execution,
+            EndThreadExecutionIntent::PersistentRuntime(
+                PersistentRuntimeOperation::EndSession { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn application_runtime_ollama_prepare_send_and_end_are_semantic_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_persistent_ollama";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Ollama,
+            None,
+            Some("qwen3:8b".into()),
+        );
+        assert_eq!(
+            CoreRuntime::new_for_application().provider_execution_family(&ProviderCode::Ollama),
+            ProviderExecutionFamily::PersistentRuntime
+        );
+        runtime.use_persistent_provider_for_test(ProviderCode::Ollama);
+        assert_eq!(
+            runtime
+                .provider_executable_path(&ProviderCode::Ollama)
+                .unwrap_err()
+                .code,
+            error_codes::PROVIDER_TERMINAL_UNSUPPORTED
+        );
+        assert_eq!(
+            runtime
+                .begin_prepare_thread(PrepareThreadInput {
+                    thread_id: thread_id.into(),
+                })
+                .unwrap_err()
+                .code,
+            error_codes::PROVIDER_UNSUPPORTED
+        );
+
+        let prepare = runtime
+            .begin_prepare_thread_intent(PrepareThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        let Some(ProviderExecutionIntent::PersistentRuntime {
+            operation: PersistentRuntimeOperation::EnsureSession { session },
+        }) = prepare.intent
+        else {
+            panic!("expected Ollama EnsureSession, not a legacy command");
+        };
+        assert_eq!(session.provider, ProviderCode::Ollama);
+        assert_eq!(session.model.as_deref(), Some("qwen3:8b"));
+        assert!(session
+            .host_instructions
+            .contains("pedelec-cli --thread-id thread_persistent_ollama tool-spec"));
+        assert!(!session.host_instructions.contains("PEDELEC_PREPARED"));
+        assert!(!session.host_instructions.contains("[Session Preparation]"));
+        assert!(!session.host_instructions.contains("[User Message]"));
+
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::SessionReady {
+                thread_id: thread_id.into(),
+                provider_session_id: "agent-session-1".into(),
+            })
+            .unwrap();
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+
+        let send = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "first Ollama task".into(),
+            })
+            .unwrap();
+        let ProviderExecutionIntent::PersistentRuntime {
+            operation: PersistentRuntimeOperation::StartTurn { turn },
+        } = send.intent
+        else {
+            panic!("expected Ollama StartTurn, not a legacy command");
+        };
+        assert_eq!(turn.message, "first Ollama task");
+        assert_eq!(turn.provider_session_id, Some("agent-session-1".into()));
+        assert!(!turn.message.contains("Pedelec Host"));
+        assert!(!turn.session.host_instructions.contains("PEDELEC_PREPARED"));
+
+        let legacy_send = runtime.begin_send_text(SendTextInput {
+            thread_id: thread_id.into(),
+            message: "must not fall back".into(),
+        });
+        assert_eq!(
+            legacy_send.unwrap_err().code,
+            error_codes::PROVIDER_UNSUPPORTED
+        );
 
         let end = runtime
             .begin_end_thread(EndThreadInput {

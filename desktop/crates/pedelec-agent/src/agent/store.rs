@@ -240,7 +240,7 @@ pub fn parse_session_metadata(content: &str, path: &Path) -> Result<SessionMetad
     if version != Some(SESSION_SCHEMA_VERSION as u64) {
         return Err(AgentError::with_details(
             "SESSION_SCHEMA_INCOMPATIBLE",
-            "Persisted session schema is not supported.",
+            "Persisted session schema is not supported. Create a new session; old session files are not migrated.",
             serde_json::json!({
                 "schemaVersion": version,
                 "supported": SESSION_SCHEMA_VERSION,
@@ -294,6 +294,17 @@ pub fn load_committed_turn_records(
                 records.push(record);
             }
             Err(err) if is_last && is_trailing_crash_debris(line, &err) => break,
+            Err(err) if err.code == "incompatible" => {
+                return Err(AgentError::with_details(
+                    "SESSION_SCHEMA_INCOMPATIBLE",
+                    "Persisted transcript uses an unsupported session format. Create a new session; old transcripts are not migrated.",
+                    serde_json::json!({
+                        "path": transcript_path,
+                        "line": line_no + 1,
+                        "error": err.message
+                    }),
+                ));
+            }
             Err(err) => {
                 return Err(AgentError::with_details(
                     "SESSION_CORRUPT",
@@ -564,6 +575,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(old.code, "SESSION_SCHEMA_INCOMPATIBLE");
+        assert!(old.message.contains("Create a new session"));
     }
 
     #[test]
@@ -611,13 +623,29 @@ mod tests {
             vec![ConversationMessage::user("later")],
         ))
         .unwrap();
+        fs::write(&store.transcript_path, format!("not-json\n{good}\n")).unwrap();
+        let err = load_committed_turn_records(&store.transcript_path).unwrap_err();
+        assert_eq!(err.code, "SESSION_CORRUPT");
+    }
+
+    #[test]
+    fn old_message_by_message_transcript_is_rejected_not_silently_loaded() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().canonicalize().unwrap();
+        let store = create_store(&temp.path().join("home"), &workspace);
         fs::write(
             &store.transcript_path,
-            format!("{{\"not\":\"a turn\"}}\n{good}\n"),
+            concat!(
+                "{\"role\":\"user\",\"content\":\"hello from old format\"}\n",
+                "{\"role\":\"assistant\",\"content\":\"old reply\"}\n"
+            ),
         )
         .unwrap();
         let err = load_committed_turn_records(&store.transcript_path).unwrap_err();
-        assert_eq!(err.code, "SESSION_CORRUPT");
+        assert_eq!(err.code, "SESSION_SCHEMA_INCOMPATIBLE");
+        assert!(err.message.contains("Create a new session"));
+        assert!(!err.message.to_ascii_lowercase().contains("corrupt"));
+        assert!(load_committed_conversation(&store.transcript_path).is_err());
     }
 
     #[test]

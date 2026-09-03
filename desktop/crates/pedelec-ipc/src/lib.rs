@@ -2,18 +2,19 @@ use encoding_rs::Encoding;
 use pedelec_core::{
     error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
     CreateAssetUploadInput, CreateThreadInput, EndThreadExecutionIntent, EndThreadInput,
-    ListAssetsInput, PedelecError, PersistentRuntimeOperation, PrepareThreadInput,
-    PrepareThreadOutput, ProviderExecutionIntent, ProviderProcessTermination,
+    ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation, PrepareThreadInput,
+    PrepareThreadOutput, ProviderCode, ProviderExecutionIntent, ProviderProcessTermination,
     ProviderProtocolTraffic, ProviderRuntimeDiagnostic, RunningProviderProcessPurpose,
     SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
     ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration, ToolInvocationWait,
-    ToolSpecInput,
+    ToolSpecInput, UpdateSettingsInput,
 };
 use pedelec_runtime::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
     CodexRuntimeEvent, CodexRuntimeLaunchConfig, CodexSandboxMode, CodexSessionConfig,
-    CodexTurnConfig, CodexTurnSandboxPolicy, CodexTurnStatus, ProtocolTrafficRecord,
-    ProviderRuntimeController, ProviderRuntimeOwner, RuntimeRegistryError, CODEX_RUNTIME_KEY,
+    CodexTurnConfig, CodexTurnSandboxPolicy, CodexTurnStatus, PedelecAgentServerController,
+    ProtocolTrafficRecord, ProviderRuntimeController, ProviderRuntimeOwner, RuntimeRegistryError,
+    CODEX_RUNTIME_KEY,
 };
 use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
@@ -39,11 +40,15 @@ use std::time::{Duration, Instant};
 mod antigravity;
 mod claude;
 mod opencode;
+mod pedelec_agent;
 pub use antigravity::AntigravityRuntimeDispatcher;
 pub use claude::ClaudeRuntimeDispatcher;
 pub use opencode::{
     AcpProviderKind, AcpRuntimeDispatcher, CursorRuntimeDispatcher, OpenCodeRuntimeDispatcher,
     CURSOR_RUNTIME_KEY, OPENCODE_RUNTIME_KEY,
+};
+pub use pedelec_agent::{
+    PedelecAgentRuntimeDispatcher, PEDELEC_AGENT_OLLAMA_PRODUCT, PEDELEC_AGENT_OLLAMA_RUNTIME_KEY,
 };
 
 #[cfg(windows)]
@@ -68,6 +73,7 @@ pub struct ProviderRuntimeDispatcher {
     opencode: OpenCodeRuntimeDispatcher,
     cursor: CursorRuntimeDispatcher,
     claude: ClaudeRuntimeDispatcher,
+    pedelec_agent_ollama: PedelecAgentRuntimeDispatcher,
 }
 
 impl ProviderRuntimeDispatcher {
@@ -77,7 +83,8 @@ impl ProviderRuntimeDispatcher {
             antigravity: AntigravityRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
             opencode: OpenCodeRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
             cursor: CursorRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
-            claude: ClaudeRuntimeDispatcher::new(owner, core_runtime),
+            claude: ClaudeRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
+            pedelec_agent_ollama: PedelecAgentRuntimeDispatcher::for_ollama(owner, core_runtime),
         }
     }
 
@@ -86,7 +93,48 @@ impl ProviderRuntimeDispatcher {
         self.opencode.record_shutdown_diagnostic();
         self.cursor.record_shutdown_diagnostic();
         self.claude.record_shutdown_diagnostics();
+        self.pedelec_agent_ollama.record_shutdown_diagnostics();
         self.codex.shutdown()
+    }
+
+    pub fn update_settings(
+        &self,
+        runtime: &SharedCoreRuntime,
+        input: UpdateSettingsInput,
+    ) -> Result<PedelecSettings, PedelecError> {
+        let previous = runtime
+            .lock()
+            .map_err(|_| {
+                PedelecError::new(
+                    error_codes::CORE_RUNTIME_UNAVAILABLE,
+                    "Core runtime mutex was poisoned",
+                )
+            })?
+            .get_settings()?;
+        let updated = runtime
+            .lock()
+            .map_err(|_| {
+                PedelecError::new(
+                    error_codes::CORE_RUNTIME_UNAVAILABLE,
+                    "Core runtime mutex was poisoned",
+                )
+            })?
+            .update_settings(input)?;
+        if previous.provider_settings.ollama != updated.provider_settings.ollama {
+            let _ = self.retire_provider(ProviderCode::Ollama, "provider settings changed");
+        }
+        Ok(updated)
+    }
+
+    pub fn retire_provider(
+        &self,
+        provider: ProviderCode,
+        reason: &str,
+    ) -> Result<(), PedelecError> {
+        match provider {
+            ProviderCode::Ollama => self.pedelec_agent_ollama.retire(reason),
+            _ => Ok(()),
+        }
     }
 
     #[doc(hidden)]
@@ -108,6 +156,31 @@ impl ProviderRuntimeDispatcher {
             ..self
         }
     }
+
+    #[doc(hidden)]
+    pub fn with_pedelec_agent_program_for_test(self, program: impl Into<PathBuf>) -> Self {
+        Self {
+            pedelec_agent_ollama: self.pedelec_agent_ollama.with_program_for_test(program),
+            ..self
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_pedelec_agent_env_for_test(
+        self,
+        key: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> Self {
+        Self {
+            pedelec_agent_ollama: self.pedelec_agent_ollama.with_env_for_test(key, value),
+            ..self
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn pedelec_agent_ollama_controller(&self) -> Option<Arc<PedelecAgentServerController>> {
+        self.pedelec_agent_ollama.current_controller()
+    }
 }
 
 impl PersistentRuntimeDispatcher for ProviderRuntimeDispatcher {
@@ -118,11 +191,7 @@ impl PersistentRuntimeDispatcher for ProviderRuntimeDispatcher {
             pedelec_core::ProviderCode::OpenCode => self.opencode.dispatch(operation),
             pedelec_core::ProviderCode::Cursor => self.cursor.dispatch(operation),
             pedelec_core::ProviderCode::Claude => self.claude.dispatch(operation),
-            provider => Err(PedelecError::with_details(
-                error_codes::PROVIDER_RUNTIME_START_FAILED,
-                "provider has not migrated to a persistent production runtime",
-                serde_json::json!({"provider": provider}),
-            )),
+            pedelec_core::ProviderCode::Ollama => self.pedelec_agent_ollama.dispatch(operation),
         }
     }
 }

@@ -12,6 +12,16 @@ pub struct Sandbox {
     max_list_files: usize,
 }
 
+pub fn canonicalize_workspace_path(path: &Path) -> Result<PathBuf, AgentError> {
+    path.canonicalize().map_err(|err| {
+        AgentError::with_details(
+            "SANDBOX_PATH_REQUIRED",
+            "Sandbox path does not exist or cannot be read",
+            serde_json::json!({ "path": path, "error": err.to_string() }),
+        )
+    })
+}
+
 impl Sandbox {
     pub fn new(
         path: &Path,
@@ -19,13 +29,7 @@ impl Sandbox {
         max_image_bytes: u64,
         max_list_files: usize,
     ) -> Result<Self, AgentError> {
-        let root = path.canonicalize().map_err(|err| {
-            AgentError::with_details(
-                "SANDBOX_PATH_REQUIRED",
-                "Sandbox path does not exist or cannot be read",
-                serde_json::json!({ "path": path, "error": err.to_string() }),
-            )
-        })?;
+        let root = canonicalize_workspace_path(path)?;
         if !root.is_dir() {
             return Err(AgentError::with_details(
                 "SANDBOX_PATH_REQUIRED",

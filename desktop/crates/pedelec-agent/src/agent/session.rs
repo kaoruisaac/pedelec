@@ -9,13 +9,16 @@ use super::conversation::{
 use super::error::AgentError;
 use super::events::{AgentTurnSink, TurnResult, TurnToolResult};
 use super::instructions::compose_system_prompt;
+use super::lifecycle::LifecycleGate;
 use super::sandbox::Sandbox;
 use super::store::{
-    create_session_store, default_agent_home_dir, load_session_store, SessionStore,
+    create_session_store, default_agent_home_dir, load_committed_turn_records, load_session_store,
+    SessionStore,
 };
 use super::tavily::{TavilyClient, TavilyRoundWrapper};
 use super::tools::{agent_tool_definitions, execute_tool_with_tavily, AgentToolDefinition};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -33,6 +36,7 @@ pub struct AgentSession {
     host_instructions: Option<String>,
     capabilities: ModelCapabilities,
     committed: Vec<ConversationMessage>,
+    committed_turn_ids: HashSet<String>,
     active_turn: Option<ActiveTurn>,
     tools: Vec<AgentToolDefinition>,
     tool_host: ToolHostConfig,
@@ -41,7 +45,10 @@ pub struct AgentSession {
     max_tool_rounds: usize,
     max_transcript_bytes: u64,
     live: Arc<AtomicBool>,
+    lifecycle: Arc<LifecycleGate>,
     status: SessionStatus,
+    #[cfg(test)]
+    tool_start_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl AgentSession {
@@ -92,6 +99,10 @@ impl AgentSession {
                 Vec::new(),
             ),
         };
+        let committed_turn_ids = load_committed_turn_records(&store.transcript_path)?
+            .into_iter()
+            .map(|record| record.turn_id)
+            .collect();
 
         let web_search_enabled = server.web_search_enabled();
         let tools = agent_tool_definitions(capabilities.vision, web_search_enabled);
@@ -107,6 +118,7 @@ impl AgentSession {
             host_instructions: session.host_instructions,
             capabilities,
             committed,
+            committed_turn_ids,
             active_turn: None,
             tools,
             tool_host: server.tool_host_config(),
@@ -115,7 +127,10 @@ impl AgentSession {
             max_tool_rounds: server.max_tool_rounds,
             max_transcript_bytes: server.max_transcript_bytes,
             live: Arc::new(AtomicBool::new(true)),
+            lifecycle: Arc::new(LifecycleGate::new()),
             status: SessionStatus::Ready,
+            #[cfg(test)]
+            tool_start_hook: None,
         })
     }
 
@@ -147,6 +162,14 @@ impl AgentSession {
         &self.committed
     }
 
+    pub fn has_committed_turn(&self, turn_id: &str) -> bool {
+        self.committed_turn_ids.contains(turn_id)
+    }
+
+    pub fn committed_turn_ids(&self) -> &HashSet<String> {
+        &self.committed_turn_ids
+    }
+
     pub fn host_instructions(&self) -> Option<&str> {
         self.host_instructions.as_deref()
     }
@@ -159,12 +182,19 @@ impl AgentSession {
         Arc::clone(&self.live)
     }
 
+    pub fn lifecycle(&self) -> Arc<LifecycleGate> {
+        Arc::clone(&self.lifecycle)
+    }
+
     pub fn is_closed(&self) -> bool {
-        matches!(self.status, SessionStatus::Closed) || !self.live.load(Ordering::SeqCst)
+        matches!(self.status, SessionStatus::Closed)
+            || !self.live.load(Ordering::SeqCst)
+            || !self.lifecycle.is_open()
     }
 
     pub fn close(&mut self) {
         self.live.store(false, Ordering::SeqCst);
+        self.lifecycle.close();
         self.active_turn = None;
         self.status = SessionStatus::Closed;
     }
@@ -200,6 +230,13 @@ impl AgentSession {
                 "User message is required.",
             ));
         }
+        if self.committed_turn_ids.contains(&turn_id) {
+            return Err(AgentError::with_details(
+                "TURN_ALREADY_COMPLETED",
+                "This turn was already committed and cannot be replayed.",
+                serde_json::json!({ "turnId": turn_id }),
+            ));
+        }
 
         self.status = SessionStatus::Running {
             turn_id: turn_id.clone(),
@@ -223,6 +260,7 @@ impl AgentSession {
             let request = self.build_inference_request()?;
             let mut delta_sink = DeltaForwarder { inner: sink };
             let output = self.backend.infer(request, &mut delta_sink)?;
+            self.lifecycle.admit_inference_result()?;
             self.record_round_usage(&output, sink)?;
             if let Some(active) = self.active_turn.as_mut() {
                 active.clear_attachments();
@@ -324,6 +362,11 @@ impl AgentSession {
         let mut tavily_round = tavily.map(TavilyRoundWrapper::new);
         let mut images_in_round = 0;
         for call in calls {
+            self.lifecycle.admit_tool()?;
+            #[cfg(test)]
+            if let Some(hook) = &self.tool_start_hook {
+                hook();
+            }
             sink.tool_call(call);
             if call.name == "fs.read_image" && !self.capabilities.vision {
                 return Err(AgentError::new(
@@ -402,6 +445,7 @@ impl AgentSession {
 
     fn commit_active_turn(&mut self, text: String) -> Result<TurnResult, AgentError> {
         self.ensure_live()?;
+        let _permit = self.lifecycle.begin_commit()?;
         let active = self
             .active_turn
             .as_ref()
@@ -416,6 +460,7 @@ impl AgentSession {
             .take()
             .ok_or_else(|| invariant("Active turn missing after durable commit."))?;
         self.committed.extend(active.messages);
+        self.committed_turn_ids.insert(turn_id.clone());
         self.store.touch()?;
         self.status = SessionStatus::Ready;
         Ok(TurnResult {
@@ -480,14 +525,17 @@ impl AgentSession {
     }
 
     fn ensure_open(&self) -> Result<(), AgentError> {
-        if matches!(self.status, SessionStatus::Closed) || !self.live.load(Ordering::SeqCst) {
+        if self.is_closed() {
             return Err(AgentError::new("SESSION_CLOSED", "Session is closed."));
         }
         Ok(())
     }
 
     fn ensure_live(&self) -> Result<(), AgentError> {
-        if !self.live.load(Ordering::SeqCst) || matches!(self.status, SessionStatus::Closed) {
+        if !self.live.load(Ordering::SeqCst)
+            || matches!(self.status, SessionStatus::Closed)
+            || !self.lifecycle.is_open()
+        {
             return Err(AgentError::new(
                 "TURN_INVALIDATED",
                 "The turn was invalidated before commit.",
@@ -501,6 +549,11 @@ impl AgentSession {
         self.status = SessionStatus::Running {
             turn_id: turn_id.to_string(),
         };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_tool_start_hook(&mut self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        self.tool_start_hook = hook;
     }
 
     #[cfg(test)]
@@ -540,7 +593,10 @@ mod tests {
     use crate::agent::store::load_committed_turn_records;
     use serde_json::json;
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     struct ScriptedStep {
         deltas: Vec<String>,
@@ -1046,6 +1102,60 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, "TURN_INVALIDATED");
         assert!(session.committed_messages().is_empty());
+    }
+
+    #[test]
+    fn close_at_commit_admission_prevents_later_durable_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![terminal(
+                "final",
+                InferenceUsage::from_token_counts(Some(1), Some(1)),
+            )],
+        );
+        let mut session = open_session(&temp, backend, None);
+        let transcript = session.transcript_path().to_path_buf();
+        let lifecycle = session.lifecycle();
+        let started = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        lifecycle.set_commit_admission_hook(Some(Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move || {
+                *started.0.lock().unwrap() = true;
+                started.1.notify_all();
+                let mut released = release.0.lock().unwrap();
+                while !*released {
+                    released = release.1.wait(released).unwrap();
+                }
+            }
+        })));
+        let worker =
+            thread::spawn(move || session.run_turn("turn-1", "hello", &mut IgnoringTurnSink));
+        {
+            let mut ready = started.0.lock().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !*ready {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let (guard, result) = started.1.wait_timeout(ready, remaining).unwrap();
+                ready = guard;
+                if result.timed_out() && !*ready {
+                    panic!("timed out waiting for commit admission");
+                }
+            }
+        }
+        lifecycle.close();
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap().trim(), "");
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        let err = worker.join().unwrap().unwrap_err();
+        assert_eq!(err.code, "TURN_INVALIDATED");
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap().trim(), "");
+        assert_eq!(load_committed_turn_records(&transcript).unwrap().len(), 0);
     }
 
     #[test]

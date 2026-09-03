@@ -10,6 +10,7 @@ mod claude;
 mod codex;
 mod jsonl;
 mod owner;
+mod pedelec_agent;
 mod persistent_process;
 mod protocol;
 mod rpc;
@@ -35,6 +36,14 @@ pub use jsonl::{JsonLineChannel, JsonLineEof, JsonLineError, JsonLineEvent, Json
 pub use owner::{
     ProviderRuntimeController, ProviderRuntimeKey, ProviderRuntimeOwner, ProviderRuntimeRegistry,
     RuntimeLifecycle, RuntimeRegistryError,
+};
+pub use pedelec_agent::{
+    PedelecAgentCloseOutcome, PedelecAgentModelCapabilities, PedelecAgentRuntimeError,
+    PedelecAgentRuntimeEvent, PedelecAgentRuntimeLaunchConfig, PedelecAgentServerController,
+    PedelecAgentSessionAttachment, PedelecAgentSessionConfig, PedelecAgentSessionResult,
+    PedelecAgentTurnStartResult, PedelecAgentTurnStatus, DEFAULT_PEDELEC_AGENT_CONTROL_TIMEOUT,
+    DEFAULT_PEDELEC_AGENT_MAX_FRAME_BYTES, DEFAULT_PEDELEC_AGENT_SHUTDOWN_TIMEOUT,
+    PEDELEC_AGENT_PROTOCOL_VERSION, PEDELEC_AGENT_SERVER_NAME,
 };
 pub use persistent_process::{
     ExitStatusSnapshot, PersistentProcess, PersistentProcessError, PersistentProcessSpec,

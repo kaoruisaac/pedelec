@@ -395,12 +395,12 @@ fn get_settings(state: State<'_, CoreRuntimeOwner>) -> Result<PedelecSettings, P
 #[tauri::command]
 fn update_settings(
     state: State<'_, CoreRuntimeOwner>,
+    provider_runtime: State<'_, ProviderRuntimeDispatcher>,
     input: UpdateSettingsInput,
 ) -> Result<PedelecSettings, PedelecError> {
     let runtime = state.runtime();
     wait_for_provider_readiness(&runtime)?;
-    let settings = runtime.lock().unwrap().update_settings(input);
-    settings
+    provider_runtime.update_settings(&runtime, input)
 }
 
 #[tauri::command]
