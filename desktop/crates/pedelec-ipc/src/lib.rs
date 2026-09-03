@@ -1693,7 +1693,11 @@ fn handle_core_ipc_request_with_services(
         },
         "ping" => ok_response(
             &request.request_id,
-            serde_json::json!({ "connected": true }),
+            serde_json::json!({
+                "connected": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "processId": std::process::id(),
+            }),
         ),
         "send_text" => match decode_payload::<SendTextInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
@@ -3081,7 +3085,48 @@ mod tests {
         assert!(response.ok);
         assert_eq!(
             response.result,
-            Some(serde_json::json!({ "connected": true }))
+            Some(serde_json::json!({
+                "connected": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "processId": std::process::id(),
+            }))
+        );
+    }
+
+    #[test]
+    fn ping_includes_package_version() {
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+
+        let response = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "ping_version".into(),
+                r#type: "ping".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: None,
+            },
+            runtime,
+        );
+
+        assert!(response.ok);
+        let result = response.result.expect("ping should return a result object");
+        assert_eq!(result["connected"], serde_json::json!(true));
+        assert_eq!(
+            result["version"],
+            serde_json::json!(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(
+            result["version"]
+                .as_str()
+                .is_some_and(|version| !version.is_empty()),
+            "ping version should be the compile-time package version"
+        );
+        assert_eq!(result["processId"], serde_json::json!(std::process::id()));
+        assert!(
+            result["processId"]
+                .as_u64()
+                .is_some_and(|process_id| process_id > 0),
+            "ping processId should be the Desktop/Core process id"
         );
     }
 

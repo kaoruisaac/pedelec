@@ -4,6 +4,7 @@ import { SDK_VERSION } from "./version.generated.js";
 
 const SDK_EXTERNAL_PORT_NAME = "pedelec-sdk-external";
 const PAGE_ACTIVITY_MESSAGE_TYPE = "page_activity";
+const SDK_HELLO_MESSAGE_TYPE = "sdk_hello";
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 
 export type PedelecOptions = {
@@ -720,6 +721,15 @@ export class Pedelec {
     return !this.isDocumentHidden() && this.isDocumentFocused();
   }
 
+  private postSdkHello(port: RuntimePort): void {
+    try {
+      port.postMessage({ type: SDK_HELLO_MESSAGE_TYPE, sdkVersion: SDK_VERSION });
+    } catch (err) {
+      const error = normalizeError(err, "EXTENSION_DISCONNECTED", "Pedelec extension disconnected.");
+      this.handleDisconnect(port, error);
+    }
+  }
+
   private reportPageActivity(active: boolean, options: { force?: boolean } = {}): void {
     if (!this.port) return;
     if (!options.force && this.lastReportedPageActive === active) return;
@@ -916,6 +926,7 @@ export class Pedelec {
       port.onMessage.addListener((message) => this.handlePortMessage(port, message));
       port.onDisconnect.addListener(() => this.handleDisconnect(port));
       this.port = port;
+      this.postSdkHello(port);
       this.reportPageActivity(this.isPageForegroundActive(), { force: true });
       return port;
     } catch (err) {

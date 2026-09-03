@@ -38,6 +38,28 @@ const SDK_EXTERNAL_PORT_NAME = "pedelec-sdk-external";
 const APPROVED_ORIGINS_STORAGE_KEY = "approvedOrigins";
 const PROVIDER_ERROR_BY_TAB_STORAGE_KEY = "providerErrorByTab";
 const DEFAULT_APPROVAL_TIMEOUT_MS = 60000;
+const DEFAULT_SDK_HANDSHAKE_TIMEOUT_MS = 300;
+const SDK_HELLO_MESSAGE_TYPE = "sdk_hello";
+
+function parseMajorMinor(version) {
+  if (typeof version !== "string") return null;
+  const trimmed = version.trim();
+  if (!trimmed) return null;
+  const match = /^(\d+)\.(\d+)(?:\.(\d+))?(?:[-+][0-9A-Za-z.-]*)?$/.exec(trimmed);
+  if (!match) return null;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (!Number.isInteger(major) || !Number.isInteger(minor) || major < 0 || minor < 0) return null;
+  return [major, minor];
+}
+
+function isPeerVersionOutdated(extensionVersion, peerVersion) {
+  const baseline = parseMajorMinor(extensionVersion);
+  if (!baseline) return false;
+  const peer = parseMajorMinor(peerVersion);
+  if (!peer) return true;
+  return peer[0] < baseline[0] || (peer[0] === baseline[0] && peer[1] < baseline[1]);
+}
 
 function createBackground(runtimeChrome, options = {}) {
   let nativePort = null;
@@ -61,6 +83,20 @@ function createBackground(runtimeChrome, options = {}) {
   let activeSdkTabId = null;
   let providerErrorByTab = Object.create(null);
   let providerErrorCacheLoaded = false;
+  const sdkHandshakeTimeoutMs = options.sdkHandshakeTimeoutMs ?? DEFAULT_SDK_HANDSHAKE_TIMEOUT_MS;
+  const sdkWarningByTab = Object.create(null);
+  let versionWarningOperation = Promise.resolve();
+  let popupOpenPromise = null;
+  let desktopProbePromise = null;
+  let desktopVersionState = {
+    status: "unknown",
+    version: null,
+    processId: null,
+    occurrenceId: 0,
+    dismissedOccurrenceId: null,
+    autoPopupConsumedOccurrenceId: null,
+    legacyOccurrenceBoundaryPending: false,
+  };
 
   let state = {
     connected: false,
@@ -119,6 +155,333 @@ function createBackground(runtimeChrome, options = {}) {
         popupPorts.delete(port);
       }
     }
+  }
+
+  function getExtensionVersion() {
+    try {
+      const version = runtimeChrome.runtime?.getManifest?.()?.version;
+      return typeof version === "string" ? version : "";
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  function enqueueVersionWarningOperation(operation) {
+    versionWarningOperation = versionWarningOperation
+      .catch(() => {})
+      .then(operation)
+      .catch(() => {});
+    return versionWarningOperation;
+  }
+
+  function tabHasOutdatedSdk(tabId) {
+    const currentTabId = normalizeTabId(tabId);
+    if (currentTabId == null) return false;
+    for (const context of sdkContextsByPort.values()) {
+      if (context?.tabId === currentTabId && context.outdated === true) return true;
+    }
+    return false;
+  }
+
+  function visibleSdkVersionWarningForTab(tabId) {
+    const currentTabId = normalizeTabId(tabId);
+    if (currentTabId == null || !hasSdkPortForTab(currentTabId) || !tabHasOutdatedSdk(currentTabId)) {
+      return { outdated: false };
+    }
+    if (sdkWarningByTab[tabIdKey(currentTabId)]?.dismissed === true) {
+      return { outdated: false };
+    }
+    return { outdated: true };
+  }
+
+  function visibleDesktopVersionWarning() {
+    if (desktopVersionState.status !== "outdated") return { outdated: false };
+    if (desktopVersionState.dismissedOccurrenceId === desktopVersionState.occurrenceId) {
+      return { outdated: false };
+    }
+    return { outdated: true };
+  }
+
+  function broadcastSdkVersionWarningState(warning) {
+    const message = { type: "sdk_version_warning_state", warning };
+    for (const port of popupPorts) {
+      try {
+        port.postMessage(message);
+      } catch (_err) {
+        popupPorts.delete(port);
+      }
+    }
+  }
+
+  function broadcastDesktopVersionWarningState(warning) {
+    const message = { type: "desktop_version_warning_state", warning };
+    for (const port of popupPorts) {
+      try {
+        port.postMessage(message);
+      } catch (_err) {
+        popupPorts.delete(port);
+      }
+    }
+  }
+
+  async function resolvePopupSdkVersionWarning() {
+    return visibleSdkVersionWarningForTab(await getCurrentBrowserTabId());
+  }
+
+  async function broadcastResolvedPopupSdkVersionWarning() {
+    if (popupPorts.size === 0) return;
+    broadcastSdkVersionWarningState(await resolvePopupSdkVersionWarning());
+  }
+
+  function broadcastResolvedPopupDesktopVersionWarning() {
+    if (popupPorts.size === 0) return;
+    broadcastDesktopVersionWarningState(visibleDesktopVersionWarning());
+  }
+
+  async function broadcastVersionWarningStates() {
+    await broadcastResolvedPopupSdkVersionWarning();
+    broadcastResolvedPopupDesktopVersionWarning();
+  }
+
+  function postPopupSdkVersionWarningState(port) {
+    return enqueueVersionWarningOperation(async () => {
+      try {
+        if (!popupPorts.has(port)) return;
+        port.postMessage({
+          type: "sdk_version_warning_state",
+          warning: await resolvePopupSdkVersionWarning(),
+        });
+      } catch (_err) {
+        popupPorts.delete(port);
+      }
+    });
+  }
+
+  function postPopupDesktopVersionWarningState(port) {
+    try {
+      port.postMessage({
+        type: "desktop_version_warning_state",
+        warning: visibleDesktopVersionWarning(),
+      });
+    } catch (_err) {
+      popupPorts.delete(port);
+    }
+  }
+
+  function syncSdkWarningForTab(tabId) {
+    const currentTabId = normalizeTabId(tabId);
+    if (currentTabId == null) return;
+    const key = tabIdKey(currentTabId);
+    if (!tabHasOutdatedSdk(currentTabId)) {
+      delete sdkWarningByTab[key];
+      return;
+    }
+    if (!sdkWarningByTab[key]) {
+      sdkWarningByTab[key] = {
+        dismissed: false,
+        autoPopupConsumed: false,
+      };
+    }
+  }
+
+  function clearSdkHandshakeTimeout(context) {
+    if (context?.handshakeTimer == null) return;
+    clearTimeout(context.handshakeTimer);
+    context.handshakeTimer = null;
+  }
+
+  function scheduleSdkHandshakeTimeout(port) {
+    const context = sdkContextsByPort.get(port);
+    if (!context || context.tabId == null) return;
+    clearSdkHandshakeTimeout(context);
+    context.handshakeTimer = setTimeout(() => {
+      context.handshakeTimer = null;
+      void enqueueVersionWarningOperation(async () => {
+        if (!sdkContextsByPort.has(port) || context.handshakeReceived) return;
+        context.sdkVersion = null;
+        context.outdated = isPeerVersionOutdated(getExtensionVersion(), null);
+        syncSdkWarningForTab(context.tabId);
+        await broadcastVersionWarningStates();
+        await maybeOpenVersionWarningPopup();
+        scheduleDesktopCompatibilityProbe();
+      });
+    }, sdkHandshakeTimeoutMs);
+    if (typeof context.handshakeTimer.unref === "function") {
+      context.handshakeTimer.unref();
+    }
+  }
+
+  function applySdkPortHello(port, message) {
+    const context = sdkContextsByPort.get(port);
+    if (!context) return;
+    clearSdkHandshakeTimeout(context);
+    context.handshakeReceived = true;
+    context.sdkVersion = typeof message?.sdkVersion === "string" ? message.sdkVersion : null;
+    context.outdated = isPeerVersionOutdated(getExtensionVersion(), context.sdkVersion);
+    syncSdkWarningForTab(context.tabId);
+  }
+
+  async function handleSdkVersionHandshake(port, message) {
+    applySdkPortHello(port, message);
+    await broadcastVersionWarningStates();
+    await maybeOpenVersionWarningPopup();
+    scheduleDesktopCompatibilityProbe();
+  }
+
+  function normalizeDesktopProcessId(value) {
+    if (typeof value === "number" && Number.isInteger(value) && value > 0 && Number.isSafeInteger(value)) {
+      return value;
+    }
+    return null;
+  }
+
+  function applyDesktopPingSuccess(result) {
+    if (result?.connected !== true) {
+      applyDesktopPingFailure();
+      return;
+    }
+    const version = typeof result.version === "string" ? result.version : null;
+    const processId = normalizeDesktopProcessId(result.processId);
+    const previousProcessId = desktopVersionState.processId;
+    const pendingLegacyBoundary = desktopVersionState.legacyOccurrenceBoundaryPending === true;
+    const processIdentityChanged =
+      processId != null &&
+      previousProcessId != null &&
+      processId !== previousProcessId;
+    const lostProcessIdentity = processId == null && previousProcessId != null;
+    const recoveredFromLegacyBoundary = pendingLegacyBoundary && previousProcessId == null;
+    if (processIdentityChanged || lostProcessIdentity || recoveredFromLegacyBoundary) {
+      beginDesktopOccurrence();
+    }
+    const outdated = isPeerVersionOutdated(getExtensionVersion(), version);
+    desktopVersionState = {
+      ...desktopVersionState,
+      status: outdated ? "outdated" : "compatible",
+      version,
+      processId,
+      legacyOccurrenceBoundaryPending: false,
+    };
+  }
+
+  function applyDesktopPingFailure() {
+    desktopVersionState = {
+      ...desktopVersionState,
+      status: "unknown",
+      version: null,
+      legacyOccurrenceBoundaryPending:
+        desktopVersionState.processId == null ? true : desktopVersionState.legacyOccurrenceBoundaryPending,
+    };
+  }
+
+  function beginDesktopOccurrence() {
+    desktopVersionState = {
+      ...desktopVersionState,
+      occurrenceId: desktopVersionState.occurrenceId + 1,
+      legacyOccurrenceBoundaryPending: false,
+    };
+  }
+
+  async function pingDesktop({ quiet = false } = {}) {
+    try {
+      const ping = await sendNativeRequest("ping", {}, {}, { quiet });
+      applyDesktopPingSuccess(ping);
+      return ping;
+    } catch (err) {
+      applyDesktopPingFailure();
+      throw err;
+    }
+  }
+
+  function startDesktopCompatibilityProbe() {
+    if (desktopProbePromise) return desktopProbePromise;
+    desktopProbePromise = withNativeOperation(() => pingDesktop({ quiet: true }))
+      .catch(() => {})
+      .finally(() => {
+        desktopProbePromise = null;
+      });
+    return desktopProbePromise;
+  }
+
+  function scheduleDesktopCompatibilityProbe() {
+    void startDesktopCompatibilityProbe().then(() => {
+      void enqueueVersionWarningOperation(async () => {
+        broadcastResolvedPopupDesktopVersionWarning();
+        await maybeOpenVersionWarningPopup();
+      });
+    });
+  }
+
+  async function requestActionPopupOpen() {
+    if (popupOpenPromise) return popupOpenPromise;
+    if (!runtimeChrome.action?.openPopup) return "unavailable";
+    popupOpenPromise = (async () => {
+      try {
+        await runtimeChrome.action.openPopup();
+        return "opened";
+      } catch (_err) {
+        return "failed";
+      } finally {
+        popupOpenPromise = null;
+      }
+    })();
+    return popupOpenPromise;
+  }
+
+  async function openActionPopup() {
+    if (popupPorts.size > 0) return "already_open";
+    return requestActionPopupOpen();
+  }
+
+  async function maybeOpenVersionWarningPopup() {
+    const currentTabId = await getCurrentBrowserTabId();
+    const sdkRecord = currentTabId != null ? sdkWarningByTab[tabIdKey(currentTabId)] : null;
+    const sdkEligible = Boolean(
+      currentTabId != null &&
+      hasSdkPortForTab(currentTabId) &&
+      tabHasOutdatedSdk(currentTabId) &&
+      sdkRecord &&
+      sdkRecord.dismissed !== true &&
+      sdkRecord.autoPopupConsumed !== true
+    );
+    const desktopEligible = Boolean(
+      currentTabId != null &&
+      hasSdkPortForTab(currentTabId) &&
+      desktopVersionState.status === "outdated" &&
+      desktopVersionState.dismissedOccurrenceId !== desktopVersionState.occurrenceId &&
+      desktopVersionState.autoPopupConsumedOccurrenceId !== desktopVersionState.occurrenceId
+    );
+    if (!sdkEligible && !desktopEligible) return false;
+
+    const result = await openActionPopup();
+    if (result === "already_open") return false;
+    if (result !== "opened") return false;
+
+    if (sdkEligible && sdkRecord) sdkRecord.autoPopupConsumed = true;
+    if (desktopEligible) {
+      desktopVersionState.autoPopupConsumedOccurrenceId = desktopVersionState.occurrenceId;
+    }
+    return true;
+  }
+
+  async function dismissSdkVersionWarning() {
+    const currentTabId = await getCurrentBrowserTabId();
+    if (currentTabId != null && tabHasOutdatedSdk(currentTabId)) {
+      const key = tabIdKey(currentTabId);
+      sdkWarningByTab[key] = {
+        ...(sdkWarningByTab[key] || {}),
+        dismissed: true,
+        autoPopupConsumed: true,
+      };
+    }
+    broadcastSdkVersionWarningState({ outdated: false });
+  }
+
+  function dismissDesktopVersionWarning() {
+    if (desktopVersionState.status === "outdated") {
+      desktopVersionState.dismissedOccurrenceId = desktopVersionState.occurrenceId;
+      desktopVersionState.autoPopupConsumedOccurrenceId = desktopVersionState.occurrenceId;
+    }
+    broadcastDesktopVersionWarningState({ outdated: false });
   }
 
   function scheduleReconnect() {
@@ -488,6 +851,10 @@ function createBackground(runtimeChrome, options = {}) {
     context.pageActive = message?.active === true;
     if (context.pageActive) {
       setActiveSdkTabId(context.tabId);
+      enqueueVersionWarningOperation(async () => {
+        await maybeOpenVersionWarningPopup();
+        await broadcastVersionWarningStates();
+      });
       if (!hasSessionStorage()) return;
       enqueueProviderErrorOperation(async () => {
         await loadProviderErrorByTab();
@@ -519,12 +886,20 @@ function createBackground(runtimeChrome, options = {}) {
 
   function handleSdkTabPortDisconnect(tabId) {
     if (hasSdkPortForTab(tabId)) {
+      syncSdkWarningForTab(tabId);
+      enqueueVersionWarningOperation(async () => {
+        await broadcastVersionWarningStates();
+      });
       if (activeSdkTabId === tabId && !hasActiveSdkPortForTab(tabId)) {
         if (setActiveSdkTabId(null)) refreshPopupProviderErrorState();
       }
       return;
     }
 
+    delete sdkWarningByTab[tabIdKey(tabId)];
+    enqueueVersionWarningOperation(async () => {
+      await broadcastVersionWarningStates();
+    });
     if (activeSdkTabId === tabId) setActiveSdkTabId(null);
     forgetProviderErrorForTab(tabId);
   }
@@ -580,14 +955,8 @@ function createBackground(runtimeChrome, options = {}) {
   }
 
   async function openProviderErrorPopup() {
-    if (!runtimeChrome.action?.openPopup) return false;
-    try {
-      await runtimeChrome.action.openPopup();
-      return true;
-    } catch (_err) {
-      // Leave the occurrence eligible so a later successful open can still notify once.
-      return false;
-    }
+    const result = await requestActionPopupOpen();
+    return result === "opened";
   }
 
   async function maybeOpenProviderErrorPopupForTab(tabId) {
@@ -797,7 +1166,7 @@ function createBackground(runtimeChrome, options = {}) {
     }
   }
 
-  function connectNative() {
+  function connectNative({ quiet = false } = {}) {
     if (nativePort) return true;
 
     try {
@@ -806,13 +1175,15 @@ function createBackground(runtimeChrome, options = {}) {
       nativePort = null;
       setState({
         connected: false,
-        error: err.message,
+        error: quiet ? null : err.message,
       });
-      notifyAllSdkPorts({
-        type: "error",
-        error: normalizeError(err, "NATIVE_HOST_UNAVAILABLE", "Pedelec native host is not connected."),
-      });
-      scheduleReconnect();
+      if (!quiet) {
+        notifyAllSdkPorts({
+          type: "error",
+          error: normalizeError(err, "NATIVE_HOST_UNAVAILABLE", "Pedelec native host is not connected."),
+        });
+        scheduleReconnect();
+      }
       return false;
     }
 
@@ -835,6 +1206,10 @@ function createBackground(runtimeChrome, options = {}) {
     const err = runtimeChrome.runtime.lastError;
     const error = normalizeError(err, "NATIVE_CONNECTION_CLOSED", "Native host disconnected.");
     nativePort = null;
+    applyDesktopPingFailure();
+    enqueueVersionWarningOperation(async () => {
+      await broadcastVersionWarningStates();
+    });
     for (const pending of pendingRequests.values()) {
       pending.reject(error);
     }
@@ -884,8 +1259,8 @@ function createBackground(runtimeChrome, options = {}) {
     });
   }
 
-  function sendNativeRequest(type, payload = {}, metadata = {}) {
-    if (!connectNative()) {
+  function sendNativeRequest(type, payload = {}, metadata = {}, { quiet = false } = {}) {
+    if (!connectNative({ quiet })) {
       return Promise.reject({
         code: "NATIVE_HOST_UNAVAILABLE",
         message: "Pedelec native host is not connected.",
@@ -1252,7 +1627,9 @@ function createBackground(runtimeChrome, options = {}) {
   }
 
   function disconnectSdkPort(port) {
-    const tabId = sdkContextsByPort.get(port)?.tabId;
+    const context = sdkContextsByPort.get(port);
+    const tabId = context?.tabId;
+    clearSdkHandshakeTimeout(context);
     sdkPorts.delete(port);
     sdkContextsByPort.delete(port);
     const channels = sdkChannelsByPort.get(port);
@@ -1382,6 +1759,11 @@ function createBackground(runtimeChrome, options = {}) {
       return;
     }
 
+    if (message?.type === SDK_HELLO_MESSAGE_TYPE) {
+      void enqueueVersionWarningOperation(() => handleSdkVersionHandshake(port, message));
+      return;
+    }
+
     const requestId = message?.requestId || "";
     const channelId = message?.channelId || "";
     const context = sdkContextsByPort.get(port) || {};
@@ -1398,11 +1780,15 @@ function createBackground(runtimeChrome, options = {}) {
         const approved = origin ? await isOriginApproved(origin) : false;
         let appConnected = false;
         try {
-          const ping = await withNativeOperation(() => sendNativeRequest("ping"));
+          const ping = await withNativeOperation(() => pingDesktop());
           appConnected = ping?.connected === true;
         } catch (_) {
           // Connection status is deliberately non-diagnostic for external sites.
         }
+        void enqueueVersionWarningOperation(async () => {
+          await broadcastVersionWarningStates();
+          await maybeOpenVersionWarningPopup();
+        });
         postSdkResponse(port, channelId, requestId, true, {
           installed: true,
           approved,
@@ -1597,6 +1983,8 @@ function createBackground(runtimeChrome, options = {}) {
     port.postMessage({ type: "state", state });
     postPopupApprovalState(port);
     postPopupProviderErrorState(port);
+    postPopupSdkVersionWarningState(port);
+    postPopupDesktopVersionWarningState(port);
 
     port.onMessage.addListener(async (message) => {
       try {
@@ -1623,6 +2011,10 @@ function createBackground(runtimeChrome, options = {}) {
           });
         } else if (message?.type === "dismiss_provider_error") {
           await dismissProviderError();
+        } else if (message?.type === "dismiss_sdk_version_warning") {
+          await enqueueVersionWarningOperation(() => dismissSdkVersionWarning());
+        } else if (message?.type === "dismiss_desktop_version_warning") {
+          dismissDesktopVersionWarning();
         }
       } catch (err) {
         setState({ error: formatError(err) });
@@ -1670,7 +2062,12 @@ function createBackground(runtimeChrome, options = {}) {
       approvalRequired: true,
       tabId: tabIdFromSender(port.sender),
       pageActive: false,
+      sdkVersion: null,
+      handshakeReceived: false,
+      outdated: false,
+      handshakeTimer: null,
     });
+    scheduleSdkHandshakeTimeout(port);
 
     port.onMessage.addListener((message) => {
       handleSdkMessage(port, message);
@@ -1716,5 +2113,5 @@ if (typeof chrome !== "undefined" && chrome.runtime) {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { createBackground };
+  module.exports = { createBackground, parseMajorMinor, isPeerVersionOutdated };
 }

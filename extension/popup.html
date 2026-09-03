@@ -100,6 +100,51 @@
         line-height: 1.45;
       }
 
+      .version-warning {
+        display: grid;
+        gap: 8px;
+        border: 1px solid #dc6803;
+        border-radius: 8px;
+        background: #fffaeb;
+        padding: 10px;
+      }
+
+      .version-warning[hidden] {
+        display: none;
+      }
+
+      .version-warning-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .version-warning-dismiss {
+        flex: none;
+        border: 0;
+        border-radius: 4px;
+        padding: 0 4px;
+        background: transparent;
+        color: #b54708;
+        font-size: 20px;
+        line-height: 1;
+      }
+
+      .version-warning-dismiss:hover,
+      .version-warning-dismiss:focus-visible {
+        background: #fef0c7;
+      }
+
+      .version-warning p {
+        margin: 0;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+        color: #93370d;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
       .approval {
         display: grid;
         gap: 10px;
@@ -193,6 +238,24 @@
           color: #fdbab4;
         }
 
+        .version-warning {
+          border-color: #f79009;
+          background: #3b2a14;
+        }
+
+        .version-warning-dismiss {
+          color: #fec84b;
+        }
+
+        .version-warning-dismiss:hover,
+        .version-warning-dismiss:focus-visible {
+          background: #593c1a;
+        }
+
+        .version-warning p {
+          color: #fde68a;
+        }
+
         .origin,
         button {
           border-color: #3b4656;
@@ -220,6 +283,30 @@
           >×</button>
         </div>
         <p id="provider-error-message"></p>
+      </section>
+      <section id="sdk-version-warning" class="version-warning" hidden>
+        <div class="version-warning-header">
+          <p data-i18n="sdkVersionWarning">This webpage is using an outdated Pedelec SDK version, which may affect some features.</p>
+          <button
+            id="dismiss-sdk-version-warning"
+            class="version-warning-dismiss"
+            type="button"
+            aria-label="Dismiss SDK version warning"
+            data-i18n-aria-label="dismissSdkVersionWarning"
+          >×</button>
+        </div>
+      </section>
+      <section id="desktop-version-warning" class="version-warning" hidden>
+        <div class="version-warning-header">
+          <p data-i18n="desktopVersionWarning">Pedelec Desktop is outdated, which may affect some features.</p>
+          <button
+            id="dismiss-desktop-version-warning"
+            class="version-warning-dismiss"
+            type="button"
+            aria-label="Dismiss Desktop version warning"
+            data-i18n-aria-label="dismissDesktopVersionWarning"
+          >×</button>
+        </div>
       </section>
       <section id="approval" class="approval" hidden>
         <h2 data-i18n="approveSiteTitle">Approve This Site</h2>

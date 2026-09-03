@@ -68,7 +68,11 @@ class MockWindow {
 }
 
 function requestMessages(port: MockRuntimePort): any[] {
-  return port.sent.filter((message) => message?.type !== "page_activity");
+  return port.sent.filter((message) => message?.type !== "page_activity" && message?.type !== "sdk_hello");
+}
+
+function sdkHelloMessage() {
+  return { type: "sdk_hello", sdkVersion: SDK_VERSION };
 }
 
 function setPageHidden(pageWindow: MockWindow): void {
@@ -226,9 +230,20 @@ describe("Pedelec SDK", () => {
     expect(PEDELEC_EXTENSION_ID).toBe("ogccgaminlphbkeghldidiiimajfdpag");
   });
 
+  it("reports the SDK version on connection before page activity", () => {
+    new Pedelec();
+    expect(pageWindow.port.sent).toEqual([
+      sdkHelloMessage(),
+      { type: "page_activity", active: true },
+    ]);
+  });
+
   it("reports the initial page activity state on connection", () => {
     new Pedelec();
-    expect(pageWindow.port.sent).toEqual([{ type: "page_activity", active: true }]);
+    expect(pageWindow.port.sent).toEqual([
+      sdkHelloMessage(),
+      { type: "page_activity", active: true },
+    ]);
   });
 
   it("reports inactivity for an initial hidden page", () => {
@@ -236,7 +251,10 @@ describe("Pedelec SDK", () => {
     pageWindow.document.visibilityState = "hidden";
     pageWindow.document.focused = false;
     new Pedelec();
-    expect(pageWindow.port.sent).toEqual([{ type: "page_activity", active: false }]);
+    expect(pageWindow.port.sent).toEqual([
+      sdkHelloMessage(),
+      { type: "page_activity", active: false },
+    ]);
   });
 
   it("reports inactivity when the page becomes hidden", () => {
@@ -275,7 +293,10 @@ describe("Pedelec SDK", () => {
 
   it("re-asserts page activity on window.focus even if already reported active", () => {
     new Pedelec();
-    expect(pageWindow.port.sent).toEqual([{ type: "page_activity", active: true }]);
+    expect(pageWindow.port.sent).toEqual([
+      sdkHelloMessage(),
+      { type: "page_activity", active: true },
+    ]);
     blurPage(pageWindow);
     expect(pageWindow.port.sent.filter((message) => message.type === "page_activity").map((message) => message.active)).toEqual([
       true,
@@ -292,6 +313,12 @@ describe("Pedelec SDK", () => {
     const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
     expect(createRequest.requestId).toMatch(/^sdk_\d+_1$/);
     expect(createRequest).toHaveProperty("channelId");
+
+    const hello = pageWindow.port.sent.find((message) => message.type === "sdk_hello");
+    expect(hello).toEqual(sdkHelloMessage());
+    expect(hello).not.toHaveProperty("requestId");
+    expect(hello).not.toHaveProperty("channelId");
+    expect(hello).not.toHaveProperty("sessionId");
 
     const activity = pageWindow.port.sent.find((message) => message.type === "page_activity");
     expect(activity).toEqual({ type: "page_activity", active: true });
@@ -534,6 +561,8 @@ describe("Pedelec SDK", () => {
     const recovered = pedelec.getSettings();
     expect(pageWindow.connectCalls).toHaveLength(2);
     expect(pageWindow.port).toBe(portB);
+    expect(portB.sent[0]).toEqual(sdkHelloMessage());
+    expect(portB.sent[1]).toEqual({ type: "page_activity", active: true });
     expect(portB.sent.at(-1)).toMatchObject({ type: "get_settings" });
     respondSettings(pageWindow, pageWindow.lastSent());
     await expect(recovered).resolves.toEqual({ defaultProvider: null });

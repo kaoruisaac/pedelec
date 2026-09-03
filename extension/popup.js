@@ -10,6 +10,10 @@ const providerErrorEl = document.getElementById("provider-error");
 const providerErrorProviderEl = document.getElementById("provider-error-provider");
 const providerErrorMessageEl = document.getElementById("provider-error-message");
 const dismissProviderErrorButton = document.getElementById("dismiss-provider-error");
+const sdkVersionWarningEl = document.getElementById("sdk-version-warning");
+const dismissSdkVersionWarningButton = document.getElementById("dismiss-sdk-version-warning");
+const desktopVersionWarningEl = document.getElementById("desktop-version-warning");
+const dismissDesktopVersionWarningButton = document.getElementById("dismiss-desktop-version-warning");
 const port = chrome.runtime.connect({ name: "popup" });
 let currentApprovalState = null;
 
@@ -58,6 +62,10 @@ function renderProviderError(providerError) {
   providerErrorEl.hidden = false;
 }
 
+function renderVersionWarning(element, warning) {
+  element.hidden = warning?.outdated !== true;
+}
+
 function closePopup() {
   window.close();
 }
@@ -81,10 +89,20 @@ dismissProviderErrorButton.addEventListener("click", () => {
   port.postMessage({ type: "dismiss_provider_error" });
 });
 
+dismissSdkVersionWarningButton.addEventListener("click", () => {
+  port.postMessage({ type: "dismiss_sdk_version_warning" });
+});
+
+dismissDesktopVersionWarningButton.addEventListener("click", () => {
+  port.postMessage({ type: "dismiss_desktop_version_warning" });
+});
+
 port.onMessage.addListener((message) => {
   if (message?.type === "state") render(message.state);
   if (message?.type === "approval_state") renderApprovalState(message.approvalState);
   if (message?.type === "provider_error_state") renderProviderError(message.providerError);
+  if (message?.type === "sdk_version_warning_state") renderVersionWarning(sdkVersionWarningEl, message.warning);
+  if (message?.type === "desktop_version_warning_state") renderVersionWarning(desktopVersionWarningEl, message.warning);
 });
 
 port.postMessage({ type: "get_state" });

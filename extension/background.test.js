@@ -1,6 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createBackground } = require("./background.js");
+const backgroundModule = require("./background.js");
+const { parseMajorMinor, isPeerVersionOutdated } = backgroundModule;
+
+function createBackground(runtimeChrome, options = {}) {
+  return backgroundModule.createBackground(runtimeChrome, {
+    sdkHandshakeTimeoutMs: 60_000,
+    ...options,
+  });
+}
 
 class MockPort {
   constructor() {
@@ -118,10 +126,14 @@ function createChrome({ approved = true } = {}) {
       onConnect: { addListener: () => {} },
       onConnectExternal: { addListener: (listener) => externalListeners.push(listener) },
       connectNative: () => {
-        const port = nativePortQueue.shift() || new MockPort();
+        const port = nativePortQueue.shift();
+        if (!port) {
+          throw new Error("Native host unavailable");
+        }
         nativePorts.push(port);
         return port;
       },
+      getManifest: () => ({ version: chrome.manifestVersion || "0.2.12" }),
     },
     connectExternal(port) {
       for (const listener of externalListeners) listener(port);
@@ -164,6 +176,14 @@ function lastProviderErrorState(popup) {
   return [...popup.sent].reverse().find((message) => message.type === "provider_error_state");
 }
 
+function lastSdkVersionWarningState(popup) {
+  return [...popup.sent].reverse().find((message) => message.type === "sdk_version_warning_state");
+}
+
+function lastDesktopVersionWarningState(popup) {
+  return [...popup.sent].reverse().find((message) => message.type === "desktop_version_warning_state");
+}
+
 async function waitForProviderErrorState(popup, expected) {
   await waitFor(() => {
     const message = lastProviderErrorState(popup);
@@ -174,6 +194,36 @@ async function waitForProviderErrorState(popup, expected) {
       message.providerError?.message === expected.message
     );
   }, "provider_error_state was not reached");
+}
+
+async function waitForSdkVersionWarning(popup, outdated) {
+  await waitFor(() => lastSdkVersionWarningState(popup)?.warning?.outdated === outdated, "sdk version warning state was not reached");
+}
+
+async function waitForDesktopVersionWarning(popup, outdated) {
+  await waitFor(() => lastDesktopVersionWarningState(popup)?.warning?.outdated === outdated, "desktop version warning state was not reached");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function emitSdkHello(port, sdkVersion) {
+  port.emit({ type: "sdk_hello", sdkVersion });
+}
+
+async function respondToNativeType(background, nativePort, type, result, ok = true) {
+  await waitFor(() => nativePort.sent.some((message) => message.type === type), `${type} was not sent`);
+  const request = [...nativePort.sent].reverse().find((message) => message.type === type);
+  background.handleNativeMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok,
+    result: ok ? result : undefined,
+    error: ok ? result : undefined,
+  });
+  await flush();
+  return request;
 }
 
 function storedProviderError(chrome, tabId) {
@@ -1507,4 +1557,545 @@ test("provider-error reconciliation does not add tabs or host permissions", () =
   assert.equal(Array.isArray(manifest.host_permissions), false);
   assert.equal("host_permissions" in manifest, false);
   assert.equal(manifest.permissions.includes("activeTab"), true);
+});
+
+test("parseMajorMinor extracts major and minor from semver-like versions", () => {
+  assert.deepEqual(parseMajorMinor("0.2.12"), [0, 2]);
+  assert.deepEqual(parseMajorMinor("0.2.0"), [0, 2]);
+  assert.deepEqual(parseMajorMinor("1.0.0"), [1, 0]);
+  assert.deepEqual(parseMajorMinor("0.3.0-beta.1"), [0, 3]);
+  assert.deepEqual(parseMajorMinor("1.2.3+build"), [1, 2]);
+  assert.equal(parseMajorMinor(""), null);
+  assert.equal(parseMajorMinor(undefined), null);
+  assert.equal(parseMajorMinor("not-a-version"), null);
+  assert.equal(parseMajorMinor("1"), null);
+  assert.equal(parseMajorMinor("v0.2.12"), null);
+});
+
+test("isPeerVersionOutdated compares [major, minor] and treats invalid peers as legacy", () => {
+  assert.equal(isPeerVersionOutdated("0.2.12", "0.2.0"), false);
+  assert.equal(isPeerVersionOutdated("0.2.12", "0.2.99"), false);
+  assert.equal(isPeerVersionOutdated("0.2.12", "0.1.99"), true);
+  assert.equal(isPeerVersionOutdated("0.2.12", "0.3.0"), false);
+  assert.equal(isPeerVersionOutdated("0.2.12", "1.0.0"), false);
+  assert.equal(isPeerVersionOutdated("0.2.12", undefined), true);
+  assert.equal(isPeerVersionOutdated("0.2.12", ""), true);
+  assert.equal(isPeerVersionOutdated("0.2.12", "bogus"), true);
+});
+
+test("active tab with an outdated SDK warns once and auto-opens the popup", async () => {
+  const chrome = createChrome();
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.1.0");
+  await waitFor(() => chrome.openPopupCalls === 1, "openPopup was not called for the outdated SDK");
+
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+  await waitForDesktopVersionWarning(popup, false);
+});
+
+test("active tab with a compatible SDK does not warn or auto-open", async () => {
+  const chrome = createChrome();
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.0");
+  await flush();
+  await delay(20);
+  assert.equal(chrome.openPopupCalls, 0);
+  assert.equal(sdk.sent.some((message) => message.type === "error"), false);
+
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, false);
+});
+
+test("inactive-tab outdated SDK retains the warning and auto-opens once on activation", async () => {
+  const chrome = createChrome();
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 99);
+  emitSdkHello(sdk, "0.1.0");
+  await flush();
+  await delay(20);
+  assert.equal(chrome.openPopupCalls, 0);
+
+  setCurrentBrowserTab(chrome, 17);
+  emitPageActivity(sdk, true);
+  await waitFor(() => chrome.openPopupCalls === 1, "activating the outdated SDK tab did not auto-open");
+
+  emitPageActivity(sdk, true);
+  await flush();
+  assert.equal(chrome.openPopupCalls, 1);
+
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+});
+
+test("dismissing the SDK warning hides the current occurrence until reconnect", async () => {
+  const chrome = createChrome();
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.1.0");
+  await waitFor(() => chrome.openPopupCalls === 1);
+
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+  popup.emit({ type: "dismiss_sdk_version_warning" });
+  await waitForSdkVersionWarning(popup, false);
+
+  emitPageActivity(sdk, true);
+  await flush();
+  assert.equal(chrome.openPopupCalls, 1);
+  assert.equal(lastSdkVersionWarningState(popup).warning.outdated, false);
+
+  popup.disconnect();
+  sdk.disconnect();
+  const reconnected = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(reconnected, "0.1.0");
+  await waitFor(() => chrome.openPopupCalls === 2, "a new outdated SDK connection did not become eligible again");
+});
+
+test("any outdated SDK port in a tab keeps the warning until the last outdated port disconnects", async () => {
+  const chrome = createChrome();
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const outdated = connectExternal(chrome, "https://app.example.test/page", 17);
+  const compatible = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(compatible, "0.2.12");
+  emitSdkHello(outdated, "0.1.0");
+  await waitFor(() => chrome.openPopupCalls === 1);
+
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+
+  outdated.disconnect();
+  await waitForSdkVersionWarning(popup, false);
+  assert.equal(chrome.openPopupCalls, 1);
+});
+
+test("an old SDK without a handshake becomes outdated after the grace timeout", async () => {
+  const chrome = createChrome();
+  const background = createBackground(chrome, { disableReconnect: true, sdkHandshakeTimeoutMs: 20 });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  await delay(50);
+  await waitFor(() => chrome.openPopupCalls === 1, "legacy SDK was not classified outdated after handshake timeout");
+
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+});
+
+test("outdated SDK warning is not blocked by an unanswered desktop ping", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.1.0");
+  await waitFor(() => chrome.openPopupCalls === 1, "SDK warning was blocked by unanswered desktop ping");
+  await waitFor(() => native.sent.some((message) => message.type === "ping"), "desktop ping was not sent");
+  await delay(20);
+  assert.equal(chrome.openPopupCalls, 1);
+  assert.equal(native.sent.filter((message) => message.type === "ping").length, 1);
+
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+  await waitForDesktopVersionWarning(popup, false);
+});
+
+test("legacy SDK timeout warning is not blocked by an unanswered desktop ping", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true, sdkHandshakeTimeoutMs: 20 });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  await delay(50);
+  await waitFor(() => chrome.openPopupCalls === 1, "legacy SDK warning was blocked by unanswered desktop ping");
+  await waitFor(() => native.sent.some((message) => message.type === "ping"), "desktop ping was not sent");
+  await delay(20);
+  assert.equal(chrome.openPopupCalls, 1);
+
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+  await waitForDesktopVersionWarning(popup, false);
+});
+
+test("a timely new SDK handshake does not flash a false outdated warning", async () => {
+  const chrome = createChrome();
+  const background = createBackground(chrome, { disableReconnect: true, sdkHandshakeTimeoutMs: 20 });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  const popup = connectPopup(background);
+  emitSdkHello(sdk, "0.2.12");
+  await delay(50);
+  assert.equal(chrome.openPopupCalls, 0);
+  assert.equal(
+    popup.sent.some((message) => message.type === "sdk_version_warning_state" && message.warning?.outdated === true),
+    false
+  );
+  await waitForSdkVersionWarning(popup, false);
+});
+
+test("successful desktop ping with a lower major/minor shows a desktop warning", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, native, "ping", { connected: true, version: "0.1.99" });
+  await waitFor(() => chrome.openPopupCalls === 1, "outdated Desktop did not auto-open");
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, true);
+  await waitForSdkVersionWarning(popup, false);
+});
+
+test("successful desktop ping with the same major/minor does not warn", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, native, "ping", { connected: true, version: "0.2.99" });
+  await flush();
+  assert.equal(chrome.openPopupCalls, 0);
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, false);
+});
+
+test("successful desktop ping without a version is treated as legacy/outdated", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, native, "ping", { connected: true });
+  await waitFor(() => chrome.openPopupCalls === 1);
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, true);
+});
+
+test("successful desktop ping with a malformed version is treated as legacy/outdated", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, native, "ping", { connected: true, version: "not-a-version" });
+  await waitFor(() => chrome.openPopupCalls === 1);
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, true);
+});
+
+test("failed desktop ping does not manufacture an outdated warning", async () => {
+  const chrome = createChrome();
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await flush();
+  await delay(20);
+  assert.equal(chrome.openPopupCalls, 0);
+  assert.equal(sdk.sent.some((message) => message.type === "error"), false);
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, false);
+  await waitForSdkVersionWarning(popup, false);
+});
+
+test("dismissing desktop warning is preserved across repeated pings of the same process", async () => {
+  const chrome = createChrome();
+  const nativeA = new MockPort();
+  const nativeB = new MockPort();
+  chrome.nativePortQueue.push(nativeA, nativeB);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, nativeA, "ping", { connected: true, version: "0.1.0", processId: 10 });
+  await waitFor(() => chrome.openPopupCalls === 1);
+  await waitFor(() => nativeA.disconnectCount === 1, "idle native port was not disconnected");
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, true);
+  popup.emit({ type: "dismiss_desktop_version_warning" });
+  await waitForDesktopVersionWarning(popup, false);
+
+  popup.disconnect();
+  const reconnected = connectExternal(chrome, "https://app.example.test/page", 17);
+  emitSdkHello(reconnected, "0.2.12");
+  await respondToNativeType(background, nativeB, "ping", { connected: true, version: "0.1.0", processId: 10 });
+  await flush();
+  await delay(20);
+  assert.equal(chrome.openPopupCalls, 1);
+
+  const laterPopup = connectPopup(background);
+  await waitForDesktopVersionWarning(laterPopup, false);
+});
+
+test("a different desktop processId creates a new outdated warning occurrence", async () => {
+  const chrome = createChrome();
+  const nativeA = new MockPort();
+  const nativeB = new MockPort();
+  chrome.nativePortQueue.push(nativeA, nativeB);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, nativeA, "ping", { connected: true, version: "0.1.0", processId: 10 });
+  await waitFor(() => chrome.openPopupCalls === 1);
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, true);
+  popup.emit({ type: "dismiss_desktop_version_warning" });
+  await waitForDesktopVersionWarning(popup, false);
+  popup.disconnect();
+  await waitFor(() => nativeA.disconnectCount === 1, "idle native port was not disconnected");
+
+  const reconnected = connectExternal(chrome, "https://app.example.test/page", 17);
+  emitSdkHello(reconnected, "0.2.12");
+  await respondToNativeType(background, nativeB, "ping", { connected: true, version: "0.1.0", processId: 20 });
+  await waitFor(() => chrome.openPopupCalls === 2, "a new Desktop process did not re-arm the outdated warning");
+
+  const laterPopup = connectPopup(background);
+  await waitForDesktopVersionWarning(laterPopup, true);
+});
+
+test("desktop process identity change from outdated to compatible clears the warning", async () => {
+  const chrome = createChrome();
+  const nativeA = new MockPort();
+  const nativeB = new MockPort();
+  chrome.nativePortQueue.push(nativeA, nativeB);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, nativeA, "ping", { connected: true, version: "0.1.0", processId: 10 });
+  await waitFor(() => chrome.openPopupCalls === 1);
+  await waitFor(() => nativeA.disconnectCount === 1);
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, true);
+
+  const reconnected = connectExternal(chrome, "https://app.example.test/page", 17);
+  emitSdkHello(reconnected, "0.2.12");
+  await respondToNativeType(background, nativeB, "ping", { connected: true, version: "0.2.12", processId: 20 });
+  await waitForDesktopVersionWarning(popup, false);
+  await flush();
+  assert.equal(chrome.openPopupCalls, 1);
+});
+
+test("a new SDK handshake re-probes desktop even when a cached result exists", async () => {
+  const chrome = createChrome();
+  const nativeA = new MockPort();
+  const nativeB = new MockPort();
+  chrome.nativePortQueue.push(nativeA, nativeB);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, nativeA, "ping", { connected: true, version: "0.2.12", processId: 10 });
+  await flush();
+  await waitFor(() => nativeA.disconnectCount === 1, "idle native port was not disconnected");
+  assert.equal(chrome.openPopupCalls, 0);
+
+  const next = connectExternal(chrome, "https://app.example.test/page", 17);
+  emitSdkHello(next, "0.2.12");
+  await waitFor(() => nativeB.sent.some((message) => message.type === "ping"), "cached desktop status skipped the new handshake probe");
+  await respondToNativeType(background, nativeB, "ping", { connected: true, version: "0.1.0", processId: 10 });
+  await waitFor(() => chrome.openPopupCalls === 1, "re-probed outdated Desktop did not become visible");
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, true);
+});
+
+test("intentional native idle disconnect does not create a new desktop warning occurrence", async () => {
+  const chrome = createChrome();
+  const nativeA = new MockPort();
+  const nativeB = new MockPort();
+  chrome.nativePortQueue.push(nativeA, nativeB);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, nativeA, "ping", { connected: true, version: "0.1.0", processId: 10 });
+  await waitFor(() => chrome.openPopupCalls === 1);
+
+  const popup = connectPopup(background);
+  await waitForDesktopVersionWarning(popup, true);
+  popup.emit({ type: "dismiss_desktop_version_warning" });
+  await waitForDesktopVersionWarning(popup, false);
+  await waitFor(() => nativeA.disconnectCount === 1, "idle native port was not disconnected");
+  assert.equal(chrome.openPopupCalls, 1);
+
+  popup.disconnect();
+  emitPageActivity(sdk, true);
+  await flush();
+  await delay(20);
+  assert.equal(chrome.openPopupCalls, 1);
+  assert.equal(nativeB.sent.length, 0);
+
+  const laterPopup = connectPopup(background);
+  await waitForDesktopVersionWarning(laterPopup, false);
+});
+
+test("desktop warning waits for an SDK-backed tab before auto-opening", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 99);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, native, "ping", { connected: true, version: "0.1.0" });
+  await flush();
+  assert.equal(chrome.openPopupCalls, 0);
+
+  setCurrentBrowserTab(chrome, 17);
+  emitPageActivity(sdk, true);
+  await waitFor(() => chrome.openPopupCalls === 1, "Desktop warning did not auto-open after SDK tab activation");
+});
+
+test("an already-open popup receives desktop warning without a redundant openPopup", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  const popup = connectPopup(background);
+  emitSdkHello(sdk, "0.2.12");
+  await respondToNativeType(background, native, "ping", { connected: true, version: "0.1.0" });
+  await waitForDesktopVersionWarning(popup, true);
+  assert.equal(chrome.openPopupCalls, 0);
+});
+
+test("simultaneous SDK and Desktop outdated states do not double-open the popup", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitSdkHello(sdk, "0.1.0");
+  await waitFor(() => chrome.openPopupCalls === 1, "outdated SDK did not auto-open");
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+  await respondToNativeType(background, native, "ping", { connected: true, version: "0.1.0", processId: 10 });
+  await waitForDesktopVersionWarning(popup, true);
+  await flush();
+  assert.equal(chrome.openPopupCalls, 1);
+});
+
+test("provider error and version warning share in-flight openPopup arbitration", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  let releaseOpen = null;
+  chrome.action.openPopup = () => {
+    chrome.openPopupCalls += 1;
+    return new Promise((resolve) => {
+      releaseOpen = resolve;
+    });
+  };
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+  setCurrentBrowserTab(chrome, 17);
+  emitPageActivity(sdk, true);
+  await createSdkSession(background, sdk, native, "thread_active");
+
+  const outdated = connectExternal(chrome, "https://app.example.test/page", 17);
+  emitSdkHello(outdated, "0.1.0");
+  background.handleNativeMessage({
+    type: "thread_event",
+    event: providerErrorEvent("thread_active", "codex", "quota exceeded"),
+  });
+
+  await waitFor(() => chrome.openPopupCalls === 1, "openPopup was not started for the racing notifications");
+  await delay(20);
+  assert.equal(chrome.openPopupCalls, 1, "concurrent notification paths issued a second in-flight openPopup");
+  assert.equal(typeof releaseOpen, "function");
+  releaseOpen();
+
+  await waitFor(() => storedProviderError(chrome, 17)?.autoPopupConsumed === true, "provider error was not consumed after the shared open");
+  const popup = connectPopup(background);
+  await waitForSdkVersionWarning(popup, true);
+  await waitForProviderErrorState(popup, { provider: "codex", message: "quota exceeded" });
+  await waitForDesktopVersionWarning(popup, false);
+  assert.equal(storedProviderError(chrome, 17)?.autoPopupConsumed, true);
+
+  chrome.action.openPopup = async () => {
+    chrome.openPopupCalls += 1;
+  };
+  background.handleNativeMessage({
+    type: "thread_event",
+    event: providerErrorEvent("thread_active", "codex", "quota exceeded", 2),
+  });
+  await waitFor(() => chrome.openPopupCalls === 2, "a later provider-error occurrence could not auto-open");
+  await waitForStoredTabError(chrome, 17, { provider: "codex", message: "quota exceeded" });
+  assert.equal(storedProviderError(chrome, 17)?.seq, 2);
+  assert.equal(storedProviderError(chrome, 17)?.autoPopupConsumed, true);
 });
