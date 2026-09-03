@@ -526,12 +526,13 @@ function applyDiagnosticToRuntimeSummary(
 
 function isPersistentRuntimeProvider(
   provider: unknown,
-): provider is "codex" | "antigravity" | "opencode" | "cursor" {
+): provider is "codex" | "antigravity" | "opencode" | "cursor" | "claude" {
   return (
     provider === "codex" ||
     provider === "antigravity" ||
     provider === "opencode" ||
-    provider === "cursor"
+    provider === "cursor" ||
+    provider === "claude"
   );
 }
 

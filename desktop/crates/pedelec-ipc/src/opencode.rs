@@ -2312,6 +2312,7 @@ mod tests {
             model: Some("fake/selected".into()),
             reasoning_effort: None,
             antigravity_reasoning_effort: None,
+            claude_reasoning_effort: None,
             approval_policy: PersistentApprovalPolicy::Never,
             sandbox_policy: PersistentSandboxPolicy::ReadOnly,
             host_instructions: "Pedelec is the host application\nthread-open privileged context"

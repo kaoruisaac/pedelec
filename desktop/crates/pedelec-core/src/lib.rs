@@ -342,6 +342,31 @@ impl AntigravityReasoningEffort {
     }
 }
 
+/// Native reasoning values accepted by Claude Code's persistent stream
+/// transport. Persisted `--effort` settings are parsed into this semantic
+/// value before crossing the provider-runtime boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaudeReasoningEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ClaudeReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PersistentApprovalPolicy {
@@ -959,6 +984,8 @@ pub struct PersistentProviderSessionIntent {
     pub reasoning_effort: Option<CodexReasoningEffort>,
     #[serde(default)]
     pub antigravity_reasoning_effort: Option<AntigravityReasoningEffort>,
+    #[serde(default)]
+    pub claude_reasoning_effort: Option<ClaudeReasoningEffort>,
     pub approval_policy: PersistentApprovalPolicy,
     pub sandbox_policy: PersistentSandboxPolicy,
     pub host_instructions: String,
@@ -2949,6 +2976,7 @@ impl CoreRuntime {
             .insert(ProviderCode::Antigravity);
         runtime.persistent_providers.insert(ProviderCode::OpenCode);
         runtime.persistent_providers.insert(ProviderCode::Cursor);
+        runtime.persistent_providers.insert(ProviderCode::Claude);
         runtime
     }
 
@@ -3379,9 +3407,12 @@ impl CoreRuntime {
                     "acpCapability": matches!(provider, ProviderCode::OpenCode | ProviderCode::Cursor)
                         .then_some(scan.acp_capability)
                         .flatten(),
-                    "streamJsonCapability": (*provider == ProviderCode::Antigravity)
-                        .then_some(scan.stream_json_capability)
-                        .flatten(),
+                    "streamJsonCapability": matches!(
+                        provider,
+                        ProviderCode::Antigravity | ProviderCode::Claude
+                    )
+                    .then_some(scan.stream_json_capability)
+                    .flatten(),
                     "workspaceCustomAgentCapability": (*provider == ProviderCode::Antigravity)
                         .then(|| antigravity_custom_agent_capability_available(scan))
                         .flatten(),
@@ -3966,22 +3997,30 @@ impl CoreRuntime {
                 serde_json::json!({ "threadId": thread_id }),
             )
         })?;
-        let (model, reasoning_effort, antigravity_reasoning_effort) = match &thread.provider {
-            ProviderCode::Codex => {
-                let (model, effort) = parse_codex_session_settings(&thread.effort_args, thread_id)?;
-                (model, effort, None)
-            }
-            ProviderCode::Antigravity => {
-                let (model, effort) =
-                    parse_antigravity_session_settings(&thread.effort_args, thread_id)?;
-                (model, None, effort)
-            }
-            _ => (
-                provider_model_from_effort_args(&thread.provider, &thread.effort_args),
-                None,
-                None,
-            ),
-        };
+        let (model, reasoning_effort, antigravity_reasoning_effort, claude_reasoning_effort) =
+            match &thread.provider {
+                ProviderCode::Codex => {
+                    let (model, effort) =
+                        parse_codex_session_settings(&thread.effort_args, thread_id)?;
+                    (model, effort, None, None)
+                }
+                ProviderCode::Antigravity => {
+                    let (model, effort) =
+                        parse_antigravity_session_settings(&thread.effort_args, thread_id)?;
+                    (model, None, effort, None)
+                }
+                ProviderCode::Claude => {
+                    let (model, effort) =
+                        parse_claude_session_settings(&thread.effort_args, thread_id)?;
+                    (model, None, None, effort)
+                }
+                _ => (
+                    provider_model_from_effort_args(&thread.provider, &thread.effort_args),
+                    None,
+                    None,
+                    None,
+                ),
+            };
         let host_instructions = build_persistent_host_instructions(&thread, registry);
         let core_ipc_runtime_file_path = self
             .core_ipc_runtime_file_path
@@ -3997,6 +4036,7 @@ impl CoreRuntime {
             model,
             reasoning_effort,
             antigravity_reasoning_effort,
+            claude_reasoning_effort,
             approval_policy: PersistentApprovalPolicy::Never,
             sandbox_policy: PersistentSandboxPolicy::ReadOnly,
             host_instructions,
@@ -8071,6 +8111,59 @@ fn parse_antigravity_session_settings(
     Ok((model, effort))
 }
 
+fn parse_claude_session_settings(
+    args: &[String],
+    thread_id: &str,
+) -> Result<(Option<String>, Option<ClaudeReasoningEffort>), PedelecError> {
+    validate_effort_tier(&ProviderCode::Claude, EffortLevel::Default, args).map_err(|error| {
+        PedelecError::with_details(
+            error_codes::INVALID_INPUT,
+            "Claude settings could not be mapped to typed stream runtime fields",
+            serde_json::json!({
+                "threadId": thread_id,
+                "provider": "claude",
+                "error": error,
+                "source": "effort_args",
+            }),
+        )
+    })?;
+
+    let mut model = None;
+    let mut effort = None;
+    for pair in args.chunks_exact(2) {
+        match pair[0].as_str() {
+            "--model" => {
+                if model.replace(pair[1].trim().to_string()).is_some() {
+                    return Err(PedelecError::with_details(
+                        error_codes::INVALID_INPUT,
+                        "Claude model setting is duplicated",
+                        serde_json::json!({ "threadId": thread_id, "provider": "claude" }),
+                    ));
+                }
+            }
+            "--effort" => {
+                let parsed = match pair[1].trim() {
+                    "low" => ClaudeReasoningEffort::Low,
+                    "medium" => ClaudeReasoningEffort::Medium,
+                    "high" => ClaudeReasoningEffort::High,
+                    "xhigh" => ClaudeReasoningEffort::XHigh,
+                    "max" => ClaudeReasoningEffort::Max,
+                    _ => unreachable!("validate_effort_tier accepted an unknown Claude effort"),
+                };
+                if effort.replace(parsed).is_some() {
+                    return Err(PedelecError::with_details(
+                        error_codes::INVALID_INPUT,
+                        "Claude reasoning effort setting is duplicated",
+                        serde_json::json!({ "threadId": thread_id, "provider": "claude" }),
+                    ));
+                }
+            }
+            _ => unreachable!("validate_effort_tier accepted an unknown Claude setting"),
+        }
+    }
+    Ok((model, effort))
+}
+
 fn provider_display_name(provider: &ProviderCode) -> &'static str {
     match provider {
         ProviderCode::Codex => "Codex",
@@ -8106,8 +8199,9 @@ pub(crate) struct ProviderCli {
     app_server_capability: Option<bool>,
     /// `Some(false)` means the provider lacks the required persistent ACP entrypoint.
     acp_capability: Option<bool>,
-    /// `Some(false)` means Antigravity was found and versioned but does not expose
-    /// the bidirectional stream-json input/output transport required by Pedelec.
+    /// `Some(false)` means a persistent stream-json provider was found and
+    /// versioned but does not expose the bidirectional stream-json transport
+    /// required by Pedelec. Used by Antigravity and Claude.
     stream_json_capability: Option<bool>,
 }
 
@@ -8582,6 +8676,11 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
                         &path,
                         Some(path_value),
                     ))
+                } else if program == provider_program_name(&ProviderCode::Claude) {
+                    Some(probe_claude_persistent_stream_capability(
+                        &path,
+                        Some(path_value),
+                    ))
                 } else {
                     None
                 };
@@ -8597,6 +8696,12 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
                 (_, Some(false), _) => Some(format!(
                     "{program} executable does not expose the required `acp` capability"
                 )),
+                (_, _, Some(false)) if program == provider_program_name(&ProviderCode::Claude) => {
+                    Some(
+                        "claude executable does not expose the required persistent `stream-json` capability"
+                            .to_string(),
+                    )
+                }
                 (_, _, Some(false)) => Some(
                     "agy executable does not expose the required bidirectional `stream-json` capability"
                         .to_string(),
@@ -8698,6 +8803,31 @@ fn probe_antigravity_stream_json_capability(path: &Path, path_value: Option<&OsS
     text.contains("--input-format")
         && text.contains("--output-format")
         && text.contains("stream-json")
+}
+
+fn probe_claude_persistent_stream_capability(path: &Path, path_value: Option<&OsString>) -> bool {
+    let output = run_bounded_provider_probe({
+        let mut command = provider_version_command(path, path_value);
+        command.arg("--help");
+        command
+    });
+    let Some(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    text.contains("--input-format")
+        && text.contains("--output-format")
+        && text.contains("stream-json")
+        && text.contains("--include-partial-messages")
+        && text.contains("--append-system-prompt")
 }
 
 fn is_provider_executable(path: &Path) -> bool {
@@ -8912,7 +9042,8 @@ fn required_runtime_capability(provider: &ProviderCode) -> Option<&'static str> 
         ProviderCode::Codex => Some("app-server"),
         ProviderCode::OpenCode | ProviderCode::Cursor => Some("acp"),
         ProviderCode::Antigravity => Some("stream-json + workspace-custom-agent"),
-        ProviderCode::Claude | ProviderCode::Ollama => None,
+        ProviderCode::Claude => Some("persistent stream-json"),
+        ProviderCode::Ollama => None,
     }
 }
 
@@ -8937,7 +9068,8 @@ fn runtime_capability_available(provider: &ProviderCode, scan: &ProviderCli) -> 
                 (None, None) => None,
             }
         }
-        ProviderCode::Claude | ProviderCode::Ollama => None,
+        ProviderCode::Claude => scan.stream_json_capability,
+        ProviderCode::Ollama => None,
     }
 }
 

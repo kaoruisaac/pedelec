@@ -69,7 +69,8 @@ Pedelec limits provider-native skill or command discovery so it does not compete
 Current runtime behavior is provider-specific:
 
 - Codex starts with `skills.include_instructions=false`.
-- Antigravity and Claude Code start with `--disable-slash-commands`.
+- Antigravity starts with `--disable-slash-commands`.
+- Persistent Claude Code does not pass `--disable-slash-commands`, so Claude skills remain available.
 - OpenCode overlays its permission configuration with `"skill": "deny"` when the existing permission value can be safely parsed as an object; an invalid or non-object parent value is left unchanged instead of being replaced.
 - Cursor and Ollama currently receive no additional provider-native skill override.
 

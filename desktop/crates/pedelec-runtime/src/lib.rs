@@ -6,6 +6,7 @@
 
 mod acp;
 mod antigravity;
+mod claude;
 mod codex;
 mod jsonl;
 mod owner;
@@ -18,6 +19,10 @@ pub use antigravity::{
     AntigravityReasoningEffort, AntigravityRuntimeError, AntigravityRuntimeEvent,
     AntigravityRuntimeLaunchConfig, AntigravityStreamController,
     DEFAULT_ANTIGRAVITY_MAX_FRAME_BYTES,
+};
+pub use claude::{
+    ClaudeReasoningEffort, ClaudeRuntimeError, ClaudeRuntimeEvent, ClaudeRuntimeLaunchConfig,
+    ClaudeStreamController, DEFAULT_CLAUDE_MAX_FRAME_BYTES,
 };
 pub use codex::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,

@@ -166,6 +166,7 @@ export function EventMonitorApp() {
           />
           <RuntimeMetric label="OpenCode Runtime" summary={store.runtimeByProvider.opencode} />
           <RuntimeMetric label="Cursor Runtime" summary={store.runtimeByProvider.cursor} />
+          <RuntimeMetric label="Claude Runtime" summary={store.runtimeByProvider.claude} />
           <Metric
             label="Latest Runtime PID / Gen"
             value={

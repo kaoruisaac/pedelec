@@ -198,6 +198,7 @@ mod tests {
             ProviderCode::Antigravity,
             ProviderCode::OpenCode,
             ProviderCode::Cursor,
+            ProviderCode::Claude,
         ] {
             assert_eq!(
                 runtime.provider_execution_family(&provider),
@@ -205,7 +206,7 @@ mod tests {
                 "provider={provider:?}"
             );
         }
-        for provider in [ProviderCode::Claude, ProviderCode::Ollama] {
+        for provider in [ProviderCode::Ollama] {
             assert_eq!(
                 runtime.provider_execution_family(&provider),
                 ProviderExecutionFamily::LegacyCommand,
@@ -243,6 +244,7 @@ mod tests {
         );
         assert_eq!(session.effort_level, EffortLevel::High);
         assert_eq!(session.reasoning_effort, None);
+        assert_eq!(session.claude_reasoning_effort, None);
     }
 
     #[test]
@@ -267,6 +269,148 @@ mod tests {
         let session = runtime.build_persistent_session_intent(thread_id).unwrap();
         assert_eq!(session.model, None);
         assert_eq!(session.antigravity_reasoning_effort, None);
+        assert_eq!(session.claude_reasoning_effort, None);
+    }
+
+    #[test]
+    fn claude_persistent_intent_uses_selected_native_model_and_effort_args() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_claude_typed_settings";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Claude, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Claude);
+        let thread = runtime.thread_manager.thread_mut(thread_id).unwrap();
+        thread.effort_level = EffortLevel::High;
+        thread.effort_args = vec![
+            "--model".into(),
+            "claude-opus-4-8".into(),
+            "--effort".into(),
+            "medium".into(),
+        ];
+
+        let session = runtime.build_persistent_session_intent(thread_id).unwrap();
+        assert_eq!(session.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(
+            session.claude_reasoning_effort,
+            Some(ClaudeReasoningEffort::Medium)
+        );
+        assert_eq!(session.effort_level, EffortLevel::High);
+        assert_eq!(session.reasoning_effort, None);
+        assert_eq!(session.antigravity_reasoning_effort, None);
+    }
+
+    #[test]
+    fn claude_persistent_intent_maps_existing_effort_presets() {
+        let temp = tempfile::tempdir().unwrap();
+        for (level, model, effort, expected) in [
+            (
+                EffortLevel::Low,
+                "claude-sonnet-5",
+                "low",
+                ClaudeReasoningEffort::Low,
+            ),
+            (
+                EffortLevel::Default,
+                "claude-opus-4-8",
+                "medium",
+                ClaudeReasoningEffort::Medium,
+            ),
+            (
+                EffortLevel::High,
+                "claude-fable-5-1",
+                "medium",
+                ClaudeReasoningEffort::Medium,
+            ),
+        ] {
+            let thread_id = format!("thread_claude_preset_{level:?}");
+            let mut runtime = runtime_with_provider_thread(
+                temp.path(),
+                &thread_id,
+                ProviderCode::Claude,
+                None,
+                None,
+            );
+            runtime.use_persistent_provider_for_test(ProviderCode::Claude);
+            let thread = runtime.thread_manager.thread_mut(&thread_id).unwrap();
+            thread.effort_level = level;
+            thread.effort_args = vec![
+                "--model".into(),
+                model.into(),
+                "--effort".into(),
+                effort.into(),
+            ];
+            let session = runtime.build_persistent_session_intent(&thread_id).unwrap();
+            assert_eq!(session.model.as_deref(), Some(model));
+            assert_eq!(session.claude_reasoning_effort, Some(expected));
+        }
+    }
+
+    #[test]
+    fn claude_persistent_intent_rejects_duplicate_and_unsupported_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_claude_invalid_settings";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Claude, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Claude);
+
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .effort_args = vec![
+            "--model".into(),
+            "claude-opus-4-8".into(),
+            "--model".into(),
+            "claude-sonnet-5".into(),
+        ];
+        let error = runtime
+            .build_persistent_session_intent(thread_id)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::INVALID_INPUT);
+
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .effort_args = vec![
+            "--effort".into(),
+            "low".into(),
+            "--effort".into(),
+            "high".into(),
+        ];
+        let error = runtime
+            .build_persistent_session_intent(thread_id)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::INVALID_INPUT);
+
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .effort_args = vec!["--effort".into(), "turbo".into()];
+        let error = runtime
+            .build_persistent_session_intent(thread_id)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::INVALID_INPUT);
+    }
+
+    #[test]
+    fn claude_persistent_intent_keeps_empty_native_settings_optional() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_claude_empty_settings";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Claude, None, None);
+        runtime.use_persistent_provider_for_test(ProviderCode::Claude);
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .effort_args
+            .clear();
+
+        let session = runtime.build_persistent_session_intent(thread_id).unwrap();
+        assert_eq!(session.model, None);
+        assert_eq!(session.claude_reasoning_effort, None);
     }
 
     #[test]
@@ -415,6 +559,77 @@ mod tests {
                 assert!(provider.error.is_none());
                 assert!(runtime
                     .provider_executable_path(&ProviderCode::Antigravity)
+                    .is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn claude_persistent_readiness_requires_persistent_stream_json_flags() {
+        for (help_mode, expected_available, expected_error) in [
+            ("complete", true, None),
+            (
+                "missing-input-format",
+                false,
+                Some("persistent `stream-json`"),
+            ),
+            (
+                "missing-partial-messages",
+                false,
+                Some("persistent `stream-json`"),
+            ),
+            (
+                "missing-append-system-prompt",
+                false,
+                Some("persistent `stream-json`"),
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let provider_path = test_claude_path(temp.path(), "2.1.258", help_mode);
+            let mut runtime = CoreRuntime {
+                provider_path_value_override: Some(provider_path),
+                ..CoreRuntime::new_for_application()
+            };
+            runtime.refresh_providers();
+
+            let provider = runtime
+                .list_providers()
+                .into_iter()
+                .find(|provider| provider.code == ProviderCode::Claude)
+                .unwrap();
+            assert!(provider.scanned);
+            assert_eq!(provider.version.as_deref(), Some("2.1.258"));
+            assert_eq!(
+                provider.available, expected_available,
+                "help_mode={help_mode}"
+            );
+            if let Some(expected_error) = expected_error {
+                assert!(provider
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(expected_error)));
+                let error = runtime
+                    .provider_executable_path(&ProviderCode::Claude)
+                    .unwrap_err();
+                assert_eq!(error.code, error_codes::PROVIDER_TERMINAL_UNAVAILABLE);
+                assert_eq!(
+                    error
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("requiredRuntimeCapability")),
+                    Some(&json!("persistent stream-json"))
+                );
+                assert_eq!(
+                    error
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("streamJsonCapability")),
+                    Some(&json!(false))
+                );
+            } else {
+                assert!(provider.error.is_none());
+                assert!(runtime
+                    .provider_executable_path(&ProviderCode::Claude)
                     .is_ok());
             }
         }
@@ -7726,6 +7941,44 @@ mod tests {
         let program_name = "agy.cmd";
         #[cfg(not(windows))]
         let program_name = "agy";
+        let path = bin_dir.join(program_name);
+        fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        env::join_paths([bin_dir]).unwrap()
+    }
+
+    fn test_claude_path(root: &Path, version: &str, help_mode: &str) -> OsString {
+        let bin_dir = root.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let help = match help_mode {
+            "missing-input-format" => {
+                "--output-format stream-json --include-partial-messages --append-system-prompt"
+            }
+            "missing-partial-messages" => {
+                "--input-format stream-json --output-format stream-json --append-system-prompt"
+            }
+            "missing-append-system-prompt" => {
+                "--input-format stream-json --output-format stream-json --include-partial-messages"
+            }
+            _ => {
+                "--input-format stream-json --output-format stream-json --include-partial-messages --append-system-prompt"
+            }
+        };
+        #[cfg(windows)]
+        let contents =
+            format!("@echo off\r\nif \"%1\"==\"--help\" (echo {help}) else (echo {version})\r\n");
+        #[cfg(not(windows))]
+        let contents = format!(
+            "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '{help}'; else printf '%s\\n' '{version}'; fi\n"
+        );
+        #[cfg(windows)]
+        let program_name = "claude.cmd";
+        #[cfg(not(windows))]
+        let program_name = "claude";
         let path = bin_dir.join(program_name);
         fs::write(&path, contents).unwrap();
         #[cfg(unix)]

@@ -123,6 +123,12 @@ describe("event monitor store", () => {
       runtimeGeneration: 2,
     });
     monitor.upsertRuntimeDiagnostic({
+      type: "provider_runtime_started",
+      provider: "claude",
+      processId: 300,
+      runtimeGeneration: 3,
+    });
+    monitor.upsertRuntimeDiagnostic({
       type: "provider_runtime_disconnected",
       provider: "codex",
       processId: 100,
@@ -139,6 +145,11 @@ describe("event monitor store", () => {
       status: "started",
       processId: 200,
       generation: 2,
+    });
+    expect(monitor.store.runtimeByProvider.claude).toEqual({
+      status: "started",
+      processId: 300,
+      generation: 3,
     });
     expect(monitor.store.runtimeByProvider.opencode).toBeUndefined();
   });

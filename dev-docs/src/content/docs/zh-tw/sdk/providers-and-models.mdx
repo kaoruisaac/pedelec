@@ -58,7 +58,8 @@ Pedelec 會限制 provider 自己的 skill 或 command discovery，避免它和 
 目前 runtime 依 provider 採用不同策略：
 
 - Codex 以 `skills.include_instructions=false` 啟動。
-- Antigravity 與 Claude Code 以 `--disable-slash-commands` 啟動。
+- Antigravity 以 `--disable-slash-commands` 啟動。
+- Persistent Claude Code 不會帶 `--disable-slash-commands`，因此 Claude skills 仍可使用。
 - OpenCode 在既有 permission value 能安全 parse 成 object 時，overlay `"skill": "deny"`；若 parent value invalid 或不是 object，則保留原值，不會用新的設定覆蓋。
 - Cursor 與 Ollama 目前沒有額外 provider-native skill override。
 

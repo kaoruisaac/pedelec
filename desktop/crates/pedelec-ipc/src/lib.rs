@@ -37,8 +37,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod antigravity;
+mod claude;
 mod opencode;
 pub use antigravity::AntigravityRuntimeDispatcher;
+pub use claude::ClaudeRuntimeDispatcher;
 pub use opencode::{
     AcpProviderKind, AcpRuntimeDispatcher, CursorRuntimeDispatcher, OpenCodeRuntimeDispatcher,
     CURSOR_RUNTIME_KEY, OPENCODE_RUNTIME_KEY,
@@ -65,6 +67,7 @@ pub struct ProviderRuntimeDispatcher {
     antigravity: AntigravityRuntimeDispatcher,
     opencode: OpenCodeRuntimeDispatcher,
     cursor: CursorRuntimeDispatcher,
+    claude: ClaudeRuntimeDispatcher,
 }
 
 impl ProviderRuntimeDispatcher {
@@ -73,7 +76,8 @@ impl ProviderRuntimeDispatcher {
             codex: CodexRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
             antigravity: AntigravityRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
             opencode: OpenCodeRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
-            cursor: CursorRuntimeDispatcher::new(owner, core_runtime),
+            cursor: CursorRuntimeDispatcher::new(owner.clone(), core_runtime.clone()),
+            claude: ClaudeRuntimeDispatcher::new(owner, core_runtime),
         }
     }
 
@@ -81,7 +85,28 @@ impl ProviderRuntimeDispatcher {
         self.antigravity.record_shutdown_diagnostics();
         self.opencode.record_shutdown_diagnostic();
         self.cursor.record_shutdown_diagnostic();
+        self.claude.record_shutdown_diagnostics();
         self.codex.shutdown()
+    }
+
+    #[doc(hidden)]
+    pub fn with_claude_program_for_test(self, program: impl Into<PathBuf>) -> Self {
+        Self {
+            claude: self.claude.with_program_for_test(program),
+            ..self
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_claude_env_for_test(
+        self,
+        key: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> Self {
+        Self {
+            claude: self.claude.with_env_for_test(key, value),
+            ..self
+        }
     }
 }
 
@@ -92,6 +117,7 @@ impl PersistentRuntimeDispatcher for ProviderRuntimeDispatcher {
             pedelec_core::ProviderCode::Antigravity => self.antigravity.dispatch(operation),
             pedelec_core::ProviderCode::OpenCode => self.opencode.dispatch(operation),
             pedelec_core::ProviderCode::Cursor => self.cursor.dispatch(operation),
+            pedelec_core::ProviderCode::Claude => self.claude.dispatch(operation),
             provider => Err(PedelecError::with_details(
                 error_codes::PROVIDER_RUNTIME_START_FAILED,
                 "provider has not migrated to a persistent production runtime",
