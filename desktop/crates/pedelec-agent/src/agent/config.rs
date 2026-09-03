@@ -1,4 +1,3 @@
-use super::cli::CliArgs;
 use super::error::AgentError;
 use pedelec_shared::ollama::{
     normalize_ollama_base_url, validate_ollama_base_url, validate_ollama_timeout,
@@ -9,25 +8,29 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelProvider {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
     Ollama,
-    OpenAI,
-    Gemini,
+}
+
+impl BackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct AgentConfig {
-    pub provider: ModelProvider,
-    pub provider_name: String,
-    pub model: String,
-    pub ollama_base_url: String,
-    pub ollama_timeout_ms: u64,
-    pub ollama_api_key: String,
+pub struct PedelecAgentServerConfig {
+    pub provider: BackendKind,
+    pub base_url: String,
+    pub timeout_ms: u64,
+    pub api_key: String,
     pub tavily_api_key: Option<String>,
-    pub sandbox: PathBuf,
     pub pedelec_cli_path: Option<PathBuf>,
     pub core_runtime_file: Option<PathBuf>,
+    pub session_root: Option<PathBuf>,
     pub max_transcript_bytes: u64,
     pub max_tool_rounds: usize,
     pub max_list_files: usize,
@@ -36,65 +39,85 @@ pub struct AgentConfig {
     pub pedelec_cli_timeout_ms: u64,
 }
 
-pub fn resolve_config(cli: &CliArgs) -> Result<AgentConfig, AgentError> {
-    resolve_config_with_settings_path(cli, default_settings_file_path()?)
+impl PedelecAgentServerConfig {
+    pub fn tool_host_config(&self) -> ToolHostConfig {
+        ToolHostConfig {
+            pedelec_cli_path: self.pedelec_cli_path.clone(),
+            core_runtime_file: self.core_runtime_file.clone(),
+            pedelec_cli_timeout_ms: self.pedelec_cli_timeout_ms,
+        }
+    }
+
+    pub fn web_search_enabled(&self) -> bool {
+        self.tavily_api_key.is_some()
+    }
 }
 
-pub(crate) fn resolve_config_with_settings_path(
-    cli: &CliArgs,
-    settings_path: PathBuf,
-) -> Result<AgentConfig, AgentError> {
-    let env_file = cli
+#[derive(Debug, Clone)]
+pub struct ToolHostConfig {
+    pub pedelec_cli_path: Option<PathBuf>,
+    pub core_runtime_file: Option<PathBuf>,
+    pub pedelec_cli_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentSessionConfig {
+    pub requested_session_id: Option<String>,
+    pub model: String,
+    pub workspace_path: PathBuf,
+    pub host_instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ServerConfigResolveInputs {
+    pub env_file: Option<PathBuf>,
+    pub settings_path: Option<PathBuf>,
+    pub pedelec_cli_path: Option<PathBuf>,
+    pub core_runtime_file: Option<PathBuf>,
+    pub session_root: Option<PathBuf>,
+}
+
+pub fn resolve_server_config() -> Result<PedelecAgentServerConfig, AgentError> {
+    resolve_server_config_from(ServerConfigResolveInputs::default())
+}
+
+pub fn resolve_server_config_from(
+    inputs: ServerConfigResolveInputs,
+) -> Result<PedelecAgentServerConfig, AgentError> {
+    let env_file = inputs
         .env_file
-        .clone()
         .unwrap_or_else(|| PathBuf::from(".env.local"));
     let file_env = read_env_file(&env_file)?;
+    let settings_path = match inputs.settings_path {
+        Some(path) => path,
+        None => default_settings_file_path()?,
+    };
     let ollama_settings = read_ollama_settings(&settings_path)?;
 
-    let provider_name = cli
-        .provider
-        .clone()
-        .or_else(|| env::var("PEDELEC_AGENT_PROVIDER").ok())
+    let provider_name = env::var("PEDELEC_AGENT_PROVIDER")
+        .ok()
         .or_else(|| file_env.get("PEDELEC_AGENT_PROVIDER").cloned())
         .unwrap_or_else(|| "ollama".into());
     let provider = parse_provider(&provider_name)?;
-
-    let model = cli
-        .model
-        .clone()
-        .or_else(|| env::var("PEDELEC_AGENT_MODEL").ok())
-        .or_else(|| file_env.get("PEDELEC_AGENT_MODEL").cloned())
-        .ok_or_else(|| AgentError::new("CONFIG_ERROR", "Model is required"))?;
-
-    let sandbox = cli
-        .sandbox
-        .clone()
-        .or_else(|| env_path("PEDELEC_AGENT_SANDBOX"))
-        .or_else(|| env_file_path(&file_env, "PEDELEC_AGENT_SANDBOX"))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let ollama_api_key = normalize_ollama_api_key(env::var("OLLAMA_API_KEY").ok())?;
+    let api_key = normalize_ollama_api_key(env::var("OLLAMA_API_KEY").ok())?;
     let tavily_api_key = normalize_tavily_api_key(env::var("TAVILY_API_KEY").ok());
 
-    Ok(AgentConfig {
+    Ok(PedelecAgentServerConfig {
         provider,
-        provider_name,
-        model,
-        ollama_base_url: ollama_settings.base_url,
-        ollama_timeout_ms: ollama_settings.timeout_ms,
-        ollama_api_key,
+        base_url: ollama_settings.base_url,
+        timeout_ms: ollama_settings.timeout_ms,
+        api_key,
         tavily_api_key,
-        sandbox,
-        pedelec_cli_path: cli
-            .pedelec_cli
-            .clone()
+        pedelec_cli_path: inputs
+            .pedelec_cli_path
             .or_else(|| env_path("PEDELEC_CLI_PATH"))
             .or_else(|| env_file_path(&file_env, "PEDELEC_CLI_PATH")),
-        core_runtime_file: cli
+        core_runtime_file: inputs
             .core_runtime_file
-            .clone()
             .or_else(|| env_path("PEDELEC_CORE_RUNTIME_FILE"))
             .or_else(|| env_path("PEDELEC_CORE_IPC_RUNTIME_FILE"))
             .or_else(|| env_file_path(&file_env, "PEDELEC_CORE_RUNTIME_FILE")),
+        session_root: inputs.session_root,
         max_transcript_bytes: get_u64(&file_env, "PEDELEC_AGENT_MAX_TRANSCRIPT_BYTES", 1_048_576)?,
         max_tool_rounds: get_usize(&file_env, "PEDELEC_AGENT_MAX_TOOL_ROUNDS", 100)?,
         max_list_files: get_usize(&file_env, "PEDELEC_AGENT_MAX_LIST_FILES", 200)?,
@@ -228,11 +251,9 @@ fn normalize_tavily_api_key(value: Option<String>) -> Option<String> {
     })
 }
 
-fn parse_provider(value: &str) -> Result<ModelProvider, AgentError> {
+fn parse_provider(value: &str) -> Result<BackendKind, AgentError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "ollama" => Ok(ModelProvider::Ollama),
-        "openai" => Ok(ModelProvider::OpenAI),
-        "gemini" => Ok(ModelProvider::Gemini),
+        "ollama" => Ok(BackendKind::Ollama),
         other => Err(AgentError::with_details(
             "CONFIG_ERROR",
             "Unsupported model provider",
@@ -330,75 +351,68 @@ mod tests {
         env::set_var("OLLAMA_API_KEY", "ollama");
     }
 
-    #[test]
-    fn cli_values_win_over_env_file() {
-        let temp = tempfile::tempdir().unwrap();
+    fn resolve_with(temp: &tempfile::TempDir, settings: Option<&str>) -> PedelecAgentServerConfig {
         let env_file = temp.path().join(".env.local");
-        fs::write(
-            &env_file,
-            "PEDELEC_AGENT_PROVIDER=ollama\nPEDELEC_AGENT_MODEL=file-model\n",
-        )
-        .unwrap();
-        let cli = CliArgs {
-            session_id: None,
-            model: Some("cli-model".into()),
-            env_file: Some(env_file),
-            ..CliArgs::default()
-        };
-
+        fs::write(&env_file, "PEDELEC_AGENT_MAX_TOOL_ROUNDS=8\n").unwrap();
+        let settings_file = temp.path().join("settings.json");
+        if let Some(content) = settings {
+            fs::write(&settings_file, content).unwrap();
+        }
         set_test_ollama_api_key();
-        let config = resolve_config(&cli).unwrap();
+        resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(env_file),
+            settings_path: Some(settings_file),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap()
+    }
 
-        assert_eq!(config.model, "cli-model");
-        assert!(!config.ollama_api_key.is_empty());
+    #[test]
+    fn server_config_does_not_require_a_session_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = resolve_with(&temp, None);
+        assert_eq!(config.provider, BackendKind::Ollama);
+        assert!(!config.api_key.is_empty());
+        assert_eq!(config.max_tool_rounds, 8);
     }
 
     #[test]
     fn ollama_settings_are_read_from_pedelec_settings_file() {
         let temp = tempfile::tempdir().unwrap();
-        let env_file = temp.path().join(".env.local");
-        let settings_file = temp.path().join("settings.json");
-        fs::write(&env_file, "PEDELEC_AGENT_MODEL=file-model\n").unwrap();
-        fs::write(
-            &settings_file,
-            r#"{
-                "providerSettings": {
-                    "ollama": {
-                        "baseUrl": "http://127.0.0.1:4567/",
-                        "timeoutMs": 3456
+        let config = resolve_with(
+            &temp,
+            Some(
+                r#"{
+                    "providerSettings": {
+                        "ollama": {
+                            "baseUrl": "http://127.0.0.1:4567/",
+                            "timeoutMs": 3456
+                        }
                     }
-                }
-            }"#,
-        )
-        .unwrap();
-        let cli = CliArgs {
-            env_file: Some(env_file),
-            ..CliArgs::default()
-        };
+                }"#,
+            ),
+        );
 
-        set_test_ollama_api_key();
-        let config = resolve_config_with_settings_path(&cli, settings_file).unwrap();
-
-        assert_eq!(config.ollama_base_url, "http://127.0.0.1:4567");
-        assert_eq!(config.ollama_timeout_ms, 3456);
-        assert!(!config.ollama_api_key.is_empty());
+        assert_eq!(config.base_url, "http://127.0.0.1:4567");
+        assert_eq!(config.timeout_ms, 3456);
+        assert!(!config.api_key.is_empty());
     }
 
     #[test]
     fn ollama_settings_default_when_file_or_fields_are_missing() {
         let temp = tempfile::tempdir().unwrap();
         let env_file = temp.path().join(".env.local");
-        fs::write(&env_file, "PEDELEC_AGENT_MODEL=file-model\n").unwrap();
-        let cli = CliArgs {
-            env_file: Some(env_file.clone()),
-            ..CliArgs::default()
+        fs::write(&env_file, "").unwrap();
+        let cli_inputs = ServerConfigResolveInputs {
+            env_file: Some(env_file),
+            settings_path: Some(temp.path().join("missing.json")),
+            ..ServerConfigResolveInputs::default()
         };
 
         set_test_ollama_api_key();
-        let missing_file =
-            resolve_config_with_settings_path(&cli, temp.path().join("missing.json")).unwrap();
-        assert_eq!(missing_file.ollama_base_url, DEFAULT_OLLAMA_BASE_URL);
-        assert_eq!(missing_file.ollama_timeout_ms, DEFAULT_OLLAMA_TIMEOUT_MS);
+        let missing_file = resolve_server_config_from(cli_inputs.clone()).unwrap();
+        assert_eq!(missing_file.base_url, DEFAULT_OLLAMA_BASE_URL);
+        assert_eq!(missing_file.timeout_ms, DEFAULT_OLLAMA_TIMEOUT_MS);
 
         set_test_ollama_api_key();
         let settings_file = temp.path().join("settings.json");
@@ -407,21 +421,21 @@ mod tests {
             r#"{"providerSettings":{"ollama":{"baseUrl":"  "}}}"#,
         )
         .unwrap();
-        let missing_fields = resolve_config_with_settings_path(&cli, settings_file).unwrap();
-        assert_eq!(missing_fields.ollama_base_url, DEFAULT_OLLAMA_BASE_URL);
-        assert_eq!(missing_fields.ollama_timeout_ms, DEFAULT_OLLAMA_TIMEOUT_MS);
+        let missing_fields = resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(temp.path().join(".env.local")),
+            settings_path: Some(settings_file),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap();
+        assert_eq!(missing_fields.base_url, DEFAULT_OLLAMA_BASE_URL);
+        assert_eq!(missing_fields.timeout_ms, DEFAULT_OLLAMA_TIMEOUT_MS);
     }
 
     #[test]
     fn ollama_settings_reject_invalid_values() {
         let temp = tempfile::tempdir().unwrap();
         let env_file = temp.path().join(".env.local");
-        fs::write(&env_file, "PEDELEC_AGENT_MODEL=file-model\n").unwrap();
-        let cli = CliArgs {
-            env_file: Some(env_file),
-            ..CliArgs::default()
-        };
-
+        fs::write(&env_file, "").unwrap();
         set_test_ollama_api_key();
         let settings_file = temp.path().join("settings.json");
         fs::write(
@@ -429,7 +443,12 @@ mod tests {
             r#"{"providerSettings":{"ollama":{"baseUrl":"ftp://127.0.0.1","timeoutMs":120000}}}"#,
         )
         .unwrap();
-        let url_err = resolve_config_with_settings_path(&cli, settings_file.clone()).unwrap_err();
+        let url_err = resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(env_file.clone()),
+            settings_path: Some(settings_file.clone()),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap_err();
         assert_eq!(url_err.code, "OLLAMA_BASE_URL_INVALID");
 
         fs::write(
@@ -437,7 +456,12 @@ mod tests {
             r#"{"providerSettings":{"ollama":{"baseUrl":"http://127.0.0.1:11434","timeoutMs":0}}}"#,
         )
         .unwrap();
-        let timeout_err = resolve_config_with_settings_path(&cli, settings_file).unwrap_err();
+        let timeout_err = resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(env_file),
+            settings_path: Some(settings_file),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap_err();
         assert_eq!(timeout_err.code, "OLLAMA_REQUEST_FAILED");
     }
 
@@ -448,7 +472,7 @@ mod tests {
         let settings_file = temp.path().join("settings.json");
         fs::write(
             &env_file,
-            "PEDELEC_AGENT_MODEL=file-model\nOLLAMA_BASE_URL=http://127.0.0.1:9999\nOLLAMA_TIMEOUT_MS=999\n",
+            "OLLAMA_BASE_URL=http://127.0.0.1:9999\nOLLAMA_TIMEOUT_MS=999\n",
         )
         .unwrap();
         fs::write(
@@ -459,17 +483,18 @@ mod tests {
         env::set_var("OLLAMA_BASE_URL", "http://127.0.0.1:8888");
         env::set_var("OLLAMA_TIMEOUT_MS", "888");
         set_test_ollama_api_key();
-        let cli = CliArgs {
-            env_file: Some(env_file),
-            ..CliArgs::default()
-        };
 
-        let config = resolve_config_with_settings_path(&cli, settings_file).unwrap();
+        let config = resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(env_file),
+            settings_path: Some(settings_file),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap();
 
         env::remove_var("OLLAMA_BASE_URL");
         env::remove_var("OLLAMA_TIMEOUT_MS");
-        assert_eq!(config.ollama_base_url, "http://127.0.0.1:4567");
-        assert_eq!(config.ollama_timeout_ms, 3456);
+        assert_eq!(config.base_url, "http://127.0.0.1:4567");
+        assert_eq!(config.timeout_ms, 3456);
     }
 
     #[test]
@@ -499,23 +524,35 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let env_file = temp.path().join(".env.local");
         let settings_file = temp.path().join("settings.json");
-        fs::write(
-            &env_file,
-            "PEDELEC_AGENT_MODEL=file-model\nOLLAMA_API_KEY=env-file-key\n",
-        )
-        .unwrap();
+        fs::write(&env_file, "OLLAMA_API_KEY=env-file-key\n").unwrap();
         fs::write(
             &settings_file,
             r#"{"providerSettings":{"ollama":{"baseUrl":"http://127.0.0.1:4567","timeoutMs":3456}}}"#,
         )
         .unwrap();
         env::set_var("OLLAMA_API_KEY", "process-key");
-        let cli = CliArgs {
-            env_file: Some(env_file.clone()),
-            ..CliArgs::default()
-        };
 
-        let config = resolve_config_with_settings_path(&cli, settings_file).unwrap();
-        assert_ne!(config.ollama_api_key, "env-file-key");
+        let config = resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(env_file),
+            settings_path: Some(settings_file),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap();
+        assert_ne!(config.api_key, "env-file-key");
+    }
+
+    #[test]
+    fn unsupported_provider_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let env_file = temp.path().join(".env.local");
+        fs::write(&env_file, "PEDELEC_AGENT_PROVIDER=openai\n").unwrap();
+        set_test_ollama_api_key();
+        let err = resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(env_file),
+            settings_path: Some(temp.path().join("missing.json")),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap_err();
+        assert_eq!(err.code, "CONFIG_ERROR");
     }
 }

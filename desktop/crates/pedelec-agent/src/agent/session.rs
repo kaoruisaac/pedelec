@@ -1,409 +1,627 @@
-use super::config::AgentConfig;
+use super::backend::{
+    InferenceBackend, InferenceEvent, InferenceEventSink, InferenceMessage, InferenceRequest,
+    InferenceResult, ModelCapabilities,
+};
+use super::config::{AgentSessionConfig, PedelecAgentServerConfig, ToolHostConfig};
+use super::conversation::{
+    ActiveTurn, CommittedTurnRecord, ConversationMessage, InferenceAttachment, NormalizedToolCall,
+};
 use super::error::AgentError;
-use super::jsonl::append_jsonl;
-use chrono::{DateTime, Datelike, TimeZone, Utc};
-use pedelec_shared::paths::pedelec_home_dir;
-use serde::{Deserialize, Serialize};
+use super::events::{AgentTurnSink, TurnResult, TurnToolResult};
+use super::instructions::compose_system_prompt;
+use super::sandbox::Sandbox;
+use super::store::{
+    create_session_store, default_agent_home_dir, load_session_store, SessionStore,
+};
+use super::tavily::{TavilyClient, TavilyRoundWrapper};
+use super::tools::{agent_tool_definitions, execute_tool_with_tavily, AgentToolDefinition};
 use serde_json::Value;
-use std::fs::{self, DirBuilder};
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use uuid::{Uuid, Version};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionMetadata {
-    pub session_id: String,
-    pub provider: String,
-    pub model: String,
-    pub sandbox_path: PathBuf,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionStatus {
+    Ready,
+    Running { turn_id: String },
+    Closed,
 }
 
-#[derive(Debug)]
-pub struct SessionState {
-    pub metadata: SessionMetadata,
-    pub resumed: bool,
-    pub dir: PathBuf,
-    pub transcript_path: PathBuf,
-    pub events_path: PathBuf,
+pub struct AgentSession {
+    backend: Arc<dyn InferenceBackend>,
+    store: SessionStore,
+    sandbox: Sandbox,
+    host_instructions: Option<String>,
+    capabilities: ModelCapabilities,
+    committed: Vec<ConversationMessage>,
+    active_turn: Option<ActiveTurn>,
+    tools: Vec<AgentToolDefinition>,
+    tool_host: ToolHostConfig,
+    tavily: Option<TavilyClient>,
+    web_search_enabled: bool,
+    max_tool_rounds: usize,
+    max_transcript_bytes: u64,
+    live: Arc<AtomicBool>,
+    status: SessionStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptMessage {
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub content: Value,
-}
+impl AgentSession {
+    pub fn open(
+        backend: Arc<dyn InferenceBackend>,
+        server: &PedelecAgentServerConfig,
+        session: AgentSessionConfig,
+    ) -> Result<Self, AgentError> {
+        if session.model.trim().is_empty() {
+            return Err(AgentError::new("INVALID_ARGUMENT", "Model is required."));
+        }
+        let sandbox = Sandbox::new(
+            &session.workspace_path,
+            server.max_file_bytes,
+            server.max_image_bytes,
+            server.max_list_files,
+        )?;
+        let agent_home = match &server.session_root {
+            Some(path) => path.clone(),
+            None => default_agent_home_dir()?,
+        };
+        let provider = server.provider.as_str();
+        let loaded = match session.requested_session_id.as_deref() {
+            Some(session_id) => Some(load_session_store(
+                &agent_home,
+                session_id,
+                provider,
+                &session.model,
+                sandbox.root(),
+                server.max_transcript_bytes,
+            )?),
+            None => None,
+        };
 
-pub fn create_session(
-    config: &AgentConfig,
-    sandbox_path: &Path,
-) -> Result<SessionState, AgentError> {
-    let agent_home = agent_home_dir()?;
-    create_session_at(&agent_home, config, sandbox_path)
-}
+        let capabilities = backend.inspect_model(&session.model)?;
+        if !capabilities.tools {
+            return Err(AgentError::with_details(
+                "MODEL_TOOLS_UNSUPPORTED",
+                "The selected model does not support tool calling.",
+                serde_json::json!({ "model": session.model, "capabilities": capabilities }),
+            ));
+        }
 
-pub fn load_session(
-    session_id: &str,
-    config: &AgentConfig,
-    sandbox_path: &Path,
-) -> Result<SessionState, AgentError> {
-    let agent_home = agent_home_dir()?;
-    load_session_at(&agent_home, session_id, config, sandbox_path)
-}
+        let (store, committed) = match loaded {
+            Some(pair) => pair,
+            None => (
+                create_session_store(&agent_home, provider, &session.model, sandbox.root())?,
+                Vec::new(),
+            ),
+        };
 
-fn agent_home_dir() -> Result<PathBuf, AgentError> {
-    pedelec_home_dir()
-        .map(|home| agent_home_dir_from_pedelec_home(&home))
-        .map_err(|err| AgentError {
-            code: err.code,
-            message: err.message,
-            details: err.details,
+        let web_search_enabled = server.web_search_enabled();
+        let tools = agent_tool_definitions(capabilities.vision, web_search_enabled);
+        let tavily = match server.tavily_api_key.clone() {
+            Some(key) => Some(TavilyClient::new(key)?),
+            None => None,
+        };
+
+        Ok(Self {
+            backend,
+            store,
+            sandbox,
+            host_instructions: session.host_instructions,
+            capabilities,
+            committed,
+            active_turn: None,
+            tools,
+            tool_host: server.tool_host_config(),
+            tavily,
+            web_search_enabled,
+            max_tool_rounds: server.max_tool_rounds,
+            max_transcript_bytes: server.max_transcript_bytes,
+            live: Arc::new(AtomicBool::new(true)),
+            status: SessionStatus::Ready,
         })
-}
+    }
 
-fn agent_home_dir_from_pedelec_home(pedelec_home: &Path) -> PathBuf {
-    pedelec_home.join("agent")
-}
+    pub fn session_id(&self) -> &str {
+        &self.store.metadata.session_id
+    }
 
-pub(crate) fn create_session_at(
-    agent_home: &Path,
-    config: &AgentConfig,
-    sandbox_path: &Path,
-) -> Result<SessionState, AgentError> {
-    for _ in 0..16 {
-        let uuid = Uuid::now_v7();
-        let session_id = uuid.hyphenated().to_string();
-        let (year, month) = uuid_year_month(&uuid, &session_id)?;
-        let session_dir = session_dir_for_parts(agent_home, year, month, &session_id);
-        match DirBuilder::new().recursive(false).create(&session_dir) {
-            Ok(()) => {
-                return initialize_new_session(session_dir, session_id, config, sandbox_path);
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                if let Some(parent) = session_dir.parent() {
-                    fs::create_dir_all(parent).map_err(|err| {
-                        AgentError::with_details(
-                            "SESSION_SAVE_FAILED",
-                            "Failed to create session parent directory",
-                            serde_json::json!({ "path": parent, "error": err.to_string() }),
-                        )
-                    })?;
-                }
-                match DirBuilder::new().recursive(false).create(&session_dir) {
-                    Ok(()) => {
-                        return initialize_new_session(
-                            session_dir,
-                            session_id,
-                            config,
-                            sandbox_path,
-                        );
-                    }
-                    Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
-                    Err(err) => {
-                        return Err(AgentError::with_details(
-                            "SESSION_SAVE_FAILED",
-                            "Failed to create session directory",
-                            serde_json::json!({ "path": session_dir, "error": err.to_string() }),
-                        ));
-                    }
-                }
-            }
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
-            Err(err) => {
+    pub fn resumed(&self) -> bool {
+        self.store.resumed
+    }
+
+    pub fn model(&self) -> &str {
+        &self.store.metadata.model
+    }
+
+    pub fn workspace_path(&self) -> &std::path::Path {
+        &self.store.metadata.workspace_path
+    }
+
+    pub fn capabilities(&self) -> ModelCapabilities {
+        self.capabilities
+    }
+
+    pub fn tools(&self) -> &[AgentToolDefinition] {
+        &self.tools
+    }
+
+    pub fn committed_messages(&self) -> &[ConversationMessage] {
+        &self.committed
+    }
+
+    pub fn host_instructions(&self) -> Option<&str> {
+        self.host_instructions.as_deref()
+    }
+
+    pub fn set_host_instructions(&mut self, host_instructions: Option<String>) {
+        self.host_instructions = host_instructions;
+    }
+
+    pub fn live_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.live)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self.status, SessionStatus::Closed) || !self.live.load(Ordering::SeqCst)
+    }
+
+    pub fn close(&mut self) {
+        self.live.store(false, Ordering::SeqCst);
+        self.active_turn = None;
+        self.status = SessionStatus::Closed;
+    }
+
+    pub fn run_turn(
+        &mut self,
+        turn_id: impl Into<String>,
+        user_message: impl Into<String>,
+        sink: &mut dyn AgentTurnSink,
+    ) -> Result<TurnResult, AgentError> {
+        let turn_id = turn_id.into();
+        let user_message = user_message.into();
+        self.ensure_open()?;
+        match &self.status {
+            SessionStatus::Running { turn_id: existing } => {
                 return Err(AgentError::with_details(
-                    "SESSION_SAVE_FAILED",
-                    "Failed to create session directory",
-                    serde_json::json!({ "path": session_dir, "error": err.to_string() }),
+                    "TURN_IN_PROGRESS",
+                    "Session already has an active turn.",
+                    serde_json::json!({ "turnId": existing }),
+                ));
+            }
+            SessionStatus::Closed => {
+                return Err(AgentError::new("SESSION_CLOSED", "Session is closed."));
+            }
+            SessionStatus::Ready => {}
+        }
+        if turn_id.trim().is_empty() {
+            return Err(AgentError::new("INVALID_ARGUMENT", "turnId is required."));
+        }
+        if user_message.trim().is_empty() {
+            return Err(AgentError::new(
+                "INVALID_ARGUMENT",
+                "User message is required.",
+            ));
+        }
+
+        self.status = SessionStatus::Running {
+            turn_id: turn_id.clone(),
+        };
+        self.active_turn = Some(ActiveTurn::begin(
+            turn_id,
+            ConversationMessage::user(user_message),
+        ));
+        match self.run_turn_inner(sink) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                self.discard_active_turn();
+                Err(err)
+            }
+        }
+    }
+
+    fn run_turn_inner(&mut self, sink: &mut dyn AgentTurnSink) -> Result<TurnResult, AgentError> {
+        loop {
+            self.ensure_live()?;
+            let request = self.build_inference_request()?;
+            let mut delta_sink = DeltaForwarder { inner: sink };
+            let output = self.backend.infer(request, &mut delta_sink)?;
+            self.record_round_usage(&output, sink)?;
+            if let Some(active) = self.active_turn.as_mut() {
+                active.clear_attachments();
+            }
+
+            let tool_calls = self.assign_tool_call_ids(output.tool_calls)?;
+            self.push_active_message(
+                ConversationMessage::assistant(output.text.clone(), tool_calls.clone()),
+                Vec::new(),
+            )?;
+
+            if tool_calls.is_empty() {
+                let text = output.text.unwrap_or_default();
+                return self.commit_active_turn(text);
+            }
+
+            let round = self
+                .active_turn
+                .as_ref()
+                .ok_or_else(|| invariant("Active turn missing during tool loop."))?
+                .current_tool_round;
+            if round >= self.max_tool_rounds {
+                return Err(AgentError::new(
+                    "MAX_TOOL_ROUNDS_EXCEEDED",
+                    "The agent exceeded max tool rounds.",
+                ));
+            }
+            self.execute_tool_calls(&tool_calls, sink)?;
+            if let Some(active) = self.active_turn.as_mut() {
+                active.current_tool_round += 1;
+            }
+        }
+    }
+
+    fn record_round_usage(
+        &mut self,
+        output: &InferenceResult,
+        sink: &mut dyn AgentTurnSink,
+    ) -> Result<(), AgentError> {
+        let active = self
+            .active_turn
+            .as_mut()
+            .ok_or_else(|| invariant("Active turn missing while recording usage."))?;
+        if let Some(usage) = &output.usage {
+            active.cumulative_usage.accumulate(usage);
+        }
+        sink.usage_updated(&active.cumulative_usage);
+        Ok(())
+    }
+
+    fn assign_tool_call_ids(
+        &self,
+        mut calls: Vec<NormalizedToolCall>,
+    ) -> Result<Vec<NormalizedToolCall>, AgentError> {
+        let active = self
+            .active_turn
+            .as_ref()
+            .ok_or_else(|| invariant("Active turn missing while assigning tool call ids."))?;
+        for (index, call) in calls.iter_mut().enumerate() {
+            if call.id.trim().is_empty() {
+                call.id = format!(
+                    "{}:r{}:{}",
+                    active.turn_id, active.current_tool_round, index
+                );
+            }
+            if call.name.trim().is_empty() {
+                return Err(AgentError::new(
+                    "INTERNAL_INVARIANT",
+                    "Backend returned a tool call without a name.",
+                ));
+            }
+            if matches!(call.arguments, Value::String(_)) {
+                return Err(AgentError::new(
+                    "INTERNAL_INVARIANT",
+                    "Backend returned tool arguments as a JSON string.",
                 ));
             }
         }
+        Ok(calls)
     }
 
-    Err(AgentError::new(
-        "SESSION_SAVE_FAILED",
-        "Failed to allocate a unique session id",
-    ))
-}
-
-pub(crate) fn load_session_at(
-    agent_home: &Path,
-    session_id: &str,
-    config: &AgentConfig,
-    sandbox_path: &Path,
-) -> Result<SessionState, AgentError> {
-    let uuid = parse_uuid_v7(session_id)?;
-    let (year, month) = uuid_year_month(&uuid, session_id)?;
-    let session_dir = session_dir_for_parts(agent_home, year, month, session_id);
-    let session_path = session_dir.join("session.json");
-    let transcript_path = session_dir.join("transcript.jsonl");
-    let events_path = session_dir.join("events.jsonl");
-
-    if !session_dir.exists() || !session_path.exists() {
-        return Err(AgentError::with_details(
-            "SESSION_LOAD_FAILED",
-            "Session was not found",
-            serde_json::json!({ "sessionId": session_id, "path": session_dir }),
-        ));
+    fn execute_tool_calls(
+        &mut self,
+        calls: &[NormalizedToolCall],
+        sink: &mut dyn AgentTurnSink,
+    ) -> Result<(), AgentError> {
+        let tavily = self.tavily.take();
+        let result = self.execute_tool_calls_inner(calls, sink, tavily.as_ref());
+        self.tavily = tavily;
+        result
     }
 
-    let content = fs::read_to_string(&session_path).map_err(|err| {
-        AgentError::with_details(
-            "SESSION_LOAD_FAILED",
-            "Failed to load session metadata",
-            serde_json::json!({
-                "sessionId": session_id,
-                "path": session_path,
-                "error": err.to_string()
-            }),
+    fn execute_tool_calls_inner(
+        &mut self,
+        calls: &[NormalizedToolCall],
+        sink: &mut dyn AgentTurnSink,
+        tavily: Option<&TavilyClient>,
+    ) -> Result<(), AgentError> {
+        let mut tavily_round = tavily.map(TavilyRoundWrapper::new);
+        let mut images_in_round = 0;
+        for call in calls {
+            sink.tool_call(call);
+            if call.name == "fs.read_image" && !self.capabilities.vision {
+                return Err(AgentError::new(
+                    "MODEL_VISION_UNSUPPORTED",
+                    "Image tools are unavailable for this model.",
+                ));
+            }
+            if call.name == "fs.read_image" {
+                images_in_round += 1;
+                if images_in_round > 4 {
+                    let error = AgentError::new(
+                        "TOO_MANY_IMAGES_IN_ROUND",
+                        "At most 4 images may be read in one tool round.",
+                    );
+                    self.record_tool_error(call, error, sink)?;
+                    continue;
+                }
+            }
+
+            let session_id = self.session_id().to_string();
+            match execute_tool_with_tavily(
+                &call.name,
+                &call.arguments,
+                &session_id,
+                &self.sandbox,
+                &self.tool_host,
+                tavily_round.as_mut(),
+            ) {
+                Ok(result) => {
+                    let content = result.content.clone();
+                    sink.tool_result(&TurnToolResult {
+                        tool_call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        ok: true,
+                        content: Some(content.clone()),
+                        error: None,
+                    });
+                    self.push_active_message(
+                        ConversationMessage::tool_result(
+                            call.id.clone(),
+                            call.name.clone(),
+                            content.to_string(),
+                        ),
+                        result.attachments,
+                    )?;
+                }
+                Err(error) => self.record_tool_error(call, error, sink)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn record_tool_error(
+        &mut self,
+        call: &NormalizedToolCall,
+        error: AgentError,
+        sink: &mut dyn AgentTurnSink,
+    ) -> Result<(), AgentError> {
+        let content = serde_json::json!({ "error": error });
+        sink.tool_result(&TurnToolResult {
+            tool_call_id: call.id.clone(),
+            name: call.name.clone(),
+            ok: false,
+            content: Some(content.clone()),
+            error: Some(error),
+        });
+        self.push_active_message(
+            ConversationMessage::tool_result(
+                call.id.clone(),
+                call.name.clone(),
+                content.to_string(),
+            ),
+            Vec::new(),
         )
-    })?;
-    let metadata = serde_json::from_str::<SessionMetadata>(&content).map_err(|err| {
-        AgentError::with_details(
-            "SESSION_LOAD_FAILED",
-            "Failed to parse session metadata",
-            serde_json::json!({
-                "sessionId": session_id,
-                "path": session_path,
-                "error": err.to_string()
-            }),
-        )
-    })?;
-    if metadata.session_id != session_id {
-        return Err(AgentError::with_details(
-            "SESSION_LOAD_FAILED",
-            "Session metadata id does not match requested session id",
-            serde_json::json!({
-                "sessionId": session_id,
-                "path": session_path,
-                "metadataSessionId": metadata.session_id
-            }),
-        ));
     }
-    reject_resume_conflicts(&metadata, config, sandbox_path)?;
-    enforce_transcript_size(&transcript_path, config.max_transcript_bytes)?;
 
-    Ok(SessionState {
-        metadata,
-        resumed: true,
-        dir: session_dir,
-        transcript_path,
-        events_path,
-    })
-}
-
-fn initialize_new_session(
-    session_dir: PathBuf,
-    session_id: String,
-    config: &AgentConfig,
-    sandbox_path: &Path,
-) -> Result<SessionState, AgentError> {
-    let session_path = session_dir.join("session.json");
-    let transcript_path = session_dir.join("transcript.jsonl");
-    let events_path = session_dir.join("events.jsonl");
-    let now = Utc::now();
-    let metadata = SessionMetadata {
-        session_id,
-        provider: config.provider_name.clone(),
-        model: config.model.clone(),
-        sandbox_path: sandbox_path.to_path_buf(),
-        created_at: now,
-        updated_at: now,
-    };
-    save_session_metadata(&session_path, &metadata)?;
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&transcript_path)
-        .map_err(|err| {
-            AgentError::with_details(
-                "SESSION_SAVE_FAILED",
-                "Failed to create transcript",
-                serde_json::json!({ "path": transcript_path, "error": err.to_string() }),
-            )
-        })?;
-
-    Ok(SessionState {
-        metadata,
-        resumed: false,
-        dir: session_dir,
-        transcript_path,
-        events_path,
-    })
-}
-
-pub fn append_transcript(
-    session: &SessionState,
-    message: &TranscriptMessage,
-) -> Result<(), AgentError> {
-    append_jsonl(&session.transcript_path, message)
-}
-
-pub fn load_transcript(session: &SessionState) -> Result<Vec<TranscriptMessage>, AgentError> {
-    if !session.transcript_path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(&session.transcript_path).map_err(|err| {
-        AgentError::with_details(
-            "SESSION_LOAD_FAILED",
-            "Failed to load transcript",
-            serde_json::json!({ "path": session.transcript_path, "error": err.to_string() }),
-        )
-    })?;
-    content
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str::<TranscriptMessage>(line).map_err(|err| {
-                AgentError::with_details(
-                    "SESSION_LOAD_FAILED",
-                    "Failed to parse transcript line",
-                    serde_json::json!({ "error": err.to_string() }),
-                )
-            })
+    fn commit_active_turn(&mut self, text: String) -> Result<TurnResult, AgentError> {
+        self.ensure_live()?;
+        let active = self
+            .active_turn
+            .as_ref()
+            .ok_or_else(|| invariant("Active turn missing at commit."))?;
+        let turn_id = active.turn_id.clone();
+        let usage = active.cumulative_usage.clone();
+        let record = CommittedTurnRecord::new(turn_id.clone(), active.messages.clone());
+        self.store
+            .append_committed_turn(&record, self.max_transcript_bytes)?;
+        let active = self
+            .active_turn
+            .take()
+            .ok_or_else(|| invariant("Active turn missing after durable commit."))?;
+        self.committed.extend(active.messages);
+        self.store.touch()?;
+        self.status = SessionStatus::Ready;
+        Ok(TurnResult {
+            turn_id,
+            text,
+            usage,
         })
-        .collect()
-}
-
-pub fn touch_session(session: &mut SessionState) -> Result<(), AgentError> {
-    session.metadata.updated_at = Utc::now();
-    save_session_metadata(&session.dir.join("session.json"), &session.metadata)
-}
-
-fn save_session_metadata(path: &Path, metadata: &SessionMetadata) -> Result<(), AgentError> {
-    let content = serde_json::to_string_pretty(metadata).map_err(|err| {
-        AgentError::with_details(
-            "SESSION_SAVE_FAILED",
-            "Failed to serialize session metadata",
-            serde_json::json!({ "error": err.to_string() }),
-        )
-    })?;
-    fs::write(path, content).map_err(|err| {
-        AgentError::with_details(
-            "SESSION_SAVE_FAILED",
-            "Failed to save session metadata",
-            serde_json::json!({ "path": path, "error": err.to_string() }),
-        )
-    })
-}
-
-fn reject_resume_conflicts(
-    metadata: &SessionMetadata,
-    config: &AgentConfig,
-    sandbox_path: &Path,
-) -> Result<(), AgentError> {
-    if metadata.provider != config.provider_name {
-        return Err(conflict(
-            "provider",
-            &metadata.provider,
-            &config.provider_name,
-        ));
     }
-    if metadata.model != config.model {
-        return Err(conflict("model", &metadata.model, &config.model));
-    }
-    if metadata.sandbox_path != sandbox_path {
-        return Err(conflict(
-            "sandboxPath",
-            &metadata.sandbox_path.to_string_lossy(),
-            &sandbox_path.to_string_lossy(),
-        ));
-    }
-    Ok(())
-}
 
-fn conflict(field: &str, existing: &str, requested: &str) -> AgentError {
-    AgentError::with_details(
-        "INVALID_ARGUMENT",
-        "Session resume argument conflicts with existing session",
-        serde_json::json!({ "field": field, "existing": existing, "requested": requested }),
-    )
-}
-
-fn enforce_transcript_size(path: &Path, max_bytes: u64) -> Result<(), AgentError> {
-    if path.exists() {
-        let size = fs::metadata(path)?.len();
-        if size > max_bytes {
-            return Err(AgentError::with_details(
-                "TRANSCRIPT_TOO_LARGE",
-                "Transcript exceeds maximum configured size",
-                serde_json::json!({ "path": path, "sizeBytes": size, "maxBytes": max_bytes }),
+    fn build_inference_request(&self) -> Result<InferenceRequest, AgentError> {
+        let active = self
+            .active_turn
+            .as_ref()
+            .ok_or_else(|| invariant("Active turn missing while building inference request."))?;
+        if active.messages.len() != active.attachments_by_message.len() {
+            return Err(invariant(
+                "Active turn message and attachment lists are out of sync.",
             ));
         }
+        let mut messages = Vec::new();
+        messages.push(InferenceMessage::system(compose_system_prompt(
+            self.host_instructions.as_deref(),
+            self.capabilities.vision,
+            self.web_search_enabled,
+        )));
+        for message in &self.committed {
+            messages.push(InferenceMessage::from_conversation(message, Vec::new()));
+        }
+        for (message, attachments) in active
+            .messages
+            .iter()
+            .zip(active.attachments_by_message.iter())
+        {
+            messages.push(InferenceMessage::from_conversation(
+                message,
+                attachments.clone(),
+            ));
+        }
+        Ok(InferenceRequest {
+            model: self.store.metadata.model.clone(),
+            messages,
+            tools: self.tools.clone(),
+        })
     }
-    Ok(())
-}
 
-fn parse_uuid_v7(session_id: &str) -> Result<Uuid, AgentError> {
-    let uuid = Uuid::parse_str(session_id).map_err(|err| {
-        AgentError::with_details(
-            "INVALID_ARGUMENT",
-            "Invalid session id",
-            serde_json::json!({ "sessionId": session_id, "error": err.to_string() }),
-        )
-    })?;
-    if uuid.get_version() != Some(Version::SortRand) {
-        return Err(AgentError::with_details(
-            "INVALID_ARGUMENT",
-            "Session id must be a UUID v7",
-            serde_json::json!({ "sessionId": session_id }),
-        ));
+    fn push_active_message(
+        &mut self,
+        message: ConversationMessage,
+        attachments: Vec<InferenceAttachment>,
+    ) -> Result<(), AgentError> {
+        self.active_turn
+            .as_mut()
+            .ok_or_else(|| invariant("Active turn missing while appending a message."))?
+            .push(message, attachments)
     }
-    Ok(uuid)
+
+    fn discard_active_turn(&mut self) {
+        self.active_turn = None;
+        if !matches!(self.status, SessionStatus::Closed) {
+            self.status = SessionStatus::Ready;
+        }
+    }
+
+    fn ensure_open(&self) -> Result<(), AgentError> {
+        if matches!(self.status, SessionStatus::Closed) || !self.live.load(Ordering::SeqCst) {
+            return Err(AgentError::new("SESSION_CLOSED", "Session is closed."));
+        }
+        Ok(())
+    }
+
+    fn ensure_live(&self) -> Result<(), AgentError> {
+        if !self.live.load(Ordering::SeqCst) || matches!(self.status, SessionStatus::Closed) {
+            return Err(AgentError::new(
+                "TURN_INVALIDATED",
+                "The turn was invalidated before commit.",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn force_running(&mut self, turn_id: &str) {
+        self.status = SessionStatus::Running {
+            turn_id: turn_id.to_string(),
+        };
+    }
+
+    #[cfg(test)]
+    fn transcript_path(&self) -> &std::path::Path {
+        &self.store.transcript_path
+    }
+
+    #[cfg(test)]
+    fn session_dir(&self) -> &std::path::Path {
+        &self.store.dir
+    }
 }
 
-fn uuid_year_month(uuid: &Uuid, session_id: &str) -> Result<(i32, u32), AgentError> {
-    let timestamp = uuid.get_timestamp().ok_or_else(|| {
-        AgentError::with_details(
-            "INVALID_ARGUMENT",
-            "Session id does not contain a UUID v7 timestamp",
-            serde_json::json!({ "sessionId": session_id }),
-        )
-    })?;
-    let (seconds, nanos) = timestamp.to_unix();
-    let datetime = Utc
-        .timestamp_opt(seconds as i64, nanos)
-        .single()
-        .ok_or_else(|| {
-            AgentError::with_details(
-                "INVALID_ARGUMENT",
-                "Session id timestamp is out of range",
-                serde_json::json!({ "sessionId": session_id }),
-            )
-        })?;
-    Ok((datetime.year(), datetime.month()))
+struct DeltaForwarder<'a> {
+    inner: &'a mut dyn AgentTurnSink,
 }
 
-fn session_dir_for_parts(agent_home: &Path, year: i32, month: u32, session_id: &str) -> PathBuf {
-    agent_home
-        .join("sessions")
-        .join(format!("{year:04}"))
-        .join(format!("{month:02}"))
-        .join(session_id)
+impl InferenceEventSink for DeltaForwarder<'_> {
+    fn on_event(&mut self, event: InferenceEvent) {
+        match event {
+            InferenceEvent::TextDelta(text) => self.inner.assistant_delta(&text),
+        }
+    }
+}
+
+fn invariant(message: &str) -> AgentError {
+    AgentError::new("INTERNAL_INVARIANT", message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::config::{AgentConfig, ModelProvider};
+    use crate::agent::backend::{InferenceUsage, ModelCapabilities};
+    use crate::agent::config::{BackendKind, PedelecAgentServerConfig};
+    use crate::agent::conversation::{ConversationRole, SESSION_SCHEMA_VERSION};
+    use crate::agent::events::IgnoringTurnSink;
+    use crate::agent::store::load_committed_turn_records;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
-    fn config(sandbox: PathBuf) -> AgentConfig {
-        AgentConfig {
-            provider: ModelProvider::Ollama,
-            provider_name: "ollama".into(),
-            model: "fake".into(),
-            ollama_base_url: "http://127.0.0.1:1".into(),
-            ollama_timeout_ms: 1000,
-            ollama_api_key: "ollama".into(),
+    struct ScriptedStep {
+        deltas: Vec<String>,
+        result: Result<InferenceResult, AgentError>,
+        on_infer: Option<Arc<dyn Fn() + Send + Sync>>,
+    }
+
+    struct ScriptedBackend {
+        capabilities: ModelCapabilities,
+        steps: Mutex<Vec<ScriptedStep>>,
+        requests: Mutex<Vec<InferenceRequest>>,
+    }
+
+    impl ScriptedBackend {
+        fn new(capabilities: ModelCapabilities, steps: Vec<ScriptedStep>) -> Arc<Self> {
+            Arc::new(Self {
+                capabilities,
+                steps: Mutex::new(steps),
+                requests: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl InferenceBackend for ScriptedBackend {
+        fn inspect_model(&self, _model: &str) -> Result<ModelCapabilities, AgentError> {
+            Ok(self.capabilities)
+        }
+
+        fn infer(
+            &self,
+            request: InferenceRequest,
+            sink: &mut dyn InferenceEventSink,
+        ) -> Result<InferenceResult, AgentError> {
+            self.requests.lock().unwrap().push(request);
+            let mut steps = self.steps.lock().unwrap();
+            let step = steps.remove(0);
+            drop(steps);
+            if let Some(on_infer) = step.on_infer {
+                on_infer();
+            }
+            for delta in step.deltas {
+                sink.on_event(InferenceEvent::TextDelta(delta));
+            }
+            step.result
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        deltas: Vec<String>,
+        usages: Vec<InferenceUsage>,
+        tool_calls: Vec<NormalizedToolCall>,
+        tool_results: Vec<TurnToolResult>,
+    }
+
+    impl AgentTurnSink for RecordingSink {
+        fn assistant_delta(&mut self, text: &str) {
+            self.deltas.push(text.to_string());
+        }
+        fn usage_updated(&mut self, usage: &InferenceUsage) {
+            self.usages.push(usage.clone());
+        }
+        fn tool_call(&mut self, call: &NormalizedToolCall) {
+            self.tool_calls.push(call.clone());
+        }
+        fn tool_result(&mut self, result: &TurnToolResult) {
+            self.tool_results.push(result.clone());
+        }
+    }
+
+    fn server_config(session_root: PathBuf, _workspace: PathBuf) -> PedelecAgentServerConfig {
+        PedelecAgentServerConfig {
+            provider: BackendKind::Ollama,
+            base_url: "http://127.0.0.1:1".into(),
+            timeout_ms: 1000,
+            api_key: "ollama".into(),
             tavily_api_key: None,
-            sandbox,
             pedelec_cli_path: None,
             core_runtime_file: None,
-            max_transcript_bytes: 1024,
+            session_root: Some(session_root),
+            max_transcript_bytes: 64_000,
             max_tool_rounds: 8,
             max_list_files: 200,
             max_file_bytes: 1024,
@@ -412,151 +630,496 @@ mod tests {
         }
     }
 
-    #[test]
-    fn creates_and_resumes_session() {
-        let temp = tempfile::tempdir().unwrap();
-        let sandbox = temp.path().canonicalize().unwrap();
-        let cfg = config(sandbox.clone());
-        let home = temp.path().join("home");
-
-        let first = create_session_at(&home, &cfg, &sandbox).unwrap();
-        let second = load_session_at(&home, &first.metadata.session_id, &cfg, &sandbox).unwrap();
-
-        assert!(!first.resumed);
-        assert!(second.resumed);
-        assert_eq!(first.metadata.session_id, second.metadata.session_id);
+    fn session_config(workspace: PathBuf) -> AgentSessionConfig {
+        AgentSessionConfig {
+            requested_session_id: None,
+            model: "fake".into(),
+            workspace_path: workspace,
+            host_instructions: Some("[Pedelec Host Context]\nworkspace=/tmp".into()),
+        }
     }
 
-    #[test]
-    fn rejects_conflicting_sandbox() {
-        let temp = tempfile::tempdir().unwrap();
-        let sandbox = temp.path().canonicalize().unwrap();
-        let cfg = config(sandbox.clone());
-        let home = temp.path().join("home");
-        let session = create_session_at(&home, &cfg, &sandbox).unwrap();
+    fn terminal(text: &str, usage: InferenceUsage) -> ScriptedStep {
+        ScriptedStep {
+            deltas: vec![text.to_string()],
+            result: Ok(InferenceResult {
+                text: Some(text.to_string()),
+                tool_calls: Vec::new(),
+                usage: Some(usage),
+                finish_reason: Some("stop".into()),
+            }),
+            on_infer: None,
+        }
+    }
 
-        let other = temp.path().join("other");
-        fs::create_dir_all(&other).unwrap();
-        let err = load_session_at(
-            &home,
-            &session.metadata.session_id,
-            &cfg,
-            &other.canonicalize().unwrap(),
+    fn tool_round(name: &str, arguments: Value, usage: InferenceUsage) -> ScriptedStep {
+        ScriptedStep {
+            deltas: vec!["working".into()],
+            result: Ok(InferenceResult {
+                text: Some("working".into()),
+                tool_calls: vec![NormalizedToolCall::new("", name, arguments)],
+                usage: Some(usage),
+                finish_reason: None,
+            }),
+            on_infer: None,
+        }
+    }
+
+    fn open_session(
+        temp: &tempfile::TempDir,
+        backend: Arc<dyn InferenceBackend>,
+        requested_session_id: Option<String>,
+    ) -> AgentSession {
+        let workspace = temp.path().canonicalize().unwrap();
+        let mut session = session_config(workspace.clone());
+        session.requested_session_id = requested_session_id;
+        AgentSession::open(
+            backend,
+            &server_config(temp.path().join("agent-home"), workspace.clone()),
+            session,
         )
-        .unwrap_err();
-
-        assert_eq!(err.code, "INVALID_ARGUMENT");
+        .unwrap()
     }
 
     #[test]
-    fn create_session_generates_uuid_v7_and_layered_path() {
+    fn tools_false_rejects_session_activation() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox = temp.path().canonicalize().unwrap();
-        let cfg = config(sandbox.clone());
-        let home = temp.path().join("home");
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: false,
+                vision: false,
+            },
+            vec![],
+        );
+        let workspace = temp.path().canonicalize().unwrap();
+        let err = match AgentSession::open(
+            backend,
+            &server_config(temp.path().join("agent-home"), workspace.clone()),
+            session_config(workspace),
+        ) {
+            Ok(_) => panic!("session opened without tool support"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, "MODEL_TOOLS_UNSUPPORTED");
+    }
 
-        let first = create_session_at(&home, &cfg, &sandbox).unwrap();
-        let second = create_session_at(&home, &cfg, &sandbox).unwrap();
-        let uuid = Uuid::parse_str(&first.metadata.session_id).unwrap();
-        let (year, month) = uuid_year_month(&uuid, &first.metadata.session_id).unwrap();
+    #[test]
+    fn vision_flag_controls_image_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let no_vision = open_session(
+            &temp,
+            ScriptedBackend::new(
+                ModelCapabilities {
+                    tools: true,
+                    vision: false,
+                },
+                vec![],
+            ),
+            None,
+        );
+        let names = no_vision
+            .tools()
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"fs.read_text_file"));
+        assert!(!names.contains(&"fs.read_image"));
+        assert!(!names.contains(&"fs.list_image_files"));
 
-        assert_eq!(uuid.get_version(), Some(Version::SortRand));
-        assert_eq!(first.metadata.session_id, uuid.hyphenated().to_string());
-        assert_ne!(first.metadata.session_id, second.metadata.session_id);
+        let with_vision = open_session(
+            &temp,
+            ScriptedBackend::new(
+                ModelCapabilities {
+                    tools: true,
+                    vision: true,
+                },
+                vec![],
+            ),
+            None,
+        );
+        let names = with_vision
+            .tools()
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"fs.read_image"));
+        assert!(names.contains(&"fs.list_image_files"));
+    }
+
+    #[test]
+    fn image_bytes_are_ephemeral_and_not_written_to_transcript() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("image.png"), [0_u8, 1, 2]).unwrap();
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: true,
+            },
+            vec![
+                tool_round(
+                    "fs.read_image",
+                    json!({"path": "image.png"}),
+                    InferenceUsage::from_token_counts(Some(2), Some(1)),
+                ),
+                terminal("a cat", InferenceUsage::from_token_counts(Some(4), Some(2))),
+            ],
+        );
+        let cloned = Arc::clone(&backend);
+        let mut session = open_session(&temp, backend, None);
+        session
+            .run_turn("turn-1", "inspect", &mut IgnoringTurnSink)
+            .unwrap();
+        let requests = cloned.requests.lock().unwrap();
+        let second = &requests[1];
+        assert!(second
+            .messages
+            .iter()
+            .any(|message| !message.attachments.is_empty()));
+        let transcript = std::fs::read_to_string(session.transcript_path()).unwrap();
+        assert!(!transcript.contains("AAEC"));
+        assert!(transcript.contains("image.png"));
+    }
+
+    #[test]
+    fn no_tool_terminal_answer_commits_one_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello readme").unwrap();
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![terminal(
+                "final answer",
+                InferenceUsage::from_token_counts(Some(11), Some(5)),
+            )],
+        );
+        let mut session = open_session(&temp, backend, None);
+        let mut sink = RecordingSink::default();
+        let result = session.run_turn("turn-1", "hello", &mut sink).unwrap();
+
+        assert_eq!(result.text, "final answer");
+        assert_eq!(result.usage.total_tokens, Some(16));
+        assert_eq!(sink.deltas, vec!["final answer"]);
+        let records = load_committed_turn_records(session.transcript_path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].schema_version, SESSION_SCHEMA_VERSION);
+        assert_eq!(records[0].turn_id, "turn-1");
+        assert_eq!(session.committed_messages().len(), 2);
+        let raw = std::fs::read_to_string(session.session_dir().join("session.json")).unwrap();
+        assert!(raw.contains("\"schemaVersion\": 2"));
+        assert!(!raw.contains("Pedelec Host Context"));
+        let transcript = std::fs::read_to_string(session.transcript_path()).unwrap();
+        assert!(!transcript.contains("You are pedelec-agent"));
+        assert!(!transcript.contains("[Pedelec Host Context]"));
+        assert!(!transcript.contains("PEDELEC_PREPARED"));
+    }
+
+    #[test]
+    fn multi_round_tool_loop_commits_only_at_terminal_success() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello readme").unwrap();
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![
+                tool_round(
+                    "fs.read_text_file",
+                    json!({"path": "README.md"}),
+                    InferenceUsage::from_token_counts(Some(4), Some(2)),
+                ),
+                terminal(
+                    "final answer",
+                    InferenceUsage::from_token_counts(Some(6), Some(3)),
+                ),
+            ],
+        );
+        let cloned = Arc::clone(&backend);
+        let mut session = open_session(&temp, backend, None);
+        let mut sink = RecordingSink::default();
+        let result = session.run_turn("turn-1", "read", &mut sink).unwrap();
+
+        assert_eq!(result.text, "final answer");
+        assert_eq!(result.usage.input_tokens, Some(10));
+        assert_eq!(result.usage.output_tokens, Some(5));
         assert_eq!(
-            first.dir,
-            home.join("sessions")
-                .join(format!("{year:04}"))
-                .join(format!("{month:02}"))
-                .join(&first.metadata.session_id)
+            sink.deltas,
+            vec!["working".to_string(), "final answer".into()]
+        );
+        assert_eq!(sink.tool_calls.len(), 1);
+        assert!(sink.tool_results[0].ok);
+        assert!(sink.tool_results[0].content.as_ref().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("hello readme"));
+        let records = load_committed_turn_records(session.transcript_path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].messages.len(), 4);
+        let assistant_tools = &records[0].messages[1];
+        assert_eq!(assistant_tools.role, ConversationRole::Assistant);
+        assert_eq!(assistant_tools.content.as_deref(), Some("working"));
+        assert_eq!(assistant_tools.tool_calls.len(), 1);
+        let tool_id = assistant_tools.tool_calls[0].id.clone();
+        assert!(tool_id.starts_with("turn-1:r0:"));
+        assert!(assistant_tools.tool_calls[0].arguments.is_object());
+        assert_eq!(
+            records[0].messages[2].tool_call_id.as_deref(),
+            Some(tool_id.as_str())
         );
         assert_eq!(
-            fs::read_to_string(first.dir.join("session.json"))
+            records[0].messages[3].content.as_deref(),
+            Some("final answer")
+        );
+
+        let requests = cloned.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let second = &requests[1];
+        assert!(second
+            .messages
+            .iter()
+            .any(|message| { message.role == "assistant" && !message.tool_calls.is_empty() }));
+        assert!(second.messages.iter().any(|message| {
+            message.role == "tool" && message.tool_call_id.as_deref() == Some(tool_id.as_str())
+        }));
+        assert_eq!(second.messages[0].role, "system");
+        assert!(second.messages[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("[Pedelec Host Context]"));
+    }
+
+    #[test]
+    fn ordinary_tool_error_is_fed_back_to_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![
+                tool_round(
+                    "fs.read_text_file",
+                    json!({"path": "missing.md"}),
+                    InferenceUsage::from_token_counts(Some(1), Some(1)),
+                ),
+                terminal("sorry", InferenceUsage::from_token_counts(Some(1), Some(1))),
+            ],
+        );
+        let mut session = open_session(&temp, backend, None);
+        let mut sink = RecordingSink::default();
+        session.run_turn("turn-1", "read", &mut sink).unwrap();
+        assert!(!sink.tool_results[0].ok);
+        assert_eq!(
+            sink.tool_results[0].error.as_ref().unwrap().code,
+            "FILE_NOT_FOUND"
+        );
+        let records = load_committed_turn_records(session.transcript_path()).unwrap();
+        assert!(records[0].messages[2]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("FILE_NOT_FOUND"));
+    }
+
+    #[test]
+    fn max_tool_rounds_failure_discards_active_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello").unwrap();
+        let mut steps = Vec::new();
+        for _ in 0..=8 {
+            steps.push(tool_round(
+                "fs.read_text_file",
+                json!({"path": "README.md"}),
+                InferenceUsage::from_token_counts(Some(1), Some(1)),
+            ));
+        }
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            steps,
+        );
+        let mut session = open_session(&temp, backend, None);
+        let err = session
+            .run_turn("turn-1", "read", &mut IgnoringTurnSink)
+            .unwrap_err();
+        assert_eq!(err.code, "MAX_TOOL_ROUNDS_EXCEEDED");
+        assert!(session.committed_messages().is_empty());
+        assert_eq!(
+            load_committed_turn_records(session.transcript_path())
                 .unwrap()
-                .contains(&first.metadata.session_id),
-            true
+                .len(),
+            0
         );
     }
 
     #[test]
-    fn production_session_root_uses_agent_directory_not_binary_path() {
-        let pedelec_home = PathBuf::from("/home/user/.pedelec");
-        let agent_home = agent_home_dir_from_pedelec_home(&pedelec_home);
-        let session_id = Uuid::now_v7().hyphenated().to_string();
-        let uuid = Uuid::parse_str(&session_id).unwrap();
-        let (year, month) = uuid_year_month(&uuid, &session_id).unwrap();
-
-        assert_eq!(agent_home, PathBuf::from("/home/user/.pedelec/agent"));
-        assert_ne!(agent_home, pedelec_home.join("pedelec-agent"));
+    fn failed_backend_turn_writes_no_committed_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![ScriptedStep {
+                deltas: vec![],
+                result: Err(AgentError::new("OLLAMA_UNAVAILABLE", "down")),
+                on_infer: None,
+            }],
+        );
+        let mut session = open_session(&temp, backend, None);
+        let err = session
+            .run_turn("turn-1", "hello", &mut IgnoringTurnSink)
+            .unwrap_err();
+        assert_eq!(err.code, "OLLAMA_UNAVAILABLE");
+        assert!(session.committed_messages().is_empty());
         assert_eq!(
-            session_dir_for_parts(&agent_home, year, month, &session_id),
-            pedelec_home
-                .join("agent")
-                .join("sessions")
-                .join(format!("{year:04}"))
-                .join(format!("{month:02}"))
-                .join(session_id)
+            std::fs::read_to_string(session.transcript_path())
+                .unwrap()
+                .trim(),
+            ""
         );
     }
 
     #[test]
-    fn creates_session_without_touching_sibling_agent_binary() {
+    fn durable_commit_failure_does_not_report_terminal_success() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox = temp.path().canonicalize().unwrap();
-        let cfg = config(sandbox.clone());
-        let pedelec_home = temp.path().join(".pedelec");
-        fs::create_dir_all(&pedelec_home).unwrap();
-        let binary_path = pedelec_home.join("pedelec-agent");
-        fs::write(&binary_path, b"installed-agent-binary").unwrap();
-
-        let session = create_session_at(
-            &agent_home_dir_from_pedelec_home(&pedelec_home),
-            &cfg,
-            &sandbox,
-        )
-        .unwrap();
-
-        assert!(session
-            .dir
-            .starts_with(pedelec_home.join("agent").join("sessions")));
-        assert_eq!(fs::read(&binary_path).unwrap(), b"installed-agent-binary");
-        assert!(binary_path.is_file());
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![terminal(
+                "final",
+                InferenceUsage::from_token_counts(Some(1), Some(1)),
+            )],
+        );
+        let mut session = open_session(&temp, backend, None);
+        let transcript = session.transcript_path().to_path_buf();
+        std::fs::remove_file(&transcript).unwrap();
+        std::fs::create_dir(&transcript).unwrap();
+        let err = session
+            .run_turn("turn-1", "hello", &mut IgnoringTurnSink)
+            .unwrap_err();
+        assert_eq!(err.code, "SESSION_COMMIT_FAILED");
+        assert!(session.committed_messages().is_empty());
     }
 
     #[test]
-    fn load_session_rejects_uuid_v4_and_missing_v7_session() {
+    fn live_token_invalidation_during_infer_skips_commit() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox = temp.path().canonicalize().unwrap();
-        let cfg = config(sandbox.clone());
-        let home = temp.path().join("home");
-
-        let err = load_session_at(
-            &home,
-            "123e4567-e89b-42d3-a456-426614174000",
-            &cfg,
-            &sandbox,
-        )
-        .unwrap_err();
-        assert_eq!(err.code, "INVALID_ARGUMENT");
-
-        let missing = Uuid::now_v7().hyphenated().to_string();
-        let err = load_session_at(&home, &missing, &cfg, &sandbox).unwrap_err();
-        assert_eq!(err.code, "SESSION_LOAD_FAILED");
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![terminal(
+                "final",
+                InferenceUsage::from_token_counts(Some(1), Some(1)),
+            )],
+        );
+        let mut session = open_session(
+            &temp,
+            Arc::clone(&backend) as Arc<dyn InferenceBackend>,
+            None,
+        );
+        let token = session.live_token();
+        backend.steps.lock().unwrap().clear();
+        backend.steps.lock().unwrap().push(ScriptedStep {
+            deltas: vec!["final".into()],
+            result: Ok(InferenceResult {
+                text: Some("final".into()),
+                tool_calls: Vec::new(),
+                usage: None,
+                finish_reason: Some("stop".into()),
+            }),
+            on_infer: Some(Arc::new(move || {
+                token.store(false, Ordering::SeqCst);
+            })),
+        });
+        let err = session
+            .run_turn("turn-1", "hello", &mut IgnoringTurnSink)
+            .unwrap_err();
+        assert_eq!(err.code, "TURN_INVALIDATED");
+        assert!(session.committed_messages().is_empty());
     }
 
     #[test]
-    fn load_session_rejects_metadata_session_id_mismatch() {
+    fn resume_rebuilds_committed_conversation_without_active_turn() {
         let temp = tempfile::tempdir().unwrap();
-        let sandbox = temp.path().canonicalize().unwrap();
-        let cfg = config(sandbox.clone());
-        let home = temp.path().join("home");
-        let session = create_session_at(&home, &cfg, &sandbox).unwrap();
-        let mut metadata = session.metadata.clone();
-        metadata.session_id = Uuid::now_v7().hyphenated().to_string();
-        save_session_metadata(&session.dir.join("session.json"), &metadata).unwrap();
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![terminal(
+                "first",
+                InferenceUsage::from_token_counts(Some(1), Some(1)),
+            )],
+        );
+        let mut session = open_session(&temp, backend, None);
+        session
+            .run_turn("turn-1", "hello", &mut IgnoringTurnSink)
+            .unwrap();
+        let session_id = session.session_id().to_string();
+        drop(session);
 
-        let err = load_session_at(&home, &session.metadata.session_id, &cfg, &sandbox).unwrap_err();
+        let backend = ScriptedBackend::new(
+            ModelCapabilities {
+                tools: true,
+                vision: false,
+            },
+            vec![],
+        );
+        let resumed = open_session(&temp, backend, Some(session_id));
+        assert!(resumed.resumed());
+        assert_eq!(resumed.committed_messages().len(), 2);
+        assert!(resumed.active_turn.is_none());
+    }
 
-        assert_eq!(err.code, "SESSION_LOAD_FAILED");
+    #[test]
+    fn same_session_rejects_parallel_turns() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = open_session(
+            &temp,
+            ScriptedBackend::new(
+                ModelCapabilities {
+                    tools: true,
+                    vision: false,
+                },
+                vec![],
+            ),
+            None,
+        );
+        session.force_running("turn-1");
+        let err = session
+            .run_turn("turn-2", "hello", &mut IgnoringTurnSink)
+            .unwrap_err();
+        assert_eq!(err.code, "TURN_IN_PROGRESS");
+    }
+
+    #[test]
+    fn closed_session_rejects_new_turns() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = open_session(
+            &temp,
+            ScriptedBackend::new(
+                ModelCapabilities {
+                    tools: true,
+                    vision: false,
+                },
+                vec![],
+            ),
+            None,
+        );
+        session.close();
+        let err = session
+            .run_turn("turn-1", "hello", &mut IgnoringTurnSink)
+            .unwrap_err();
+        assert_eq!(err.code, "SESSION_CLOSED");
     }
 }

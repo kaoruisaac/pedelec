@@ -1,8 +1,9 @@
-use super::config::AgentConfig;
+use super::config::ToolHostConfig;
+use super::conversation::InferenceAttachment;
 use super::error::AgentError;
-use super::model::ModelAttachment;
 use super::sandbox::Sandbox;
 use super::tavily::TavilyRoundWrapper;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -10,74 +11,104 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub fn tool_definitions(vision: bool) -> Value {
-    tool_definitions_with_web_search(vision, false)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
 }
 
-pub fn tool_definitions_with_web_search(vision: bool, web_search_enabled: bool) -> Value {
-    let mut definitions = serde_json::json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "fs.list_text_files",
-                "description": "List readable UTF-8 text files inside the sandbox.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "dir": { "type": "string", "default": "." },
-                        "maxDepth": { "type": "integer", "default": 3 }
-                    },
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "bash",
-                "description": "Run a restricted Pedelec CLI command. This is not a full shell; only pedelec-cli --thread-id <pedelec_thread_id> tool-spec and pedelec-cli --thread-id <pedelec_thread_id> tool-call commands are allowed.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string" },
-                        "timeoutMs": { "type": "integer" }
-                    },
-                    "required": ["command"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "fs.read_text_file",
-                "description": "Read one UTF-8 text file inside the sandbox.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": false
-                }
-            }
-        },
-    ]);
+fn tool_def(name: &str, description: &str, input_schema: Value) -> AgentToolDefinition {
+    AgentToolDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        input_schema,
+    }
+}
+
+pub fn agent_tool_definitions(vision: bool, web_search_enabled: bool) -> Vec<AgentToolDefinition> {
+    let mut definitions = vec![
+        tool_def(
+            "fs.list_text_files",
+            "List readable UTF-8 text files inside the sandbox.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "dir": { "type": "string", "default": "." },
+                    "maxDepth": { "type": "integer", "default": 3 }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool_def(
+            "bash",
+            "Run a restricted Pedelec CLI command. This is not a full shell; only pedelec-cli --thread-id <pedelec_thread_id> tool-spec and pedelec-cli --thread-id <pedelec_thread_id> tool-call commands are allowed.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "timeoutMs": { "type": "integer" }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_def(
+            "fs.read_text_file",
+            "Read one UTF-8 text file inside the sandbox.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        ),
+    ];
     if vision {
-        definitions.as_array_mut().unwrap().extend(serde_json::json!([
-        {"type":"function","function":{"name":"fs.list_image_files","description":"List supported PNG, JPEG, and WebP images inside the sandbox.","parameters":{"type":"object","properties":{"dir":{"type":"string","default":"."},"maxDepth":{"type":"integer","default":3}},"additionalProperties":false}}},
-        {"type":"function","function":{"name":"fs.read_image","description":"Read one sandbox image so it can be viewed.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}}
-    ]).as_array().unwrap().iter().cloned());
+        definitions.push(tool_def(
+            "fs.list_image_files",
+            "List supported PNG, JPEG, and WebP images inside the sandbox.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "dir": { "type": "string", "default": "." },
+                    "maxDepth": { "type": "integer", "default": 3 }
+                },
+                "additionalProperties": false
+            }),
+        ));
+        definitions.push(tool_def(
+            "fs.read_image",
+            "Read one sandbox image so it can be viewed.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        ));
     }
     if web_search_enabled {
-        definitions.as_array_mut().unwrap().push(serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "web.search",
-                "description": "Search the public web for current, recent, or externally verifiable information. Use it only when web information would materially improve the answer.",
-                "parameters": {"type":"object","properties":{"query":{"type":"string","description":"A focused web search query."}},"required":["query"],"additionalProperties":false}
-            }
-        }));
+        definitions.push(tool_def(
+            "web.search",
+            "Search the public web for current, recent, or externally verifiable information. Use it only when web information would materially improve the answer.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A focused web search query."
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        ));
     }
     definitions
 }
@@ -85,15 +116,16 @@ pub fn tool_definitions_with_web_search(vision: bool, web_search_enabled: bool) 
 #[derive(Debug)]
 pub struct ToolExecutionResult {
     pub content: Value,
-    pub attachments: Vec<ModelAttachment>,
+    pub attachments: Vec<InferenceAttachment>,
 }
 
+#[allow(dead_code)]
 pub fn execute_tool(
     tool: &str,
     args: &Value,
     session_id: &str,
     sandbox: &Sandbox,
-    config: &AgentConfig,
+    config: &ToolHostConfig,
 ) -> Result<ToolExecutionResult, AgentError> {
     execute_tool_with_tavily(tool, args, session_id, sandbox, config, None)
 }
@@ -103,8 +135,8 @@ pub fn execute_tool_with_tavily(
     args: &Value,
     _session_id: &str,
     sandbox: &Sandbox,
-    config: &AgentConfig,
-    mut tavily: Option<&mut TavilyRoundWrapper<'_>>,
+    config: &ToolHostConfig,
+    tavily: Option<&mut TavilyRoundWrapper<'_>>,
 ) -> Result<ToolExecutionResult, AgentError> {
     match tool {
         "fs.list_text_files" => {
@@ -150,7 +182,7 @@ pub fn execute_tool_with_tavily(
             let (info, bytes) = sandbox.read_image(path)?;
             Ok(ToolExecutionResult {
                 content: serde_json::to_value(&info).unwrap(),
-                attachments: vec![ModelAttachment::Image {
+                attachments: vec![InferenceAttachment {
                     media_type: info.media_type,
                     bytes,
                 }],
@@ -166,7 +198,6 @@ pub fn execute_tool_with_tavily(
                 .and_then(Value::as_str)
                 .ok_or_else(|| AgentError::new("INVALID_ARGUMENT", "web.search requires query"))?;
             let content = tavily
-                .as_deref_mut()
                 .ok_or_else(|| {
                     AgentError::new("WEB_SEARCH_UNAVAILABLE", "Web search is not configured.")
                 })?
@@ -184,7 +215,7 @@ pub fn execute_tool_with_tavily(
     }
 }
 
-fn bash_tool(args: &Value, config: &AgentConfig) -> Result<Value, AgentError> {
+fn bash_tool(args: &Value, config: &ToolHostConfig) -> Result<Value, AgentError> {
     let command = args
         .get("command")
         .and_then(Value::as_str)
@@ -413,7 +444,7 @@ fn run_command_with_timeout(
     }
 }
 
-fn resolve_pedelec_cli(config: &AgentConfig) -> Result<PathBuf, AgentError> {
+fn resolve_pedelec_cli(config: &ToolHostConfig) -> Result<PathBuf, AgentError> {
     if let Some(path) = &config.pedelec_cli_path {
         if path.exists() {
             return Ok(path.clone());
@@ -449,25 +480,11 @@ fn candidates(dir: &Path, program: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::config::{AgentConfig, ModelProvider};
 
-    fn config(sandbox: PathBuf) -> AgentConfig {
-        AgentConfig {
-            provider: ModelProvider::Ollama,
-            provider_name: "ollama".into(),
-            model: "fake".into(),
-            ollama_base_url: "http://127.0.0.1:1".into(),
-            ollama_timeout_ms: 1000,
-            ollama_api_key: "ollama".into(),
-            tavily_api_key: None,
-            sandbox,
+    fn config() -> ToolHostConfig {
+        ToolHostConfig {
             pedelec_cli_path: None,
             core_runtime_file: None,
-            max_transcript_bytes: 1024,
-            max_tool_rounds: 8,
-            max_list_files: 200,
-            max_file_bytes: 1024,
-            max_image_bytes: 20 * 1024 * 1024,
             pedelec_cli_timeout_ms: 1000,
         }
     }
@@ -477,7 +494,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("README.md"), "hello").unwrap();
         let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
-        let cfg = config(temp.path().to_path_buf());
+        let cfg = config();
 
         let result = execute_tool(
             "fs.read_text_file",
@@ -493,32 +510,30 @@ mod tests {
 
     #[test]
     fn tool_definitions_expose_bash_not_old_native_host_tools() {
-        let tools = tool_definitions(false).to_string();
-
-        assert!(tools.contains("\"name\":\"bash\""));
-        assert!(!tools.contains("pedelec_cli.tool_spec"));
-        assert!(!tools.contains("pedelec_cli.tool_call"));
+        let tools = agent_tool_definitions(false, false);
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"bash"));
+        assert!(!names
+            .iter()
+            .any(|name| name.contains("pedelec_cli.tool_spec")));
+        assert!(!names
+            .iter()
+            .any(|name| name.contains("pedelec_cli.tool_call")));
+        assert!(tools.iter().all(|tool| tool.input_schema.is_object()));
     }
 
     #[test]
     fn web_search_definition_is_conditional_and_only_accepts_query() {
-        assert!(!tool_definitions_with_web_search(false, false)
-            .to_string()
-            .contains("web.search"));
-        let tools = tool_definitions_with_web_search(false, true);
-        let web = tools
-            .as_array()
-            .unwrap()
+        assert!(!agent_tool_definitions(false, false)
             .iter()
-            .find(|tool| tool["function"]["name"] == "web.search")
-            .unwrap();
-        assert_eq!(
-            web["function"]["parameters"]["required"],
-            serde_json::json!(["query"])
-        );
-        assert!(web["function"]["parameters"]["properties"]
-            .get("max_results")
-            .is_none());
+            .any(|tool| tool.name == "web.search"));
+        let tools = agent_tool_definitions(false, true);
+        let web = tools.iter().find(|tool| tool.name == "web.search").unwrap();
+        assert_eq!(web.input_schema["required"], serde_json::json!(["query"]));
+        assert!(web.input_schema["properties"].get("max_results").is_none());
     }
 
     #[test]
@@ -527,7 +542,7 @@ mod tests {
         let capture = temp.path().join("args.txt");
         let cli = fake_pedelec_cli(temp.path(), &capture);
         let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
-        let mut cfg = config(temp.path().to_path_buf());
+        let mut cfg = config();
         cfg.pedelec_cli_path = Some(cli);
 
         let result = execute_tool(
@@ -556,7 +571,7 @@ mod tests {
     fn bash_tool_rejects_non_pedelec_cli_commands() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
-        let cfg = config(temp.path().to_path_buf());
+        let cfg = config();
 
         let err = execute_tool(
             "bash",
@@ -574,7 +589,7 @@ mod tests {
     fn bash_tool_rejects_unsupported_shell_syntax() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
-        let cfg = config(temp.path().to_path_buf());
+        let cfg = config();
 
         let err = execute_tool(
             "bash",
@@ -661,7 +676,7 @@ mod tests {
     fn old_native_host_tool_is_unknown() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
-        let cfg = config(temp.path().to_path_buf());
+        let cfg = config();
 
         let err = execute_tool(
             "pedelec_cli.tool_call",
