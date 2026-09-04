@@ -442,7 +442,7 @@ mod tests {
     use chrono::Utc;
     use pedelec_core::{
         workspace_assets_root, workspace_tmp_root, AssetUploadState, CoreRuntime,
-        CreateAssetUploadInput, EffortLevel, ProviderAdapterState, ProviderCode, ThreadState,
+        CreateAssetUploadInput, EffortLevel, ProviderCode, ProviderSessionState, ThreadState,
         ThreadStatus,
     };
     use std::io::{Read, Write};
@@ -465,16 +465,13 @@ mod tests {
                 workspace_path: workspace_path.clone(),
                 skills: vec![],
                 status: ThreadStatus::Idle,
-                process_id: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 sdk_origin: None,
             },
-            ProviderAdapterState {
+            ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
 

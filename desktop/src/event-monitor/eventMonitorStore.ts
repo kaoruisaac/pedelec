@@ -53,9 +53,6 @@ export interface ThreadViewModel {
   lastSeq?: number;
   events: MonitorEvent[];
   assistantMessages: string[];
-  commandEvents: MonitorEvent[];
-  rawStdout: string;
-  rawStderr: string;
   toolCalls: MonitorEvent[];
   toolResults: MonitorEvent[];
   errors: MonitorEvent[];
@@ -361,9 +358,6 @@ function createMonitorThreadViewModel({
     lastSeq: undefined,
     events: [],
     assistantMessages: [],
-    commandEvents: [],
-    rawStdout: "",
-    rawStderr: "",
     toolCalls: [],
     toolResults: [],
     errors: [],
@@ -384,12 +378,6 @@ function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void 
     case "status_changed":
       thread.status = event.status || thread.status;
       break;
-    case "raw_stdout":
-      thread.rawStdout += event.text || "";
-      break;
-    case "raw_stderr":
-      thread.rawStderr += event.text || "";
-      break;
     case "assistant_message":
       thread.assistantMessages.push(event.text || "");
       break;
@@ -398,9 +386,6 @@ function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void 
       break;
     case "tool_result":
       thread.toolResults.push(event);
-      break;
-    case "provider_command_started":
-      thread.commandEvents.push(event);
       break;
     case "provider_session_id_updated":
       thread.providerSessionId = event.providerSessionId as string | undefined;

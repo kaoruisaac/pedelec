@@ -724,8 +724,8 @@ mod tests {
     use super::*;
     use pedelec_core::{
         error_codes, CreateThreadInput, CreateThreadSkillsInput, CreateThreadWorkspaceInput,
-        EffortLevel, EndThreadExecutionIntent, EndThreadInput, PrepareThreadInput,
-        ProviderExecutionIntent, SendTextInput, ThreadEvent, ThreadStatus, WorkspaceManager,
+        EffortLevel, EndThreadInput, PersistentRuntimeOperation, PrepareThreadInput, SendTextInput,
+        ThreadEvent, ThreadStatus, WorkspaceManager,
     };
     use std::fs;
     use std::time::Instant;
@@ -1159,7 +1159,7 @@ mod tests {
                 thread_id: failed.clone(),
             })
             .unwrap();
-        let EndThreadExecutionIntent::PersistentRuntime(operation) = end.execution else {
+        let operation @ PersistentRuntimeOperation::EndSession { .. } = end.execution else {
             panic!("Claude end should use persistent runtime");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1222,7 +1222,7 @@ mod tests {
                 thread_id: first.clone(),
             })
             .unwrap();
-        let EndThreadExecutionIntent::PersistentRuntime(operation) = end.execution else {
+        let operation @ PersistentRuntimeOperation::EndSession { .. } = end.execution else {
             panic!("Claude end should use persistent runtime");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1299,7 +1299,7 @@ mod tests {
                 thread_id: thread_id.to_string(),
             })
             .unwrap();
-        let Some(ProviderExecutionIntent::PersistentRuntime { operation }) = start.intent else {
+        let Some(operation) = start.intent else {
             panic!("Claude prepare should produce a persistent operation");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1319,9 +1319,7 @@ mod tests {
                 message: message.to_string(),
             })
             .unwrap();
-        let ProviderExecutionIntent::PersistentRuntime { operation } = start.intent else {
-            panic!("Claude turn should produce a persistent operation");
-        };
+        let operation = start.intent;
         dispatcher.dispatch(operation).unwrap();
     }
 

@@ -1654,7 +1654,6 @@ mod tests {
                     ProviderCode::Cursor,
                     ProviderCode::Codex,
                 ] {
-                    core.use_persistent_provider_for_test(provider.clone());
                     let id = format!("thread-{}", format!("{provider:?}").to_lowercase());
                     core.thread_manager.insert_thread(
                         ThreadState {
@@ -1665,7 +1664,6 @@ mod tests {
                             workspace_path: workspace.join(&id),
                             skills: vec![],
                             status: ThreadStatus::Running,
-                            process_id: None,
                             created_at: Utc::now(),
                             updated_at: Utc::now(),
                             sdk_origin: None,
@@ -1673,8 +1671,6 @@ mod tests {
                         ProviderSessionState {
                             provider_session_id: Some(format!("session-{id}")),
                             active_provider_turn_id: Some(format!("turn-{id}")),
-                            last_process_id: None,
-                            has_user_message: true,
                         },
                     );
                     core.pending_provider_operations
@@ -1769,7 +1765,6 @@ mod tests {
                 workspace_path: workspace.clone(),
                 skills: vec![],
                 status: ThreadStatus::Running,
-                process_id: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 sdk_origin: None,
@@ -1777,8 +1772,6 @@ mod tests {
             ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
         runtime
@@ -1910,7 +1903,6 @@ mod tests {
             let thread_id = format!("thread-{}-resume", provider.code());
             {
                 let mut core = runtime.lock().unwrap();
-                core.use_persistent_provider_for_test(provider.provider_code());
                 core.thread_manager.insert_thread(
                     ThreadState {
                         thread_id: thread_id.clone(),
@@ -1920,7 +1912,6 @@ mod tests {
                         workspace_path: workspace.clone(),
                         skills: vec![],
                         status: ThreadStatus::Running,
-                        process_id: None,
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                         sdk_origin: None,
@@ -1928,8 +1919,6 @@ mod tests {
                     ProviderSessionState {
                         provider_session_id: Some("persisted-session".into()),
                         active_provider_turn_id: None,
-                        last_process_id: None,
-                        has_user_message: true,
                     },
                 );
                 core.pending_provider_operations
@@ -2130,7 +2119,6 @@ mod tests {
                 workspace_path: workspace.clone(),
                 skills: vec![],
                 status: ThreadStatus::Running,
-                process_id: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 sdk_origin: None,
@@ -2138,8 +2126,6 @@ mod tests {
             ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
         runtime

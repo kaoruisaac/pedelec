@@ -754,7 +754,7 @@ mod tests {
     use super::*;
     use pedelec_core::{
         CreateThreadInput, CreateThreadSkillsInput, CreateThreadWorkspaceInput, EffortLevel,
-        EndThreadExecutionIntent, EndThreadInput, PrepareThreadInput, ProviderExecutionIntent,
+        EndThreadInput, PersistentRuntimeOperation, PrepareThreadInput,
         ProviderExecutionOperationKind, SendTextInput, ThreadEvent, ThreadStatus, WorkspaceManager,
     };
     use std::fs;
@@ -1094,7 +1094,7 @@ mod tests {
                 thread_id: failed.clone(),
             })
             .unwrap();
-        let EndThreadExecutionIntent::PersistentRuntime(operation) = end.execution else {
+        let operation @ PersistentRuntimeOperation::EndSession { .. } = end.execution else {
             panic!("Antigravity end should use persistent runtime");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1145,9 +1145,7 @@ mod tests {
                 message: "must not spawn".into(),
             })
             .unwrap();
-        let ProviderExecutionIntent::PersistentRuntime { operation } = start.intent else {
-            panic!("Antigravity turn should produce a persistent operation");
-        };
+        let operation = start.intent;
         let error = dispatcher.dispatch(operation).unwrap_err();
         assert_eq!(error.code, error_codes::PROVIDER_RUNTIME_START_FAILED);
         runtime.lock().unwrap().fail_provider_execution_dispatch(
@@ -1202,7 +1200,7 @@ mod tests {
                 thread_id: first.clone(),
             })
             .unwrap();
-        let EndThreadExecutionIntent::PersistentRuntime(operation) = end.execution else {
+        let operation @ PersistentRuntimeOperation::EndSession { .. } = end.execution else {
             panic!("Antigravity end should use persistent runtime");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1278,7 +1276,7 @@ mod tests {
                 thread_id: thread_id.to_string(),
             })
             .unwrap();
-        let Some(ProviderExecutionIntent::PersistentRuntime { operation }) = start.intent else {
+        let Some(operation) = start.intent else {
             panic!("Antigravity prepare should produce a persistent operation");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1298,9 +1296,7 @@ mod tests {
                 message: message.to_string(),
             })
             .unwrap();
-        let ProviderExecutionIntent::PersistentRuntime { operation } = start.intent else {
-            panic!("Antigravity turn should produce a persistent operation");
-        };
+        let operation = start.intent;
         dispatcher.dispatch(operation).unwrap();
     }
 

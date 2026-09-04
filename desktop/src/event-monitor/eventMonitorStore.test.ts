@@ -11,7 +11,6 @@ describe("event monitor store", () => {
       threadId: "ended-thread",
       status: "ended",
     });
-    monitor.upsertThreadEvent({ type: "raw_stdout", threadId: "ended-thread", text: "done" });
     monitor.upsertThreadEvent({ type: "created", threadId: "active-thread" });
     monitor.upsertThreadEvent({
       type: "status_changed",
@@ -20,7 +19,7 @@ describe("event monitor store", () => {
     });
     monitor.selectThread("ended-thread");
 
-    expect(monitor.store.totalEventCount).toBe(5);
+    expect(monitor.store.totalEventCount).toBe(4);
     monitor.clearEndedThreads();
 
     expect(monitor.store.threadOrder).toEqual(["active-thread"]);

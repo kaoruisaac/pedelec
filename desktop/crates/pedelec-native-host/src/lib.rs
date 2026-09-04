@@ -974,7 +974,7 @@ mod tests {
     }
 
     fn insert_idle_thread(runtime: &SharedCoreRuntime, thread_id: &str) {
-        use pedelec_core::{EffortLevel, ProviderAdapterState, ThreadState, ThreadStatus};
+        use pedelec_core::{EffortLevel, ProviderSessionState, ThreadState, ThreadStatus};
         use std::path::PathBuf;
 
         let now = chrono::Utc::now();
@@ -987,16 +987,13 @@ mod tests {
                 workspace_path: PathBuf::from("workspace").join(thread_id),
                 skills: vec![],
                 status: ThreadStatus::Idle,
-                process_id: None,
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
             },
-            ProviderAdapterState {
+            ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
     }

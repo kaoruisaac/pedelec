@@ -6,9 +6,9 @@ mod tests {
     use pedelec_cli::run_tool_cli_with_runtime_file_path;
     use pedelec_core::{
         workspace_assets_root, workspace_logs_root, CommandSpec, CoreRuntime, CreateThreadOutput,
-        CreateThreadSkillsInput, CreateThreadToolInput, EffortLevel, PedelecSettings,
-        ProviderAdapterState, ProviderCode, ThreadErrorSource, ThreadState, ThreadStatus,
-        ToolRegistry, WorkspaceManager,
+        CreateThreadSkillsInput, CreateThreadToolInput, EffortLevel, EndThreadInput,
+        PedelecSettings, PersistentRuntimeOperation, ProviderCode, ProviderRuntimeEvent,
+        ProviderSessionState, ThreadState, ThreadStatus, ToolRegistry, WorkspaceManager,
     };
     use serde_json::{json, Value};
     use std::env;
@@ -76,33 +76,6 @@ mod tests {
                 bin_dir.join("codex.cmd"),
                 bin_dir.join("codex.bat")
             ]
-        );
-    }
-
-    #[test]
-    fn provider_output_decoder_preserves_split_utf8_sequence() {
-        let mut decoder = ProviderOutputDecoder {
-            pending: Vec::new(),
-            fallback_encoding: None,
-        };
-
-        assert_eq!(decoder.decode_chunk("中".as_bytes().split_at(1).0), None);
-        assert_eq!(
-            decoder.decode_chunk("中".as_bytes().split_at(1).1),
-            Some("中".into())
-        );
-    }
-
-    #[test]
-    fn provider_output_decoder_uses_fallback_for_non_utf8_bytes() {
-        let mut decoder = ProviderOutputDecoder {
-            pending: Vec::new(),
-            fallback_encoding: Encoding::for_label(b"big5"),
-        };
-
-        assert_eq!(
-            decoder.decode_chunk(&[0xA4, 0xA4, 0xA4, 0xE5]),
-            Some("中文".into())
         );
     }
 
@@ -398,11 +371,7 @@ mod tests {
         let response: CoreIpcResponse = serde_json::from_slice(&response_line).unwrap();
         assert!(response.ok);
 
-        runtime
-            .lock()
-            .unwrap()
-            .event_bus
-            .emit_raw_stdout("thread_sub", "hello".into());
+        runtime.lock().unwrap().event_bus.emit_done("thread_sub");
         let event_line = read_bounded_json_line(&mut reader).unwrap();
         let event: CoreIpcEventMessage = serde_json::from_slice(&event_line).unwrap();
 
@@ -442,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn phase09_mock_app_path_create_send_tool_end_e2e() {
+    fn persistent_create_send_tool_result_complete_end_e2e() {
         let temp = tempfile::tempdir().unwrap();
         let runtime_path = temp.path().join("runtime.json");
         let workspace_root = temp.path().join("workspace");
@@ -455,10 +424,18 @@ mod tests {
             .unwrap()
             .provider_readiness
             .mark_ready_for_test();
-        start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
+        let dispatcher = Arc::new(RecordingPersistentDispatcher::default());
+        start_core_ipc_server_with_runtime_path_services_and_dispatcher(
+            Arc::clone(&runtime),
+            runtime_path.clone(),
+            Arc::new(NoopCoreIpcPlatformServices),
+            dispatcher.clone(),
+        )
+        .unwrap();
+
         let create = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
-                request_id: "phase09_create".into(),
+                request_id: "persistent_e2e_create".into(),
                 r#type: "create_thread".into(),
                 caller_origin: None,
                 caller_sdk_version: None,
@@ -472,23 +449,35 @@ mod tests {
         .unwrap();
         assert!(create.ok);
         let output: CreateThreadOutput = serde_json::from_value(create.result.unwrap()).unwrap();
-        assert_eq!(create.request_id, "phase09_create");
-        assert_eq!(runtime.lock().unwrap().running_process_count(), 0);
+        let thread_id = output.thread_id.clone();
+        assert_eq!(create.request_id, "persistent_e2e_create");
         assert_eq!(
-            runtime.lock().unwrap().thread_status(&output.thread_id),
+            runtime.lock().unwrap().thread_status(&thread_id),
             Some(ThreadStatus::Idle)
         );
+        let workspace_path = runtime
+            .lock()
+            .unwrap()
+            .thread_workspace_path(&thread_id)
+            .unwrap();
+        assert!(workspace_path.is_dir());
+        assert_eq!(
+            runtime.lock().unwrap().provider_session_state(&thread_id),
+            Some(&ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            })
+        );
 
-        let mut subscription = subscribe_to_thread(&runtime_path, &output.thread_id);
-        install_test_provider_command(&runtime, &output.thread_id, true, false);
+        let mut subscription = subscribe_to_thread(&runtime_path, &thread_id);
         let send = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
-                request_id: "phase09_send".into(),
+                request_id: "persistent_e2e_send".into(),
                 r#type: "send_text".into(),
                 caller_origin: None,
                 caller_sdk_version: None,
                 payload: Some(json!({
-                    "threadId": output.thread_id,
+                    "threadId": thread_id,
                     "message": "call update_counter with delta 2"
                 })),
             },
@@ -496,13 +485,82 @@ mod tests {
         )
         .unwrap();
         assert!(send.ok);
+        assert_eq!(send.result.unwrap(), json!({ "threadId": thread_id }));
+
+        let mut events = vec![read_thread_event(&mut subscription).event];
+        assert!(matches!(
+            events[0],
+            ThreadEvent::StatusChanged {
+                status: ThreadStatus::Running,
+                ..
+            }
+        ));
+
+        let start_turn = {
+            let operations = dispatcher.operations.lock().unwrap();
+            let Some(PersistentRuntimeOperation::StartTurn { turn }) = operations.first() else {
+                panic!("send should dispatch a persistent start-turn operation");
+            };
+            assert_eq!(turn.thread_id, thread_id);
+            assert_eq!(turn.session.thread_id, thread_id);
+            assert_eq!(turn.message, "call update_counter with delta 2");
+            assert_eq!(turn.session.provider, ProviderCode::Codex);
+            turn.clone()
+        };
+        assert!(!start_turn.local_turn_id.is_empty());
+
+        runtime
+            .lock()
+            .unwrap()
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::SessionReady {
+                thread_id: thread_id.clone(),
+                provider_session_id: "provider-session-e2e".into(),
+            })
+            .unwrap();
+        events.push(read_thread_event(&mut subscription).event);
+        assert!(matches!(
+            events.last(),
+            Some(ThreadEvent::ProviderSessionIdUpdated {
+                provider_session_id,
+                ..
+            }) if provider_session_id == "provider-session-e2e"
+        ));
+
+        runtime
+            .lock()
+            .unwrap()
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnStarted {
+                thread_id: thread_id.clone(),
+                provider_turn_id: "provider-turn-e2e".into(),
+            })
+            .unwrap();
         assert_eq!(
-            send.result.unwrap(),
-            json!({ "threadId": output.thread_id })
+            runtime
+                .lock()
+                .unwrap()
+                .provider_session_state(&thread_id)
+                .and_then(|state| state.active_provider_turn_id.as_deref()),
+            Some("provider-turn-e2e")
         );
 
+        runtime
+            .lock()
+            .unwrap()
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::AssistantMessage {
+                thread_id: thread_id.clone(),
+                provider_turn_id: Some("provider-turn-e2e".into()),
+                text: "I will inspect the app state.".into(),
+            })
+            .unwrap();
+        events.push(read_thread_event(&mut subscription).event);
+        assert!(matches!(
+            events.last(),
+            Some(ThreadEvent::AssistantMessage { text, .. })
+                if text == "I will inspect the app state."
+        ));
+
         let first_tool_runtime_path = runtime_path.clone();
-        let first_tool_thread_id = output.thread_id.clone();
+        let first_tool_thread_id = thread_id.clone();
         let first_tool_handle = thread::spawn(move || {
             run_tool_cli_with_runtime_file_path(
                 vec![
@@ -517,27 +575,19 @@ mod tests {
             )
         });
 
-        let mut events = Vec::new();
-        let first_request_id = loop {
-            let event = read_thread_event(&mut subscription).event;
-            if let ThreadEvent::ToolCall { request_id, .. } = &event {
-                let request_id = request_id.clone();
-                events.push(event);
-                break request_id;
-            }
-            events.push(event);
-        };
-
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                ThreadEvent::StatusChanged {
-                    status: ThreadStatus::Running,
-                    ..
-                }
-            )
-        }));
-        assert!(events.iter().any(|event| {
+        let tool_events = collect_ipc_events_until(&mut subscription, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+        });
+        let first_request_id = tool_events
+            .iter()
+            .find_map(|event| match event {
+                ThreadEvent::ToolCall { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("tool call event should include a request id");
+        assert!(tool_events.iter().any(|event| {
             matches!(
                 event,
                 ThreadEvent::StatusChanged {
@@ -546,13 +596,21 @@ mod tests {
                 }
             )
         }));
-        assert_thread_event_seq_is_strictly_increasing(&events);
+        assert!(tool_events.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::ToolCall {
+                    tool_name, args, ..
+                } if tool_name == "update_counter" && args == &json!({ "delta": 2 })
+            )
+        }));
+        events.extend(tool_events);
 
         let duplicate = run_tool_cli_with_runtime_file_path(
             vec![
                 "pedelec-cli".into(),
                 "--thread-id".into(),
-                output.thread_id.clone(),
+                thread_id.clone(),
                 "tool-call".into(),
                 "get_app_state".into(),
                 "{}".into(),
@@ -565,36 +623,24 @@ mod tests {
             error_codes::PENDING_TOOL_REQUEST_EXISTS
         );
 
-        let submit = send_core_ipc_request_with_runtime_path(
-            &CoreIpcRequest {
-                request_id: "phase09_submit".into(),
-                r#type: "submit_tool_result".into(),
-                caller_origin: None,
-                caller_sdk_version: None,
-                payload: Some(json!({
-                    "threadId": output.thread_id,
-                    "requestId": first_request_id,
-                    "result": { "counter": 2 }
-                })),
-            },
+        submit_tool_result_over_ipc(
             &runtime_path,
-        )
-        .unwrap();
-        assert!(submit.ok);
+            "persistent_e2e_submit",
+            &thread_id,
+            &first_request_id,
+            json!({ "value": "persistent result" }),
+        );
         let first_tool_response = first_tool_handle.join().unwrap();
         assert!(first_tool_response.ok);
-        assert_eq!(first_tool_response.result.unwrap(), json!({ "counter": 2 }));
+        assert_eq!(
+            first_tool_response.result,
+            Some(json!({ "value": "persistent result" }))
+        );
 
         let after_submit_events = collect_ipc_events_until(&mut subscription, |events| {
-            events.iter().any(|event| {
-                matches!(
-                    event,
-                    ThreadEvent::StatusChanged {
-                        status: ThreadStatus::Idle,
-                        ..
-                    }
-                )
-            })
+            events
+                .iter()
+                .any(|event| matches!(event, ThreadEvent::ToolResult { .. }))
         });
         assert!(after_submit_events.iter().any(|event| {
             matches!(
@@ -605,37 +651,115 @@ mod tests {
                 }
             )
         }));
-        assert!(after_submit_events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::ToolResult { .. })));
-        assert!(events
-            .iter()
-            .chain(after_submit_events.iter())
-            .any(|event| matches!(event, ThreadEvent::RawStdout { .. })));
-        assert!(events
-            .iter()
-            .chain(after_submit_events.iter())
-            .any(|event| matches!(event, ThreadEvent::RawStderr { .. })));
+        assert!(after_submit_events.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::ToolResult {
+                    request_id,
+                    result,
+                    ..
+                } if request_id == &first_request_id
+                    && result == &json!({ "value": "persistent result" })
+            )
+        }));
+        events.extend(after_submit_events);
         assert_eq!(
-            runtime.lock().unwrap().thread_status(&output.thread_id),
-            Some(ThreadStatus::Idle)
+            runtime.lock().unwrap().thread_status(&thread_id),
+            Some(ThreadStatus::Running)
         );
 
-        let workspace_path = runtime
+        runtime
             .lock()
             .unwrap()
-            .thread_workspace_path(&output.thread_id)
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.clone(),
+                provider_turn_id: Some("provider-turn-e2e".into()),
+                success: true,
+                error: None,
+            })
             .unwrap();
-        assert!(workspace_path.exists());
+        let completion_events = collect_ipc_events_until(&mut subscription, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ThreadEvent::Done { .. }))
+        });
+        assert!(completion_events.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::StatusChanged {
+                    status: ThreadStatus::Idle,
+                    ..
+                }
+            )
+        }));
+        events.extend(completion_events);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::Done { .. })));
+        assert_eq!(
+            runtime.lock().unwrap().thread_status(&thread_id),
+            Some(ThreadStatus::Idle)
+        );
+        assert_eq!(
+            runtime.lock().unwrap().provider_session_state(&thread_id),
+            Some(&ProviderSessionState {
+                provider_session_id: Some("provider-session-e2e".into()),
+                active_provider_turn_id: None,
+            })
+        );
+
+        assert_thread_event_seq_is_strictly_increasing(&events);
+        let running_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ThreadEvent::StatusChanged {
+                        status: ThreadStatus::Running,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let tool_call_index = events
+            .iter()
+            .position(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+            .unwrap();
+        let tool_result_index = events
+            .iter()
+            .position(|event| matches!(event, ThreadEvent::ToolResult { .. }))
+            .unwrap();
+        let done_index = events
+            .iter()
+            .position(|event| matches!(event, ThreadEvent::Done { .. }))
+            .unwrap();
+        let idle_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ThreadEvent::StatusChanged {
+                        status: ThreadStatus::Idle,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(running_index < tool_call_index);
+        assert!(tool_call_index < tool_result_index);
+        assert!(tool_result_index < done_index);
+        assert!(tool_result_index < idle_index);
+        assert!(idle_index < done_index);
+
         let sentinel_path = workspace_assets_root(&workspace_path).join("end-sentinel.txt");
         std::fs::write(&sentinel_path, "preserve me").unwrap();
         let end = send_core_ipc_request_with_runtime_path(
             &CoreIpcRequest {
-                request_id: "phase09_end".into(),
+                request_id: "persistent_e2e_end".into(),
                 r#type: "end_thread".into(),
                 caller_origin: None,
                 caller_sdk_version: None,
-                payload: Some(json!({ "threadId": output.thread_id })),
+                payload: Some(json!({ "threadId": thread_id })),
             },
             &runtime_path,
         )
@@ -656,13 +780,73 @@ mod tests {
                 }
             )
         }));
-        assert!(workspace_path.exists());
+        assert!(end_events.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::StatusChanged {
+                    status: ThreadStatus::Ended,
+                    ..
+                }
+            )
+        }));
+        let stopping_index = end_events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ThreadEvent::StatusChanged {
+                        status: ThreadStatus::Stopping,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let ended_status_index = end_events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ThreadEvent::StatusChanged {
+                        status: ThreadStatus::Ended,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let ended_event_index = end_events
+            .iter()
+            .position(|event| matches!(event, ThreadEvent::Ended { .. }))
+            .unwrap();
+        assert!(stopping_index < ended_status_index);
+        assert!(ended_status_index < ended_event_index);
+        events.extend(end_events);
+        assert_thread_event_seq_is_strictly_increasing(&events);
+        assert_eq!(
+            runtime.lock().unwrap().thread_status(&thread_id),
+            Some(ThreadStatus::Ended)
+        );
+        assert!(workspace_path.is_dir());
         assert_eq!(
             std::fs::read_to_string(&sentinel_path).unwrap(),
             "preserve me"
         );
-        assert!(runtime.lock().unwrap().cleanup_for_app_exit().is_empty());
-        assert!(!workspace_path.exists());
+
+        let operations = dispatcher.operations.lock().unwrap();
+        assert_eq!(operations.len(), 2);
+        assert!(matches!(
+            operations.first(),
+            Some(PersistentRuntimeOperation::StartTurn { turn })
+                if turn.thread_id == thread_id
+                    && turn.message == "call update_counter with delta 2"
+        ));
+        assert!(matches!(
+            operations.get(1),
+            Some(PersistentRuntimeOperation::EndSession { session })
+                if session.thread_id == thread_id
+                    && session.provider == ProviderCode::Codex
+                    && session.provider_session_id.as_deref() == Some("provider-session-e2e")
+                    && session.active_provider_turn_id.is_none()
+        ));
     }
 
     #[test]
@@ -1419,95 +1603,6 @@ mod tests {
     }
 
     #[test]
-    fn send_text_starts_mock_process_and_emits_command_and_raw_stdout_stderr() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
-        insert_thread_with_registry(
-            &runtime,
-            temp.path(),
-            "thread_mock",
-            ThreadStatus::Idle,
-            1000,
-        );
-        let event_rx = runtime.lock().unwrap().event_bus.subscribe("thread_mock");
-
-        install_test_provider_command(&runtime, "thread_mock", true, false);
-
-        let output = start_provider_process(
-            Arc::clone(&runtime),
-            SendTextInput {
-                thread_id: "thread_mock".into(),
-                message: "hello".into(),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(output.thread_id, "thread_mock");
-        assert_eq!(
-            runtime.lock().unwrap().thread_status("thread_mock"),
-            Some(ThreadStatus::Running)
-        );
-        assert!(runtime
-            .lock()
-            .unwrap()
-            .active_process_id("thread_mock")
-            .is_some());
-
-        let events = collect_events_until(&event_rx, |events| {
-            has_provider_command_started(events)
-                && has_raw_stdout(events)
-                && has_raw_stderr(events)
-                && has_idle(events)
-        });
-        let command_event = find_provider_command_started(&events).unwrap();
-        match command_event {
-            ThreadEvent::ProviderCommandStarted {
-                thread_id,
-                process_id,
-                program,
-                args,
-                cwd,
-                prompt,
-                ..
-            } => {
-                assert_eq!(thread_id, "thread_mock");
-                assert!(*process_id > 0);
-                assert!(!program.is_empty());
-                assert!(!args.is_empty());
-                assert_eq!(prompt, "test provider stdin");
-                assert_eq!(
-                    cwd,
-                    &runtime
-                        .lock()
-                        .unwrap()
-                        .thread_workspace_path("thread_mock")
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string()
-                );
-            }
-            _ => unreachable!(),
-        }
-        let command_value = serde_json::to_value(command_event).unwrap();
-        assert!(command_value.get("stdin").is_none());
-        assert!(command_value.get("env").is_none());
-        assert!(has_raw_stdout(&events));
-        assert!(has_raw_stderr(&events));
-        assert!(has_idle(&events));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::Error { .. })));
-        assert_eq!(
-            runtime.lock().unwrap().thread_status("thread_mock"),
-            Some(ThreadStatus::Idle)
-        );
-        assert_eq!(
-            runtime.lock().unwrap().active_process_id("thread_mock"),
-            None
-        );
-    }
-
-    #[test]
     fn persistent_dispatch_receives_an_intent_and_user_turn_is_admitted_first() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
@@ -1518,13 +1613,9 @@ mod tests {
             ThreadStatus::Idle,
             1000,
         );
-        runtime
-            .lock()
-            .unwrap()
-            .use_persistent_provider_for_test(ProviderCode::Codex);
         let dispatcher = Arc::new(RecordingPersistentDispatcher::default());
 
-        let output = start_provider_process_with_dispatcher(
+        let output = start_provider_turn_with_dispatcher(
             Arc::clone(&runtime),
             dispatcher.clone(),
             SendTextInput {
@@ -1550,6 +1641,128 @@ mod tests {
     }
 
     #[test]
+    fn debug_send_text_dispatches_a_persistent_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_debug_persistent_ipc",
+            ThreadStatus::Idle,
+            1000,
+        );
+        let dispatcher = Arc::new(RecordingPersistentDispatcher::default());
+
+        let output = start_debug_provider_turn_with_dispatcher(
+            Arc::clone(&runtime),
+            dispatcher.clone(),
+            SendTextInput {
+                thread_id: "thread_debug_persistent_ipc".into(),
+                message: "debug hello".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(output.thread_id, "thread_debug_persistent_ipc");
+        let operations = dispatcher.operations.lock().unwrap();
+        let Some(PersistentRuntimeOperation::StartTurn { turn }) = operations.first() else {
+            panic!("debug send should dispatch a persistent start-turn operation");
+        };
+        assert_eq!(turn.thread_id, "thread_debug_persistent_ipc");
+        assert_eq!(turn.message, "debug hello");
+    }
+
+    #[test]
+    fn prepare_dispatches_a_persistent_session_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_prepare_persistent_ipc",
+            ThreadStatus::Idle,
+            1000,
+        );
+        let dispatcher = Arc::new(RecordingPersistentDispatcher::default());
+
+        let output = prepare_provider_session_with_dispatcher(
+            Arc::clone(&runtime),
+            dispatcher.clone(),
+            PrepareThreadInput {
+                thread_id: "thread_prepare_persistent_ipc".into(),
+            },
+        )
+        .unwrap();
+
+        assert!(output.prepared);
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_status("thread_prepare_persistent_ipc"),
+            Some(ThreadStatus::Running)
+        );
+        let operations = dispatcher.operations.lock().unwrap();
+        let Some(PersistentRuntimeOperation::EnsureSession { session }) = operations.first() else {
+            panic!("prepare should dispatch a persistent ensure-session operation");
+        };
+        assert_eq!(session.thread_id, "thread_prepare_persistent_ipc");
+    }
+
+    #[test]
+    fn end_thread_dispatches_persistent_session_end_and_finishes_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_end_persistent_ipc",
+            ThreadStatus::Idle,
+            1000,
+        );
+        {
+            let mut runtime = runtime.lock().unwrap();
+            let session = runtime
+                .thread_manager
+                .provider_session_state_mut("thread_end_persistent_ipc")
+                .unwrap();
+            session.provider_session_id = Some("provider-session".into());
+            session.active_provider_turn_id = Some("provider-turn".into());
+        }
+        let dispatcher = Arc::new(RecordingPersistentDispatcher::default());
+
+        end_thread_with_dispatcher(
+            Arc::clone(&runtime),
+            dispatcher.clone(),
+            EndThreadInput {
+                thread_id: "thread_end_persistent_ipc".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_status("thread_end_persistent_ipc"),
+            Some(ThreadStatus::Ended)
+        );
+        let operations = dispatcher.operations.lock().unwrap();
+        let Some(PersistentRuntimeOperation::EndSession { session }) = operations.first() else {
+            panic!("end thread should dispatch a persistent end-session operation");
+        };
+        assert_eq!(session.thread_id, "thread_end_persistent_ipc");
+        assert_eq!(
+            session.provider_session_id.as_deref(),
+            Some("provider-session")
+        );
+        assert_eq!(
+            session.active_provider_turn_id.as_deref(),
+            Some("provider-turn")
+        );
+    }
+
+    #[test]
     fn persistent_dispatch_failure_rolls_a_user_turn_into_error() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
@@ -1560,16 +1773,12 @@ mod tests {
             ThreadStatus::Idle,
             1000,
         );
-        runtime
-            .lock()
-            .unwrap()
-            .use_persistent_provider_for_test(ProviderCode::Codex);
         let dispatcher = Arc::new(RecordingPersistentDispatcher {
             operations: Mutex::new(Vec::new()),
             error: true,
         });
 
-        let error = start_provider_process_with_dispatcher(
+        let error = start_provider_turn_with_dispatcher(
             Arc::clone(&runtime),
             dispatcher,
             SendTextInput {
@@ -1600,10 +1809,6 @@ mod tests {
             ThreadStatus::Idle,
             1000,
         );
-        runtime
-            .lock()
-            .unwrap()
-            .use_persistent_provider_for_test(ProviderCode::Codex);
         let event_rx = runtime
             .lock()
             .unwrap()
@@ -1614,7 +1819,7 @@ mod tests {
             error: true,
         });
 
-        let error = prepare_provider_process_with_dispatcher(
+        let error = prepare_provider_session_with_dispatcher(
             Arc::clone(&runtime),
             dispatcher,
             PrepareThreadInput {
@@ -1654,127 +1859,6 @@ mod tests {
                 ..
             }
         )));
-    }
-
-    #[test]
-    fn mock_process_failure_sets_error_and_rejects_later_send() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
-        insert_thread_with_registry(
-            &runtime,
-            temp.path(),
-            "thread_fail",
-            ThreadStatus::Idle,
-            1000,
-        );
-        let event_rx = runtime.lock().unwrap().event_bus.subscribe("thread_fail");
-
-        install_test_provider_command(&runtime, "thread_fail", false, true);
-
-        let output = start_provider_process(
-            Arc::clone(&runtime),
-            SendTextInput {
-                thread_id: "thread_fail".into(),
-                message: "fail".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(output.thread_id, "thread_fail");
-
-        let events = collect_events_until(&event_rx, has_provider_command_failed);
-        assert!(has_provider_command_failed(&events));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ThreadEvent::Error {
-                source: ThreadErrorSource::Provider { provider: ProviderCode::Codex },
-                error,
-                ..
-            } if error.code == error_codes::PROVIDER_COMMAND_FAILED
-                && error.message == "mock provider stderr: codex"
-                && error.details.as_ref().is_some_and(|details| {
-                    details["exitCode"] == 7
-                        && details["stderr"].as_str().is_some_and(|stderr| stderr.contains("mock provider stderr: codex"))
-                })
-        )));
-        assert_eq!(
-            runtime.lock().unwrap().thread_status("thread_fail"),
-            Some(ThreadStatus::Error)
-        );
-
-        let err = start_provider_process(
-            Arc::clone(&runtime),
-            SendTextInput {
-                thread_id: "thread_fail".into(),
-                message: "after error".into(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err.code, error_codes::PROVIDER_COMMAND_FAILED);
-    }
-
-    #[test]
-    fn end_thread_stops_running_process_emits_ended_and_preserves_workspace() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
-        insert_thread_with_registry(
-            &runtime,
-            temp.path(),
-            "thread_end",
-            ThreadStatus::Idle,
-            1000,
-        );
-        let event_rx = runtime.lock().unwrap().event_bus.subscribe("thread_end");
-
-        install_test_provider_command(&runtime, "thread_end", true, false);
-
-        start_provider_process(
-            Arc::clone(&runtime),
-            SendTextInput {
-                thread_id: "thread_end".into(),
-                message: "sleep".into(),
-            },
-        )
-        .unwrap();
-        let workspace_path = runtime
-            .lock()
-            .unwrap()
-            .thread_workspace_path("thread_end")
-            .unwrap();
-        assert!(workspace_path.exists());
-        let sentinel_path = workspace_logs_root(&workspace_path).join("end-sentinel.txt");
-        std::fs::write(&sentinel_path, "preserve me").unwrap();
-
-        runtime
-            .lock()
-            .unwrap()
-            .end_thread(EndThreadInput {
-                thread_id: "thread_end".into(),
-            })
-            .unwrap();
-        let events = collect_events_until(&event_rx, |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, ThreadEvent::Ended { .. }))
-        });
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::Ended { .. })));
-        assert_eq!(
-            runtime.lock().unwrap().thread_status("thread_end"),
-            Some(ThreadStatus::Ended)
-        );
-        assert_eq!(
-            runtime.lock().unwrap().active_process_id("thread_end"),
-            None
-        );
-        assert_eq!(runtime.lock().unwrap().running_process_count(), 0);
-        assert!(workspace_path.exists());
-        assert_eq!(
-            std::fs::read_to_string(&sentinel_path).unwrap(),
-            "preserve me"
-        );
-        assert!(runtime.lock().unwrap().cleanup_for_app_exit().is_empty());
-        assert!(!workspace_path.exists());
     }
 
     #[derive(Debug, Default)]
@@ -1820,16 +1904,13 @@ mod tests {
                 workspace_path,
                 skills: vec![],
                 status,
-                process_id: None,
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
             },
-            ProviderAdapterState {
+            ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
         runtime.tool_registry.insert(
@@ -1865,76 +1946,6 @@ mod tests {
         );
     }
 
-    fn install_test_provider_command(
-        runtime: &Arc<Mutex<CoreRuntime>>,
-        thread_id: &str,
-        sleep: bool,
-        fail: bool,
-    ) {
-        let cwd = runtime
-            .lock()
-            .unwrap()
-            .thread_workspace_path(thread_id)
-            .unwrap();
-        runtime.lock().unwrap().test_provider_command =
-            Some(test_provider_command(cwd, sleep, fail));
-    }
-
-    fn test_provider_command(cwd: PathBuf, sleep: bool, fail: bool) -> CommandSpec {
-        #[cfg(windows)]
-        let (program, args) = {
-            let script = format!(
-                r#"
-$inputText = [Console]::In.ReadToEnd()
-[Console]::Out.Write("mock provider received: ")
-[Console]::Out.WriteLine($inputText)
-[Console]::Error.Write("mock provider stderr: codex")
-if ({sleep}) {{ Start-Sleep -Seconds 2 }}
-if ({fail}) {{ exit 7 }}
-exit 0
-"#,
-                sleep = if sleep { "$true" } else { "$false" },
-                fail = if fail { "$true" } else { "$false" }
-            );
-            (
-                "powershell.exe".to_string(),
-                vec![
-                    "-NoProfile".to_string(),
-                    "-ExecutionPolicy".to_string(),
-                    "Bypass".to_string(),
-                    "-Command".to_string(),
-                    script,
-                ],
-            )
-        };
-
-        #[cfg(not(windows))]
-        let (program, args) = {
-            let script = format!(
-                r#"
-input="$(cat)"
-printf 'mock provider received: %s\n' "$input"
-printf 'mock provider stderr: codex\n' >&2
-{sleep}
-{fail}
-exit 0
-"#,
-                sleep = if sleep { "sleep 2" } else { ":" },
-                fail = if fail { "exit 7" } else { ":" }
-            );
-            ("sh".to_string(), vec!["-c".to_string(), script])
-        };
-
-        CommandSpec {
-            program,
-            args,
-            cwd,
-            env: Vec::new(),
-            prompt: "test provider stdin".to_string(),
-            stdin: "test provider stdin".to_string(),
-        }
-    }
-
     fn collect_events_until(
         event_rx: &std::sync::mpsc::Receiver<ThreadEvent>,
         done: impl Fn(&[ThreadEvent]) -> bool,
@@ -1952,59 +1963,28 @@ exit 0
         panic!("condition was not met by collected events: {events:?}");
     }
 
-    fn has_provider_command_started(events: &[ThreadEvent]) -> bool {
-        find_provider_command_started(events).is_some()
+    fn collect_ipc_events_until(
+        reader: &mut BufReader<TcpStream>,
+        done: impl Fn(&[ThreadEvent]) -> bool,
+    ) -> Vec<ThreadEvent> {
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            let event = read_thread_event(reader).event;
+            events.push(event);
+            if done(&events) {
+                return events;
+            }
+        }
+        panic!("condition was not met by collected IPC events: {events:?}");
     }
 
-    fn find_provider_command_started(events: &[ThreadEvent]) -> Option<&ThreadEvent> {
-        events
-            .iter()
-            .find(|event| matches!(event, ThreadEvent::ProviderCommandStarted { .. }))
-    }
-
-    fn has_raw_stdout(events: &[ThreadEvent]) -> bool {
-        events.iter().any(|event| {
-            matches!(
-                event,
-                ThreadEvent::RawStdout { text, .. } if text.contains("mock provider received")
-            )
-        })
-    }
-
-    fn has_raw_stderr(events: &[ThreadEvent]) -> bool {
-        events.iter().any(|event| {
-            matches!(
-                event,
-                ThreadEvent::RawStderr { text, .. } if text.contains("mock provider stderr")
-            )
-        })
-    }
-
-    fn has_idle(events: &[ThreadEvent]) -> bool {
-        events.iter().any(|event| {
-            matches!(
-                event,
-                ThreadEvent::StatusChanged {
-                    status: ThreadStatus::Idle,
-                    ..
-                }
-            )
-        })
-    }
-
-    fn has_provider_command_failed(events: &[ThreadEvent]) -> bool {
-        events.iter().any(|event| {
-            matches!(
-                event,
-                ThreadEvent::Error {
-                    source: ThreadErrorSource::Provider {
-                        provider: ProviderCode::Codex
-                    },
-                    error,
-                    ..
-                } if error.code == error_codes::PROVIDER_COMMAND_FAILED
-            )
-        })
+    fn assert_thread_event_seq_is_strictly_increasing(events: &[ThreadEvent]) {
+        let mut previous = 0;
+        for event in events {
+            let seq = event.seq();
+            assert!(seq > previous, "event seq did not increase: {events:?}");
+            previous = seq;
+        }
     }
 
     fn subscribe_to_thread(runtime_path: &Path, thread_id: &str) -> BufReader<TcpStream> {
@@ -2142,30 +2122,6 @@ exit 0
     fn read_thread_event(reader: &mut BufReader<TcpStream>) -> CoreIpcEventMessage {
         let event_line = read_bounded_json_line(reader).unwrap();
         serde_json::from_slice(&event_line).unwrap()
-    }
-
-    fn collect_ipc_events_until(
-        reader: &mut BufReader<TcpStream>,
-        done: impl Fn(&[ThreadEvent]) -> bool,
-    ) -> Vec<ThreadEvent> {
-        let mut events = Vec::new();
-        for _ in 0..20 {
-            let event = read_thread_event(reader).event;
-            events.push(event);
-            if done(&events) {
-                return events;
-            }
-        }
-        panic!("condition was not met by collected IPC events: {events:?}");
-    }
-
-    fn assert_thread_event_seq_is_strictly_increasing(events: &[ThreadEvent]) {
-        let mut previous = 0;
-        for event in events {
-            let seq = event.seq();
-            assert!(seq > previous, "event seq did not increase: {events:?}");
-            previous = seq;
-        }
     }
 
     fn phase09_tools_json() -> &'static str {

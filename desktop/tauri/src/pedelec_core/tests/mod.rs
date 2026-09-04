@@ -10,27 +10,6 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    fn claude_raw_stdout(events: &[ThreadEvent]) -> String {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                ThreadEvent::RawStdout { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn emit_claude_in_chunks(
-        runtime: &mut CoreRuntime,
-        thread_id: &str,
-        input: &str,
-        chunk_size: usize,
-    ) {
-        for chunk in input.as_bytes().chunks(chunk_size) {
-            runtime.emit_provider_stdout(thread_id, String::from_utf8(chunk.to_vec()).unwrap());
-        }
-    }
-
     #[test]
     fn bootstrap_instruction_explains_exact_retry_and_formal_timeout() {
         let instruction = build_pedelec_bootstrap_instruction();
@@ -124,7 +103,6 @@ mod tests {
                 path: Some(PathBuf::from("C:/providers/codex.cmd")),
                 version: Some(ProviderVersion(vec![1, 2, 3])),
                 error: None,
-                bootstrap_capabilities: None,
                 app_server_capability: None,
                 acp_capability: None,
                 stream_json_capability: None,
@@ -184,29 +162,6 @@ mod tests {
                 .and_then(|details| details.get("appServerCapability")),
             Some(&json!(false))
         );
-        assert_eq!(
-            runtime.provider_execution_family(&ProviderCode::Codex),
-            ProviderExecutionFamily::PersistentRuntime
-        );
-    }
-
-    #[test]
-    fn application_runtime_routes_migrated_providers_persistently() {
-        let runtime = CoreRuntime::new_for_application();
-        for provider in [
-            ProviderCode::Codex,
-            ProviderCode::Antigravity,
-            ProviderCode::OpenCode,
-            ProviderCode::Cursor,
-            ProviderCode::Claude,
-            ProviderCode::Ollama,
-        ] {
-            assert_eq!(
-                runtime.provider_execution_family(&provider),
-                ProviderExecutionFamily::PersistentRuntime,
-                "provider={provider:?}"
-            );
-        }
     }
 
     #[test]
@@ -220,7 +175,6 @@ mod tests {
             None,
             None,
         );
-        runtime.use_persistent_provider_for_test(ProviderCode::Antigravity);
         let thread = runtime.thread_manager.thread_mut(thread_id).unwrap();
         thread.effort_level = EffortLevel::High;
         thread.effort_args = vec![
@@ -252,7 +206,6 @@ mod tests {
             None,
             None,
         );
-        runtime.use_persistent_provider_for_test(ProviderCode::Antigravity);
         runtime
             .thread_manager
             .thread_mut(thread_id)
@@ -272,7 +225,6 @@ mod tests {
         let thread_id = "thread_claude_typed_settings";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Claude, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Claude);
         let thread = runtime.thread_manager.thread_mut(thread_id).unwrap();
         thread.effort_level = EffortLevel::High;
         thread.effort_args = vec![
@@ -324,7 +276,6 @@ mod tests {
                 None,
                 None,
             );
-            runtime.use_persistent_provider_for_test(ProviderCode::Claude);
             let thread = runtime.thread_manager.thread_mut(&thread_id).unwrap();
             thread.effort_level = level;
             thread.effort_args = vec![
@@ -345,7 +296,6 @@ mod tests {
         let thread_id = "thread_claude_invalid_settings";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Claude, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Claude);
 
         runtime
             .thread_manager
@@ -394,7 +344,6 @@ mod tests {
         let thread_id = "thread_claude_empty_settings";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Claude, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Claude);
         runtime
             .thread_manager
             .thread_mut(thread_id)
@@ -435,84 +384,6 @@ mod tests {
             json!(519)
         );
         assert_eq!(receiver.try_iter().count(), 520);
-    }
-
-    #[test]
-    fn provider_bootstrap_modes_cover_internal_defaults_and_probe_fallbacks() {
-        let runtime = CoreRuntime::default();
-        assert_eq!(
-            runtime.provider_bootstrap_mode(&ProviderCode::Ollama),
-            ProviderBootstrapMode::NativeSystemPrompt
-        );
-        assert_eq!(
-            runtime.provider_bootstrap_mode(&ProviderCode::Cursor),
-            ProviderBootstrapMode::UserPromptFallback
-        );
-
-        let scan = ProviderCli {
-            path: Some(PathBuf::from("provider")),
-            version: Some(ProviderVersion(vec![1])),
-            error: None,
-            bootstrap_capabilities: None,
-            app_server_capability: None,
-            acp_capability: None,
-            stream_json_capability: None,
-        };
-        assert_eq!(
-            provider_bootstrap_capability_from_probe(
-                &ProviderCode::Claude,
-                Some(&scan),
-                true,
-                false
-            )
-            .privileged_bootstrap,
-            ProviderBootstrapMode::ClaudeAppendSystemPrompt
-        );
-        assert_eq!(
-            provider_bootstrap_capability_from_probe(
-                &ProviderCode::Claude,
-                Some(&scan),
-                false,
-                false
-            )
-            .privileged_bootstrap,
-            ProviderBootstrapMode::UserPromptFallback
-        );
-        assert_eq!(
-            provider_bootstrap_capability_from_probe(
-                &ProviderCode::OpenCode,
-                Some(&scan),
-                false,
-                true
-            )
-            .privileged_bootstrap,
-            ProviderBootstrapMode::OpenCodeInlineAgent
-        );
-        assert_eq!(
-            provider_bootstrap_capability_from_probe(
-                &ProviderCode::OpenCode,
-                Some(&scan),
-                false,
-                false
-            )
-            .privileged_bootstrap,
-            ProviderBootstrapMode::UserPromptFallback
-        );
-        assert_eq!(
-            provider_bootstrap_capability_from_probe(
-                &ProviderCode::Cursor,
-                Some(&scan),
-                true,
-                true
-            )
-            .privileged_bootstrap,
-            ProviderBootstrapMode::UserPromptFallback
-        );
-        assert_eq!(
-            provider_bootstrap_capability_from_probe(&ProviderCode::Ollama, None, true, true)
-                .privileged_bootstrap,
-            ProviderBootstrapMode::NativeSystemPrompt
-        );
     }
 
     #[test]
@@ -637,33 +508,12 @@ mod tests {
     #[test]
     fn antigravity_custom_agent_version_gate_maps_supported_versions() {
         for (version, expected) in [
-            (vec![1, 1, 5], ProviderBootstrapMode::UserPromptFallback),
-            (
-                vec![1, 1, 6],
-                ProviderBootstrapMode::AntigravityWorkspaceAgent,
-            ),
-            (
-                vec![1, 2, 0],
-                ProviderBootstrapMode::AntigravityWorkspaceAgent,
-            ),
+            (vec![1, 1, 5], false),
+            (vec![1, 1, 6], true),
+            (vec![1, 2, 0], true),
         ] {
-            let scan = ProviderCli {
-                path: Some(PathBuf::from("agy")),
-                version: Some(ProviderVersion(version)),
-                error: None,
-                bootstrap_capabilities: None,
-                app_server_capability: None,
-                acp_capability: None,
-                stream_json_capability: None,
-            };
             assert_eq!(
-                provider_bootstrap_capability_from_probe(
-                    &ProviderCode::Antigravity,
-                    Some(&scan),
-                    false,
-                    false
-                )
-                .privileged_bootstrap,
+                antigravity_custom_agent_version_supported(&ProviderVersion(version)),
                 expected
             );
         }
@@ -882,103 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_new_command_uses_workspace_args_env_prompt_and_no_generated_session_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_codex_new",
-            ProviderCode::Codex,
-            None,
-            Some("gpt-5".into()),
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_codex_new".into(),
-                message: "hello".into(),
-            })
-            .unwrap();
-
-        assert_eq!(start.command.program, "codex");
-        let workspace_path = temp.path().join("workspace").join("thread_codex_new");
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["-c", "skills.include_instructions=false"]));
-        let bootstrap = start
-            .command
-            .args
-            .windows(2)
-            .find(|args| args[0] == "-c" && args[1].starts_with("developer_instructions="))
-            .expect("Codex developer bootstrap");
-        assert!(bootstrap[1].contains("Pedelec is the host application"));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--cd", workspace_path.to_str().unwrap()]));
-        assert!(start.command.args.ends_with(&["gpt-5".into(), "-".into()]));
-        assert_eq!(start.command.cwd, workspace_path);
-        assert!(!start.command.args.iter().any(|arg| arg == "--last"));
-        assert_provider_instruction_present(&start.command);
-        assert!(start.command.stdin.ends_with("hello"));
-        assert_eq!(env_value(&start.command, "PEDELEC_THREAD_ID"), None);
-        assert_env(&start.command, "PEDELEC_PROVIDER", "codex");
-        assert_env(
-            &start.command,
-            "PEDELEC_CORE_IPC_ENDPOINT",
-            "127.0.0.1:12345",
-        );
-        assert!(env_value(&start.command, "PATH")
-            .unwrap()
-            .contains(".pedelec"));
-    }
-
-    #[test]
-    fn provider_command_uses_saved_resolved_path_and_pedelec_dir() {
-        let temp = tempfile::tempdir().unwrap();
-        let resolved_dir = temp.path().join("login-bin");
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_codex_resolved_path",
-            ProviderCode::Codex,
-            None,
-            Some("gpt-5".into()),
-        );
-        runtime.provider_resolved_path = Some(env::join_paths([&resolved_dir]).unwrap());
-        let selected_provider = temp.path().join("scanned-codex");
-        runtime.provider_scan.insert(
-            ProviderCode::Codex,
-            ProviderCli {
-                path: Some(selected_provider.clone()),
-                version: Some(ProviderVersion(vec![1, 2, 3])),
-                error: None,
-                bootstrap_capabilities: None,
-                app_server_capability: None,
-                acp_capability: None,
-                stream_json_capability: None,
-            },
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_codex_resolved_path".into(),
-                message: "hello".into(),
-            })
-            .unwrap();
-        let command_path = OsString::from(env_value(&start.command, "PATH").unwrap());
-        let paths = env::split_paths(&command_path).collect::<Vec<_>>();
-
-        assert_eq!(start.command.program, selected_provider.to_string_lossy());
-        assert_eq!(
-            paths.first(),
-            dirs::home_dir().map(|home| home.join(".pedelec")).as_ref()
-        );
-        assert!(paths.contains(&resolved_dir));
-    }
-
-    #[test]
     fn refresh_stores_the_exact_override_path_used_for_the_scan() {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "codex");
@@ -990,1952 +743,6 @@ mod tests {
         runtime.refresh_providers();
 
         assert_eq!(runtime.provider_resolved_path, Some(provider_path));
-    }
-
-    #[test]
-    fn codex_resume_uses_explicit_session_id_and_not_last() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_codex_resume",
-            ProviderCode::Codex,
-            Some("123e4567-e89b-12d3-a456-426614174000".into()),
-            None,
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_codex_resume".into(),
-                message: "continue".into(),
-            })
-            .unwrap();
-
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["-c", "skills.include_instructions=false"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args[0] == "-c" && args[1].starts_with("developer_instructions=")));
-        assert!(start.command.args.windows(2).any(|args| {
-            args == [
-                "--cd",
-                temp.path()
-                    .join("workspace")
-                    .join("thread_codex_resume")
-                    .to_str()
-                    .unwrap(),
-            ]
-        }));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| { args == ["resume", "123e4567-e89b-12d3-a456-426614174000"] }));
-        assert!(!start.command.args.iter().any(|arg| arg == "--last"));
-        assert_eq!(start.command.prompt, "continue");
-        assert_eq!(start.command.stdin, "continue");
-        assert_provider_instruction_absent(&start.command);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn provider_run_commands_externalize_verbatim_workspace_paths_and_keep_canonical_cwd() {
-        let cases = [
-            ("codex", ProviderCode::Codex, Some("gpt-5")),
-            (
-                "antigravity",
-                ProviderCode::Antigravity,
-                Some("antigravity-2.5-pro"),
-            ),
-            (
-                "opencode",
-                ProviderCode::OpenCode,
-                Some("ollama/qwen2.5-coder:14b"),
-            ),
-            ("cursor", ProviderCode::Cursor, Some("gpt-5")),
-            ("claude", ProviderCode::Claude, Some("sonnet")),
-        ];
-        let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
-        let external = r"C:\Users\kaoru\OneDrive\桌面\test";
-
-        for (name, provider, model) in cases {
-            let temp = tempfile::tempdir().unwrap();
-            let thread_id = format!("thread_externalize_run_{name}");
-            let mut runtime = runtime_with_provider_thread(
-                temp.path(),
-                &thread_id,
-                provider.clone(),
-                None,
-                model.map(str::to_string),
-            );
-            runtime
-                .thread_manager
-                .thread_mut(&thread_id)
-                .unwrap()
-                .workspace_path = verbatim.clone();
-
-            let start = runtime
-                .begin_send_text(SendTextInput {
-                    thread_id,
-                    message: "hello".into(),
-                })
-                .unwrap();
-
-            assert_eq!(start.command.cwd, verbatim);
-            assert_eq!(
-                env_value(&start.command, "PEDELEC_WORKSPACE_PATH"),
-                Some(external)
-            );
-            assert_eq!(env_value(&start.command, "PEDELEC_SANDBOX_PATH"), None);
-            assert!(!start.command.args.iter().any(|arg| arg.contains(r"\\?\")));
-            assert!(!start.command.prompt.contains(r"\\?\"));
-            assert!(start.command.prompt.contains(external));
-
-            let path_flag = match provider {
-                ProviderCode::Codex => Some("--cd"),
-                ProviderCode::OpenCode => Some("--dir"),
-                ProviderCode::Cursor => Some("--workspace"),
-                ProviderCode::Ollama => unreachable!("Ollama has no legacy command spec"),
-                ProviderCode::Antigravity | ProviderCode::Claude => None,
-            };
-            if let Some(path_flag) = path_flag {
-                assert!(start
-                    .command
-                    .args
-                    .windows(2)
-                    .any(|args| args == [path_flag, external]));
-            } else {
-                assert!(!start.command.args.iter().any(|arg| arg == external));
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn provider_resume_commands_externalize_verbatim_workspace_paths_and_keep_canonical_cwd() {
-        let cases = [
-            ("codex", ProviderCode::Codex, Some("gpt-5"), "codex-session"),
-            (
-                "opencode",
-                ProviderCode::OpenCode,
-                Some("ollama/qwen2.5-coder:14b"),
-                "opencode-session",
-            ),
-            (
-                "cursor",
-                ProviderCode::Cursor,
-                Some("gpt-5"),
-                "cursor-session",
-            ),
-        ];
-        let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
-        let external = r"C:\Users\kaoru\OneDrive\桌面\test";
-
-        for (name, provider, model, provider_session_id) in cases {
-            let temp = tempfile::tempdir().unwrap();
-            let thread_id = format!("thread_externalize_resume_{name}");
-            let mut runtime = runtime_with_provider_thread(
-                temp.path(),
-                &thread_id,
-                provider.clone(),
-                Some(provider_session_id.into()),
-                model.map(str::to_string),
-            );
-            runtime
-                .thread_manager
-                .thread_mut(&thread_id)
-                .unwrap()
-                .workspace_path = verbatim.clone();
-
-            let start = runtime
-                .begin_send_text(SendTextInput {
-                    thread_id,
-                    message: "continue".into(),
-                })
-                .unwrap();
-
-            assert_eq!(start.command.cwd, verbatim);
-            assert_eq!(
-                env_value(&start.command, "PEDELEC_WORKSPACE_PATH"),
-                Some(external)
-            );
-            assert_eq!(env_value(&start.command, "PEDELEC_SANDBOX_PATH"), None);
-            assert!(!start.command.args.iter().any(|arg| arg.contains(r"\\?\")));
-            assert!(!start.command.prompt.contains(r"\\?\"));
-
-            let path_flag = match provider {
-                ProviderCode::Codex => "--cd",
-                ProviderCode::OpenCode => "--dir",
-                ProviderCode::Cursor => "--workspace",
-                ProviderCode::Ollama | ProviderCode::Antigravity | ProviderCode::Claude => {
-                    unreachable!()
-                }
-            };
-            assert!(start
-                .command
-                .args
-                .windows(2)
-                .any(|args| args == [path_flag, external]));
-        }
-    }
-
-    #[test]
-    fn antigravity_new_command_passes_prompt_as_an_argument() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_new",
-            ProviderCode::Antigravity,
-            None,
-            Some("antigravity-2.5-pro".into()),
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_antigravity_new".into(),
-                message: "hello".into(),
-            })
-            .unwrap();
-
-        assert_eq!(start.command.program, "agy");
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--model", "antigravity-2.5-pro"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--output-format", "stream-json"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args[0] == "-p" && args[1] == start.command.prompt));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--mode", "accept-edits"]));
-        assert!(start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "--dangerously-skip-permissions"));
-        assert!(start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "--disable-slash-commands"));
-        assert!(!start.command.args.iter().any(|arg| arg == "--conversation"));
-        assert!(!start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "User message: hello"));
-        assert_provider_instruction_present(&start.command);
-        assert!(start.command.prompt.ends_with("hello"));
-        assert!(start.command.stdin.is_empty());
-    }
-
-    #[test]
-    fn antigravity_resume_passes_prompt_and_uses_explicit_conversation_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_resume",
-            ProviderCode::Antigravity,
-            Some("123e4567-e89b-12d3-a456-426614174000".into()),
-            None,
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_antigravity_resume".into(),
-                message: "continue".into(),
-            })
-            .unwrap();
-
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| { args == ["--conversation", "123e4567-e89b-12d3-a456-426614174000"] }));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--output-format", "stream-json"]));
-        assert!(!start.command.args.iter().any(|arg| arg == "latest"));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args[0] == "-p" && args[1] == "continue"));
-        assert!(start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "--disable-slash-commands"));
-        assert!(!start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "User message: continue"));
-        assert_eq!(start.command.prompt, "continue");
-        assert!(start.command.stdin.is_empty());
-        assert_provider_instruction_absent(&start.command);
-    }
-
-    #[test]
-    fn antigravity_run_preserves_multiline_markdown_json_and_quotes_in_prompt_argument() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_special",
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let message =
-            "line 1\n\n```json\n{\"quote\":\"hello \\\"world\\\"\",\"markdown\":\"**bold**\"}\n```";
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_antigravity_special".into(),
-                message: message.into(),
-            })
-            .unwrap();
-
-        assert!(start.command.stdin.is_empty());
-        assert!(start.command.prompt.ends_with(message));
-        assert_provider_instruction_present(&start.command);
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args[0] == "-p" && args[1].ends_with(message)));
-    }
-
-    #[test]
-    fn antigravity_resume_preserves_multiline_markdown_json_and_quotes_in_prompt_argument() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_resume_special",
-            ProviderCode::Antigravity,
-            Some("123e4567-e89b-12d3-a456-426614174000".into()),
-            Some("antigravity-2.5-pro".into()),
-        );
-        let message =
-            "line 1\n\n```json\n{\"quote\":\"hello \\\"world\\\"\",\"markdown\":\"**bold**\"}\n```";
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_antigravity_resume_special".into(),
-                message: message.into(),
-            })
-            .unwrap();
-
-        assert!(start.command.stdin.is_empty());
-        assert_eq!(start.command.prompt, message);
-        assert_provider_instruction_absent(&start.command);
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--conversation", "123e4567-e89b-12d3-a456-426614174000"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--model", "antigravity-2.5-pro"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args[0] == "-p" && args[1] == message));
-    }
-
-    #[test]
-    fn antigravity_run_allows_prompt_at_utf16_boundary_and_counts_emoji_as_two_units() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_antigravity_prompt_boundary";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let message = antigravity_run_message_with_final_utf16_length(
-            &runtime,
-            thread_id,
-            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS,
-            true,
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message,
-            })
-            .unwrap();
-
-        assert_eq!(
-            start.command.prompt.encode_utf16().count(),
-            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS
-        );
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args[0] == "-p" && args[1] == start.command.prompt));
-    }
-
-    #[test]
-    fn antigravity_run_rejects_prompt_over_utf16_limit_and_keeps_thread_idle() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_antigravity_prompt_too_large";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let message = antigravity_run_message_with_final_utf16_length(
-            &runtime,
-            thread_id,
-            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
-            true,
-        );
-
-        let error = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message,
-            })
-            .unwrap_err();
-
-        assert_antigravity_prompt_too_large_error(
-            error,
-            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
-        );
-        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
-    }
-
-    #[test]
-    fn antigravity_run_checks_final_prompt_instead_of_raw_user_message() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_antigravity_final_prompt_limit";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let message = antigravity_run_message_with_final_utf16_length(
-            &runtime,
-            thread_id,
-            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
-            false,
-        );
-        assert!(message.encode_utf16().count() < ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS);
-
-        let error = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message,
-            })
-            .unwrap_err();
-
-        assert_antigravity_prompt_too_large_error(
-            error,
-            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
-        );
-    }
-
-    #[test]
-    fn antigravity_resume_allows_prompt_at_utf16_boundary() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_antigravity_resume_prompt_boundary";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Antigravity,
-            Some("conversation_boundary".into()),
-            None,
-        );
-        let message = format!(
-            "{}😀",
-            "a".repeat(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS - 2)
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message,
-            })
-            .unwrap();
-
-        assert_eq!(
-            start.command.prompt.encode_utf16().count(),
-            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS
-        );
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args[0] == "-p" && args[1] == start.command.prompt));
-    }
-
-    #[test]
-    fn antigravity_resume_rejects_prompt_over_utf16_limit() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_antigravity_resume_prompt_too_large";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Antigravity,
-            Some("conversation_too_large".into()),
-            None,
-        );
-        let message = "a".repeat(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1);
-
-        let error = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message,
-            })
-            .unwrap_err();
-
-        assert_antigravity_prompt_too_large_error(
-            error,
-            ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1,
-        );
-        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
-    }
-
-    #[test]
-    fn antigravity_prepare_rejects_an_overlong_final_prompt_before_running() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_antigravity_prepare_prompt_too_large";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let oversized_guidance = "g".repeat(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1);
-        runtime.tool_registry.insert(
-            thread_id,
-            ToolRegistry::from_skills_input(Some(&CreateThreadSkillsInput {
-                guidance: oversized_guidance,
-                tools: vec![],
-            }))
-            .unwrap(),
-        );
-
-        let error = runtime
-            .begin_prepare_thread(PrepareThreadInput {
-                thread_id: thread_id.into(),
-            })
-            .unwrap_err();
-
-        assert!(error.code == error_codes::PROVIDER_PROMPT_TOO_LARGE);
-        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
-    }
-
-    #[test]
-    fn codex_large_stdin_prompt_is_not_rejected_by_antigravity_limit() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_codex_large_prompt";
-        let mut runtime =
-            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        let message = "c".repeat(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS + 1);
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message,
-            })
-            .unwrap();
-
-        assert!(
-            start.command.stdin.encode_utf16().count() > ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS
-        );
-        assert_eq!(start.command.prompt, start.command.stdin);
-        assert_eq!(start.command.args.last().map(String::as_str), Some("-"));
-    }
-
-    #[test]
-    fn opencode_new_command_uses_json_dir_model_and_stdin_prompt() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_opencode_new",
-            ProviderCode::OpenCode,
-            None,
-            Some("ollama/qwen2.5-coder:14b".into()),
-        );
-        let message = "line 1\n{\"quote\":\"hello \\\"world\\\"\"}\n中文";
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_opencode_new".into(),
-                message: message.into(),
-            })
-            .unwrap();
-
-        let workspace_path = temp.path().join("workspace").join("thread_opencode_new");
-        assert_eq!(start.command.program, "opencode");
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| { args == ["--agent", PEDELEC_OPENCODE_AGENT] }));
-        assert_eq!(start.command.args.last().map(String::as_str), Some("-"));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--dir", workspace_path.to_str().unwrap()]));
-        let config: Value =
-            serde_json::from_str(env_value(&start.command, OPENCODE_CONFIG_CONTENT_ENV).unwrap())
-                .unwrap();
-        assert_eq!(config["agent"][PEDELEC_OPENCODE_AGENT]["mode"], "primary");
-        assert!(config["agent"][PEDELEC_OPENCODE_AGENT]["prompt"]
-            .as_str()
-            .unwrap()
-            .contains("Pedelec is the host application"));
-        assert_eq!(start.command.cwd, workspace_path);
-        assert!(start.command.stdin.ends_with(message));
-        assert_provider_instruction_present(&start.command);
-        assert!(!start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == &start.command.stdin));
-        assert_env(&start.command, "PEDELEC_PROVIDER", "opencode");
-        assert_opencode_native_skills_policy(&start.command);
-    }
-
-    #[test]
-    fn opencode_resume_uses_explicit_session_id_and_model() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_opencode_resume",
-            ProviderCode::OpenCode,
-            Some("ses_123".into()),
-            Some("anthropic/claude-sonnet-4".into()),
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_opencode_resume".into(),
-                message: "continue".into(),
-            })
-            .unwrap();
-
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--session", "ses_123"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--model", "anthropic/claude-sonnet-4"]));
-        assert!(!start.command.args.iter().any(|arg| arg == "--last"));
-        assert_eq!(start.command.prompt, "continue");
-        assert_eq!(start.command.stdin, "continue");
-        assert_provider_instruction_absent(&start.command);
-        assert_opencode_native_skills_policy(&start.command);
-    }
-
-    #[test]
-    fn opencode_permission_overlay_only_denies_skill_and_preserves_existing_permissions() {
-        let merged = build_opencode_permission_overlay(Some(
-            r#"{"read":"allow","edit":"allow","bash":"ask","skill":{"*":"allow"}}"#,
-        ))
-        .unwrap();
-        let merged: Value = serde_json::from_str(&merged).unwrap();
-
-        assert_eq!(merged.get("read").and_then(Value::as_str), Some("allow"));
-        assert_eq!(merged.get("edit").and_then(Value::as_str), Some("allow"));
-        assert_eq!(merged.get("bash").and_then(Value::as_str), Some("ask"));
-        assert_eq!(merged.get("skill").and_then(Value::as_str), Some("deny"));
-        assert_ne!(merged.get("read").and_then(Value::as_str), Some("deny"));
-        assert_ne!(merged.get("edit").and_then(Value::as_str), Some("deny"));
-
-        let defaults: Value =
-            serde_json::from_str(&build_opencode_permission_overlay(None).unwrap()).unwrap();
-        assert_eq!(defaults.get("skill").and_then(Value::as_str), Some("deny"));
-        assert!(build_opencode_permission_overlay(Some("not-json")).is_none());
-        assert!(build_opencode_permission_overlay(Some(r#"["allow"]"#)).is_none());
-    }
-
-    #[test]
-    fn opencode_bootstrap_merges_inline_config_and_rejects_invalid_json() {
-        let command = CommandSpec {
-            program: "opencode".into(),
-            args: vec![],
-            cwd: PathBuf::from("."),
-            env: vec![(
-                OPENCODE_CONFIG_CONTENT_ENV.into(),
-                r#"{"theme":"dark","agent":{"custom":{"mode":"subagent"}}}"#.into(),
-            )],
-            prompt: String::new(),
-            stdin: String::new(),
-        };
-        let merged: Value =
-            serde_json::from_str(&merge_opencode_runtime_agent_config(&command).unwrap()).unwrap();
-        assert_eq!(merged["theme"], "dark");
-        assert_eq!(merged["agent"]["custom"]["mode"], "subagent");
-        assert_eq!(merged["agent"][PEDELEC_OPENCODE_AGENT]["mode"], "primary");
-        assert!(merged["agent"][PEDELEC_OPENCODE_AGENT]["prompt"]
-            .as_str()
-            .unwrap()
-            .contains("Pedelec is the host application"));
-
-        let invalid = CommandSpec {
-            env: vec![(OPENCODE_CONFIG_CONTENT_ENV.into(), "not-json".into())],
-            ..command
-        };
-        assert_eq!(
-            merge_opencode_runtime_agent_config(&invalid)
-                .unwrap_err()
-                .code,
-            error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID
-        );
-    }
-
-    #[test]
-    fn opencode_agent_selector_has_pedelec_precedence_over_effort_args() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_opencode_agent_precedence",
-            ProviderCode::OpenCode,
-            None,
-            Some("model".into()),
-        );
-        runtime
-            .thread_manager
-            .thread_mut("thread_opencode_agent_precedence")
-            .unwrap()
-            .effort_args
-            .extend([
-                "--agent".into(),
-                "user-agent".into(),
-                "--agent=other".into(),
-            ]);
-
-        let command = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_opencode_agent_precedence".into(),
-                message: "hello".into(),
-            })
-            .unwrap()
-            .command;
-        assert_eq!(
-            command
-                .args
-                .windows(2)
-                .filter(|args| args[0] == "--agent")
-                .count(),
-            1
-        );
-        assert!(command
-            .args
-            .windows(2)
-            .any(|args| args == ["--agent", PEDELEC_OPENCODE_AGENT]));
-    }
-
-    #[test]
-    fn antigravity_supported_version_ensures_reserved_workspace_agent_idempotently() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_antigravity_agent_supported";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        runtime.provider_scan.insert(
-            ProviderCode::Antigravity,
-            ProviderCli {
-                path: None,
-                version: Some(ProviderVersion(vec![1, 1, 6])),
-                error: None,
-                bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
-                    privileged_bootstrap: ProviderBootstrapMode::AntigravityWorkspaceAgent,
-                }),
-                app_server_capability: None,
-                acp_capability: None,
-                stream_json_capability: None,
-            },
-        );
-        let workspace = runtime.thread_workspace_path(thread_id).unwrap();
-        let agent_path = workspace
-            .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
-            .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
-        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
-        fs::write(&agent_path, "stale").unwrap();
-
-        let first = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message: "hello".into(),
-            })
-            .unwrap()
-            .command;
-        let expected = fs::read_to_string(&agent_path).unwrap();
-        assert!(expected.contains("name: pedelec-runtime"));
-        assert!(expected.contains("mainAgent: true"));
-        assert!(expected.contains("subagent: false"));
-        assert!(expected.contains("Pedelec is the host application"));
-        assert!(first
-            .args
-            .windows(2)
-            .any(|args| args == ["--agent", PEDELEC_OPENCODE_AGENT]));
-
-        runtime.thread_manager.thread_mut(thread_id).unwrap().status = ThreadStatus::Idle;
-        let prepare = runtime
-            .begin_prepare_thread(PrepareThreadInput {
-                thread_id: thread_id.into(),
-            })
-            .unwrap()
-            .command
-            .unwrap();
-        assert!(prepare
-            .args
-            .windows(2)
-            .any(|args| args == ["--agent", PEDELEC_OPENCODE_AGENT]));
-        runtime.thread_manager.thread_mut(thread_id).unwrap().status = ThreadStatus::Idle;
-        runtime
-            .thread_manager
-            .provider_state_mut(thread_id)
-            .unwrap()
-            .provider_session_id = Some("agy-session".into());
-        let second = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message: "again".into(),
-            })
-            .unwrap()
-            .command;
-        assert_eq!(fs::read_to_string(&agent_path).unwrap(), expected);
-        assert_eq!(
-            second
-                .args
-                .windows(2)
-                .filter(|args| args[0] == "--agent")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn antigravity_supported_version_writes_agent_into_custom_workspace() {
-        let temp = tempfile::tempdir().unwrap();
-        let custom_workspace = temp.path().join("custom-project");
-        let mut runtime = CoreRuntime {
-            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
-            ..CoreRuntime::default()
-        };
-        let thread_id = runtime
-            .create_thread(CreateThreadInput {
-                provider: ProviderCode::Antigravity,
-                effort_level: None,
-                skills: Some(sample_skills_input()),
-                workspace: Some(CreateThreadWorkspaceInput {
-                    path: custom_workspace.clone(),
-                }),
-            })
-            .unwrap()
-            .thread_id;
-        runtime.provider_scan.insert(
-            ProviderCode::Antigravity,
-            ProviderCli {
-                path: None,
-                version: Some(ProviderVersion(vec![1, 1, 6])),
-                error: None,
-                bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
-                    privileged_bootstrap: ProviderBootstrapMode::AntigravityWorkspaceAgent,
-                }),
-                app_server_capability: None,
-                acp_capability: None,
-                stream_json_capability: None,
-            },
-        );
-
-        let command = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.clone(),
-                message: "hello".into(),
-            })
-            .unwrap()
-            .command;
-        let thread = runtime.thread_manager.thread(&thread_id).unwrap();
-        let agent_path = thread
-            .workspace_path
-            .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
-            .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
-
-        assert_eq!(
-            thread.workspace_path,
-            custom_workspace.canonicalize().unwrap()
-        );
-        assert!(agent_path.is_file());
-        assert!(fs::read_to_string(agent_path)
-            .unwrap()
-            .contains("Pedelec is the host application"));
-        assert!(command
-            .args
-            .windows(2)
-            .any(|args| args == ["--agent", PEDELEC_OPENCODE_AGENT]));
-    }
-
-    #[test]
-    fn antigravity_old_version_falls_back_without_workspace_agent_asset() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_antigravity_agent_old";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        runtime.provider_scan.insert(
-            ProviderCode::Antigravity,
-            ProviderCli {
-                path: None,
-                version: Some(ProviderVersion(vec![1, 1, 5])),
-                error: None,
-                bootstrap_capabilities: None,
-                app_server_capability: None,
-                acp_capability: None,
-                stream_json_capability: None,
-            },
-        );
-        let command = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message: "hello".into(),
-            })
-            .unwrap()
-            .command;
-        assert!(!command.args.iter().any(|arg| arg == "--agent"));
-        assert!(!runtime
-            .thread_workspace_path(thread_id)
-            .unwrap()
-            .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
-            .exists());
-        assert!(command.prompt.contains("[Pedelec Host Bootstrap]"));
-        assert!(command.prompt.contains("[Pedelec Host Context]"));
-        assert!(command.prompt.contains("[User Message]"));
-        assert!(command.prompt.contains("PEDELEC_PREPARED"));
-        assert!(!command.prompt.contains("[Pedelec Runtime Rules]"));
-
-        runtime.thread_manager.thread_mut(thread_id).unwrap().status = ThreadStatus::Idle;
-        let prepare = runtime
-            .begin_prepare_thread(PrepareThreadInput {
-                thread_id: thread_id.into(),
-            })
-            .unwrap()
-            .command
-            .unwrap();
-        assert!(!prepare.args.iter().any(|arg| arg == "--agent"));
-        assert!(prepare.prompt.contains("[Pedelec Host Bootstrap]"));
-        assert!(prepare.prompt.contains("[Pedelec Host Context]"));
-        assert!(prepare.prompt.contains("PEDELEC_PREPARED"));
-        assert!(prepare.prompt.ends_with("[Session Preparation]"));
-        assert!(!prepare.prompt.contains("After preparation is complete"));
-    }
-
-    #[test]
-    fn antigravity_sessions_sharing_a_workspace_can_ensure_the_agent_asset() {
-        let temp = tempfile::tempdir().unwrap();
-        let first_id = "thread_antigravity_shared_first";
-        let second_id = "thread_antigravity_shared_second";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            first_id,
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let first = runtime.thread_manager.thread(first_id).unwrap().clone();
-        let mut second = first.clone();
-        second.thread_id = second_id.into();
-        second.status = ThreadStatus::Idle;
-        second.process_id = None;
-        runtime.thread_manager.insert_thread(
-            second,
-            ProviderAdapterState {
-                provider_session_id: None,
-                active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
-            },
-        );
-        runtime.tool_registry.insert(
-            second_id,
-            ToolRegistry::from_skills_input(Some(&sample_skills_input())).unwrap(),
-        );
-
-        runtime
-            .begin_send_text(SendTextInput {
-                thread_id: first_id.into(),
-                message: "first".into(),
-            })
-            .unwrap();
-        runtime.thread_manager.thread_mut(first_id).unwrap().status = ThreadStatus::Idle;
-        runtime
-            .begin_send_text(SendTextInput {
-                thread_id: second_id.into(),
-                message: "second".into(),
-            })
-            .unwrap();
-
-        let agent_path = first
-            .workspace_path
-            .join(PEDELEC_ANTIGRAVITY_AGENT_DIR)
-            .join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
-        assert!(agent_path.is_file());
-        assert!(fs::read_to_string(agent_path)
-            .unwrap()
-            .contains("Pedelec is the host application"));
-    }
-
-    #[test]
-    fn opencode_parser_updates_session_and_assistant_text() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_opencode_parse",
-            ProviderCode::OpenCode,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_opencode_parse");
-
-        runtime.emit_provider_stdout(
-            "thread_opencode_parse",
-            r#"{"type":"session.created","id":"ses_123"}"#.to_string() + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_opencode_parse",
-            r#"{"type":"assistant.text.delta","delta":"hello"}"#.to_string() + "\n",
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_opencode_parse")
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            Some("ses_123")
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "hello")
-        ));
-    }
-
-    #[test]
-    fn opencode_invalid_json_emits_structured_error_without_panic() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_opencode_invalid_json",
-            ProviderCode::OpenCode,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_opencode_invalid_json");
-
-        runtime.emit_provider_stdout("thread_opencode_invalid_json", "{not-json}\n".into());
-
-        assert_eq!(
-            runtime.thread_status("thread_opencode_invalid_json"),
-            Some(ThreadStatus::Error)
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::Error {
-                source: ThreadErrorSource::Provider { provider: ProviderCode::OpenCode }, error, ..
-            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)));
-    }
-
-    #[test]
-    fn cursor_new_command_uses_cursor_agent_workspace_model_json_and_stdin_prompt() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_cursor_new",
-            ProviderCode::Cursor,
-            None,
-            Some("gpt-5".into()),
-        );
-        let message = "line 1\n{\"quote\":\"hello \\\"world\\\"\"}\n中文";
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_cursor_new".into(),
-                message: message.into(),
-            })
-            .unwrap();
-
-        let workspace_path = temp.path().join("workspace").join("thread_cursor_new");
-        assert_eq!(start.command.program, "cursor-agent");
-        assert_eq!(
-            start.command.args,
-            vec![
-                "--workspace",
-                workspace_path.to_str().unwrap(),
-                "--output-format",
-                "stream-json",
-                "--force",
-                "--trust",
-                "--model",
-                "gpt-5",
-            ]
-        );
-        assert_eq!(start.command.cwd, workspace_path);
-        assert!(start.command.stdin.ends_with(message));
-        assert!(start.command.prompt.contains("[Pedelec Host Bootstrap]"));
-        assert!(start.command.prompt.contains("[Pedelec Host Context]"));
-        assert!(start.command.prompt.contains("[User Message]"));
-        assert!(start.command.prompt.contains("PEDELEC_PREPARED"));
-        assert!(!start.command.prompt.contains("[Pedelec Runtime Rules]"));
-        assert!(!workspace_path.join(".cursor").exists());
-        assert!(!workspace_path.join("AGENTS.md").exists());
-        assert!(!workspace_path.join("CLAUDE.md").exists());
-        assert_provider_instruction_present(&start.command);
-        assert!(!start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == &start.command.stdin));
-        assert_env(&start.command, "PEDELEC_PROVIDER", "cursor");
-    }
-
-    #[test]
-    fn cursor_resume_uses_explicit_session_id_and_omits_provider_instruction() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_cursor_resume",
-            ProviderCode::Cursor,
-            Some("cur_123".into()),
-            Some("gpt-5".into()),
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_cursor_resume".into(),
-                message: "continue".into(),
-            })
-            .unwrap();
-
-        assert_eq!(start.command.program, "cursor-agent");
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--resume", "cur_123"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--model", "gpt-5"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--output-format", "stream-json"]));
-        assert_eq!(start.command.prompt, "continue");
-        assert_eq!(start.command.stdin, "continue");
-        assert!(!start.command.prompt.contains("[Pedelec Host Bootstrap]"));
-        assert!(!start.command.prompt.contains("[Pedelec Host Context]"));
-        assert_provider_instruction_absent(&start.command);
-    }
-
-    #[test]
-    fn cursor_prepare_uses_fallback_bootstrap_and_short_prepare_task() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_cursor_prepare",
-            ProviderCode::Cursor,
-            None,
-            None,
-        );
-
-        let command = runtime
-            .begin_prepare_thread(PrepareThreadInput {
-                thread_id: "thread_cursor_prepare".into(),
-            })
-            .unwrap()
-            .command
-            .unwrap();
-
-        assert!(command.prompt.contains("[Pedelec Host Bootstrap]"));
-        assert!(command.prompt.contains("[Pedelec Host Context]"));
-        assert!(command.prompt.contains("PEDELEC_PREPARED"));
-        assert!(!command.prompt.contains("[Pedelec Runtime Rules]"));
-        assert!(command.prompt.ends_with("[Session Preparation]"));
-        assert!(!command.prompt.contains("After preparation is complete"));
-        assert!(!runtime
-            .thread_workspace_path("thread_cursor_prepare")
-            .unwrap()
-            .join(".cursor")
-            .exists());
-        assert!(!runtime
-            .thread_workspace_path("thread_cursor_prepare")
-            .unwrap()
-            .join("AGENTS.md")
-            .exists());
-        assert!(!runtime
-            .thread_workspace_path("thread_cursor_prepare")
-            .unwrap()
-            .join("CLAUDE.md")
-            .exists());
-    }
-
-    #[test]
-    fn cursor_parser_updates_session_and_assistant_text() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_cursor_parse",
-            ProviderCode::Cursor,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_cursor_parse");
-
-        runtime.emit_provider_stdout(
-            "thread_cursor_parse",
-            r#"{"type":"assistant","subtype":"delta","text":"hello","session_id":"cur_123"}"#
-                .to_string()
-                + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_cursor_parse",
-            r#"{"message":{"type":"assistant","content":[{"type":"text","text":" world"}]},"conversationId":"cur_123"}"#
-                .to_string()
-                + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_cursor_parse",
-            r#"{"role":"assistant","text":"role only"}"#.to_string() + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_cursor_parse",
-            r#"{"type":"text","text":"text only"}"#.to_string() + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_cursor_parse",
-            r#"{"subtype":"delta","text":"delta only"}"#.to_string() + "\n",
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_cursor_parse")
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            Some("cur_123")
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "hello")
-        ));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "world")
-        ));
-        assert!(events.iter().all(
-            |event| !matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "role only" || text == "text only" || text == "delta only")
-        ));
-    }
-
-    #[test]
-    fn cursor_invalid_json_emits_structured_error_without_panic() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_cursor_invalid_json",
-            ProviderCode::Cursor,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_cursor_invalid_json");
-
-        runtime.emit_provider_stdout("thread_cursor_invalid_json", "{not-json}\n".into());
-
-        assert_eq!(
-            runtime.thread_status("thread_cursor_invalid_json"),
-            Some(ThreadStatus::Error)
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::Error {
-                source: ThreadErrorSource::Provider { provider: ProviderCode::Cursor }, error, ..
-            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)));
-    }
-
-    #[test]
-    fn claude_new_command_uses_stream_json_permissions_model_and_stdin_prompt() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_new",
-            ProviderCode::Claude,
-            None,
-            Some("sonnet".into()),
-        );
-        let message = "line 1\n{\"quote\":\"hello \\\"world\\\"\"}\n中文";
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_claude_new".into(),
-                message: message.into(),
-            })
-            .unwrap();
-
-        let workspace_path = temp.path().join("workspace").join("thread_claude_new");
-        assert_eq!(start.command.program, "claude");
-        assert!(start.command.args.windows(2).any(|args| {
-            args[0] == "--append-system-prompt" && args[1] == build_pedelec_bootstrap_instruction()
-        }));
-        assert!(!start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "--system-prompt"));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--model", "sonnet"]));
-        assert!(start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "--disable-slash-commands"));
-        assert_eq!(start.command.cwd, workspace_path);
-        assert!(start.command.stdin.ends_with(message));
-        assert_provider_instruction_present(&start.command);
-        assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
-        assert!(!start.command.args.iter().any(|arg| arg == "--continue"));
-        assert!(!start.command.args.iter().any(|arg| arg == "--add-dir"));
-        assert_env(&start.command, "PEDELEC_PROVIDER", "claude");
-    }
-
-    #[test]
-    fn claude_resume_uses_explicit_session_id_and_omits_provider_instruction() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_resume",
-            ProviderCode::Claude,
-            Some("4fab02ca-67b9-489d-8b89-0b1f0b9550e6".into()),
-            Some("sonnet".into()),
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_claude_resume".into(),
-                message: "continue".into(),
-            })
-            .unwrap();
-
-        assert!(start.command.args.windows(2).any(|args| {
-            args[0] == "--append-system-prompt" && args[1] == build_pedelec_bootstrap_instruction()
-        }));
-        assert!(!start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "--system-prompt"));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["--resume", "4fab02ca-67b9-489d-8b89-0b1f0b9550e6"]));
-        assert!(start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "--disable-slash-commands"));
-        assert_eq!(start.command.prompt, "continue");
-        assert_eq!(start.command.stdin, "continue");
-        assert_provider_instruction_absent(&start.command);
-        assert!(!start.command.args.iter().any(|arg| arg == "--continue"));
-        assert!(!start.command.args.iter().any(|arg| arg == "--session-id"));
-        assert!(!start.command.args.iter().any(|arg| arg == "--add-dir"));
-    }
-
-    #[test]
-    fn claude_parser_updates_session_from_init_and_assistant_text() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_parse",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_claude_parse");
-
-        runtime.emit_provider_stdout(
-            "thread_claude_parse",
-            r#"{"type":"system","subtype":"init","cwd":"C:\\Users\\kaoru","session_id":"4fab02ca-67b9-489d-8b89-0b1f0b9550e6","tools":[]}"#
-                .to_string()
-                + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_claude_parse",
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#
-                .to_string()
-                + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_claude_parse",
-            r#"{"type":"user","session_id":"do-not-use","message":{"role":"user","content":[{"type":"text","text":"ignore"}]}}"#
-                .to_string()
-                + "\n",
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_claude_parse")
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            Some("4fab02ca-67b9-489d-8b89-0b1f0b9550e6")
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "hello")
-        ));
-        assert!(events.iter().all(
-            |event| !matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "ignore")
-        ));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::RawStdout { text, .. } if text.contains("do-not-use"))
-        ));
-    }
-
-    #[test]
-    fn claude_stdout_filter_drops_large_chunked_user_tool_result_and_recovers() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_tool_result",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_claude_tool_result");
-        let payload = "BASE64_PAYLOAD_MARKER".repeat(8 * 1024);
-        let assistant =
-            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"after image"}]}}"#
-                .to_string()
-                + "\n";
-
-        runtime.emit_provider_stdout("thread_claude_tool_result", r#"{"ty"#.into());
-        runtime.emit_provider_stdout(
-            "thread_claude_tool_result",
-            r#"pe":"user","message":{"role":"user","content":[{"ty"#.into(),
-        );
-        runtime.emit_provider_stdout("thread_claude_tool_result", r#"pe":"tool_res"#.into());
-        runtime.emit_provider_stdout(
-            "thread_claude_tool_result",
-            r#"ult","content":[{"type":"image","source":{"type":"base64","data":""#.into(),
-        );
-        let midpoint = payload.len() / 2;
-        runtime.emit_provider_stdout("thread_claude_tool_result", payload[..midpoint].to_string());
-        runtime.emit_provider_stdout(
-            "thread_claude_tool_result",
-            payload[midpoint..].to_string() + r#""}}]}]}]}}"# + "\r\n" + &assistant,
-        );
-
-        assert_eq!(
-            runtime.thread_status("thread_claude_tool_result"),
-            Some(ThreadStatus::Idle)
-        );
-        assert_eq!(
-            runtime
-                .provider_state("thread_claude_tool_result")
-                .unwrap()
-                .provider_session_id,
-            None
-        );
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = events
-            .iter()
-            .filter_map(|event| match event {
-                ThreadEvent::RawStdout { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(raw_stdout, assistant);
-        assert!(!raw_stdout.contains("BASE64_PAYLOAD_MARKER"));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "after image")
-        ));
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
-    }
-
-    #[test]
-    fn claude_stdout_filter_redacts_large_chunked_thinking_signature_and_keeps_text() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_thinking_signature",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_claude_thinking_signature");
-        let payload = "SIGNATURE_PAYLOAD_MARKER".repeat(8 * 1024);
-        let line = format!(
-            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"","signature":"{payload}"}},{{"type":"text","text":"visible answer"}}]}}}}"#
-        ) + "\n";
-
-        emit_claude_in_chunks(&mut runtime, "thread_claude_thinking_signature", &line, 257);
-
-        assert_eq!(
-            runtime.thread_status("thread_claude_thinking_signature"),
-            Some(ThreadStatus::Idle)
-        );
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = claude_raw_stdout(&events);
-        assert!(!raw_stdout.contains("SIGNATURE_PAYLOAD_MARKER"));
-        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
-        assert!(serde_json::from_str::<serde_json::Value>(raw_stdout.trim()).is_ok());
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "visible answer")
-        ));
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
-    }
-
-    #[test]
-    fn claude_stdout_filter_redacts_signature_key_split_across_chunks() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_signature_key_split",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_claude_signature_key_split");
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","signature":"SIGNATURE_KEY_SPLIT_MARKER","thinking":""}]}}"#.to_string() + "\n";
-        let key_start = line.find(r#""signature""#).unwrap();
-        let split = key_start + 4;
-        runtime.emit_provider_stdout(
-            "thread_claude_signature_key_split",
-            line[..split].to_string(),
-        );
-        runtime.emit_provider_stdout(
-            "thread_claude_signature_key_split",
-            line[split..].to_string(),
-        );
-
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = claude_raw_stdout(&events);
-        assert!(!raw_stdout.contains("SIGNATURE_KEY_SPLIT_MARKER"));
-        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
-        assert!(serde_json::from_str::<serde_json::Value>(raw_stdout.trim()).is_ok());
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
-    }
-
-    #[test]
-    fn claude_stdout_filter_redacts_signature_when_value_quotes_split_across_chunks() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_signature_value_split",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_claude_signature_value_split");
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","signature":"SIGNATURE_VALUE_SPLIT_MARKER","thinking":""}]}}"#.to_string() + "\n";
-        let key_start = line.find(r#""signature":"#).unwrap();
-        let value_quote = key_start + r#""signature":"#.len();
-        let payload_start = value_quote + 1;
-        let payload_end = payload_start + "SIGNATURE_VALUE_SPLIT_MARKER".len();
-        for part in [
-            &line[..value_quote],
-            &line[value_quote..payload_end],
-            &line[payload_end..],
-        ] {
-            runtime
-                .emit_provider_stdout("thread_claude_signature_value_split", (*part).to_string());
-        }
-
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = claude_raw_stdout(&events);
-        assert!(!raw_stdout.contains("SIGNATURE_VALUE_SPLIT_MARKER"));
-        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
-        assert!(serde_json::from_str::<serde_json::Value>(raw_stdout.trim()).is_ok());
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
-    }
-
-    #[test]
-    fn claude_stdout_filter_handles_escaped_signature_characters() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_signature_escapes",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_claude_signature_escapes");
-        let signature = r#"prefix \ and " quote SIGNATURE_ESCAPED_MARKER suffix"#;
-        let encoded_signature = serde_json::to_string(signature).unwrap();
-        let line = format!(
-            r#"{{"type":"assistant","message":{{"content":[{{"type":"thinking","signature":{encoded_signature},"thinking":""}},{{"type":"text","text":"visible after escape"}}]}}}}"#
-        ) + "\n";
-        emit_claude_in_chunks(&mut runtime, "thread_claude_signature_escapes", &line, 3);
-
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = claude_raw_stdout(&events);
-        assert!(!raw_stdout.contains("SIGNATURE_ESCAPED_MARKER"));
-        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
-        assert!(serde_json::from_str::<serde_json::Value>(raw_stdout.trim()).is_ok());
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "visible after escape")
-        ));
-    }
-
-    #[test]
-    fn claude_stdout_filter_preserves_literal_signature_text_and_non_thinking_signature() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_signature_false_positives",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_claude_signature_false_positives");
-        let literal_text = r#"example: "signature":"foo""#;
-        let line = format!(
-            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{}}},{{"type":"text","signature":"SHOULD_BE_KEPT","text":"hello"}}]}}}}"#,
-            serde_json::to_string(literal_text).unwrap()
-        ) + "\n";
-        runtime.emit_provider_stdout("thread_claude_signature_false_positives", line.clone());
-
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = claude_raw_stdout(&events);
-        assert_eq!(raw_stdout, line);
-        assert!(raw_stdout.contains("SHOULD_BE_KEPT"));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == literal_text)
-        ));
-    }
-
-    #[test]
-    fn claude_stdout_filter_redacts_multiple_events_in_one_chunk() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_multiple_signature_events",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_claude_multiple_signature_events");
-        let first = r#"{"type":"assistant","message":{"content":[{"type":"thinking","signature":"SIGNATURE_FIRST_MARKER","thinking":""}]}}"#;
-        let second =
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second event"}]}}"#;
-        runtime.emit_provider_stdout(
-            "thread_claude_multiple_signature_events",
-            format!("{first}\n{second}\n"),
-        );
-
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = claude_raw_stdout(&events);
-        assert!(!raw_stdout.contains("SIGNATURE_FIRST_MARKER"));
-        assert!(raw_stdout.contains(r#""signature":"[omitted]""#));
-        assert!(raw_stdout.contains(second));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "second event")
-        ));
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, ThreadEvent::Error { .. })));
-    }
-
-    #[test]
-    fn claude_stdout_filter_handles_multiple_crlf_events_in_one_chunk() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_multi_filter",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_claude_multi_filter");
-        let init = r#"{"type":"system","subtype":"init","session_id":"4fab02ca-67b9-489d-8b89-0b1f0b9550e6"}"#;
-        let dropped =
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"DROP_ME"}]}}"#;
-        let assistant = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"kept"}]}}"#;
-
-        runtime.emit_provider_stdout(
-            "thread_claude_multi_filter",
-            format!("{init}\r\n{dropped}\r\n{assistant}\r\n"),
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_claude_multi_filter")
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            Some("4fab02ca-67b9-489d-8b89-0b1f0b9550e6")
-        );
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = events
-            .iter()
-            .filter_map(|event| match event {
-                ThreadEvent::RawStdout { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(raw_stdout, format!("{init}\r\n{assistant}\r\n"));
-        assert!(!raw_stdout.contains("DROP_ME"));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "kept")
-        ));
-    }
-
-    #[test]
-    fn claude_stdout_filter_keeps_user_and_non_user_false_positives() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_filter_false_positive",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_claude_filter_false_positive");
-        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"ordinary"}]}}"#;
-        let assistant_text = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"literal \"type\":\"tool_result\""}]}}"#;
-        let assistant_structured = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_result","text":"structured but kept"}]}}"#;
-        let input = format!("{user}\n{assistant_text}\n{assistant_structured}\n");
-
-        runtime.emit_provider_stdout("thread_claude_filter_false_positive", input.clone());
-
-        let events = collect_available_core_events(&event_rx);
-        let raw_stdout = events
-            .iter()
-            .filter_map(|event| match event {
-                ThreadEvent::RawStdout { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(raw_stdout, input);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "literal \"type\":\"tool_result\"")
-        ));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "structured but kept")
-        ));
-    }
-
-    #[test]
-    fn claude_stdout_filter_does_not_affect_stderr_or_other_providers() {
-        let temp = tempfile::tempdir().unwrap();
-        let matching = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"keep outside claude stdout"}]}}"#
-            .to_string()
-            + "\n";
-        let mut claude = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_stderr_filter",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let claude_rx = claude.event_bus.subscribe("thread_claude_stderr_filter");
-        claude.emit_provider_stderr("thread_claude_stderr_filter", matching.clone());
-        let claude_events = collect_available_core_events(&claude_rx);
-        assert!(claude_events.iter().any(
-            |event| matches!(event, ThreadEvent::RawStderr { text, .. } if text == &matching)
-        ));
-
-        let mut codex = runtime_with_provider_thread(
-            temp.path(),
-            "thread_codex_filter_passthrough",
-            ProviderCode::Codex,
-            None,
-            None,
-        );
-        let codex_rx = codex.event_bus.subscribe("thread_codex_filter_passthrough");
-        codex.emit_provider_stdout("thread_codex_filter_passthrough", matching.clone());
-        let codex_events = collect_available_core_events(&codex_rx);
-        assert!(codex_events.iter().any(
-            |event| matches!(event, ThreadEvent::RawStdout { text, .. } if text == &matching)
-        ));
-    }
-
-    #[test]
-    fn claude_invalid_json_emits_structured_error_without_panic() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_claude_invalid_json",
-            ProviderCode::Claude,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_claude_invalid_json");
-
-        runtime.emit_provider_stdout("thread_claude_invalid_json", "{not-json}\n".into());
-
-        assert_eq!(
-            runtime.thread_status("thread_claude_invalid_json"),
-            Some(ThreadStatus::Error)
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::RawStdout { text, .. } if text == "{not-json}\n")
-        ));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::Error {
-                source: ThreadErrorSource::Provider { provider: ProviderCode::Claude }, error, ..
-            } if error.code == error_codes::PROVIDER_COMMAND_FAILED)));
-    }
-
-    #[test]
-    fn ollama_never_builds_a_legacy_one_shot_command() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_ollama_new",
-            ProviderCode::Ollama,
-            None,
-            Some("qwen3-14b-32k:latest".into()),
-        );
-        assert_eq!(
-            runtime.provider_execution_family(&ProviderCode::Ollama),
-            ProviderExecutionFamily::PersistentRuntime
-        );
-        runtime.set_provider_execution_family(
-            ProviderCode::Ollama,
-            ProviderExecutionFamily::LegacyCommand,
-        );
-        assert_eq!(
-            runtime.provider_execution_family(&ProviderCode::Ollama),
-            ProviderExecutionFamily::PersistentRuntime
-        );
-
-        let legacy = runtime.begin_send_text(SendTextInput {
-            thread_id: "thread_ollama_new".into(),
-            message: "must not spawn pedelec-agent one-shot".into(),
-        });
-        assert_eq!(legacy.unwrap_err().code, error_codes::PROVIDER_UNSUPPORTED);
-
-        let start = runtime
-            .begin_send_text_intent(SendTextInput {
-                thread_id: "thread_ollama_new".into(),
-                message: "hello persistent".into(),
-            })
-            .unwrap();
-        match start.intent {
-            ProviderExecutionIntent::PersistentRuntime { .. } => {}
-            ProviderExecutionIntent::LegacyCommand { command, .. } => {
-                panic!("Ollama must not fall back to {command:?}")
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn provider_command_started_event_externalizes_verbatim_cwd() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_externalize_command_event";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Codex,
-            None,
-            Some("gpt-5".into()),
-        );
-        let verbatim = PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test");
-        let external = r"C:\Users\kaoru\OneDrive\桌面\test";
-        runtime
-            .thread_manager
-            .thread_mut(thread_id)
-            .unwrap()
-            .workspace_path = verbatim.clone();
-        let event_rx = runtime.event_bus.subscribe(thread_id);
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message: "hello".into(),
-            })
-            .unwrap();
-
-        runtime.emit_provider_command_started(thread_id, 123, &start.command);
-        let events = collect_available_core_events(&event_rx);
-        let event = events
-            .iter()
-            .find_map(|event| match event {
-                ThreadEvent::ProviderCommandStarted { cwd, args, .. } => Some((cwd, args)),
-                _ => None,
-            })
-            .expect("provider command event should be emitted");
-        assert_eq!(event.0, external);
-        assert!(event.1.iter().any(|arg| arg == external));
-        assert!(!serde_json::to_string(&events).unwrap().contains(r"\\?\"));
     }
 
     #[test]
@@ -2963,52 +770,6 @@ mod tests {
             runtime.thread_status("thread_ollama_no_model"),
             Some(ThreadStatus::Idle)
         );
-    }
-
-    #[test]
-    fn ollama_ignores_legacy_agent_event_stdout() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_ollama_parse",
-            ProviderCode::Ollama,
-            None,
-            Some("model-a".into()),
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_ollama_parse");
-
-        runtime.emit_provider_stdout(
-            "thread_ollama_parse",
-            concat!(
-                "{\"type\":\"session\",\"sessionId\":\"0197d8f0-8e3c-7b1a-a331-3fcf7b1f9176\",\"resumed\":false}\r\n",
-                "{\"type\":\"assistant_message\",\"text\":\"hello\"}\n",
-                "{\"type\":\"error\",\"error\":{\"code\":\"OLLAMA_UNAVAILABLE\",\"message\":\"Ollama request failed\"}}\n",
-                "{not-json}\n"
-            )
-            .into(),
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_ollama_parse")
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            None
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::RawStdout { .. })));
-        assert!(events.iter().all(|event| {
-            !matches!(
-                event,
-                ThreadEvent::AssistantMessage { .. }
-                    | ThreadEvent::Error { .. }
-                    | ThreadEvent::ToolCall { .. }
-                    | ThreadEvent::ToolResult { .. }
-            )
-        }));
     }
 
     #[test]
@@ -3782,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_commands_use_snapshotted_effort_args_for_first_run_and_resume() {
+    fn persistent_turns_use_snapshotted_effort_args_for_first_turn_and_resume() {
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
         let mut settings = PedelecSettings::default();
@@ -3811,21 +1572,15 @@ mod tests {
         write_settings_file(&settings_path, &settings).unwrap();
 
         let first = runtime
-            .begin_send_text(SendTextInput {
+            .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.clone(),
                 message: "first".into(),
             })
             .unwrap();
-        assert!(first
-            .command
-            .args
-            .windows(2)
-            .any(|pair| pair == ["-m", "gpt-snapshot"]));
-        assert!(!first
-            .command
-            .args
-            .windows(2)
-            .any(|pair| pair == ["-m", "gpt-changed"]));
+        let PersistentRuntimeOperation::StartTurn { turn } = first.intent else {
+            panic!("expected a StartTurn operation");
+        };
+        assert_eq!(turn.session.model.as_deref(), Some("gpt-snapshot"));
 
         runtime
             .thread_manager
@@ -3838,21 +1593,15 @@ mod tests {
             .unwrap()
             .provider_session_id = Some("session-snapshot".into());
         let resume = runtime
-            .begin_send_text(SendTextInput {
+            .begin_send_text_intent(SendTextInput {
                 thread_id,
                 message: "resume".into(),
             })
             .unwrap();
-        assert!(resume
-            .command
-            .args
-            .windows(2)
-            .any(|pair| pair == ["-m", "gpt-snapshot"]));
-        assert!(!resume
-            .command
-            .args
-            .windows(2)
-            .any(|pair| pair == ["-m", "gpt-changed"]));
+        let PersistentRuntimeOperation::StartTurn { turn } = resume.intent else {
+            panic!("expected a StartTurn operation");
+        };
+        assert_eq!(turn.session.model.as_deref(), Some("gpt-snapshot"));
     }
 
     #[test]
@@ -4188,413 +1937,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_parser_buffers_jsonl_and_updates_session_once() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_parse",
-            ProviderCode::Codex,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_parse");
-
-        runtime.emit_provider_stdout("thread_parse", r#"{"sessionId":"123e4567-e89b"#.into());
-        runtime.emit_provider_stdout(
-            "thread_parse",
-            r#"-12d3-a456-426614174000","text":"hello"}"#.to_string() + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_parse",
-            r#"{"sessionId":"123e4567-e89b-12d3-a456-426614174000"}"#.to_string() + "\n",
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_parse")
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, ThreadEvent::ProviderSessionIdUpdated { .. }))
-                .count(),
-            1
-        );
-        assert!(matches!(events[0], ThreadEvent::RawStdout { .. }));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "hello")
-        ));
-    }
-
-    #[test]
-    fn codex_assistant_message_parser_does_not_require_role() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_codex_text",
-            ProviderCode::Codex,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_codex_text");
-
-        runtime.emit_provider_stdout(
-            "thread_codex_text",
-            r#"{"text":"hello"}"#.to_string() + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_codex_text",
-            r#"{"role":"user","text":"still codex"}"#.to_string() + "\n",
-        );
-
-        let events = collect_available_core_events(&event_rx);
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "hello")
-        ));
-        assert!(events.iter().any(
-            |event| matches!(event, ThreadEvent::AssistantMessage { text, .. } if text == "still codex")
-        ));
-    }
-
-    #[test]
-    fn antigravity_assistant_step_update_deltas_do_not_emit_assistant_messages() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_role",
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_antigravity_role");
-
-        runtime.emit_provider_stdout(
-            "thread_antigravity_role",
-            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"hello"}}"#.to_string() + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_antigravity_role",
-            r#"{"event":"step_update","step_update":{"step_type":"user_input","text_delta":"ignore user"}}"#.to_string() + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_antigravity_role",
-            r#"{"event":"step_update","step_update":{"step_type":"tool","text_delta":"ignore missing role"}}"#.to_string() + "\n",
-        );
-
-        let events = collect_available_core_events(&event_rx);
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::AssistantMessage { .. })));
-    }
-
-    #[test]
-    fn antigravity_assistant_uses_clean_final_response_after_corrupted_deltas() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_final_response",
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_antigravity_final_response");
-
-        runtime.emit_provider_stdout(
-            "thread_antigravity_final_response",
-            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"眼前�"}}"#.to_string()
-                + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_antigravity_final_response",
-            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"��火光"}}"#.to_string()
-                + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_antigravity_final_response",
-            r#"{"event":"result","result":{"status":"SUCCESS","response":"眼前的火光"}}"#
-                .to_string()
-                + "\n",
-        );
-
-        let events = collect_available_core_events(&event_rx);
-        let assistant_messages: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                ThreadEvent::AssistantMessage { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(assistant_messages, vec!["眼前的火光"]);
-    }
-
-    #[test]
-    fn antigravity_assistant_final_response_preserves_whitespace() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_final_whitespace",
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_antigravity_final_whitespace");
-
-        runtime.emit_provider_stdout(
-            "thread_antigravity_final_whitespace",
-            r#"{"event":"result","result":{"status":"SUCCESS","response":"  nested hello\n"}}"#
-                .to_string()
-                + "\n",
-        );
-
-        let events = collect_available_core_events(&event_rx);
-        let assistant_messages: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                ThreadEvent::AssistantMessage { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(assistant_messages, vec!["  nested hello\n"]);
-    }
-
-    #[test]
-    fn antigravity_assistant_success_with_empty_final_response_does_not_emit_assistant_message() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_empty_final",
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_antigravity_empty_final");
-
-        runtime.emit_provider_stdout(
-            "thread_antigravity_empty_final",
-            r#"{"event":"result","result":{"status":"SUCCESS","response":""}}"#.to_string() + "\n",
-        );
-
-        let events = collect_available_core_events(&event_rx);
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::AssistantMessage { .. })));
-    }
-
-    #[test]
-    fn antigravity_assistant_unsuccessful_result_still_emits_provider_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_failed_result",
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let event_rx = runtime
-            .event_bus
-            .subscribe("thread_antigravity_failed_result");
-
-        runtime.emit_provider_stdout(
-            "thread_antigravity_failed_result",
-            r#"{"event":"result","result":{"status":"FAILED","conversation_id":"conv_1","response":"failed"}}"#.to_string()
-                + "\n",
-        );
-
-        let events = collect_available_core_events(&event_rx);
-        let error = events
-            .iter()
-            .find_map(|event| match event {
-                ThreadEvent::Error {
-                    source:
-                        ThreadErrorSource::Provider {
-                            provider: ProviderCode::Antigravity,
-                        },
-                    error,
-                    ..
-                } => Some(error),
-                _ => None,
-            })
-            .expect("Antigravity unsuccessful result should emit a provider error");
-        assert_eq!(error.code, error_codes::PROVIDER_COMMAND_FAILED);
-        assert_eq!(error.details.as_ref().unwrap()["status"], json!("FAILED"));
-        assert_eq!(
-            error.details.as_ref().unwrap()["conversation_id"],
-            json!("conv_1")
-        );
-        assert_eq!(error.details.as_ref().unwrap()["response"], json!("failed"));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::AssistantMessage { .. })));
-    }
-
-    #[test]
-    fn antigravity_assistant_init_updates_provider_session_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_antigravity_init",
-            ProviderCode::Antigravity,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_antigravity_init");
-
-        runtime.emit_provider_stdout(
-            "thread_antigravity_init",
-            r#"{"event":"init","conversation_id":"conv_123"}"#.to_string() + "\n",
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_antigravity_init")
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            Some("conv_123")
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, ThreadEvent::ProviderSessionIdUpdated { .. }))
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn codex_thread_started_updates_session_id_once_and_resume_uses_it() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_codex_started",
-            ProviderCode::Codex,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_codex_started");
-
-        runtime.emit_provider_stdout(
-            "thread_codex_started",
-            r#"{"type":"thread.started","thread_id":"019e91d7-4a21-7ca0-aeef-c27ce6e334c5"}"#
-                .to_string()
-                + "\n",
-        );
-        runtime.emit_provider_stdout(
-            "thread_codex_started",
-            r#"{"type":"thread.started","thread_id":"019e91d7-4a21-7ca0-aeef-c27ce6e334c5"}"#
-                .to_string()
-                + "\n",
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_codex_started")
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            Some("019e91d7-4a21-7ca0-aeef-c27ce6e334c5")
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, ThreadEvent::ProviderSessionIdUpdated { .. }))
-                .count(),
-            1
-        );
-
-        let start = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: "thread_codex_started".into(),
-                message: "continue".into(),
-            })
-            .unwrap();
-
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args == ["-c", "skills.include_instructions=false"]));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| args[0] == "-c" && args[1].starts_with("developer_instructions=")));
-        assert!(start
-            .command
-            .args
-            .windows(2)
-            .any(|args| { args == ["resume", "019e91d7-4a21-7ca0-aeef-c27ce6e334c5"] }));
-    }
-
-    #[test]
-    fn unrelated_json_thread_id_does_not_update_provider_session_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_unrelated_id",
-            ProviderCode::Codex,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_unrelated_id");
-
-        runtime.emit_provider_stdout(
-            "thread_unrelated_id",
-            r#"{"type":"turn.started","thread_id":"019e91d7-4a21-7ca0-aeef-c27ce6e334c5"}"#
-                .to_string()
-                + "\n",
-        );
-
-        assert_eq!(
-            runtime
-                .provider_state("thread_unrelated_id")
-                .unwrap()
-                .provider_session_id,
-            None
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, ThreadEvent::ProviderSessionIdUpdated { .. })));
-    }
-
-    #[test]
-    fn malformed_provider_json_still_emits_raw_and_keeps_status() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            "thread_malformed",
-            ProviderCode::Codex,
-            None,
-            None,
-        );
-        let event_rx = runtime.event_bus.subscribe("thread_malformed");
-
-        runtime.emit_provider_stdout("thread_malformed", "{not-json}\n".into());
-
-        assert_eq!(
-            runtime.thread_status("thread_malformed"),
-            Some(ThreadStatus::Idle)
-        );
-        let events = collect_available_core_events(&event_rx);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], ThreadEvent::RawStdout { .. }));
-    }
-
-    #[test]
     fn thread_state_serializes_camel_case_fields() {
         let now = DateTime::parse_from_rfc3339("2026-06-03T12:00:00Z")
             .unwrap()
@@ -4614,7 +1956,6 @@ mod tests {
                 size_bytes: 12,
             }],
             status: ThreadStatus::Idle,
-            process_id: Some(42),
             created_at: now,
             updated_at: now,
             sdk_origin: None,
@@ -4646,7 +1987,6 @@ mod tests {
                 size_bytes: 2,
             }],
             status: ThreadStatus::Idle,
-            process_id: None,
             created_at: now,
             updated_at: now,
             sdk_origin: None,
@@ -4672,7 +2012,6 @@ mod tests {
             workspace_path: PathBuf::from("workspace").join("thread_with_tools_md"),
             skills: vec![],
             status: ThreadStatus::Idle,
-            process_id: None,
             created_at: now,
             updated_at: now,
             sdk_origin: None,
@@ -4706,7 +2045,6 @@ mod tests {
             workspace_path: PathBuf::from("workspace").join("thread_empty_tools"),
             skills: vec![],
             status: ThreadStatus::Idle,
-            process_id: None,
             created_at: now,
             updated_at: now,
             sdk_origin: None,
@@ -4758,15 +2096,6 @@ mod tests {
         assert_eq!(status_value["threadId"], json!("thread_abc123"));
         assert!(status_value.get("thread_id").is_none());
 
-        let stdout_event = ThreadEvent::RawStdout {
-            seq: 2,
-            thread_id: "thread_abc123".into(),
-            text: "hello".into(),
-        };
-        let stdout_value = serde_json::to_value(stdout_event).unwrap();
-        assert_eq!(stdout_value["type"], json!("raw_stdout"));
-        assert_eq!(stdout_value["threadId"], json!("thread_abc123"));
-
         let delta_value = serde_json::to_value(ThreadEvent::AssistantDelta {
             seq: 3,
             thread_id: "thread_abc123".into(),
@@ -4794,28 +2123,6 @@ mod tests {
         assert_eq!(session_value["type"], json!("provider_session_id_updated"));
         assert_eq!(session_value["providerSessionId"], json!("session_xyz"));
         assert!(session_value.get("provider_session_id").is_none());
-
-        let command_event = ThreadEvent::ProviderCommandStarted {
-            seq: 4,
-            thread_id: "thread_abc123".into(),
-            process_id: 42,
-            program: "codex".into(),
-            args: vec!["exec".into(), "-".into()],
-            cwd: "C:/tmp/pedelec/thread_abc123".into(),
-            prompt: "full provider prompt".into(),
-        };
-        let command_value = serde_json::to_value(command_event).unwrap();
-        assert_eq!(command_value["type"], json!("provider_command_started"));
-        assert_eq!(command_value["threadId"], json!("thread_abc123"));
-        assert_eq!(command_value["processId"], json!(42));
-        assert_eq!(command_value["program"], json!("codex"));
-        assert_eq!(command_value["args"], json!(["exec", "-"]));
-        assert_eq!(command_value["cwd"], json!("C:/tmp/pedelec/thread_abc123"));
-        assert_eq!(command_value["prompt"], json!("full provider prompt"));
-        assert!(command_value.get("thread_id").is_none());
-        assert!(command_value.get("process_id").is_none());
-        assert!(command_value.get("stdin").is_none());
-        assert!(command_value.get("env").is_none());
 
         let provider_error = ThreadEvent::Error {
             seq: 5,
@@ -6758,7 +4065,6 @@ mod tests {
             workspace_path: workspace,
             skills: vec![],
             status: ThreadStatus::Idle,
-            process_id: None,
             created_at: now,
             updated_at: now,
             sdk_origin: None,
@@ -6852,16 +4158,13 @@ mod tests {
                 workspace_path: workspace_root.join("t000001"),
                 skills: vec![],
                 status: ThreadStatus::Idle,
-                process_id: None,
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
             },
-            ProviderAdapterState {
+            ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
 
@@ -6966,8 +4269,6 @@ mod tests {
             runtime.thread_status(&thread.thread_id),
             Some(ThreadStatus::Ended)
         );
-        assert_eq!(runtime.active_process_id(&thread.thread_id), None);
-        assert_eq!(runtime.running_process_count(), 0);
         assert!(!runtime
             .tool_request_broker
             .has_pending_for_thread(&thread.thread_id));
@@ -7137,7 +4438,7 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_registers_idle_state_without_starting_process_and_logs_events() {
+    fn create_thread_registers_idle_state_without_starting_runtime_and_logs_events() {
         let temp = tempfile::tempdir().unwrap();
         let workspace_root = temp.path().join("workspace");
         let mut runtime = CoreRuntime {
@@ -7156,9 +4457,6 @@ mod tests {
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
         assert_eq!(thread.status, ThreadStatus::Idle);
-        assert_eq!(thread.process_id, None);
-        assert_eq!(runtime.running_process_count(), 0);
-
         let log_path = runtime.event_log_path(&output.thread_id).unwrap();
         let log = fs::read_to_string(log_path).unwrap();
         let records = log
@@ -7192,446 +4490,12 @@ mod tests {
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
         assert_eq!(thread.status, ThreadStatus::Idle);
-        assert_eq!(thread.process_id, None);
-        assert_eq!(runtime.running_process_count(), 0);
         let skills_dir = workspace_skills_root(&thread.workspace_path);
         assert!(skills_dir.exists());
         assert!(skills_dir.is_dir());
         assert!(!skills_dir.join("tools.md").exists());
         assert!(!skills_dir.join("pedelec-cli.md").exists());
         assert!(thread.skills.is_empty());
-    }
-
-    #[test]
-    fn prepare_thread_builds_prepare_prompt() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace_root = temp.path().join("workspace");
-        let mut runtime = CoreRuntime {
-            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
-            ..CoreRuntime::default()
-        };
-
-        let output = runtime
-            .create_thread(CreateThreadInput {
-                provider: ProviderCode::Codex,
-                effort_level: None,
-                skills: Some(sample_skills_input()),
-                workspace: None,
-            })
-            .unwrap();
-
-        let start = runtime
-            .begin_prepare_thread(PrepareThreadInput {
-                thread_id: output.thread_id.clone(),
-            })
-            .unwrap();
-        let command = start.command.unwrap();
-
-        assert!(command.stdin.contains("[Session Preparation]"));
-        assert!(command
-            .args
-            .iter()
-            .any(|arg| arg.contains("PEDELEC_PREPARED")));
-        assert!(!command.stdin.contains("After preparation is complete"));
-        assert!(!command.stdin.contains("\n[User Message]\n"));
-        assert!(command
-            .args
-            .windows(2)
-            .any(|args| args == ["-c", "skills.include_instructions=false"]));
-        assert_eq!(
-            runtime
-                .thread_manager
-                .thread(&output.thread_id)
-                .unwrap()
-                .status,
-            ThreadStatus::Running
-        );
-    }
-
-    fn complete_prepare_with_codex_output(
-        output: &str,
-        include_session_id: bool,
-    ) -> (CoreRuntime, String, Vec<ThreadEvent>) {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = format!("thread_prepare_ack_{}", Uuid::new_v4().simple());
-        let mut runtime =
-            runtime_with_provider_thread(temp.path(), &thread_id, ProviderCode::Codex, None, None);
-        let event_rx = runtime.event_bus.subscribe(&thread_id);
-        runtime
-            .begin_prepare_thread(PrepareThreadInput {
-                thread_id: thread_id.clone(),
-            })
-            .unwrap();
-        runtime.register_provider_process(
-            &thread_id,
-            7,
-            Arc::new(Mutex::new(None)),
-            RunningProviderProcessPurpose::Prepare,
-        );
-        let line = if include_session_id {
-            format!(r#"{{"sessionId":"prepare-session","text":{output:?}}}"#)
-        } else {
-            format!(r#"{{"text":{output:?}}}"#)
-        };
-        runtime.emit_provider_stdout(&thread_id, format!("{line}\n"));
-        runtime.complete_provider_process(&thread_id, 7, success_exit_status());
-        (runtime, thread_id, collect_available_core_events(&event_rx))
-    }
-
-    #[test]
-    fn prepare_accepts_only_trimmed_exact_acknowledgment_and_keeps_prepare_chat_internal() {
-        for output in [
-            "PEDELEC_PREPARED",
-            "PEDELEC_PREPARED\n",
-            " PEDELEC_PREPARED ",
-        ] {
-            let (runtime, thread_id, events) = complete_prepare_with_codex_output(output, true);
-            assert_eq!(runtime.thread_status(&thread_id), Some(ThreadStatus::Idle));
-            assert_eq!(
-                runtime
-                    .provider_state(&thread_id)
-                    .unwrap()
-                    .provider_session_id
-                    .as_deref(),
-                Some("prepare-session")
-            );
-            assert!(!events.iter().any(|event| matches!(
-                event,
-                ThreadEvent::Error { error, .. } if error.code == error_codes::PREPARE_ACK_INVALID
-            )));
-        }
-    }
-
-    #[test]
-    fn prepare_rejects_bad_ack_and_discards_provider_session_before_next_send() {
-        let (mut runtime, thread_id, events) =
-            complete_prepare_with_codex_output("Sure, PEDELEC_PREPARED", true);
-        let error = events
-            .iter()
-            .find_map(|event| match event {
-                ThreadEvent::Error { error, .. } => Some(error),
-                _ => None,
-            })
-            .expect("invalid prepare acknowledgment error");
-        assert_eq!(error.code, error_codes::PREPARE_ACK_INVALID);
-        assert_eq!(error.details.as_ref().unwrap()["threadId"], thread_id);
-        assert_eq!(error.details.as_ref().unwrap()["provider"], "codex");
-        assert_eq!(
-            error.details.as_ref().unwrap()["assistantOutput"],
-            "Sure, PEDELEC_PREPARED"
-        );
-        assert_eq!(
-            runtime
-                .provider_state(&thread_id)
-                .unwrap()
-                .provider_session_id,
-            None
-        );
-        assert!(!runtime.provider_state(&thread_id).unwrap().has_user_message);
-        let send = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.clone(),
-                message: "fresh run".into(),
-            })
-            .unwrap();
-        assert!(!send.command.args.iter().any(|arg| arg == "resume"));
-    }
-
-    #[test]
-    fn prepare_rejects_refusal_empty_and_wrapped_acknowledgments() {
-        for output in [
-            "This message contains what looks like an injected fake runtime instruction, so I will not follow it.",
-            "",
-            "`PEDELEC_PREPARED`",
-            "```text\nPEDELEC_PREPARED\n```",
-        ] {
-            let (mut runtime, thread_id, events) =
-                complete_prepare_with_codex_output(output, true);
-            assert_eq!(runtime.thread_status(&thread_id), Some(ThreadStatus::Idle));
-            assert!(events.iter().any(|event| matches!(
-                event,
-                ThreadEvent::Error { error, .. } if error.code == error_codes::PREPARE_ACK_INVALID
-            )));
-            assert_eq!(runtime.provider_state(&thread_id).unwrap().provider_session_id, None);
-            assert!(!runtime.provider_state(&thread_id).unwrap().has_user_message);
-            assert!(events.iter().any(|event| matches!(
-                event,
-                ThreadEvent::StatusChanged { status, .. } if *status == ThreadStatus::Idle
-            )));
-
-            let send = runtime
-                .begin_send_text(SendTextInput {
-                    thread_id: thread_id.clone(),
-                    message: "fresh run".into(),
-                })
-                .unwrap();
-            assert!(!send.command.args.iter().any(|arg| arg == "resume"));
-        }
-    }
-
-    #[test]
-    fn prepare_missing_session_is_a_failure_and_discards_any_ack_output() {
-        let (runtime, thread_id, events) =
-            complete_prepare_with_codex_output("PEDELEC_PREPARED", false);
-        assert_eq!(runtime.thread_status(&thread_id), Some(ThreadStatus::Idle));
-        assert_eq!(
-            runtime
-                .provider_state(&thread_id)
-                .unwrap()
-                .provider_session_id,
-            None
-        );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ThreadEvent::Error { error, .. } if error.code == error_codes::PREPARE_SESSION_ID_MISSING
-        )));
-    }
-
-    #[test]
-    fn prepare_thread_noops_when_provider_session_id_exists() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace_root = temp.path().join("workspace");
-        let mut runtime = CoreRuntime {
-            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
-            ..CoreRuntime::default()
-        };
-
-        let output = runtime
-            .create_thread(CreateThreadInput {
-                provider: ProviderCode::Codex,
-                effort_level: None,
-                skills: Some(sample_skills_input()),
-                workspace: None,
-            })
-            .unwrap();
-        runtime
-            .thread_manager
-            .provider_state_mut(&output.thread_id)
-            .unwrap()
-            .provider_session_id = Some("session_123".into());
-
-        let start = runtime
-            .begin_prepare_thread(PrepareThreadInput {
-                thread_id: output.thread_id.clone(),
-            })
-            .unwrap();
-
-        assert!(start.command.is_none());
-        assert_eq!(start.output.prepared, true);
-        assert_eq!(start.output.already_prepared, Some(true));
-        assert_eq!(
-            runtime
-                .thread_manager
-                .thread(&output.thread_id)
-                .unwrap()
-                .status,
-            ThreadStatus::Idle
-        );
-    }
-
-    #[test]
-    fn send_text_after_prepare_uses_resume_command() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace_root = temp.path().join("workspace");
-        let mut runtime = CoreRuntime {
-            workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
-            ..CoreRuntime::default()
-        };
-
-        let output = runtime
-            .create_thread(CreateThreadInput {
-                provider: ProviderCode::Codex,
-                effort_level: None,
-                skills: Some(sample_skills_input()),
-                workspace: None,
-            })
-            .unwrap();
-        let thread_id = output.thread_id.clone();
-        let prepare = runtime
-            .begin_prepare_thread(PrepareThreadInput {
-                thread_id: thread_id.clone(),
-            })
-            .unwrap();
-        assert!(prepare
-            .command
-            .unwrap()
-            .stdin
-            .contains("[Session Preparation]"));
-        runtime
-            .thread_manager
-            .provider_state_mut(&thread_id)
-            .unwrap()
-            .provider_session_id = Some("session_123".into());
-        runtime
-            .thread_manager
-            .thread_mut(&thread_id)
-            .unwrap()
-            .status = ThreadStatus::Idle;
-
-        let send = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.clone(),
-                message: "hello".into(),
-            })
-            .unwrap();
-
-        assert!(send.command.args.contains(&"resume".to_string()));
-        assert!(send.command.args.contains(&"session_123".to_string()));
-        assert_eq!(
-            send.command.stdin,
-            build_provider_user_message_task("hello")
-        );
-
-        runtime
-            .thread_manager
-            .thread_mut(&thread_id)
-            .unwrap()
-            .status = ThreadStatus::Idle;
-        let second_send = runtime
-            .begin_send_text(SendTextInput {
-                thread_id,
-                message: "again".into(),
-            })
-            .unwrap();
-        assert_eq!(second_send.command.stdin, "again");
-    }
-
-    #[test]
-    fn normal_send_text_still_rejects_ended_threads() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_normal_send_ended";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Codex,
-            Some("session_existing".into()),
-            None,
-        );
-
-        runtime
-            .end_thread(EndThreadInput {
-                thread_id: thread_id.into(),
-            })
-            .unwrap();
-
-        let error = runtime
-            .begin_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message: "normal send must remain rejected".into(),
-            })
-            .unwrap_err();
-
-        assert_eq!(error.code, error_codes::THREAD_ENDED);
-    }
-
-    #[test]
-    fn debug_send_text_reactivates_ended_thread_resources_and_resumes_session() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_debug_reactivate";
-        let mut runtime = runtime_with_provider_thread(
-            temp.path(),
-            thread_id,
-            ProviderCode::Codex,
-            Some("session_existing".into()),
-            None,
-        );
-        let workspace_path = runtime.thread_workspace_path(thread_id).unwrap();
-        let initial_log_path = workspace_logs_root(&workspace_path).join("initial.jsonl");
-        let skills_dir = workspace_skills_root(&workspace_path);
-        fs::create_dir_all(&skills_dir).unwrap();
-        fs::write(
-            skills_dir.join("tools-get_app_state.json"),
-            serde_json::to_string(&json!({
-                "name": "get_app_state",
-                "description": "Read state.",
-                "argsSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": false
-                },
-                "timeoutMs": 30000
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        runtime
-            .event_bus
-            .register_thread_log(thread_id, initial_log_path.clone());
-        runtime
-            .thread_manager
-            .thread_mut(thread_id)
-            .unwrap()
-            .sdk_origin = Some("https://example.com".into());
-
-        runtime
-            .end_thread(EndThreadInput {
-                thread_id: thread_id.into(),
-            })
-            .unwrap();
-        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Ended));
-        assert!(runtime.tool_registry.get(thread_id).is_none());
-        assert!(runtime.event_log_path(thread_id).is_none());
-
-        let start = runtime
-            .begin_debug_send_text(SendTextInput {
-                thread_id: thread_id.into(),
-                message: "What did you just change?".into(),
-            })
-            .unwrap();
-
-        assert_eq!(start.output.thread_id, thread_id);
-        assert_eq!(
-            runtime.thread_status(thread_id),
-            Some(ThreadStatus::Running)
-        );
-        assert_eq!(
-            runtime
-                .provider_state(thread_id)
-                .unwrap()
-                .provider_session_id
-                .as_deref(),
-            Some("session_existing")
-        );
-        assert_eq!(
-            runtime
-                .thread_manager
-                .thread(thread_id)
-                .unwrap()
-                .sdk_origin
-                .as_deref(),
-            Some("https://example.com")
-        );
-        assert!(runtime
-            .tool_registry
-            .get(thread_id)
-            .unwrap()
-            .get("get_app_state")
-            .is_some());
-        assert!(runtime.event_log_path(thread_id).is_some());
-        assert_ne!(runtime.event_log_path(thread_id), Some(initial_log_path));
-        assert!(start.command.args.iter().any(|arg| arg == "resume"));
-        assert!(start
-            .command
-            .args
-            .iter()
-            .any(|arg| arg == "session_existing"));
-        assert!(runtime
-            .begin_tool_call(ToolCallInput {
-                thread_id: thread_id.into(),
-                tool_name: "get_app_state".into(),
-                args: json!({}),
-            })
-            .is_ok());
-
-        runtime.register_provider_process(
-            thread_id,
-            7,
-            Arc::new(Mutex::new(None)),
-            RunningProviderProcessPurpose::UserMessage,
-        );
-        runtime.complete_provider_process(thread_id, 7, success_exit_status());
-        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
     }
 
     #[test]
@@ -7653,21 +4517,13 @@ mod tests {
                 Some("session_existing".into()),
                 None,
             );
-            runtime.test_provider_command = Some(CommandSpec {
-                program: "provider-test".into(),
-                args: Vec::new(),
-                cwd: temp.path().into(),
-                env: Vec::new(),
-                prompt: String::new(),
-                stdin: "debug".into(),
-            });
             runtime
                 .thread_manager
                 .thread_mut(&thread_id)
                 .unwrap()
                 .status = status.clone();
 
-            let result = runtime.begin_debug_send_text(SendTextInput {
+            let result = runtime.begin_debug_send_text_intent(SendTextInput {
                 thread_id: thread_id.clone(),
                 message: "debug".into(),
             });
@@ -7967,134 +4823,19 @@ mod tests {
                 workspace_path: PathBuf::from("workspace").join(thread_id),
                 skills: vec![],
                 status,
-                process_id: None,
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
             },
-            ProviderAdapterState {
+            ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
         runtime.tool_registry.insert(
             thread_id,
             ToolRegistry::from_tools_json_str(tools_json).unwrap(),
         );
-    }
-
-    #[test]
-    fn all_providers_parse_root_error_without_assistant_message() {
-        let temp = tempfile::tempdir().unwrap();
-        for provider in [
-            ProviderCode::Codex,
-            ProviderCode::Antigravity,
-            ProviderCode::OpenCode,
-            ProviderCode::Cursor,
-            ProviderCode::Claude,
-        ] {
-            let thread_id = format!("thread_root_error_{provider:?}");
-            let mut runtime =
-                runtime_with_provider_thread(temp.path(), &thread_id, provider.clone(), None, None);
-            let event_rx = runtime.event_bus.subscribe(&thread_id);
-            runtime.emit_provider_stdout(
-                &thread_id,
-                r#"{"type":"error","message":"some error"}"#.to_string() + "\n",
-            );
-            let events = collect_available_core_events(&event_rx);
-
-            assert!(events.iter().any(|event| matches!(
-                event,
-                ThreadEvent::Error {
-                    source: ThreadErrorSource::Provider { provider: event_provider },
-                    error,
-                    ..
-                } if event_provider == &provider
-                    && error.code == error_codes::PROVIDER_COMMAND_FAILED
-                    && error.message == "some error"
-            )));
-            assert!(!events.iter().any(|event| matches!(
-                event,
-                ThreadEvent::AssistantMessage { text, .. } if text == "some error"
-            )));
-        }
-    }
-
-    #[test]
-    fn root_provider_error_preserves_nested_and_root_fields() {
-        let nested = parse_root_provider_error(&json!({
-            "type": "error",
-            "error": { "code": "AUTH_FAILED", "message": "Token expired", "details": { "status": 401 } }
-        }))
-        .unwrap();
-        assert_eq!(nested.code, "AUTH_FAILED");
-        assert_eq!(nested.message, "Token expired");
-        assert_eq!(nested.details.unwrap()["status"], 401);
-
-        let root = parse_root_provider_error(&json!({
-            "type": "error",
-            "code": "RATE_LIMITED",
-            "message": "Try later",
-            "details": { "retryAfter": 10 }
-        }))
-        .unwrap();
-        assert_eq!(root.code, "RATE_LIMITED");
-        assert_eq!(root.message, "Try later");
-        assert_eq!(root.details.unwrap()["retryAfter"], 10);
-    }
-
-    #[test]
-    fn stderr_capture_keeps_utf8_tail_within_limit() {
-        let mut stderr = "prefix".repeat(MAX_PROVIDER_STDERR_BYTES / 6);
-        let mut truncated = false;
-        append_provider_stderr(&mut stderr, &mut truncated, "最後錯誤");
-
-        assert!(truncated);
-        assert!(stderr.len() <= MAX_PROVIDER_STDERR_BYTES);
-        assert!(stderr.ends_with("最後錯誤"));
-        assert!(std::str::from_utf8(stderr.as_bytes()).is_ok());
-    }
-
-    fn antigravity_run_message_with_final_utf16_length(
-        runtime: &CoreRuntime,
-        thread_id: &str,
-        target_length: usize,
-        include_supplementary_character: bool,
-    ) -> String {
-        let thread = runtime.thread_manager.thread(thread_id).unwrap();
-        let registry = runtime.tool_registry.get(thread_id).unwrap();
-        let prompt_prefix = build_provider_run_prompt(thread, registry, "", false);
-        let prefix_length = prompt_prefix.encode_utf16().count();
-        let message = if include_supplementary_character {
-            assert!(target_length >= prefix_length + 2);
-            format!("{}😀", "a".repeat(target_length - prefix_length - 2))
-        } else {
-            assert!(target_length >= prefix_length);
-            "a".repeat(target_length - prefix_length)
-        };
-        let final_prompt = build_provider_run_prompt(thread, registry, &message, false);
-        assert_eq!(final_prompt.encode_utf16().count(), target_length);
-        message
-    }
-
-    fn assert_antigravity_prompt_too_large_error(error: PedelecError, prompt_length: usize) {
-        assert_eq!(error.code, error_codes::PROVIDER_PROMPT_TOO_LARGE);
-        assert_eq!(
-            error.message,
-            "Antigravity prompt exceeds the 20,000 character limit"
-        );
-        let details = error
-            .details
-            .expect("prompt length error should include details");
-        assert_eq!(details["provider"], json!("antigravity"));
-        assert_eq!(details["promptLength"], json!(prompt_length));
-        assert_eq!(
-            details["maxPromptLength"],
-            json!(ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS)
-        );
-        assert_eq!(details["lengthUnit"], json!("utf16CodeUnits"));
     }
 
     fn runtime_with_provider_thread(
@@ -8127,7 +4868,6 @@ mod tests {
         let workspace_path = temp.join("workspace").join(thread_id);
         fs::create_dir_all(workspace_logs_root(&workspace_path)).unwrap();
         let now = chrono::Utc::now();
-        let has_user_message = provider_session_id.is_some();
         let effort_args = model
             .map(|model| {
                 let flag = match &provider {
@@ -8146,16 +4886,13 @@ mod tests {
                 workspace_path,
                 skills: vec![],
                 status: ThreadStatus::Idle,
-                process_id: None,
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
             },
-            ProviderAdapterState {
+            ProviderSessionState {
                 provider_session_id,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message,
             },
         );
         runtime.tool_registry.insert(
@@ -8163,23 +4900,12 @@ mod tests {
             ToolRegistry::from_skills_input(Some(&sample_skills_input())).unwrap(),
         );
         if provider != ProviderCode::Ollama {
-            let privileged_bootstrap = match provider {
-                ProviderCode::Codex => ProviderBootstrapMode::CodexDeveloperInstructions,
-                ProviderCode::Claude => ProviderBootstrapMode::ClaudeAppendSystemPrompt,
-                ProviderCode::OpenCode => ProviderBootstrapMode::OpenCodeInlineAgent,
-                ProviderCode::Antigravity => ProviderBootstrapMode::AntigravityWorkspaceAgent,
-                ProviderCode::Cursor => ProviderBootstrapMode::UserPromptFallback,
-                ProviderCode::Ollama => unreachable!(),
-            };
             runtime.provider_scan.insert(
                 provider.clone(),
                 ProviderCli {
                     path: None,
                     version: Some(ProviderVersion(vec![9, 9, 9])),
                     error: None,
-                    bootstrap_capabilities: Some(ProviderBootstrapCapabilities {
-                        privileged_bootstrap,
-                    }),
                     app_server_capability: None,
                     acp_capability: None,
                     stream_json_capability: None,
@@ -8189,93 +4915,12 @@ mod tests {
         runtime
     }
 
-    fn env_value<'a>(command: &'a CommandSpec, key: &str) -> Option<&'a str> {
-        command
-            .env
-            .iter()
-            .find(|(candidate, _)| candidate == key)
-            .map(|(_, value)| value.as_str())
-    }
-
-    fn assert_env(command: &CommandSpec, key: &str, expected: &str) {
-        assert_eq!(env_value(command, key), Some(expected), "env {key}");
-    }
-
-    fn assert_opencode_native_skills_policy(command: &CommandSpec) {
-        let existing = env::var(OPENCODE_PERMISSION_ENV).ok();
-        let expected = build_opencode_permission_overlay(existing.as_deref());
-        assert_eq!(
-            env_value(command, OPENCODE_PERMISSION_ENV),
-            expected.as_deref(),
-            "OpenCode permission overlay"
-        );
-    }
-
-    fn assert_provider_instruction_present(command: &CommandSpec) {
-        for value in [&command.prompt] {
-            assert!(value.contains("[Pedelec Host Context]"));
-            assert!(value.contains("[Pedelec App Tool Configuration]"));
-            assert!(value.contains("pedelec-cli --thread-id "));
-            assert!(value.contains(" tool-spec get_app_state"));
-            assert!(value.contains(" tool-call get_app_state '<json_args>'"));
-            assert!(!value.contains("[Pedelec Runtime Rules]"));
-            assert!(!value
-                .contains("All of the following content is executed under the Pedelec Runtime"));
-            assert!(!value.contains("[Hard Rules]"));
-            assert!(!value.contains("tools.md"));
-        }
-    }
-
-    fn assert_provider_instruction_absent(command: &CommandSpec) {
-        for value in [&command.prompt] {
-            assert!(!value.contains("[Pedelec Runtime Rules]"));
-            assert!(!value.contains("[Pedelec App Tool Configuration]"));
-            assert!(!value.contains("./skills/pedelec-cli.md"));
-            assert!(!value.contains("pedelec-cli.md"));
-        }
-    }
-
-    #[test]
-    fn legacy_send_intent_keeps_the_existing_command_spec() {
-        let temp = tempfile::tempdir().unwrap();
-        let thread_id = "thread_legacy_intent";
-        let mut runtime =
-            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.test_provider_command = Some(CommandSpec {
-            program: "codex".into(),
-            args: vec!["exec".into()],
-            cwd: temp.path().to_path_buf(),
-            env: Vec::new(),
-            prompt: "prompt".into(),
-            stdin: "stdin".into(),
-        });
-
-        let start = runtime
-            .begin_send_text_intent(SendTextInput {
-                thread_id: thread_id.into(),
-                message: "legacy".into(),
-            })
-            .unwrap();
-        assert!(matches!(
-            start.intent,
-            ProviderExecutionIntent::LegacyCommand {
-                command: CommandSpec { .. },
-                purpose: RunningProviderProcessPurpose::UserMessage,
-            }
-        ));
-        assert_eq!(
-            runtime.thread_status(thread_id),
-            Some(ThreadStatus::Running)
-        );
-    }
-
     #[test]
     fn persistent_send_returns_a_semantic_intent_without_a_command_spec() {
         let temp = tempfile::tempdir().unwrap();
         let thread_id = "thread_persistent_intent";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
 
         let start = runtime
             .begin_send_text_intent(SendTextInput {
@@ -8284,9 +4929,7 @@ mod tests {
             })
             .unwrap();
         match start.intent {
-            ProviderExecutionIntent::PersistentRuntime {
-                operation: PersistentRuntimeOperation::StartTurn { turn },
-            } => {
+            PersistentRuntimeOperation::StartTurn { turn } => {
                 assert_eq!(turn.thread_id, thread_id);
                 assert_eq!(turn.message, "hello persistent");
                 assert!(turn.local_turn_id.starts_with("local_"));
@@ -8297,7 +4940,6 @@ mod tests {
             runtime.thread_status(thread_id),
             Some(ThreadStatus::Running)
         );
-        assert_eq!(runtime.active_process_id(thread_id), None);
     }
 
     #[test]
@@ -8306,7 +4948,6 @@ mod tests {
         let thread_id = "thread_persistent_prepare_config";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         runtime
             .thread_manager
             .thread_mut(thread_id)
@@ -8323,10 +4964,7 @@ mod tests {
                 thread_id: thread_id.into(),
             })
             .unwrap();
-        let ProviderExecutionIntent::PersistentRuntime {
-            operation: PersistentRuntimeOperation::EnsureSession { session },
-        } = start.intent.unwrap()
-        else {
+        let PersistentRuntimeOperation::EnsureSession { session } = start.intent.unwrap() else {
             panic!("expected a persistent Codex ensure-session intent");
         };
 
@@ -8372,7 +5010,6 @@ mod tests {
             None,
             None,
         );
-        runtime.use_persistent_provider_for_test(ProviderCode::OpenCode);
         runtime
             .thread_manager
             .thread_mut(thread_id)
@@ -8384,10 +5021,7 @@ mod tests {
                 thread_id: thread_id.into(),
             })
             .unwrap();
-        let Some(ProviderExecutionIntent::PersistentRuntime {
-            operation: PersistentRuntimeOperation::EnsureSession { session },
-        }) = prepare.intent
-        else {
+        let Some(PersistentRuntimeOperation::EnsureSession { session }) = prepare.intent else {
             panic!("expected OpenCode EnsureSession");
         };
         assert_eq!(session.provider, ProviderCode::OpenCode);
@@ -8407,10 +5041,7 @@ mod tests {
                 message: "first user task".into(),
             })
             .unwrap();
-        let ProviderExecutionIntent::PersistentRuntime {
-            operation: PersistentRuntimeOperation::StartTurn { turn },
-        } = send.intent
-        else {
+        let PersistentRuntimeOperation::StartTurn { turn } = send.intent else {
             panic!("expected OpenCode StartTurn");
         };
         assert_eq!(turn.message, "first user task");
@@ -8423,9 +5054,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             end.execution,
-            EndThreadExecutionIntent::PersistentRuntime(
-                PersistentRuntimeOperation::EndSession { .. }
-            )
+            PersistentRuntimeOperation::EndSession { .. }
         ));
     }
 
@@ -8440,17 +5069,13 @@ mod tests {
             None,
             Some("cursor-model".into()),
         );
-        runtime.use_persistent_provider_for_test(ProviderCode::Cursor);
 
         let prepare = runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.into(),
             })
             .unwrap();
-        let Some(ProviderExecutionIntent::PersistentRuntime {
-            operation: PersistentRuntimeOperation::EnsureSession { session },
-        }) = prepare.intent
-        else {
+        let Some(PersistentRuntimeOperation::EnsureSession { session }) = prepare.intent else {
             panic!("expected Cursor EnsureSession");
         };
         assert_eq!(session.provider, ProviderCode::Cursor);
@@ -8469,10 +5094,7 @@ mod tests {
                 message: "first Cursor task".into(),
             })
             .unwrap();
-        let ProviderExecutionIntent::PersistentRuntime {
-            operation: PersistentRuntimeOperation::StartTurn { turn },
-        } = send.intent
-        else {
+        let PersistentRuntimeOperation::StartTurn { turn } = send.intent else {
             panic!("expected Cursor StartTurn");
         };
         assert_eq!(turn.message, "first Cursor task");
@@ -8485,9 +5107,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             end.execution,
-            EndThreadExecutionIntent::PersistentRuntime(
-                PersistentRuntimeOperation::EndSession { .. }
-            )
+            PersistentRuntimeOperation::EndSession { .. }
         ));
     }
 
@@ -8503,25 +5123,11 @@ mod tests {
             Some("qwen3:8b".into()),
         );
         assert_eq!(
-            CoreRuntime::new_for_application().provider_execution_family(&ProviderCode::Ollama),
-            ProviderExecutionFamily::PersistentRuntime
-        );
-        runtime.use_persistent_provider_for_test(ProviderCode::Ollama);
-        assert_eq!(
             runtime
                 .provider_executable_path(&ProviderCode::Ollama)
                 .unwrap_err()
                 .code,
             error_codes::PROVIDER_TERMINAL_UNSUPPORTED
-        );
-        assert_eq!(
-            runtime
-                .begin_prepare_thread(PrepareThreadInput {
-                    thread_id: thread_id.into(),
-                })
-                .unwrap_err()
-                .code,
-            error_codes::PROVIDER_UNSUPPORTED
         );
 
         let prepare = runtime
@@ -8529,11 +5135,8 @@ mod tests {
                 thread_id: thread_id.into(),
             })
             .unwrap();
-        let Some(ProviderExecutionIntent::PersistentRuntime {
-            operation: PersistentRuntimeOperation::EnsureSession { session },
-        }) = prepare.intent
-        else {
-            panic!("expected Ollama EnsureSession, not a legacy command");
+        let Some(PersistentRuntimeOperation::EnsureSession { session }) = prepare.intent else {
+            panic!("expected Ollama EnsureSession");
         };
         assert_eq!(session.provider, ProviderCode::Ollama);
         assert_eq!(session.model.as_deref(), Some("qwen3:8b"));
@@ -8558,25 +5161,13 @@ mod tests {
                 message: "first Ollama task".into(),
             })
             .unwrap();
-        let ProviderExecutionIntent::PersistentRuntime {
-            operation: PersistentRuntimeOperation::StartTurn { turn },
-        } = send.intent
-        else {
-            panic!("expected Ollama StartTurn, not a legacy command");
+        let PersistentRuntimeOperation::StartTurn { turn } = send.intent else {
+            panic!("expected Ollama StartTurn");
         };
         assert_eq!(turn.message, "first Ollama task");
         assert_eq!(turn.provider_session_id, Some("agent-session-1".into()));
         assert!(!turn.message.contains("Pedelec Host"));
         assert!(!turn.session.host_instructions.contains("PEDELEC_PREPARED"));
-
-        let legacy_send = runtime.begin_send_text(SendTextInput {
-            thread_id: thread_id.into(),
-            message: "must not fall back".into(),
-        });
-        assert_eq!(
-            legacy_send.unwrap_err().code,
-            error_codes::PROVIDER_UNSUPPORTED
-        );
 
         let end = runtime
             .begin_end_thread(EndThreadInput {
@@ -8585,9 +5176,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             end.execution,
-            EndThreadExecutionIntent::PersistentRuntime(
-                PersistentRuntimeOperation::EndSession { .. }
-            )
+            PersistentRuntimeOperation::EndSession { .. }
         ));
     }
 
@@ -8597,7 +5186,6 @@ mod tests {
         let thread_id = "thread_persistent_complete";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         let events = runtime.event_bus.subscribe(thread_id);
         runtime
             .begin_send_text_intent(SendTextInput {
@@ -8662,7 +5250,6 @@ mod tests {
         let thread_id = "thread_persistent_failure";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         let events = runtime.event_bus.subscribe(thread_id);
         runtime
             .begin_send_text_intent(SendTextInput {
@@ -8702,7 +5289,6 @@ mod tests {
         let thread_id = "thread_persistent_stopping";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         runtime
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
@@ -8721,7 +5307,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             end.execution,
-            EndThreadExecutionIntent::PersistentRuntime(_)
+            PersistentRuntimeOperation::EndSession { .. }
         ));
         runtime
             .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
@@ -8745,7 +5331,6 @@ mod tests {
         let thread_id = "thread_persistent_prepare";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         let events = runtime.event_bus.subscribe(thread_id);
         let start = runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
@@ -8754,9 +5339,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             start.intent,
-            Some(ProviderExecutionIntent::PersistentRuntime {
-                operation: PersistentRuntimeOperation::EnsureSession { .. }
-            })
+            Some(PersistentRuntimeOperation::EnsureSession { .. })
         ));
         runtime
             .reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
@@ -8797,7 +5380,6 @@ mod tests {
                 workspace_path: second_path,
                 skills: Vec::new(),
                 status: ThreadStatus::Idle,
-                process_id: None,
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
@@ -8805,14 +5387,11 @@ mod tests {
             ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
         runtime
             .tool_registry
             .insert(second, ToolRegistry::default());
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         for thread_id in ["thread_persistent_a", second] {
             runtime
                 .begin_send_text_intent(SendTextInput {
@@ -8844,7 +5423,6 @@ mod tests {
             Some("provider-session".into()),
             None,
         );
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         runtime
             .end_thread(EndThreadInput {
                 thread_id: thread_id.into(),
@@ -8859,9 +5437,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             start.intent,
-            ProviderExecutionIntent::PersistentRuntime {
-                operation: PersistentRuntimeOperation::StartTurn { .. }
-            }
+            PersistentRuntimeOperation::StartTurn { .. }
         ));
         assert!(runtime.tool_registry.get(thread_id).is_some());
         assert_eq!(
@@ -8876,7 +5452,6 @@ mod tests {
         let thread_id = "thread_persistent_normal_ended";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         runtime
             .end_thread(EndThreadInput {
                 thread_id: thread_id.into(),
@@ -8904,7 +5479,6 @@ mod tests {
             Some("provider-idle".into()),
             None,
         );
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
 
         let base_thread = runtime.thread_manager.thread(idle_id).unwrap().clone();
         let base_provider_state = runtime
@@ -8928,7 +5502,6 @@ mod tests {
             let mut provider_state = base_provider_state.clone();
             provider_state.provider_session_id = Some(provider_session_id.into());
             provider_state.active_provider_turn_id = Some(format!("turn-{thread_id}"));
-            provider_state.has_user_message = true;
             runtime.thread_manager.insert_thread(thread, provider_state);
         }
         runtime
@@ -9024,7 +5597,6 @@ mod tests {
         let thread_id = "thread_runtime_prepare";
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.into(),
@@ -9057,7 +5629,6 @@ mod tests {
             Some("provider-session".into()),
             None,
         );
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         runtime
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
@@ -9118,7 +5689,6 @@ mod tests {
             Some("provider-session".into()),
             None,
         );
-        runtime.use_persistent_provider_for_test(ProviderCode::Codex);
         runtime
             .end_thread(EndThreadInput {
                 thread_id: thread_id.into(),

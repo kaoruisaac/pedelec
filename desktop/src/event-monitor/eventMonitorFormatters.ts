@@ -35,17 +35,6 @@ export function statusLabel(status: unknown): string {
   return formatValue(status);
 }
 
-export function commandDetails(event: Record<string, unknown>): string {
-  return prettyJson({
-    seq: event.seq,
-    processId: event.processId,
-    program: event.program,
-    args: event.args,
-    cwd: event.cwd,
-    prompt: event.prompt,
-  });
-}
-
 export function toolCallDetails(event: Record<string, unknown>): string {
   return prettyJson({
     seq: event.seq,

@@ -24,10 +24,9 @@ use pedelec_core::{
     UpdateSettingsInput,
 };
 use pedelec_ipc::{
-    end_thread_with_dispatcher, prepare_provider_process_with_dispatcher,
-    start_core_ipc_server_with_services_and_dispatcher,
-    start_debug_provider_process_with_dispatcher, start_provider_process_with_dispatcher,
-    PersistentRuntimeDispatcher, ProviderRuntimeDispatcher, RejectPersistentRuntimeDispatcher,
+    end_thread_with_dispatcher, prepare_provider_session_with_dispatcher,
+    start_core_ipc_server_with_services_and_dispatcher, start_debug_provider_turn_with_dispatcher,
+    start_provider_turn_with_dispatcher, PersistentRuntimeDispatcher, ProviderRuntimeDispatcher,
 };
 use pedelec_runtime::ProviderRuntimeOwner;
 use std::path::PathBuf;
@@ -537,7 +536,7 @@ fn send_text(
         .lock()
         .unwrap()
         .authorize_thread_access(&input.thread_id, None)?;
-    start_provider_process_with_dispatcher(
+    start_provider_turn_with_dispatcher(
         state.runtime(),
         Arc::new(provider_runtime.inner().clone()),
         input,
@@ -550,20 +549,9 @@ fn debug_send_text(
     provider_runtime: State<'_, ProviderRuntimeDispatcher>,
     input: SendTextInput,
 ) -> Result<SendTextOutput, PedelecError> {
-    start_debug_provider_process_with_dispatcher(
+    start_debug_provider_turn_with_dispatcher(
         state.runtime(),
         Arc::new(provider_runtime.inner().clone()),
-        input,
-    )
-}
-
-fn debug_start_provider_process(
-    runtime: SharedCoreRuntime,
-    input: SendTextInput,
-) -> Result<SendTextOutput, PedelecError> {
-    start_debug_provider_process_with_dispatcher(
-        runtime,
-        Arc::new(RejectPersistentRuntimeDispatcher),
         input,
     )
 }
@@ -579,7 +567,7 @@ fn prepare_thread(
         .lock()
         .unwrap()
         .authorize_thread_access(&input.thread_id, None)?;
-    prepare_provider_process_with_dispatcher(
+    prepare_provider_session_with_dispatcher(
         state.runtime(),
         Arc::new(provider_runtime.inner().clone()),
         input,
@@ -628,13 +616,6 @@ fn monitor_end_thread(
         Arc::new(provider_runtime.inner().clone()),
         input,
     )
-}
-
-fn end_thread_from_monitor(
-    runtime: &SharedCoreRuntime,
-    input: EndThreadInput,
-) -> Result<(), PedelecError> {
-    runtime.lock().unwrap().end_thread(input)
 }
 
 fn end_thread_from_monitor_with_dispatcher(
@@ -732,11 +713,22 @@ mod workspace_open_tests {
 mod debug_send_text_tests {
     use super::*;
     use pedelec_core::{
-        CommandSpec, CoreRuntime, EffortLevel, ProviderAdapterState, ProviderCode, ThreadState,
-        ThreadStatus, WorkspaceManager,
+        CoreRuntime, EffortLevel, PersistentRuntimeOperation, ProviderCode, ProviderSessionState,
+        ThreadState, ThreadStatus, WorkspaceManager,
     };
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct RecordingPersistentDispatcher {
+        operations: Mutex<Vec<PersistentRuntimeOperation>>,
+    }
+
+    impl PersistentRuntimeDispatcher for RecordingPersistentDispatcher {
+        fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
+            self.operations.lock().unwrap().push(operation);
+            Ok(())
+        }
+    }
 
     #[test]
     fn normal_thread_access_still_requires_the_matching_sdk_origin() {
@@ -765,9 +757,11 @@ mod debug_send_text_tests {
     #[test]
     fn monitor_thread_stop_bypasses_sdk_origin_authorization() {
         let (runtime, _temp) = runtime_with_sdk_thread(ThreadStatus::Idle);
+        let dispatcher = Arc::new(RecordingPersistentDispatcher::default());
 
-        end_thread_from_monitor(
+        end_thread_from_monitor_with_dispatcher(
             &runtime,
+            dispatcher.clone(),
             EndThreadInput {
                 thread_id: "t000001".into(),
             },
@@ -778,31 +772,25 @@ mod debug_send_text_tests {
             runtime.lock().unwrap().thread_status("t000001"),
             Some(ThreadStatus::Ended)
         );
+        assert!(matches!(
+            dispatcher.operations.lock().unwrap().first(),
+            Some(PersistentRuntimeOperation::EndSession { .. })
+        ));
     }
 
     #[test]
     fn debug_send_text_skips_origin_authorization_but_uses_normal_send_start() {
         let (runtime, _temp) = runtime_with_sdk_thread(ThreadStatus::Idle);
-        let workspace_path = runtime
+        let output = runtime
             .lock()
             .unwrap()
-            .thread_workspace_path("t000001")
-            .unwrap();
-        runtime.lock().unwrap().test_provider_command = Some(test_provider_command(
-            workspace_path,
-            "What did you just change?",
-        ));
-
-        let output = debug_start_provider_process(
-            Arc::clone(&runtime),
-            SendTextInput {
+            .begin_debug_send_text_intent(SendTextInput {
                 thread_id: "t000001".into(),
                 message: "What did you just change?".into(),
-            },
-        )
-        .expect("debug send should reach the provider start path");
+            })
+            .expect("debug send should reach the provider start path");
 
-        assert_eq!(output.thread_id, "t000001");
+        assert_eq!(output.output.thread_id, "t000001");
         assert_eq!(
             runtime.lock().unwrap().thread_status("t000001"),
             Some(ThreadStatus::Running)
@@ -824,14 +812,14 @@ mod debug_send_text_tests {
     fn debug_send_text_keeps_busy_thread_protection() {
         let (runtime, _temp) = runtime_with_sdk_thread(ThreadStatus::Running);
 
-        let error = debug_start_provider_process(
-            runtime,
-            SendTextInput {
+        let error = runtime
+            .lock()
+            .unwrap()
+            .begin_debug_send_text_intent(SendTextInput {
                 thread_id: "t000001".into(),
                 message: "This must be rejected while running.".into(),
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
 
         assert_eq!(error.code, error_codes::THREAD_BUSY);
     }
@@ -857,47 +845,19 @@ mod debug_send_text_tests {
                 workspace_path,
                 skills: Vec::new(),
                 status,
-                process_id: None,
                 created_at: now,
                 updated_at: now,
                 sdk_origin: Some("https://example.com".into()),
             },
-            ProviderAdapterState {
+            ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
+        runtime
+            .tool_registry
+            .insert("t000001", pedelec_core::ToolRegistry::default());
 
         (Arc::new(Mutex::new(runtime)), temp)
-    }
-
-    fn test_provider_command(cwd: PathBuf, message: &str) -> CommandSpec {
-        #[cfg(windows)]
-        let (program, args) = (
-            "powershell.exe".to_string(),
-            vec![
-                "-NoProfile".to_string(),
-                "-ExecutionPolicy".to_string(),
-                "Bypass".to_string(),
-                "-Command".to_string(),
-                "[Console]::In.ReadToEnd() | Out-Null; Start-Sleep -Seconds 1".to_string(),
-            ],
-        );
-        #[cfg(not(windows))]
-        let (program, args) = (
-            "sh".to_string(),
-            vec!["-c".to_string(), "cat >/dev/null; sleep 1".to_string()],
-        );
-
-        CommandSpec {
-            program,
-            args,
-            cwd,
-            env: Vec::new(),
-            prompt: message.to_string(),
-            stdin: message.to_string(),
-        }
     }
 }

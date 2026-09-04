@@ -3,7 +3,6 @@ import type { JSX } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import { FaRegularFolderOpen, FaSolidStop, FaSolidTrash } from "solid-icons/fa";
 import {
-  commandDetails,
   errorTitle,
   formatTimestamp,
   formatValue,
@@ -412,29 +411,13 @@ function ThreadDetail(props: {
           </For>
         </MonitorBlock>
 
-        <MonitorBlock title="Commands" empty={thread().commandEvents.length === 0}>
-          <For each={thread().commandEvents}>
-            {(event) => <pre class="event-monitor-json">{commandDetails(event as Record<string, unknown>)}</pre>}
-          </For>
-        </MonitorBlock>
-
         <MonitorBlock title="Protocol Traffic" empty={protocolTraffic().length === 0}>
           <For each={protocolTraffic()}>
             {(event) => <pre class="event-monitor-json">{prettyJson(event)}</pre>}
           </For>
         </MonitorBlock>
 
-        <MonitorBlock title="Stdout" empty={!thread().rawStdout}>
-          <pre class="event-monitor-stream">{thread().rawStdout}</pre>
-        </MonitorBlock>
-
-        <MonitorBlock
-          title="Stderr"
-          empty={!thread().rawStderr && runtimeStderr().length === 0}
-        >
-          <Show when={thread().rawStderr}>
-            <pre class="event-monitor-stream">{thread().rawStderr}</pre>
-          </Show>
+        <MonitorBlock title="Stderr" empty={runtimeStderr().length === 0}>
           <For each={runtimeStderr()}>
             {(event) => <pre class="event-monitor-stream">{event.text || ""}</pre>}
           </For>

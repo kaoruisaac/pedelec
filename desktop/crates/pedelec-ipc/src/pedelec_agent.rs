@@ -1202,10 +1202,9 @@ mod tests {
     use crate::ProviderRuntimeDispatcher;
     use pedelec_core::{
         CreateThreadInput, CreateThreadSkillsInput, CreateThreadWorkspaceInput, EffortLevel,
-        EffortsArgs, EndThreadExecutionIntent, EndThreadInput, OllamaProviderSettingsInput,
-        PrepareThreadInput, ProviderExecutionIntent, ProviderExecutionOperationKind,
-        ProviderSettingsInput, SendTextInput, ThreadEvent, ThreadStatus, UpdateSettingsInput,
-        WorkspaceManager,
+        EffortsArgs, EndThreadInput, OllamaProviderSettingsInput, PersistentRuntimeOperation,
+        PrepareThreadInput, ProviderExecutionOperationKind, ProviderSettingsInput, SendTextInput,
+        ThreadEvent, ThreadStatus, UpdateSettingsInput, WorkspaceManager,
     };
     use std::fs;
     use std::thread;
@@ -1498,7 +1497,7 @@ mod tests {
                 thread_id: thread_id.clone(),
             })
             .unwrap();
-        let EndThreadExecutionIntent::PersistentRuntime(operation) = end.execution else {
+        let operation @ PersistentRuntimeOperation::EndSession { .. } = end.execution else {
             panic!("Ollama end should use persistent runtime");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1535,7 +1534,7 @@ mod tests {
                 thread_id: healthy.clone(),
             })
             .unwrap();
-        let EndThreadExecutionIntent::PersistentRuntime(operation) = end.execution else {
+        let operation @ PersistentRuntimeOperation::EndSession { .. } = end.execution else {
             panic!("Ollama end should use persistent runtime");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1557,7 +1556,7 @@ mod tests {
                 thread_id: ambiguous.clone(),
             })
             .unwrap();
-        let EndThreadExecutionIntent::PersistentRuntime(operation) = end.execution else {
+        let operation @ PersistentRuntimeOperation::EndSession { .. } = end.execution else {
             panic!("Ollama end should use persistent runtime");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -1641,7 +1640,7 @@ mod tests {
                 thread_id: thread_id.clone(),
             })
             .unwrap();
-        let Some(ProviderExecutionIntent::PersistentRuntime { operation }) = start.intent else {
+        let Some(operation) = start.intent else {
             panic!("Ollama prepare should produce a persistent operation");
         };
         let error = dispatcher.dispatch(operation).unwrap_err();
@@ -1864,7 +1863,7 @@ mod tests {
                 thread_id: thread_id.clone(),
             })
             .unwrap();
-        let EndThreadExecutionIntent::PersistentRuntime(operation) = end.execution else {
+        let operation @ PersistentRuntimeOperation::EndSession { .. } = end.execution else {
             panic!("Ollama end should use persistent runtime");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -2080,7 +2079,7 @@ mod tests {
                 thread_id: thread_id.to_string(),
             })
             .unwrap();
-        let Some(ProviderExecutionIntent::PersistentRuntime { operation }) = start.intent else {
+        let Some(operation) = start.intent else {
             panic!("Ollama prepare should produce a persistent operation");
         };
         dispatcher.dispatch(operation).unwrap();
@@ -2100,9 +2099,7 @@ mod tests {
                 message: message.to_string(),
             })
             .unwrap();
-        let ProviderExecutionIntent::PersistentRuntime { operation } = start.intent else {
-            panic!("Ollama turn should produce a persistent operation");
-        };
+        let operation = start.intent;
         dispatcher.dispatch(operation).unwrap();
     }
 

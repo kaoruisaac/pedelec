@@ -994,15 +994,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
 
 [[package]]
-name = "encoding_rs"
-version = "0.8.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2806,7 +2797,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs",
- "encoding_rs",
  "jsonschema",
  "objc2",
  "objc2-app-kit",
@@ -2869,7 +2859,6 @@ version = "0.3.0"
 dependencies = [
  "chrono",
  "dirs",
- "encoding_rs",
  "pedelec-cli",
  "pedelec-core",
  "pedelec-runtime",
@@ -2877,7 +2866,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

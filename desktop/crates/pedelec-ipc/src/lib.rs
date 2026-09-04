@@ -1,13 +1,11 @@
-use encoding_rs::Encoding;
 use pedelec_core::{
     error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
-    CreateAssetUploadInput, CreateThreadInput, EndThreadExecutionIntent, EndThreadInput,
-    ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation, PrepareThreadInput,
-    PrepareThreadOutput, ProviderCode, ProviderExecutionIntent, ProviderProcessTermination,
-    ProviderProtocolTraffic, ProviderRuntimeDiagnostic, RunningProviderProcessPurpose,
-    SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
-    ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration, ToolInvocationWait,
-    ToolSpecInput, UpdateSettingsInput,
+    CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError,
+    PedelecSettings, PersistentRuntimeOperation, PrepareThreadInput, PrepareThreadOutput,
+    ProviderCode, ProviderProtocolTraffic, ProviderRuntimeDiagnostic, SendTextInput,
+    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput,
+    ToolInvocationOutcome, ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput,
+    UpdateSettingsInput,
 };
 use pedelec_runtime::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
@@ -1797,7 +1795,7 @@ fn handle_core_ipc_request_with_services(
         "send_text" => match decode_payload::<SendTextInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| {
-                    start_provider_process_with_dispatcher(
+                    start_provider_turn_with_dispatcher(
                         runtime,
                         Arc::clone(&persistent_dispatcher),
                         input,
@@ -1811,7 +1809,7 @@ fn handle_core_ipc_request_with_services(
         "prepare_thread" => match decode_payload::<PrepareThreadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| {
-                    prepare_provider_process_with_dispatcher(
+                    prepare_provider_session_with_dispatcher(
                         runtime,
                         Arc::clone(&persistent_dispatcher),
                         input,
@@ -2074,18 +2072,14 @@ where
     })
 }
 
-pub fn start_provider_process(
+pub fn start_provider_turn(
     runtime: SharedCoreRuntime,
     input: SendTextInput,
 ) -> Result<pedelec_core::SendTextOutput, PedelecError> {
-    start_provider_process_with_dispatcher(
-        runtime,
-        Arc::new(RejectPersistentRuntimeDispatcher),
-        input,
-    )
+    start_provider_turn_with_dispatcher(runtime, Arc::new(RejectPersistentRuntimeDispatcher), input)
 }
 
-pub fn start_provider_process_with_dispatcher(
+pub fn start_provider_turn_with_dispatcher(
     runtime: SharedCoreRuntime,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
     input: SendTextInput,
@@ -2097,18 +2091,18 @@ pub fn start_provider_process_with_dispatcher(
     Ok(start.output)
 }
 
-pub fn start_debug_provider_process(
+pub fn start_debug_provider_turn(
     runtime: SharedCoreRuntime,
     input: SendTextInput,
 ) -> Result<pedelec_core::SendTextOutput, PedelecError> {
-    start_debug_provider_process_with_dispatcher(
+    start_debug_provider_turn_with_dispatcher(
         runtime,
         Arc::new(RejectPersistentRuntimeDispatcher),
         input,
     )
 }
 
-pub fn start_debug_provider_process_with_dispatcher(
+pub fn start_debug_provider_turn_with_dispatcher(
     runtime: SharedCoreRuntime,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
     input: SendTextInput,
@@ -2123,18 +2117,18 @@ pub fn start_debug_provider_process_with_dispatcher(
     Ok(start.output)
 }
 
-pub fn prepare_provider_process(
+pub fn prepare_provider_session(
     runtime: SharedCoreRuntime,
     input: PrepareThreadInput,
 ) -> Result<PrepareThreadOutput, PedelecError> {
-    prepare_provider_process_with_dispatcher(
+    prepare_provider_session_with_dispatcher(
         runtime,
         Arc::new(RejectPersistentRuntimeDispatcher),
         input,
     )
 }
 
-pub fn prepare_provider_process_with_dispatcher(
+pub fn prepare_provider_session_with_dispatcher(
     runtime: SharedCoreRuntime,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
     input: PrepareThreadInput,
@@ -2156,197 +2150,35 @@ pub fn end_thread_with_dispatcher(
 ) -> Result<(), PedelecError> {
     let start = runtime.lock().unwrap().begin_end_thread(input)?;
     let thread_id = start.thread_id.clone();
-    match start.execution {
-        EndThreadExecutionIntent::LegacyProcess(stop) => {
-            if let Some(stop) = stop {
-                stop.stop();
-            }
-            runtime.lock().unwrap().finish_end_thread(&thread_id)
-        }
-        EndThreadExecutionIntent::PersistentRuntime(operation) => {
-            let dispatch_result = persistent_dispatcher.dispatch(operation);
-            if let Err(error) = dispatch_result {
-                // End is a safety operation: a failed unsubscribe must not
-                // leave the Pedelec thread permanently in Stopping.
-                runtime.lock().unwrap().finish_end_thread(&thread_id)?;
-                return Err(error);
-            }
-            runtime.lock().unwrap().finish_end_thread(&thread_id)
-        }
+    let dispatch_result = persistent_dispatcher.dispatch(start.execution);
+    if let Err(error) = dispatch_result {
+        // End is a safety operation: a failed unsubscribe must not leave the
+        // Pedelec thread permanently in Stopping.
+        runtime.lock().unwrap().finish_end_thread(&thread_id)?;
+        return Err(error);
     }
+    runtime.lock().unwrap().finish_end_thread(&thread_id)
 }
 
 fn dispatch_provider_execution(
     runtime: SharedCoreRuntime,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
     thread_id: String,
-    intent: ProviderExecutionIntent,
+    operation: PersistentRuntimeOperation,
 ) -> Result<(), PedelecError> {
-    let operation = intent.operation_kind();
-    match intent {
-        ProviderExecutionIntent::LegacyCommand { command, purpose } => {
-            let result = start_provider_process_with_command(
-                Arc::clone(&runtime),
-                thread_id.clone(),
-                command,
-                purpose,
-            );
-            if result.is_ok() {
-                runtime
-                    .lock()
-                    .unwrap()
-                    .complete_provider_execution_dispatch(&thread_id);
-            }
-            result
-        }
-        ProviderExecutionIntent::PersistentRuntime {
-            operation: runtime_operation,
-        } => {
-            if let Err(error) = persistent_dispatcher.dispatch(runtime_operation) {
-                runtime.lock().unwrap().fail_provider_execution_dispatch(
-                    &thread_id,
-                    operation,
-                    error.clone(),
-                );
-                return Err(error);
-            }
-            runtime
-                .lock()
-                .unwrap()
-                .complete_provider_execution_dispatch(&thread_id);
-            Ok(())
-        }
+    let operation_kind = operation.kind();
+    if let Err(error) = persistent_dispatcher.dispatch(operation) {
+        runtime.lock().unwrap().fail_provider_execution_dispatch(
+            &thread_id,
+            operation_kind,
+            error.clone(),
+        );
+        return Err(error);
     }
-}
-
-fn start_provider_process_with_command(
-    runtime: SharedCoreRuntime,
-    thread_id: String,
-    command_spec: pedelec_core::CommandSpec,
-    purpose: RunningProviderProcessPurpose,
-) -> Result<(), PedelecError> {
-    let resolved_program = match resolve_provider_program(&command_spec.program, &command_spec.env)
-    {
-        Ok(resolved_program) => resolved_program,
-        Err(err) => {
-            let error = PedelecError::with_details(
-                error_codes::PROVIDER_PROCESS_START_FAILED,
-                "provider program could not be found",
-                provider_start_error_details(&thread_id, &command_spec, None, Some(err)),
-            );
-            runtime
-                .lock()
-                .unwrap()
-                .fail_provider_process_start(&thread_id, error.clone(), purpose);
-            return Err(error);
-        }
-    };
-
-    let mut command = build_provider_process_command(&command_spec, &resolved_program);
-
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            let error = PedelecError::with_details(
-                error_codes::PROVIDER_PROCESS_START_FAILED,
-                "provider process could not be started",
-                provider_start_error_details(
-                    &thread_id,
-                    &command_spec,
-                    Some(&resolved_program),
-                    Some(ProviderProgramResolveError {
-                        candidates: Vec::new(),
-                        error: err.to_string(),
-                    }),
-                ),
-            );
-            runtime
-                .lock()
-                .unwrap()
-                .fail_provider_process_start(&thread_id, error.clone(), purpose);
-            return Err(error);
-        }
-    };
-
-    let process_id = child.id();
     runtime
         .lock()
         .unwrap()
-        .emit_provider_command_started(&thread_id, process_id, &command_spec);
-
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(err) = stdin.write_all(command_spec.stdin.as_bytes()) {
-            let _ = child.kill();
-            let error = PedelecError::with_details(
-                error_codes::PROVIDER_STDIN_CLOSED,
-                "provider stdin closed before prompt was written",
-                serde_json::json!({
-                    "threadId": thread_id,
-                    "processId": process_id,
-                    "error": err.to_string()
-                }),
-            );
-            runtime
-                .lock()
-                .unwrap()
-                .fail_provider_process_start(&thread_id, error.clone(), purpose);
-            return Err(error);
-        }
-    } else {
-        let _ = child.kill();
-        let error = PedelecError::with_details(
-            error_codes::PROVIDER_STDIN_CLOSED,
-            "provider stdin was not available",
-            serde_json::json!({
-                "threadId": thread_id,
-                "processId": process_id
-            }),
-        );
-        runtime
-            .lock()
-            .unwrap()
-            .fail_provider_process_start(&thread_id, error.clone(), purpose);
-        return Err(error);
-    }
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let child = Arc::new(Mutex::new(Some(child)));
-    let termination = runtime.lock().unwrap().register_provider_process(
-        &thread_id,
-        process_id,
-        Arc::clone(&child),
-        purpose,
-    );
-
-    let stdout_reader = stdout.map(|stdout| {
-        spawn_provider_reader(
-            Arc::clone(&runtime),
-            thread_id.clone(),
-            stdout,
-            ProviderStream::Stdout,
-            Arc::clone(&termination),
-        )
-    });
-    let stderr_reader = stderr.map(|stderr| {
-        spawn_provider_reader(
-            Arc::clone(&runtime),
-            thread_id.clone(),
-            stderr,
-            ProviderStream::Stderr,
-            Arc::clone(&termination),
-        )
-    });
-    spawn_provider_waiter(
-        runtime,
-        thread_id,
-        process_id,
-        child,
-        termination,
-        stdout_reader,
-        stderr_reader,
-    );
-
+        .complete_provider_execution_dispatch(&thread_id);
     Ok(())
 }
 
@@ -2671,12 +2503,12 @@ pub fn run_provider_command_captured_with_cancel(
 }
 
 #[derive(Debug)]
-struct CapturedProviderStream {
+struct CapturedOutput {
     text: String,
     truncated: bool,
 }
 
-fn capture_provider_output<R: Read>(mut reader: R) -> CapturedProviderStream {
+fn capture_provider_output<R: Read>(mut reader: R) -> CapturedOutput {
     let mut output = Vec::with_capacity(MAX_CAPTURED_PROVIDER_OUTPUT_BYTES.min(64 * 1024));
     let mut buffer = [0u8; CAPTURE_READ_BUFFER_BYTES];
     let mut truncated = false;
@@ -2697,7 +2529,7 @@ fn capture_provider_output<R: Read>(mut reader: R) -> CapturedProviderStream {
             Err(_) => break,
         }
     }
-    CapturedProviderStream {
+    CapturedOutput {
         text: bounded_capture_text(&output),
         truncated,
     }
@@ -2735,261 +2567,6 @@ fn env_key_is_path(key: &str) -> bool {
 
 fn has_path_separator(program: &str) -> bool {
     program.contains('/') || program.contains('\\')
-}
-
-fn provider_start_error_details(
-    thread_id: &str,
-    spec: &pedelec_core::CommandSpec,
-    resolved_program: Option<&ResolvedProviderProgram>,
-    resolve_error: Option<ProviderProgramResolveError>,
-) -> Value {
-    let mut details = serde_json::json!({
-        "threadId": thread_id,
-        "program": spec.program,
-        "args": spec.args,
-        "cwd": path_for_external_use(&spec.cwd),
-        "path": command_env_path(&spec.env)
-            .or_else(|| env::var_os("PATH"))
-            .map(|path| path.to_string_lossy().to_string())
-    });
-    if let Some(resolved_program) = resolved_program {
-        details["resolvedProgram"] = match resolved_program {
-            ResolvedProviderProgram::Direct(program) => serde_json::json!({
-                "type": "direct",
-                "path": program.to_string_lossy()
-            }),
-            #[cfg(windows)]
-            ResolvedProviderProgram::CmdScript(program) => serde_json::json!({
-                "type": "cmdScript",
-                "path": program.to_string_lossy()
-            }),
-        };
-    }
-    if let Some(resolve_error) = resolve_error {
-        details["error"] = serde_json::json!(resolve_error.error);
-        if !resolve_error.candidates.is_empty() {
-            details["programLookupCandidates"] = serde_json::json!(resolve_error
-                .candidates
-                .iter()
-                .map(|candidate| candidate.to_string_lossy().to_string())
-                .collect::<Vec<_>>());
-        }
-    }
-    details
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ProviderStream {
-    Stdout,
-    Stderr,
-}
-
-fn spawn_provider_reader<R>(
-    runtime: SharedCoreRuntime,
-    thread_id: String,
-    mut reader: R,
-    stream: ProviderStream,
-    termination: Arc<ProviderProcessTermination>,
-) -> thread::JoinHandle<()>
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 4096];
-        let mut decoder = ProviderOutputDecoder::new();
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(bytes_read) => {
-                    let Some(text) = decoder.decode_chunk(&buffer[..bytes_read]) else {
-                        continue;
-                    };
-                    emit_provider_reader_text(&runtime, &thread_id, stream, text, &termination);
-                }
-                Err(_) => break,
-            }
-        }
-        if let Some(text) = decoder.flush() {
-            emit_provider_reader_text(&runtime, &thread_id, stream, text, &termination);
-        }
-    })
-}
-
-fn emit_provider_reader_text(
-    runtime: &SharedCoreRuntime,
-    thread_id: &str,
-    stream: ProviderStream,
-    text: String,
-    termination: &ProviderProcessTermination,
-) {
-    let mut text = Some(text);
-    loop {
-        if termination.is_cancelled() {
-            return;
-        }
-        match runtime.try_lock() {
-            Ok(mut runtime) => {
-                if termination.is_cancelled() {
-                    return;
-                }
-                let text = text.take().expect("provider reader text is present");
-                match stream {
-                    ProviderStream::Stdout => runtime.emit_provider_stdout(thread_id, text),
-                    ProviderStream::Stderr => runtime.emit_provider_stderr(thread_id, text),
-                }
-                return;
-            }
-            Err(std::sync::TryLockError::WouldBlock) => thread::yield_now(),
-            Err(std::sync::TryLockError::Poisoned(_)) => return,
-        }
-    }
-}
-
-struct ProviderOutputDecoder {
-    pending: Vec<u8>,
-    fallback_encoding: Option<&'static Encoding>,
-}
-
-impl ProviderOutputDecoder {
-    fn new() -> Self {
-        Self {
-            pending: Vec::new(),
-            fallback_encoding: provider_output_fallback_encoding(),
-        }
-    }
-
-    fn decode_chunk(&mut self, bytes: &[u8]) -> Option<String> {
-        self.pending.extend_from_slice(bytes);
-        self.decode_pending(false)
-    }
-
-    fn flush(&mut self) -> Option<String> {
-        self.decode_pending(true)
-    }
-
-    fn decode_pending(&mut self, flush: bool) -> Option<String> {
-        if self.pending.is_empty() {
-            return None;
-        }
-
-        match std::str::from_utf8(&self.pending) {
-            Ok(text) => {
-                let text = text.to_string();
-                self.pending.clear();
-                Some(text)
-            }
-            Err(err) if err.error_len().is_none() && !flush => {
-                let valid_up_to = err.valid_up_to();
-                if valid_up_to == 0 {
-                    return None;
-                }
-
-                let suffix = self.pending.split_off(valid_up_to);
-                let text = String::from_utf8(self.pending.split_off(0)).ok();
-                self.pending = suffix;
-                text
-            }
-            Err(_) => {
-                let text = self.decode_with_fallback();
-                self.pending.clear();
-                Some(text)
-            }
-        }
-    }
-
-    fn decode_with_fallback(&self) -> String {
-        if let Some(encoding) = self.fallback_encoding {
-            let (text, _, _) = encoding.decode(&self.pending);
-            return text.into_owned();
-        }
-
-        String::from_utf8_lossy(&self.pending).to_string()
-    }
-}
-
-#[cfg(windows)]
-fn provider_output_fallback_encoding() -> Option<&'static Encoding> {
-    let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
-    provider_output_encoding_for_windows_code_page(code_page)
-}
-
-#[cfg(windows)]
-fn provider_output_encoding_for_windows_code_page(code_page: u32) -> Option<&'static Encoding> {
-    let label = match code_page {
-        65001 => "utf-8",
-        950 => "big5",
-        936 => "gbk",
-        932 => "shift_jis",
-        949 => "euc-kr",
-        874 => "windows-874",
-        866 => "ibm866",
-        1250 => "windows-1250",
-        1251 => "windows-1251",
-        1252 => "windows-1252",
-        1253 => "windows-1253",
-        1254 => "windows-1254",
-        1255 => "windows-1255",
-        1256 => "windows-1256",
-        1257 => "windows-1257",
-        1258 => "windows-1258",
-        _ => return None,
-    };
-    Encoding::for_label(label.as_bytes())
-}
-
-#[cfg(not(windows))]
-fn provider_output_fallback_encoding() -> Option<&'static Encoding> {
-    None
-}
-
-fn spawn_provider_waiter(
-    runtime: SharedCoreRuntime,
-    thread_id: String,
-    process_id: u32,
-    child: Arc<Mutex<Option<std::process::Child>>>,
-    termination: Arc<ProviderProcessTermination>,
-    stdout_reader: Option<thread::JoinHandle<()>>,
-    stderr_reader: Option<thread::JoinHandle<()>>,
-) {
-    thread::spawn(move || {
-        let child = {
-            let Ok(mut child) = child.lock() else {
-                termination.mark_completed();
-                return;
-            };
-            child.take()
-        };
-
-        let Some(mut child) = child else {
-            termination.mark_completed();
-            return;
-        };
-
-        let wait_result = child.wait();
-        if let Some(reader) = stdout_reader {
-            let _ = reader.join();
-        }
-        if let Some(reader) = stderr_reader {
-            let _ = reader.join();
-        }
-        termination.mark_completed();
-        match wait_result {
-            Ok(status) => {
-                if !termination.is_cancelled() {
-                    if let Ok(mut runtime) = runtime.lock() {
-                        runtime.complete_provider_process(&thread_id, process_id, status);
-                    }
-                }
-            }
-            Err(err) => {
-                if !termination.is_cancelled() {
-                    if let Ok(mut runtime) = runtime.lock() {
-                        runtime.fail_provider_process_wait(&thread_id, process_id, err.to_string());
-                    }
-                }
-            }
-        }
-    });
 }
 
 fn ok_response(request_id: &str, result: Value) -> CoreIpcResponse {
@@ -3082,28 +2659,6 @@ mod tests {
             serde_json::to_value(diagnostic).unwrap()["type"],
             "provider_runtime_stderr"
         );
-    }
-
-    #[test]
-    fn provider_start_diagnostics_externalize_cwd_without_changing_the_spec() {
-        let cwd = if cfg!(windows) {
-            PathBuf::from(r"\\?\C:\Users\kaoru\OneDrive\桌面\test")
-        } else {
-            PathBuf::from("/tmp/pedelec-workspace")
-        };
-        let spec = pedelec_core::CommandSpec {
-            program: "codex".into(),
-            args: vec!["--cd".into(), "external path placeholder".into()],
-            cwd: cwd.clone(),
-            env: Vec::new(),
-            prompt: String::new(),
-            stdin: String::new(),
-        };
-
-        let details = provider_start_error_details("thread", &spec, None, None);
-
-        assert_eq!(details["cwd"], path_for_external_use(&cwd));
-        assert_eq!(spec.cwd, cwd);
     }
 
     #[test]
@@ -3226,13 +2781,13 @@ mod tests {
     }
 
     #[test]
-    fn send_text_waits_for_initial_provider_readiness_before_starting_process() {
+    fn send_text_waits_for_initial_provider_readiness_before_dispatch() {
         let runtime = waiting_provider_runtime("send_text_wait");
         let request_runtime = Arc::clone(&runtime);
         let (response_tx, response_rx) = mpsc::channel();
         let request_thread = thread::spawn(move || {
             response_tx
-                .send(start_provider_process(
+                .send(start_provider_turn(
                     request_runtime,
                     SendTextInput {
                         thread_id: "send_text_wait".into(),
@@ -3267,7 +2822,7 @@ mod tests {
             .unwrap()
             .unwrap_err();
         request_thread.join().unwrap();
-        assert_eq!(error.code, error_codes::PROVIDER_PROCESS_START_FAILED);
+        assert_eq!(error.code, error_codes::PROVIDER_RUNTIME_START_FAILED);
     }
 
     #[test]
@@ -3277,7 +2832,7 @@ mod tests {
         let (response_tx, response_rx) = mpsc::channel();
         let request_thread = thread::spawn(move || {
             response_tx
-                .send(prepare_provider_process(
+                .send(prepare_provider_session(
                     request_runtime,
                     PrepareThreadInput {
                         thread_id: "prepare_thread_wait".into(),
@@ -3301,7 +2856,7 @@ mod tests {
             .unwrap()
             .unwrap_err();
         request_thread.join().unwrap();
-        assert_eq!(error.code, error_codes::PROVIDER_PROCESS_START_FAILED);
+        assert_eq!(error.code, error_codes::PROVIDER_RUNTIME_START_FAILED);
     }
 
     #[cfg(unix)]
@@ -3522,26 +3077,18 @@ mod tests {
                 workspace_path: PathBuf::from("."),
                 skills: Vec::new(),
                 status: pedelec_core::ThreadStatus::Idle,
-                process_id: None,
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
             },
-            pedelec_core::ProviderAdapterState {
+            pedelec_core::ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
-        runtime_guard.test_provider_command = Some(pedelec_core::CommandSpec {
-            program: "pedelec-provider-readiness-test-command-that-does-not-exist".into(),
-            args: Vec::new(),
-            cwd: PathBuf::from("."),
-            env: Vec::new(),
-            prompt: String::new(),
-            stdin: String::new(),
-        });
+        runtime_guard
+            .tool_registry
+            .insert(thread_id, pedelec_core::ToolRegistry::default());
         drop(runtime_guard);
         runtime
     }

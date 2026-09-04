@@ -415,6 +415,8 @@ describe("EventMonitorApp Debug Prompt", () => {
     await tick();
 
     expect(container.textContent).toContain("Protocol Traffic");
+    expect(container.textContent).not.toContain("Commands");
+    expect(container.textContent).not.toContain("Stdout");
     expect(container.textContent).not.toContain("Runtime Diagnostics");
     expect(container.textContent).toContain("full-rpc-frame");
     expect(container.textContent).toContain("unmatched");

@@ -9,8 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Command, Output, Stdio};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -27,7 +26,6 @@ const DEFAULT_MAX_SKILL_SIZE_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_OLLAMA_TIMEOUT_MS: u64 = 120_000;
 const OLLAMA_CONNECTION_CHECK_TIMEOUT_MS: u64 = 3_000;
-const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG: &str = "skills.include_instructions=false";
 const CODEX_SKILLS_INCLUDE_INSTRUCTIONS_KEY: &str = "skills.include_instructions";
 const CODEX_PROJECT_DOC_MAX_BYTES_KEY: &str = "project_doc_max_bytes";
 const CODEX_INCLUDE_PERMISSIONS_INSTRUCTIONS_KEY: &str = "include_permissions_instructions";
@@ -36,12 +34,8 @@ const CODEX_INCLUDE_COLLABORATION_MODE_INSTRUCTIONS_KEY: &str =
     "include_collaboration_mode_instructions";
 const CODEX_FEATURES_PLUGINS_KEY: &str = "features.plugins";
 const CODEX_FEATURES_APPS_KEY: &str = "features.apps";
-const OPENCODE_PERMISSION_ENV: &str = "OPENCODE_PERMISSION";
-const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
-const PEDELEC_OPENCODE_AGENT: &str = "pedelec-runtime";
 const PEDELEC_ANTIGRAVITY_AGENT_DIR: &str = ".agents/agents/pedelec-runtime";
 const PEDELEC_ANTIGRAVITY_AGENT_FILE: &str = "agent.md";
-const ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS: usize = 20_000;
 pub const PEDELEC_RUNTIME_DATA_DIR: &str = ".pedelec-runtime";
 pub const PEDELEC_WORKSPACE_FILE: &str = ".pedelec-workspace.json";
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
@@ -52,8 +46,6 @@ const THREAD_ID_BASE36_MAX_WIDTH: usize = 7;
 const THREAD_ID_MAX_COUNTER: u64 = 78_364_164_095;
 pub const MAX_ASSET_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const ASSET_UPLOAD_TICKET_SECONDS: i64 = 5 * 60;
-const MAX_PROVIDER_STDERR_BYTES: usize = 64 * 1024;
-const MAX_PREPARE_ASSISTANT_OUTPUT_BYTES: usize = 64 * 1024;
 const WORKSPACE_REMOVE_MAX_ATTEMPTS: usize = 10;
 const WORKSPACE_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const PROVIDER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -237,7 +229,6 @@ pub struct ThreadState {
     pub workspace_path: PathBuf,
     pub skills: Vec<SkillFile>,
     pub status: ThreadStatus,
-    pub process_id: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing)]
@@ -249,14 +240,7 @@ pub struct ThreadState {
 pub struct ProviderSessionState {
     pub provider_session_id: Option<String>,
     pub active_provider_turn_id: Option<String>,
-    pub last_process_id: Option<u32>,
-    #[serde(default)]
-    pub has_user_message: bool,
 }
-
-/// Legacy name retained for downstream integrations during the lifecycle
-/// migration. New code should use [`ProviderSessionState`].
-pub type ProviderAdapterState = ProviderSessionState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -279,13 +263,6 @@ pub enum ProviderCode {
     Cursor,
     Claude,
     Ollama,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderExecutionFamily {
-    LegacyCommand,
-    PersistentRuntime,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -680,16 +657,6 @@ pub enum ThreadEvent {
         thread_id: String,
         status: ThreadStatus,
     },
-    RawStdout {
-        seq: u64,
-        thread_id: String,
-        text: String,
-    },
-    RawStderr {
-        seq: u64,
-        thread_id: String,
-        text: String,
-    },
     AssistantDelta {
         seq: u64,
         thread_id: String,
@@ -713,15 +680,6 @@ pub enum ThreadEvent {
         request_id: String,
         tool_name: String,
         result: Value,
-    },
-    ProviderCommandStarted {
-        seq: u64,
-        thread_id: String,
-        process_id: u32,
-        program: String,
-        args: Vec<String>,
-        cwd: String,
-        prompt: String,
     },
     ProviderSessionIdUpdated {
         seq: u64,
@@ -750,13 +708,10 @@ impl ThreadEvent {
         match self {
             ThreadEvent::Created { seq, .. }
             | ThreadEvent::StatusChanged { seq, .. }
-            | ThreadEvent::RawStdout { seq, .. }
-            | ThreadEvent::RawStderr { seq, .. }
             | ThreadEvent::AssistantDelta { seq, .. }
             | ThreadEvent::AssistantMessage { seq, .. }
             | ThreadEvent::ToolCall { seq, .. }
             | ThreadEvent::ToolResult { seq, .. }
-            | ThreadEvent::ProviderCommandStarted { seq, .. }
             | ThreadEvent::ProviderSessionIdUpdated { seq, .. }
             | ThreadEvent::Done { seq, .. }
             | ThreadEvent::Error { seq, .. }
@@ -905,28 +860,9 @@ pub struct PendingToolRequest {
     pub timeout_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderCapabilities {
-    pub supports_json_events: bool,
-    pub supports_resume_by_session_id: bool,
-    pub supports_user_supplied_session_id: bool,
-    pub supports_provider_generated_session_id_parse: bool,
-    pub supports_resume_last_session: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SendTextStart {
-    pub output: SendTextOutput,
-    pub command: CommandSpec,
-}
-
-#[derive(Debug, Clone)]
-pub struct PrepareThreadStart {
-    pub output: PrepareThreadOutput,
-    pub command: Option<CommandSpec>,
-}
-
+/// A generic process specification. Thread send/prepare/end execution is
+/// persistent-only and never constructs one of these; it remains for the
+/// Effort Wizard captured probe runner and other one-shot command needs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CommandSpec {
     pub program: String,
@@ -935,34 +871,6 @@ pub struct CommandSpec {
     pub env: Vec<(String, String)>,
     pub prompt: String,
     pub stdin: String,
-}
-
-/// A provider operation admitted by Core.  Legacy providers carry the
-/// process-per-turn command they already use; persistent providers carry a
-/// semantic operation and never need a synthetic command.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ProviderExecutionIntent {
-    LegacyCommand {
-        command: CommandSpec,
-        purpose: RunningProviderProcessPurpose,
-    },
-    PersistentRuntime {
-        operation: PersistentRuntimeOperation,
-    },
-}
-
-impl ProviderExecutionIntent {
-    pub fn operation_kind(&self) -> ProviderExecutionOperationKind {
-        match self {
-            Self::LegacyCommand { purpose, .. } => match purpose {
-                RunningProviderProcessPurpose::UserMessage => {
-                    ProviderExecutionOperationKind::UserTurn
-                }
-                RunningProviderProcessPurpose::Prepare => ProviderExecutionOperationKind::Prepare,
-            },
-            Self::PersistentRuntime { operation } => operation.kind(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1054,137 +962,19 @@ impl PersistentRuntimeOperation {
 #[derive(Debug, Clone)]
 pub struct ProviderExecutionStart {
     pub output: SendTextOutput,
-    pub intent: ProviderExecutionIntent,
+    pub intent: PersistentRuntimeOperation,
 }
 
 #[derive(Debug, Clone)]
 pub struct PrepareExecutionStart {
     pub output: PrepareThreadOutput,
-    pub intent: Option<ProviderExecutionIntent>,
-}
-
-#[derive(Debug, Clone)]
-pub enum EndThreadExecutionIntent {
-    LegacyProcess(Option<ProviderProcessStop>),
-    PersistentRuntime(PersistentRuntimeOperation),
+    pub intent: Option<PersistentRuntimeOperation>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EndThreadStart {
     pub thread_id: String,
-    pub execution: EndThreadExecutionIntent,
-}
-
-#[derive(Debug, Clone)]
-pub struct RunPromptProviderContext {
-    pub thread: ThreadState,
-    pub tool_registry: ToolRegistry,
-    pub provider_state: ProviderAdapterState,
-    include_fallback_bootstrap: bool,
-    pub settings: PedelecSettings,
-    pub core_ipc_endpoint: String,
-    pub core_ipc_runtime_file_path: PathBuf,
-    pub provider_resolved_path: Option<OsString>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RunningProviderProcess {
-    process_id: u32,
-    child: Arc<Mutex<Option<Child>>>,
-    termination: Arc<ProviderProcessTermination>,
-    purpose: RunningProviderProcessPurpose,
-    stderr: String,
-    stderr_truncated: bool,
-    had_provider_error: bool,
-    prepare_assistant_output: String,
-    prepare_assistant_output_truncated: bool,
-}
-
-/// Coordinates provider child termination with the Core lifecycle operation.
-///
-/// The provider waiter owns the child handle and is responsible for waiting
-/// and reaping it. The end orchestrator can request termination after taking
-/// this handle out of Core state, without making the waiter reacquire the
-/// Core mutex on the cancellation path.
-#[derive(Debug)]
-pub struct ProviderProcessTermination {
-    cancelled: AtomicBool,
-    completed: Mutex<bool>,
-    changed: Condvar,
-}
-
-/// A legacy process cancellation handle detached from Core state. The
-/// process kill and waiter completion can therefore happen after the Core
-/// mutex has been released.
-#[derive(Debug, Clone)]
-pub struct ProviderProcessStop {
-    process_id: u32,
-    child: Arc<Mutex<Option<Child>>>,
-    termination: Arc<ProviderProcessTermination>,
-}
-
-impl ProviderProcessStop {
-    pub fn process_id(&self) -> u32 {
-        self.process_id
-    }
-
-    pub fn stop(self) {
-        self.termination.cancel();
-        let killed_directly = self
-            .child
-            .lock()
-            .ok()
-            .and_then(|mut child| child.as_mut().map(|child| child.kill().is_ok()))
-            .unwrap_or(false);
-        if !killed_directly {
-            let _ = kill_process_by_id(self.process_id);
-        }
-        self.termination.wait_completed();
-    }
-}
-
-impl ProviderProcessTermination {
-    pub fn new() -> Self {
-        Self {
-            cancelled: AtomicBool::new(false),
-            completed: Mutex::new(false),
-            changed: Condvar::new(),
-        }
-    }
-
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-
-    pub fn mark_completed(&self) {
-        let mut completed = self.completed.lock().unwrap();
-        *completed = true;
-        self.changed.notify_all();
-    }
-
-    pub fn wait_completed(&self) {
-        let mut completed = self.completed.lock().unwrap();
-        while !*completed {
-            completed = self.changed.wait(completed).unwrap();
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum RunningProviderProcessPurpose {
-    UserMessage,
-    Prepare,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ThreadEventPartial {
-    AssistantMessage { text: String },
-    ProviderSessionIdUpdated { provider_session_id: String },
-    ProviderError { error: PedelecError },
+    pub execution: PersistentRuntimeOperation,
 }
 
 /// Protocol-neutral events emitted by a persistent provider runtime.
@@ -1346,1334 +1136,6 @@ pub enum PendingProviderOperation {
     Prepare,
 }
 
-enum ProviderTurnKind<'a> {
-    UserMessage { message: &'a str },
-    Prepare,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProviderBootstrapMode {
-    CodexDeveloperInstructions,
-    ClaudeAppendSystemPrompt,
-    OpenCodeInlineAgent,
-    AntigravityWorkspaceAgent,
-    NativeSystemPrompt,
-    UserPromptFallback,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProviderBootstrapCapabilities {
-    privileged_bootstrap: ProviderBootstrapMode,
-}
-
-impl Default for ProviderBootstrapCapabilities {
-    fn default() -> Self {
-        Self {
-            privileged_bootstrap: ProviderBootstrapMode::UserPromptFallback,
-        }
-    }
-}
-
-/// Legacy process-per-turn provider adapters. The desktop application enables
-/// migrated persistent runtime families through [`CoreRuntime::new_for_application`];
-/// these adapters remain only for neutral/legacy embedding and compatibility
-/// coverage, never as the production desktop dispatch path.
-trait ProviderAdapter {
-    fn code(&self) -> ProviderCode;
-    fn capabilities(&self) -> ProviderCapabilities;
-    fn build_run_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError>;
-    fn build_resume_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        provider_session_id: &str,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError>;
-    fn preprocess_stdout_chunk(&mut self, chunk: &str) -> Vec<String> {
-        vec![chunk.to_string()]
-    }
-    fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial>;
-    fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial>;
-}
-
-#[derive(Debug, Clone)]
-enum ProviderAdapterInstance {
-    Codex(CodexProviderAdapter),
-    Antigravity(AntigravityProviderAdapter),
-    OpenCode(OpenCodeProviderAdapter),
-    Cursor(CursorProviderAdapter),
-    Claude(ClaudeProviderAdapter),
-}
-
-impl ProviderAdapterInstance {
-    fn new(provider: ProviderCode) -> Option<Self> {
-        match provider {
-            ProviderCode::Codex => Some(Self::Codex(CodexProviderAdapter::default())),
-            ProviderCode::Antigravity => {
-                Some(Self::Antigravity(AntigravityProviderAdapter::default()))
-            }
-            ProviderCode::OpenCode => Some(Self::OpenCode(OpenCodeProviderAdapter::default())),
-            ProviderCode::Cursor => Some(Self::Cursor(CursorProviderAdapter::default())),
-            ProviderCode::Claude => Some(Self::Claude(ClaudeProviderAdapter::default())),
-            ProviderCode::Ollama => None,
-        }
-    }
-}
-
-impl ProviderAdapter for ProviderAdapterInstance {
-    fn code(&self) -> ProviderCode {
-        match self {
-            Self::Codex(adapter) => adapter.code(),
-            Self::Antigravity(adapter) => adapter.code(),
-            Self::OpenCode(adapter) => adapter.code(),
-            Self::Cursor(adapter) => adapter.code(),
-            Self::Claude(adapter) => adapter.code(),
-        }
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        match self {
-            Self::Codex(adapter) => adapter.capabilities(),
-            Self::Antigravity(adapter) => adapter.capabilities(),
-            Self::OpenCode(adapter) => adapter.capabilities(),
-            Self::Cursor(adapter) => adapter.capabilities(),
-            Self::Claude(adapter) => adapter.capabilities(),
-        }
-    }
-
-    fn build_run_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        match self {
-            Self::Codex(adapter) => adapter.build_run_command(ctx, message),
-            Self::Antigravity(adapter) => adapter.build_run_command(ctx, message),
-            Self::OpenCode(adapter) => adapter.build_run_command(ctx, message),
-            Self::Cursor(adapter) => adapter.build_run_command(ctx, message),
-            Self::Claude(adapter) => adapter.build_run_command(ctx, message),
-        }
-    }
-
-    fn build_resume_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        provider_session_id: &str,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        match self {
-            Self::Codex(adapter) => adapter.build_resume_command(ctx, provider_session_id, message),
-            Self::Antigravity(adapter) => {
-                adapter.build_resume_command(ctx, provider_session_id, message)
-            }
-            Self::OpenCode(adapter) => {
-                adapter.build_resume_command(ctx, provider_session_id, message)
-            }
-            Self::Cursor(adapter) => {
-                adapter.build_resume_command(ctx, provider_session_id, message)
-            }
-            Self::Claude(adapter) => {
-                adapter.build_resume_command(ctx, provider_session_id, message)
-            }
-        }
-    }
-
-    fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        match self {
-            Self::Codex(adapter) => adapter.parse_stdout_event(chunk),
-            Self::Antigravity(adapter) => adapter.parse_stdout_event(chunk),
-            Self::OpenCode(adapter) => adapter.parse_stdout_event(chunk),
-            Self::Cursor(adapter) => adapter.parse_stdout_event(chunk),
-            Self::Claude(adapter) => adapter.parse_stdout_event(chunk),
-        }
-    }
-
-    fn preprocess_stdout_chunk(&mut self, chunk: &str) -> Vec<String> {
-        match self {
-            Self::Claude(adapter) => adapter.preprocess_stdout_chunk(chunk),
-            _ => vec![chunk.to_string()],
-        }
-    }
-
-    fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        match self {
-            Self::Codex(adapter) => adapter.parse_stderr_event(chunk),
-            Self::Antigravity(adapter) => adapter.parse_stderr_event(chunk),
-            Self::OpenCode(adapter) => adapter.parse_stderr_event(chunk),
-            Self::Cursor(adapter) => adapter.parse_stderr_event(chunk),
-            Self::Claude(adapter) => adapter.parse_stderr_event(chunk),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct CodexProviderAdapter {
-    stdout_buffer: String,
-    stderr_buffer: String,
-}
-
-impl ProviderAdapter for CodexProviderAdapter {
-    fn code(&self) -> ProviderCode {
-        ProviderCode::Codex
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            supports_json_events: true,
-            supports_resume_by_session_id: true,
-            supports_user_supplied_session_id: false,
-            supports_provider_generated_session_id_parse: true,
-            supports_resume_last_session: true,
-        }
-    }
-
-    fn build_run_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        let mut args = vec![
-            "exec".to_string(),
-            "--cd".to_string(),
-            path_for_external_use(&ctx.thread.workspace_path),
-            "--sandbox".to_string(),
-            "danger-full-access".to_string(),
-            "--skip-git-repo-check".to_string(),
-            "--json".to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        args.push("-".to_string());
-        let prompt = build_provider_run_prompt(
-            &ctx.thread,
-            &ctx.tool_registry,
-            message,
-            ctx.include_fallback_bootstrap,
-        );
-        Ok(CommandSpec {
-            program: "codex".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: prompt,
-        })
-    }
-
-    fn build_resume_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        provider_session_id: &str,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        if !self.capabilities().supports_resume_by_session_id {
-            return Err(provider_unsupported_error(
-                &ctx.thread,
-                "codex resume is not supported",
-            ));
-        }
-
-        let mut args = vec![
-            "exec".to_string(),
-            "--cd".to_string(),
-            path_for_external_use(&ctx.thread.workspace_path),
-            "--sandbox".to_string(),
-            "danger-full-access".to_string(),
-            "--skip-git-repo-check".to_string(),
-            "--json".to_string(),
-            "resume".to_string(),
-            provider_session_id.to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        args.push("-".to_string());
-        let prompt = build_provider_resume_prompt(message);
-        Ok(CommandSpec {
-            program: "codex".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: prompt,
-        })
-    }
-
-    fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_provider_chunk(
-            &mut self.stdout_buffer,
-            chunk,
-            find_codex_assistant_text_in_json,
-        )
-    }
-
-    fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_provider_chunk(
-            &mut self.stderr_buffer,
-            chunk,
-            find_codex_assistant_text_in_json,
-        )
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct AntigravityProviderAdapter {
-    stdout_buffer: String,
-    stderr_buffer: String,
-}
-
-impl ProviderAdapter for AntigravityProviderAdapter {
-    fn code(&self) -> ProviderCode {
-        ProviderCode::Antigravity
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            supports_json_events: true,
-            supports_resume_by_session_id: true,
-            supports_user_supplied_session_id: false,
-            supports_provider_generated_session_id_parse: true,
-            supports_resume_last_session: true,
-        }
-    }
-
-    fn build_run_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        let prompt = build_provider_run_prompt(
-            &ctx.thread,
-            &ctx.tool_registry,
-            message,
-            ctx.include_fallback_bootstrap,
-        );
-        validate_antigravity_prompt_length(&prompt)?;
-        let mut args = vec![
-            "-p".to_string(),
-            prompt.clone(),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--mode".to_string(),
-            "accept-edits".to_string(),
-            "--dangerously-skip-permissions".to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        Ok(CommandSpec {
-            program: "agy".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: String::new(),
-        })
-    }
-
-    fn build_resume_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        provider_session_id: &str,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        if !self.capabilities().supports_resume_by_session_id {
-            return Err(provider_unsupported_error(
-                &ctx.thread,
-                "antigravity resume is not supported",
-            ));
-        }
-
-        let prompt = build_provider_resume_prompt(message);
-        validate_antigravity_prompt_length(&prompt)?;
-        let mut args = vec![
-            "--conversation".to_string(),
-            provider_session_id.to_string(),
-            "-p".to_string(),
-            prompt.clone(),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--mode".to_string(),
-            "accept-edits".to_string(),
-            "--dangerously-skip-permissions".to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        Ok(CommandSpec {
-            program: "agy".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: String::new(),
-        })
-    }
-
-    fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_antigravity_provider_chunk(&mut self.stdout_buffer, chunk)
-    }
-
-    fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_antigravity_provider_chunk(&mut self.stderr_buffer, chunk)
-    }
-}
-
-fn validate_antigravity_prompt_length(prompt: &str) -> Result<(), PedelecError> {
-    let prompt_length = prompt.encode_utf16().count();
-    if prompt_length <= ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS {
-        return Ok(());
-    }
-
-    Err(PedelecError::with_details(
-        error_codes::PROVIDER_PROMPT_TOO_LARGE,
-        "Antigravity prompt exceeds the 20,000 character limit",
-        serde_json::json!({
-            "provider": "antigravity",
-            "promptLength": prompt_length,
-            "maxPromptLength": ANTIGRAVITY_MAX_PROMPT_UTF16_CODE_UNITS,
-            "lengthUnit": "utf16CodeUnits",
-        }),
-    ))
-}
-
-/// Neutral-constructor compatibility adapter. Production OpenCode execution
-/// is owned by the shared ACP dispatcher and never reaches this type.
-#[derive(Debug, Clone, Default)]
-struct OpenCodeProviderAdapter {
-    stdout_buffer: String,
-    stderr_buffer: String,
-}
-
-impl ProviderAdapter for OpenCodeProviderAdapter {
-    fn code(&self) -> ProviderCode {
-        ProviderCode::OpenCode
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            supports_json_events: true,
-            supports_resume_by_session_id: true,
-            supports_user_supplied_session_id: false,
-            supports_provider_generated_session_id_parse: true,
-            supports_resume_last_session: false,
-        }
-    }
-
-    fn build_run_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        let mut args = vec![
-            "run".to_string(),
-            "--dangerously-skip-permissions".to_string(),
-            "--thinking".to_string(),
-            "--pure".to_string(),
-            "--format".to_string(),
-            "json".to_string(),
-            "--dir".to_string(),
-            path_for_external_use(&ctx.thread.workspace_path),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        args.push("-".to_string());
-        let prompt = build_provider_run_prompt(
-            &ctx.thread,
-            &ctx.tool_registry,
-            message,
-            ctx.include_fallback_bootstrap,
-        );
-        Ok(CommandSpec {
-            program: "opencode".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: prompt,
-        })
-    }
-
-    fn build_resume_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        provider_session_id: &str,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        if provider_session_id.trim().is_empty() {
-            return Err(provider_unsupported_error(
-                &ctx.thread,
-                "opencode resume requires a provider session id",
-            ));
-        }
-
-        let mut args = vec![
-            "run".to_string(),
-            "--dangerously-skip-permissions".to_string(),
-            "--thinking".to_string(),
-            "--pure".to_string(),
-            "--format".to_string(),
-            "json".to_string(),
-            "--dir".to_string(),
-            path_for_external_use(&ctx.thread.workspace_path),
-            "--session".to_string(),
-            provider_session_id.to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        args.push("-".to_string());
-        let prompt = build_provider_resume_prompt(message);
-        Ok(CommandSpec {
-            program: "opencode".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: prompt,
-        })
-    }
-
-    fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_opencode_provider_chunk(&mut self.stdout_buffer, chunk)
-    }
-
-    fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_opencode_provider_chunk(&mut self.stderr_buffer, chunk)
-    }
-}
-
-/// Neutral-constructor compatibility adapter. Production Cursor execution is
-/// owned by the shared ACP dispatcher and never reaches this type.
-#[derive(Debug, Clone, Default)]
-struct CursorProviderAdapter {
-    stdout_buffer: String,
-    stderr_buffer: String,
-}
-
-impl ProviderAdapter for CursorProviderAdapter {
-    fn code(&self) -> ProviderCode {
-        ProviderCode::Cursor
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            supports_json_events: true,
-            supports_resume_by_session_id: true,
-            supports_user_supplied_session_id: false,
-            supports_provider_generated_session_id_parse: true,
-            supports_resume_last_session: false,
-        }
-    }
-
-    fn build_run_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        let mut args = vec![
-            "--workspace".to_string(),
-            path_for_external_use(&ctx.thread.workspace_path),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--force".to_string(),
-            "--trust".to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        let prompt = build_provider_run_prompt(
-            &ctx.thread,
-            &ctx.tool_registry,
-            message,
-            ctx.include_fallback_bootstrap,
-        );
-        Ok(CommandSpec {
-            program: "cursor-agent".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: prompt,
-        })
-    }
-
-    fn build_resume_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        provider_session_id: &str,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        if provider_session_id.trim().is_empty() {
-            return Err(provider_unsupported_error(
-                &ctx.thread,
-                "cursor resume requires a provider session id",
-            ));
-        }
-
-        let mut args = vec![
-            "--workspace".to_string(),
-            path_for_external_use(&ctx.thread.workspace_path),
-            "--resume".to_string(),
-            provider_session_id.to_string(),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--force".to_string(),
-            "--trust".to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        let prompt = build_provider_resume_prompt(message);
-        Ok(CommandSpec {
-            program: "cursor-agent".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: prompt,
-        })
-    }
-
-    fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_cursor_provider_chunk(&mut self.stdout_buffer, chunk)
-    }
-
-    fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_cursor_provider_chunk(&mut self.stderr_buffer, chunk)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeStdoutFilterMode {
-    Inspecting,
-    Passing,
-    RedactingSignature,
-    Dropping,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeJsonObjectState {
-    KeyOrEnd,
-    Colon,
-    Value,
-    CommaOrEnd,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeJsonArrayState {
-    ValueOrEnd,
-    CommaOrEnd,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeJsonObjectKind {
-    RootEvent,
-    Message,
-    ContentItem,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeJsonArrayKind {
-    Content,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeJsonKey {
-    Type,
-    Message,
-    Content,
-    Signature,
-    Other,
-}
-
-impl ClaudeJsonKey {
-    fn from_decoded(value: &str) -> Self {
-        match value {
-            "type" => Self::Type,
-            "message" => Self::Message,
-            "content" => Self::Content,
-            "signature" => Self::Signature,
-            _ => Self::Other,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeContentItemType {
-    Unknown,
-    Thinking,
-    Other,
-}
-
-#[derive(Debug, Clone)]
-enum ClaudeJsonContainer {
-    Object {
-        kind: ClaudeJsonObjectKind,
-        state: ClaudeJsonObjectState,
-        key: ClaudeJsonKey,
-        content_item_type: ClaudeContentItemType,
-    },
-    Array {
-        kind: ClaudeJsonArrayKind,
-        state: ClaudeJsonArrayState,
-    },
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ClaudeJsonStringRole {
-    Key,
-    Value {
-        is_type_value: bool,
-        is_root_type_value: bool,
-        is_content_item_type_value: bool,
-    },
-    ThinkingSignatureValue,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ClaudeJsonValueContext {
-    key: ClaudeJsonKey,
-    is_root_type_value: bool,
-    is_content_item_type_value: bool,
-    is_thinking_signature_value: bool,
-}
-
-#[derive(Debug, Clone)]
-struct ClaudeJsonStringScanner {
-    raw: String,
-    role: ClaudeJsonStringRole,
-    escaped: bool,
-    too_long: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeStdoutFilterDecision {
-    Continue,
-    Pass,
-    Drop,
-    StartRedaction,
-    EndRedaction,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ClaudeJsonEventScanner {
-    containers: Vec<ClaudeJsonContainer>,
-    string: Option<ClaudeJsonStringScanner>,
-    primitive: Option<String>,
-    root_started: bool,
-    root_complete: bool,
-    root_type_is_user: Option<bool>,
-    root_type_is_assistant: Option<bool>,
-    saw_tool_result: bool,
-}
-
-impl ClaudeJsonEventScanner {
-    fn scan_char(&mut self, ch: char) -> ClaudeStdoutFilterDecision {
-        let mut current = Some(ch);
-        while let Some(ch) = current.take() {
-            if let Some(string) = self.string.as_mut() {
-                if string.escaped {
-                    if !matches!(string.role, ClaudeJsonStringRole::ThinkingSignatureValue)
-                        && !string.too_long
-                    {
-                        string.raw.push(ch);
-                        string.too_long = string.raw.len() > 128;
-                    }
-                    string.escaped = false;
-                    continue;
-                }
-                match ch {
-                    '\\' => {
-                        if !matches!(string.role, ClaudeJsonStringRole::ThinkingSignatureValue)
-                            && !string.too_long
-                        {
-                            string.raw.push(ch);
-                        }
-                        string.escaped = true;
-                    }
-                    '"' => return self.finish_string(),
-                    ch if ch.is_control() => return ClaudeStdoutFilterDecision::Pass,
-                    _ => {
-                        if !matches!(string.role, ClaudeJsonStringRole::ThinkingSignatureValue)
-                            && !string.too_long
-                        {
-                            string.raw.push(ch);
-                            string.too_long = string.raw.len() > 128;
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if self.primitive.is_some() {
-                if ch.is_whitespace() || matches!(ch, ',' | ']' | '}') {
-                    if !self.finish_primitive() {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                    current = Some(ch);
-                    continue;
-                }
-                let primitive = self.primitive.as_mut().expect("primitive exists");
-                if primitive.len() >= 64 || matches!(ch, ':' | '{' | '[' | '"') {
-                    return ClaudeStdoutFilterDecision::Pass;
-                }
-                primitive.push(ch);
-                continue;
-            }
-
-            if ch.is_whitespace() {
-                continue;
-            }
-            if self.root_complete {
-                return ClaudeStdoutFilterDecision::Pass;
-            }
-
-            match ch {
-                '{' => {
-                    if !self.start_container(true) {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                }
-                '[' => {
-                    if !self.root_started {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                    if !self.start_container(false) {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                }
-                '}' => {
-                    if !matches!(
-                        self.containers.last(),
-                        Some(ClaudeJsonContainer::Object {
-                            state: ClaudeJsonObjectState::KeyOrEnd
-                                | ClaudeJsonObjectState::CommaOrEnd,
-                            ..
-                        })
-                    ) {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                    self.containers.pop();
-                    if !self.complete_container_value() {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                    if self.root_complete {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                }
-                ']' => {
-                    if !matches!(
-                        self.containers.last(),
-                        Some(ClaudeJsonContainer::Array {
-                            state: ClaudeJsonArrayState::ValueOrEnd
-                                | ClaudeJsonArrayState::CommaOrEnd,
-                            ..
-                        })
-                    ) {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                    self.containers.pop();
-                    if !self.complete_container_value() {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                    if self.root_complete {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                }
-                ':' => match self.containers.last_mut() {
-                    Some(ClaudeJsonContainer::Object { state, .. })
-                        if *state == ClaudeJsonObjectState::Colon =>
-                    {
-                        *state = ClaudeJsonObjectState::Value;
-                    }
-                    _ => return ClaudeStdoutFilterDecision::Pass,
-                },
-                ',' => match self.containers.last_mut() {
-                    Some(ClaudeJsonContainer::Object { state, .. })
-                        if *state == ClaudeJsonObjectState::CommaOrEnd =>
-                    {
-                        *state = ClaudeJsonObjectState::KeyOrEnd;
-                    }
-                    Some(ClaudeJsonContainer::Array { state, .. })
-                        if *state == ClaudeJsonArrayState::CommaOrEnd =>
-                    {
-                        *state = ClaudeJsonArrayState::ValueOrEnd;
-                    }
-                    _ => return ClaudeStdoutFilterDecision::Pass,
-                },
-                '"' => {
-                    let role = match self.containers.last() {
-                        Some(ClaudeJsonContainer::Object {
-                            state: ClaudeJsonObjectState::KeyOrEnd,
-                            ..
-                        }) => ClaudeJsonStringRole::Key,
-                        _ => {
-                            let Some(context) = self.string_value_context() else {
-                                return ClaudeStdoutFilterDecision::Pass;
-                            };
-                            if context.is_thinking_signature_value {
-                                self.string = Some(ClaudeJsonStringScanner {
-                                    raw: String::new(),
-                                    role: ClaudeJsonStringRole::ThinkingSignatureValue,
-                                    escaped: false,
-                                    too_long: false,
-                                });
-                                return ClaudeStdoutFilterDecision::StartRedaction;
-                            }
-                            ClaudeJsonStringRole::Value {
-                                is_type_value: context.key == ClaudeJsonKey::Type,
-                                is_root_type_value: context.is_root_type_value,
-                                is_content_item_type_value: context.is_content_item_type_value,
-                            }
-                        }
-                    };
-                    self.string = Some(ClaudeJsonStringScanner {
-                        raw: String::new(),
-                        role,
-                        escaped: false,
-                        too_long: false,
-                    });
-                }
-                '-' | '0'..='9' | 't' | 'f' | 'n' => {
-                    let Some(context) = self.string_value_context() else {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    };
-                    if context.key == ClaudeJsonKey::Type && context.is_root_type_value {
-                        self.root_type_is_user = Some(false);
-                        self.root_type_is_assistant = Some(false);
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                    self.primitive = Some(ch.to_string());
-                }
-                _ => return ClaudeStdoutFilterDecision::Pass,
-            }
-        }
-
-        self.decision()
-    }
-
-    fn start_container(&mut self, object: bool) -> bool {
-        if !self.root_started {
-            if !object || !self.containers.is_empty() {
-                return false;
-            }
-            self.root_started = true;
-        } else if self.string_value_context().is_none() {
-            return false;
-        }
-
-        self.containers.push(if object {
-            ClaudeJsonContainer::Object {
-                kind: self.object_kind_for_next_value(),
-                state: ClaudeJsonObjectState::KeyOrEnd,
-                key: ClaudeJsonKey::Other,
-                content_item_type: ClaudeContentItemType::Unknown,
-            }
-        } else {
-            ClaudeJsonContainer::Array {
-                kind: self.array_kind_for_next_value(),
-                state: ClaudeJsonArrayState::ValueOrEnd,
-            }
-        });
-        true
-    }
-
-    fn object_kind_for_next_value(&self) -> ClaudeJsonObjectKind {
-        if self.containers.is_empty() {
-            return ClaudeJsonObjectKind::RootEvent;
-        }
-
-        match self.containers.last() {
-            Some(ClaudeJsonContainer::Object {
-                kind: ClaudeJsonObjectKind::RootEvent,
-                key: ClaudeJsonKey::Message,
-                ..
-            }) => ClaudeJsonObjectKind::Message,
-            Some(ClaudeJsonContainer::Array {
-                kind: ClaudeJsonArrayKind::Content,
-                ..
-            }) => ClaudeJsonObjectKind::ContentItem,
-            _ => ClaudeJsonObjectKind::Other,
-        }
-    }
-
-    fn array_kind_for_next_value(&self) -> ClaudeJsonArrayKind {
-        match self.containers.last() {
-            Some(ClaudeJsonContainer::Object {
-                kind: ClaudeJsonObjectKind::Message,
-                key: ClaudeJsonKey::Content,
-                ..
-            }) => ClaudeJsonArrayKind::Content,
-            _ => ClaudeJsonArrayKind::Other,
-        }
-    }
-
-    fn string_value_context(&self) -> Option<ClaudeJsonValueContext> {
-        match self.containers.last()? {
-            ClaudeJsonContainer::Object {
-                state: ClaudeJsonObjectState::Value,
-                kind,
-                key,
-                content_item_type,
-            } => Some(ClaudeJsonValueContext {
-                key: *key,
-                is_root_type_value: *kind == ClaudeJsonObjectKind::RootEvent
-                    && *key == ClaudeJsonKey::Type,
-                is_content_item_type_value: *kind == ClaudeJsonObjectKind::ContentItem
-                    && *key == ClaudeJsonKey::Type,
-                // Claude's stream-json events emit the root `type`, and content blocks
-                // emit their `type`, before block-specific fields. Keeping that contract
-                // lets us redact without buffering a potentially unbounded signature
-                // before its event/block kind is known.
-                is_thinking_signature_value: *kind == ClaudeJsonObjectKind::ContentItem
-                    && *content_item_type == ClaudeContentItemType::Thinking
-                    && *key == ClaudeJsonKey::Signature
-                    && self.root_type_is_assistant == Some(true),
-            }),
-            ClaudeJsonContainer::Array {
-                state: ClaudeJsonArrayState::ValueOrEnd,
-                ..
-            } => Some(ClaudeJsonValueContext {
-                key: ClaudeJsonKey::Other,
-                is_root_type_value: false,
-                is_content_item_type_value: false,
-                is_thinking_signature_value: false,
-            }),
-            _ => None,
-        }
-    }
-
-    fn finish_string(&mut self) -> ClaudeStdoutFilterDecision {
-        let string = self.string.take().expect("string scanner exists");
-        if matches!(string.role, ClaudeJsonStringRole::ThinkingSignatureValue) {
-            if !self.complete_scalar_value() {
-                return ClaudeStdoutFilterDecision::Pass;
-            }
-            return ClaudeStdoutFilterDecision::EndRedaction;
-        }
-
-        if string.escaped || string.too_long {
-            return match string.role {
-                _ if string.escaped => ClaudeStdoutFilterDecision::Pass,
-                ClaudeJsonStringRole::Key => match self.containers.last_mut() {
-                    Some(ClaudeJsonContainer::Object { state, key, .. })
-                        if *state == ClaudeJsonObjectState::KeyOrEnd =>
-                    {
-                        *state = ClaudeJsonObjectState::Colon;
-                        *key = ClaudeJsonKey::Other;
-                        self.decision()
-                    }
-                    _ => ClaudeStdoutFilterDecision::Pass,
-                },
-                ClaudeJsonStringRole::Value {
-                    is_root_type_value,
-                    is_content_item_type_value,
-                    ..
-                } => {
-                    if is_content_item_type_value {
-                        self.set_content_item_type(ClaudeContentItemType::Other);
-                    }
-                    if !self.complete_scalar_value() {
-                        return ClaudeStdoutFilterDecision::Pass;
-                    }
-                    if is_root_type_value {
-                        self.root_type_is_user = Some(false);
-                        self.root_type_is_assistant = Some(false);
-                    }
-                    self.decision()
-                }
-                ClaudeJsonStringRole::ThinkingSignatureValue => ClaudeStdoutFilterDecision::Pass,
-            };
-        }
-        let encoded = format!("\"{}\"", string.raw);
-        let Ok(value) = serde_json::from_str::<String>(&encoded) else {
-            return ClaudeStdoutFilterDecision::Pass;
-        };
-
-        match string.role {
-            ClaudeJsonStringRole::Key => match self.containers.last_mut() {
-                Some(ClaudeJsonContainer::Object { state, key, .. })
-                    if *state == ClaudeJsonObjectState::KeyOrEnd =>
-                {
-                    *state = ClaudeJsonObjectState::Colon;
-                    *key = ClaudeJsonKey::from_decoded(&value);
-                }
-                _ => return ClaudeStdoutFilterDecision::Pass,
-            },
-            ClaudeJsonStringRole::Value {
-                is_type_value,
-                is_root_type_value,
-                is_content_item_type_value,
-            } => {
-                if is_content_item_type_value {
-                    self.set_content_item_type(if value == "thinking" {
-                        ClaudeContentItemType::Thinking
-                    } else {
-                        ClaudeContentItemType::Other
-                    });
-                }
-                if !self.complete_scalar_value() {
-                    return ClaudeStdoutFilterDecision::Pass;
-                }
-                if is_type_value {
-                    self.saw_tool_result |= value == "tool_result";
-                    if is_root_type_value {
-                        self.root_type_is_user = Some(value == "user");
-                        self.root_type_is_assistant = Some(value == "assistant");
-                    }
-                }
-            }
-            ClaudeJsonStringRole::ThinkingSignatureValue => {
-                return ClaudeStdoutFilterDecision::Pass;
-            }
-        }
-        self.decision()
-    }
-
-    fn set_content_item_type(&mut self, content_item_type: ClaudeContentItemType) {
-        if let Some(ClaudeJsonContainer::Object {
-            kind: ClaudeJsonObjectKind::ContentItem,
-            content_item_type: current,
-            ..
-        }) = self.containers.last_mut()
-        {
-            *current = content_item_type;
-        }
-    }
-
-    fn finish_primitive(&mut self) -> bool {
-        let primitive = self.primitive.take().expect("primitive exists");
-        if serde_json::from_str::<Value>(&primitive).is_err() {
-            return false;
-        }
-        self.complete_scalar_value()
-    }
-
-    fn complete_scalar_value(&mut self) -> bool {
-        match self.containers.last_mut() {
-            Some(ClaudeJsonContainer::Object { state, key, .. })
-                if *state == ClaudeJsonObjectState::Value =>
-            {
-                *state = ClaudeJsonObjectState::CommaOrEnd;
-                *key = ClaudeJsonKey::Other;
-                true
-            }
-            Some(ClaudeJsonContainer::Array { state, .. })
-                if *state == ClaudeJsonArrayState::ValueOrEnd =>
-            {
-                *state = ClaudeJsonArrayState::CommaOrEnd;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn complete_container_value(&mut self) -> bool {
-        if self.containers.is_empty() {
-            self.root_complete = true;
-            return true;
-        }
-        self.complete_scalar_value()
-    }
-
-    fn decision(&self) -> ClaudeStdoutFilterDecision {
-        if self.root_type_is_user == Some(true) && self.saw_tool_result {
-            ClaudeStdoutFilterDecision::Drop
-        } else if self.root_type_is_user == Some(false) || self.root_complete {
-            ClaudeStdoutFilterDecision::Pass
-        } else {
-            ClaudeStdoutFilterDecision::Continue
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ClaudeStdoutFilter {
-    mode: ClaudeStdoutFilterMode,
-    pending: String,
-    scanner: ClaudeJsonEventScanner,
-}
-
-impl Default for ClaudeStdoutFilter {
-    fn default() -> Self {
-        Self {
-            mode: ClaudeStdoutFilterMode::Inspecting,
-            pending: String::new(),
-            scanner: ClaudeJsonEventScanner::default(),
-        }
-    }
-}
-
-impl ClaudeStdoutFilter {
-    const SIGNATURE_REPLACEMENT: &'static str = "\"[omitted]\"";
-
-    fn preprocess_chunk(&mut self, chunk: &str) -> Vec<String> {
-        let mut retained = String::new();
-        for ch in chunk.chars() {
-            if ch == '\n' {
-                match self.mode {
-                    ClaudeStdoutFilterMode::Inspecting => {
-                        self.pending.push(ch);
-                        retained.push_str(&self.pending);
-                    }
-                    ClaudeStdoutFilterMode::Passing => retained.push(ch),
-                    ClaudeStdoutFilterMode::RedactingSignature => retained.push(ch),
-                    ClaudeStdoutFilterMode::Dropping => {}
-                }
-                self.reset_event();
-                continue;
-            }
-
-            match self.mode {
-                ClaudeStdoutFilterMode::Passing => match self.scanner.scan_char(ch) {
-                    ClaudeStdoutFilterDecision::StartRedaction => {
-                        retained.push_str(Self::SIGNATURE_REPLACEMENT);
-                        self.mode = ClaudeStdoutFilterMode::RedactingSignature;
-                    }
-                    ClaudeStdoutFilterDecision::Continue
-                    | ClaudeStdoutFilterDecision::Pass
-                    | ClaudeStdoutFilterDecision::Drop
-                    | ClaudeStdoutFilterDecision::EndRedaction => retained.push(ch),
-                },
-                ClaudeStdoutFilterMode::RedactingSignature => {
-                    if matches!(
-                        self.scanner.scan_char(ch),
-                        ClaudeStdoutFilterDecision::EndRedaction
-                    ) {
-                        self.mode = ClaudeStdoutFilterMode::Passing;
-                    }
-                }
-                ClaudeStdoutFilterMode::Dropping => {}
-                ClaudeStdoutFilterMode::Inspecting => {
-                    self.pending.push(ch);
-                    match self.scanner.scan_char(ch) {
-                        ClaudeStdoutFilterDecision::Continue => {}
-                        ClaudeStdoutFilterDecision::Pass => {
-                            retained.push_str(&self.pending);
-                            self.pending.clear();
-                            self.mode = ClaudeStdoutFilterMode::Passing;
-                        }
-                        ClaudeStdoutFilterDecision::Drop => {
-                            self.pending.clear();
-                            self.mode = ClaudeStdoutFilterMode::Dropping;
-                        }
-                        ClaudeStdoutFilterDecision::StartRedaction => {
-                            self.pending.pop();
-                            retained.push_str(&self.pending);
-                            retained.push_str(Self::SIGNATURE_REPLACEMENT);
-                            self.pending.clear();
-                            self.mode = ClaudeStdoutFilterMode::RedactingSignature;
-                        }
-                        ClaudeStdoutFilterDecision::EndRedaction => {}
-                    }
-                }
-            }
-        }
-
-        if retained.is_empty() {
-            Vec::new()
-        } else {
-            vec![retained]
-        }
-    }
-
-    fn reset_event(&mut self) {
-        self.mode = ClaudeStdoutFilterMode::Inspecting;
-        self.pending.clear();
-        self.scanner = ClaudeJsonEventScanner::default();
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct ClaudeProviderAdapter {
-    stdout_filter: ClaudeStdoutFilter,
-    stdout_buffer: String,
-    stderr_buffer: String,
-}
-
-impl ProviderAdapter for ClaudeProviderAdapter {
-    fn code(&self) -> ProviderCode {
-        ProviderCode::Claude
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            supports_json_events: true,
-            supports_resume_by_session_id: true,
-            supports_user_supplied_session_id: false,
-            supports_provider_generated_session_id_parse: true,
-            supports_resume_last_session: true,
-        }
-    }
-
-    fn build_run_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        let mut args = vec![
-            "-p".to_string(),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--verbose".to_string(),
-            "--dangerously-skip-permissions".to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        let prompt = build_provider_run_prompt(
-            &ctx.thread,
-            &ctx.tool_registry,
-            message,
-            ctx.include_fallback_bootstrap,
-        );
-        Ok(CommandSpec {
-            program: "claude".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: prompt,
-        })
-    }
-
-    fn build_resume_command(
-        &self,
-        ctx: &RunPromptProviderContext,
-        provider_session_id: &str,
-        message: &str,
-    ) -> Result<CommandSpec, PedelecError> {
-        if provider_session_id.trim().is_empty() {
-            return Err(provider_unsupported_error(
-                &ctx.thread,
-                "claude resume requires a provider session id",
-            ));
-        }
-
-        let mut args = vec![
-            "-p".to_string(),
-            "--resume".to_string(),
-            provider_session_id.to_string(),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--verbose".to_string(),
-            "--dangerously-skip-permissions".to_string(),
-        ];
-        args.extend(ctx.thread.effort_args.clone());
-        let prompt = build_provider_resume_prompt(message);
-        Ok(CommandSpec {
-            program: "claude".to_string(),
-            args,
-            cwd: ctx.thread.workspace_path.clone(),
-            env: build_provider_env(ctx)?,
-            prompt: prompt.clone(),
-            stdin: prompt,
-        })
-    }
-
-    fn parse_stdout_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_claude_provider_chunk(&mut self.stdout_buffer, chunk)
-    }
-
-    fn preprocess_stdout_chunk(&mut self, chunk: &str) -> Vec<String> {
-        self.stdout_filter.preprocess_chunk(chunk)
-    }
-
-    fn parse_stderr_event(&mut self, chunk: &str) -> Vec<ThreadEventPartial> {
-        parse_claude_provider_chunk(&mut self.stderr_buffer, chunk)
-    }
-}
-
 #[derive(Debug, Clone)]
 enum ProviderReadinessState {
     Uninitialized,
@@ -2790,7 +1252,6 @@ pub struct CoreRuntime {
     pub event_bus: EventBus,
     pub provider_runtime_diagnostics: ProviderRuntimeDiagnosticBus,
     pub provider_protocol_traffic: ProviderProtocolTrafficBus,
-    pub running_processes: HashMap<String, RunningProviderProcess>,
     pub core_ipc_endpoint: Option<String>,
     pub core_ipc_runtime_file_path: Option<PathBuf>,
     pub settings_file_path: Option<PathBuf>,
@@ -2802,11 +1263,6 @@ pub struct CoreRuntime {
     pub asset_upload_tickets: HashMap<String, AssetUploadTicket>,
     pub asset_download_tickets: HashMap<String, AssetDownloadTicket>,
     pub provider_path_value_override: Option<OsString>,
-    pub test_provider_command: Option<CommandSpec>,
-    /// Providers in this set use semantic runtime intents. The application
-    /// owner enables migrated providers here; the neutral default is retained for tests and
-    /// embedders that intentionally exercise the legacy adapter path.
-    pub persistent_providers: HashSet<ProviderCode>,
     pub pending_provider_operations: HashMap<String, PendingProviderOperation>,
     pub provider_usage: HashMap<String, Value>,
     /// Threads in this set have restored ended-thread diagnostic resources
@@ -2822,51 +1278,12 @@ impl CoreRuntime {
         runtime
     }
 
-    /// Runtime used by the desktop application. Keep `CoreRuntime::new()`
-    /// neutral for legacy/unit-test construction, while the production owner
-    /// explicitly enables completed provider migrations.
+    /// Runtime used by the desktop application. All supported providers
+    /// dispatch through the persistent runtime path, so this is currently
+    /// equivalent to [`Self::new`]; it remains a distinct entry point for
+    /// the production owner.
     pub fn new_for_application() -> Self {
-        let mut runtime = Self::new();
-        runtime.persistent_providers.insert(ProviderCode::Codex);
-        runtime
-            .persistent_providers
-            .insert(ProviderCode::Antigravity);
-        runtime.persistent_providers.insert(ProviderCode::OpenCode);
-        runtime.persistent_providers.insert(ProviderCode::Cursor);
-        runtime.persistent_providers.insert(ProviderCode::Claude);
-        runtime.persistent_providers.insert(ProviderCode::Ollama);
-        runtime
-    }
-
-    pub fn set_provider_execution_family(
-        &mut self,
-        provider: ProviderCode,
-        family: ProviderExecutionFamily,
-    ) {
-        if provider == ProviderCode::Ollama {
-            self.persistent_providers.insert(provider);
-            return;
-        }
-        match family {
-            ProviderExecutionFamily::LegacyCommand => {
-                self.persistent_providers.remove(&provider);
-            }
-            ProviderExecutionFamily::PersistentRuntime => {
-                self.persistent_providers.insert(provider);
-            }
-        }
-    }
-
-    pub fn provider_execution_family(&self, provider: &ProviderCode) -> ProviderExecutionFamily {
-        if *provider == ProviderCode::Ollama || self.persistent_providers.contains(provider) {
-            ProviderExecutionFamily::PersistentRuntime
-        } else {
-            ProviderExecutionFamily::LegacyCommand
-        }
-    }
-
-    pub fn use_persistent_provider_for_test(&mut self, provider: ProviderCode) {
-        self.set_provider_execution_family(provider, ProviderExecutionFamily::PersistentRuntime);
+        Self::new()
     }
 
     pub fn set_core_ipc_runtime(
@@ -3168,7 +1585,6 @@ impl CoreRuntime {
             workspace_path: workspace_path.clone(),
             skills,
             status: ThreadStatus::Idle,
-            process_id: None,
             created_at: now,
             updated_at: now,
             sdk_origin,
@@ -3176,11 +1592,9 @@ impl CoreRuntime {
 
         self.thread_manager.insert_thread(
             state,
-            ProviderAdapterState {
+            ProviderSessionState {
                 provider_session_id: None,
                 active_provider_turn_id: None,
-                last_process_id: None,
-                has_user_message: false,
             },
         );
         self.tool_registry.insert(thread_id.clone(), registry);
@@ -3312,11 +1726,6 @@ impl CoreRuntime {
         let path_value = self.resolve_provider_path_value();
         self.provider_resolved_path = Some(path_value.clone());
         self.provider_scan = scan_external_providers(Some(path_value));
-        apply_provider_bootstrap_capabilities(
-            &mut self.provider_scan,
-            self.provider_resolved_path.as_ref(),
-            !self.persistent_providers.contains(&ProviderCode::OpenCode),
-        );
         if is_initial_scan {
             self.provider_readiness.mark_ready();
         }
@@ -3401,66 +1810,14 @@ impl CoreRuntime {
         }
     }
 
-    pub fn begin_send_text(&mut self, input: SendTextInput) -> Result<SendTextStart, PedelecError> {
-        if self.provider_execution_family_for_thread(&input.thread_id)?
-            == ProviderExecutionFamily::PersistentRuntime
-        {
-            return Err(PedelecError::with_details(
-                error_codes::PROVIDER_UNSUPPORTED,
-                "persistent providers must be started through the execution intent API",
-                serde_json::json!({ "threadId": input.thread_id }),
-            ));
-        }
-        self.validate_normal_send_text_status(&input.thread_id)?;
-        self.begin_send_text_start(input, None)
-    }
-
-    /// Admits a user turn and returns a provider-family-neutral execution
-    /// intent. This is the Core boundary used by IPC and future persistent
-    /// provider runtimes.
+    /// Admits a user turn and returns the persistent runtime operation for
+    /// it. This is the Core boundary used by IPC and provider runtimes.
     pub fn begin_send_text_intent(
         &mut self,
         input: SendTextInput,
     ) -> Result<ProviderExecutionStart, PedelecError> {
         self.validate_normal_send_text_status(&input.thread_id)?;
         self.begin_send_text_intent_start(input, None)
-    }
-
-    /// Starts a user turn from the trusted desktop diagnostic boundary.
-    ///
-    /// Unlike the normal send entry point, this deliberately accepts an ended
-    /// thread. It restores only the in-memory resources that `end_thread`
-    /// discarded, then reuses the normal provider command and process-start
-    /// path. Normal SDK/Core callers must continue using `begin_send_text`.
-    pub fn begin_debug_send_text(
-        &mut self,
-        input: SendTextInput,
-    ) -> Result<SendTextStart, PedelecError> {
-        if self.provider_execution_family_for_thread(&input.thread_id)?
-            == ProviderExecutionFamily::PersistentRuntime
-        {
-            return Err(PedelecError::with_details(
-                error_codes::PROVIDER_UNSUPPORTED,
-                "persistent providers must be started through the execution intent API",
-                serde_json::json!({ "threadId": input.thread_id }),
-            ));
-        }
-        let reactivate = self.validate_debug_send_text_status(&input.thread_id)?;
-        if !reactivate {
-            return self.begin_send_text_start(input, None);
-        }
-
-        let thread_id = input.thread_id.clone();
-        let event_log_path = self.restore_ended_thread_runtime(&thread_id)?;
-        let result = self.begin_send_text_start(input, Some(event_log_path));
-        if result.is_err() {
-            // The command builder can still reject a prompt (for example, if
-            // provider configuration is unavailable). Keep a failed retry in
-            // the original ended state instead of leaving a partial registry.
-            self.tool_registry.remove(&thread_id);
-            self.debug_reactivating_threads.remove(&thread_id);
-        }
-        result
     }
 
     /// Diagnostic variant of [`Self::begin_send_text_intent`]. It preserves
@@ -3557,56 +1914,11 @@ impl CoreRuntime {
         Ok(thread_event_log_path(&workspace_path, thread_id))
     }
 
-    fn begin_send_text_start(
-        &mut self,
-        input: SendTextInput,
-        reactivated_event_log_path: Option<PathBuf>,
-    ) -> Result<SendTextStart, PedelecError> {
-        let test_command = self.test_provider_command.clone();
-
-        let command = if let Some(command) = test_command {
-            command
-        } else {
-            match self.build_send_text_command(&input) {
-                Ok(command) => command,
-                Err(error) => {
-                    if reactivated_event_log_path.is_some() {
-                        self.tool_registry.remove(&input.thread_id);
-                        self.debug_reactivating_threads.remove(&input.thread_id);
-                    }
-                    return Err(error);
-                }
-            }
-        };
-
-        self.mark_user_turn_started(&input.thread_id, reactivated_event_log_path)?;
-
-        Ok(SendTextStart {
-            output: SendTextOutput {
-                thread_id: input.thread_id,
-            },
-            command,
-        })
-    }
-
     fn begin_send_text_intent_start(
         &mut self,
         input: SendTextInput,
         reactivated_event_log_path: Option<PathBuf>,
     ) -> Result<ProviderExecutionStart, PedelecError> {
-        if self.provider_execution_family_for_thread(&input.thread_id)?
-            == ProviderExecutionFamily::LegacyCommand
-        {
-            let start = self.begin_send_text_start(input, reactivated_event_log_path)?;
-            return Ok(ProviderExecutionStart {
-                output: start.output,
-                intent: ProviderExecutionIntent::LegacyCommand {
-                    command: start.command,
-                    purpose: RunningProviderProcessPurpose::UserMessage,
-                },
-            });
-        }
-
         let session = match self.build_persistent_session_intent(&input.thread_id) {
             Ok(session) => session,
             Err(error) => {
@@ -3624,15 +1936,13 @@ impl CoreRuntime {
             output: SendTextOutput {
                 thread_id: input.thread_id.clone(),
             },
-            intent: ProviderExecutionIntent::PersistentRuntime {
-                operation: PersistentRuntimeOperation::StartTurn {
-                    turn: PersistentProviderTurnIntent {
-                        thread_id: input.thread_id,
-                        local_turn_id,
-                        provider_session_id,
-                        message: input.message,
-                        session,
-                    },
+            intent: PersistentRuntimeOperation::StartTurn {
+                turn: PersistentProviderTurnIntent {
+                    thread_id: input.thread_id,
+                    local_turn_id,
+                    provider_session_id,
+                    message: input.message,
+                    session,
                 },
             },
         })
@@ -3654,7 +1964,6 @@ impl CoreRuntime {
         }
         let local_turn_id = new_provider_turn_id();
         if let Some(provider_state) = self.thread_manager.provider_state_mut(thread_id) {
-            provider_state.has_user_message = true;
             provider_state.active_provider_turn_id = Some(local_turn_id.clone());
         }
         self.pending_provider_operations
@@ -3670,112 +1979,12 @@ impl CoreRuntime {
         self.debug_reactivating_threads.remove(thread_id);
     }
 
-    pub fn begin_prepare_thread(
-        &mut self,
-        input: PrepareThreadInput,
-    ) -> Result<PrepareThreadStart, PedelecError> {
-        if self.provider_execution_family_for_thread(&input.thread_id)?
-            == ProviderExecutionFamily::PersistentRuntime
-        {
-            return Err(PedelecError::with_details(
-                error_codes::PROVIDER_UNSUPPORTED,
-                "persistent providers must be prepared through the execution intent API",
-                serde_json::json!({ "threadId": input.thread_id }),
-            ));
-        }
-        {
-            let thread = self.thread_manager.thread(&input.thread_id)?;
-            match thread.status {
-                ThreadStatus::Running
-                | ThreadStatus::WaitingToolResult
-                | ThreadStatus::Starting => {
-                    return Err(PedelecError::with_details(
-                        error_codes::THREAD_BUSY,
-                        "thread is already running",
-                        serde_json::json!({ "threadId": input.thread_id }),
-                    ));
-                }
-                ThreadStatus::Ended => {
-                    return Err(PedelecError::with_details(
-                        error_codes::THREAD_ENDED,
-                        "thread has ended",
-                        serde_json::json!({ "threadId": input.thread_id }),
-                    ));
-                }
-                ThreadStatus::Stopping => {
-                    return Err(PedelecError::with_details(
-                        error_codes::THREAD_BUSY,
-                        "thread is stopping",
-                        serde_json::json!({ "threadId": input.thread_id }),
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        if self
-            .thread_manager
-            .provider_state(&input.thread_id)
-            .and_then(|state| state.provider_session_id.as_deref())
-            .is_some()
-        {
-            return Ok(PrepareThreadStart {
-                output: PrepareThreadOutput {
-                    thread_id: input.thread_id,
-                    prepared: true,
-                    already_prepared: Some(true),
-                },
-                command: None,
-            });
-        }
-
-        let test_command = self.test_provider_command.clone();
-
-        let command = if let Some(command) = test_command {
-            command
-        } else {
-            self.build_prepare_thread_command(&input)?
-        };
-
-        let thread = self.thread_manager.thread_mut(&input.thread_id)?;
-        thread.status = ThreadStatus::Running;
-        thread.updated_at = Utc::now();
-        self.pending_provider_operations
-            .insert(input.thread_id.clone(), PendingProviderOperation::Prepare);
-        self.event_bus
-            .emit_status_changed(&input.thread_id, ThreadStatus::Running);
-
-        Ok(PrepareThreadStart {
-            output: PrepareThreadOutput {
-                thread_id: input.thread_id,
-                prepared: true,
-                already_prepared: Some(false),
-            },
-            command: Some(command),
-        })
-    }
-
     /// Admits a prepare operation. Persistent providers receive an
     /// `EnsureSession` intent rather than a synthetic user turn.
     pub fn begin_prepare_thread_intent(
         &mut self,
         input: PrepareThreadInput,
     ) -> Result<PrepareExecutionStart, PedelecError> {
-        if self.provider_execution_family_for_thread(&input.thread_id)?
-            == ProviderExecutionFamily::LegacyCommand
-        {
-            let start = self.begin_prepare_thread(input)?;
-            return Ok(PrepareExecutionStart {
-                output: start.output,
-                intent: start
-                    .command
-                    .map(|command| ProviderExecutionIntent::LegacyCommand {
-                        command,
-                        purpose: RunningProviderProcessPurpose::Prepare,
-                    }),
-            });
-        }
-
         {
             let thread = self.thread_manager.thread(&input.thread_id)?;
             match thread.status {
@@ -3822,18 +2031,8 @@ impl CoreRuntime {
                 prepared: true,
                 already_prepared: Some(false),
             },
-            intent: Some(ProviderExecutionIntent::PersistentRuntime {
-                operation: PersistentRuntimeOperation::EnsureSession { session },
-            }),
+            intent: Some(PersistentRuntimeOperation::EnsureSession { session }),
         })
-    }
-
-    fn provider_execution_family_for_thread(
-        &self,
-        thread_id: &str,
-    ) -> Result<ProviderExecutionFamily, PedelecError> {
-        let provider = &self.thread_manager.thread(thread_id)?.provider;
-        Ok(self.provider_execution_family(provider))
     }
 
     fn build_persistent_session_intent(
@@ -3937,517 +2136,6 @@ impl CoreRuntime {
         })
     }
 
-    fn build_send_text_command(
-        &mut self,
-        input: &SendTextInput,
-    ) -> Result<CommandSpec, PedelecError> {
-        self.build_provider_turn_command(
-            &input.thread_id,
-            ProviderTurnKind::UserMessage {
-                message: &input.message,
-            },
-        )
-    }
-
-    fn build_prepare_thread_command(
-        &mut self,
-        input: &PrepareThreadInput,
-    ) -> Result<CommandSpec, PedelecError> {
-        self.build_provider_turn_command(&input.thread_id, ProviderTurnKind::Prepare)
-    }
-
-    fn build_provider_turn_command(
-        &mut self,
-        thread_id: &str,
-        kind: ProviderTurnKind<'_>,
-    ) -> Result<CommandSpec, PedelecError> {
-        let thread = self.thread_manager.thread(thread_id)?.clone();
-        let provider_state = self
-            .thread_manager
-            .provider_state(thread_id)
-            .cloned()
-            .ok_or_else(|| {
-                PedelecError::with_details(
-                    error_codes::PROVIDER_NOT_FOUND,
-                    "provider state was not found for thread",
-                    serde_json::json!({ "threadId": thread_id }),
-                )
-            })?;
-        let settings = self.get_settings()?;
-        let tool_registry = self.tool_registry.get(thread_id).cloned().ok_or_else(|| {
-            PedelecError::with_details(
-                error_codes::TOOL_NOT_FOUND,
-                "tool registry was not found for thread",
-                serde_json::json!({ "threadId": thread_id }),
-            )
-        })?;
-        let include_fallback_bootstrap = self.provider_bootstrap_mode(&thread.provider)
-            == ProviderBootstrapMode::UserPromptFallback
-            && provider_state.provider_session_id.is_none();
-        let ctx = RunPromptProviderContext {
-            thread,
-            tool_registry,
-            provider_state: provider_state.clone(),
-            include_fallback_bootstrap,
-            settings,
-            core_ipc_endpoint: self.core_ipc_endpoint.clone().unwrap_or_default(),
-            core_ipc_runtime_file_path: self
-                .core_ipc_runtime_file_path
-                .clone()
-                .unwrap_or_else(default_runtime_file_path_for_provider),
-            provider_resolved_path: self.provider_path_value(),
-        };
-        let adapter = self.thread_manager.provider_adapter(thread_id)?;
-        if adapter.code() != ctx.thread.provider {
-            return Err(PedelecError::with_details(
-                error_codes::PROVIDER_NOT_FOUND,
-                "provider adapter does not match thread provider",
-                serde_json::json!({ "threadId": thread_id }),
-            ));
-        }
-
-        let command = match kind {
-            ProviderTurnKind::UserMessage { message } => {
-                if let Some(provider_session_id) = provider_state.provider_session_id.as_deref() {
-                    let resume_message = if provider_state.has_user_message {
-                        message.to_string()
-                    } else {
-                        build_provider_user_message_task(message)
-                    };
-                    adapter.build_resume_command(&ctx, provider_session_id, &resume_message)
-                } else {
-                    adapter.build_run_command(&ctx, message)
-                }
-            }
-            ProviderTurnKind::Prepare => {
-                let capabilities = adapter.capabilities();
-                if !capabilities.supports_resume_by_session_id
-                    || !capabilities.supports_provider_generated_session_id_parse
-                {
-                    return Err(PedelecError::with_details(
-                        error_codes::PROVIDER_PREPARE_UNSUPPORTED,
-                        "provider does not support prepare",
-                        serde_json::json!({
-                            "threadId": thread_id,
-                            "provider": provider_code_as_str(&ctx.thread.provider)
-                        }),
-                    ));
-                }
-                adapter.build_run_command(&ctx, &build_provider_prepare_task())
-            }
-        }?;
-        let mut command = command;
-        self.apply_provider_bootstrap(&ctx, &mut command)?;
-        apply_provider_native_skills_policy(&ctx.thread.provider, &mut command);
-        self.apply_scanned_provider_program(&ctx.thread.provider, &mut command)?;
-        Ok(command)
-    }
-
-    fn provider_bootstrap_mode(&self, provider: &ProviderCode) -> ProviderBootstrapMode {
-        if let Some(capabilities) = self
-            .provider_scan
-            .get(provider)
-            .and_then(|scan| scan.bootstrap_capabilities)
-        {
-            return capabilities.privileged_bootstrap;
-        }
-
-        // Codex and pedelec-agent expose the required instruction channel as a
-        // stable part of their command/runtime contract. The other external
-        // providers are deliberately conservative until the latest scan has
-        // probed their flag or version capability.
-        match provider {
-            ProviderCode::Codex => ProviderBootstrapMode::CodexDeveloperInstructions,
-            ProviderCode::Ollama => ProviderBootstrapMode::NativeSystemPrompt,
-            ProviderCode::Antigravity
-            | ProviderCode::Claude
-            | ProviderCode::OpenCode
-            | ProviderCode::Cursor => ProviderBootstrapMode::UserPromptFallback,
-        }
-    }
-
-    fn apply_provider_bootstrap(
-        &self,
-        ctx: &RunPromptProviderContext,
-        command: &mut CommandSpec,
-    ) -> Result<(), PedelecError> {
-        let mode = self.provider_bootstrap_mode(&ctx.thread.provider);
-        match mode {
-            ProviderBootstrapMode::CodexDeveloperInstructions => {
-                remove_codex_developer_instruction_override(&mut command.args);
-                let insertion_index = command
-                    .args
-                    .iter()
-                    .position(|arg| arg == "exec")
-                    .map_or(0, |index| index + 1);
-                command.args.splice(
-                    insertion_index..insertion_index,
-                    [
-                        "-c".to_string(),
-                        format!(
-                            "developer_instructions={}",
-                            build_pedelec_bootstrap_instruction()
-                        ),
-                    ],
-                );
-            }
-            ProviderBootstrapMode::ClaudeAppendSystemPrompt => {
-                command.args.retain(|arg| arg != "--append-system-prompt");
-                command.args.push("--append-system-prompt".to_string());
-                command.args.push(build_pedelec_bootstrap_instruction());
-            }
-            ProviderBootstrapMode::OpenCodeInlineAgent => {
-                remove_agent_selector(&mut command.args);
-                command.args = insert_agent_selector(command.args.clone(), PEDELEC_OPENCODE_AGENT);
-                let config = merge_opencode_runtime_agent_config(command)?;
-                set_command_env(command, OPENCODE_CONFIG_CONTENT_ENV, config);
-            }
-            ProviderBootstrapMode::AntigravityWorkspaceAgent => {
-                ensure_antigravity_custom_agent(&ctx.thread.workspace_path)?;
-                remove_agent_selector(&mut command.args);
-                command.args = insert_agent_selector(command.args.clone(), PEDELEC_OPENCODE_AGENT);
-            }
-            ProviderBootstrapMode::NativeSystemPrompt
-            | ProviderBootstrapMode::UserPromptFallback => {}
-        }
-        Ok(())
-    }
-
-    fn apply_scanned_provider_program(
-        &self,
-        provider: &ProviderCode,
-        command: &mut CommandSpec,
-    ) -> Result<(), PedelecError> {
-        if *provider == ProviderCode::Ollama {
-            return Ok(());
-        }
-        let selected = self
-            .provider_scan
-            .get(provider)
-            .and_then(|entry| entry.path.as_ref());
-        let Some(selected) = selected else {
-            #[cfg(test)]
-            return Ok(());
-            #[cfg(not(test))]
-            return Err(PedelecError::with_details(
-                error_codes::PROVIDER_NOT_FOUND,
-                "provider is unavailable; refresh Providers after installing or upgrading it",
-                serde_json::json!({ "provider": provider_code_as_str(provider) }),
-            ));
-        };
-        command.program = selected.to_string_lossy().to_string();
-        Ok(())
-    }
-
-    pub fn register_provider_process(
-        &mut self,
-        thread_id: &str,
-        process_id: u32,
-        child: Arc<Mutex<Option<Child>>>,
-        purpose: RunningProviderProcessPurpose,
-    ) -> Arc<ProviderProcessTermination> {
-        let termination = Arc::new(ProviderProcessTermination::new());
-        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
-            thread.process_id = Some(process_id);
-            thread.updated_at = Utc::now();
-        }
-        if let Some(provider_state) = self.thread_manager.provider_state_mut(thread_id) {
-            provider_state.last_process_id = Some(process_id);
-        }
-        self.running_processes.insert(
-            thread_id.to_string(),
-            RunningProviderProcess {
-                process_id,
-                child,
-                termination: Arc::clone(&termination),
-                purpose,
-                stderr: String::new(),
-                stderr_truncated: false,
-                had_provider_error: false,
-                prepare_assistant_output: String::new(),
-                prepare_assistant_output_truncated: false,
-            },
-        );
-        termination
-    }
-
-    pub fn fail_provider_process_start(
-        &mut self,
-        thread_id: &str,
-        error: PedelecError,
-        purpose: RunningProviderProcessPurpose,
-    ) {
-        self.running_processes.remove(thread_id);
-        self.pending_provider_operations.remove(thread_id);
-        self.clear_active_provider_turn(thread_id);
-        self.tool_request_broker.clear_thread(thread_id);
-        if self.rollback_debug_reactivation(thread_id) {
-            return;
-        }
-        if purpose == RunningProviderProcessPurpose::Prepare {
-            self.discard_failed_prepare_provider_session(thread_id);
-        }
-        let status = match purpose {
-            RunningProviderProcessPurpose::UserMessage => ThreadStatus::Error,
-            RunningProviderProcessPurpose::Prepare => ThreadStatus::Idle,
-        };
-        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
-            thread.status = status.clone();
-            thread.process_id = None;
-            thread.updated_at = Utc::now();
-        }
-        if purpose == RunningProviderProcessPurpose::Prepare {
-            self.emit_thread_provider_error(thread_id, error);
-            self.event_bus.emit_status_changed(thread_id, status);
-        } else {
-            self.event_bus.emit_status_changed(thread_id, status);
-            self.emit_thread_provider_error(thread_id, error);
-        }
-    }
-
-    pub fn emit_provider_command_started(
-        &mut self,
-        thread_id: &str,
-        process_id: u32,
-        command: &CommandSpec,
-    ) {
-        self.event_bus
-            .emit_provider_command_started(thread_id, process_id, command);
-    }
-
-    pub fn emit_provider_stdout(&mut self, thread_id: &str, text: String) {
-        let retained = self
-            .thread_manager
-            .provider_adapter_mut(thread_id)
-            .map(|adapter| adapter.preprocess_stdout_chunk(&text))
-            .unwrap_or_else(|| vec![text]);
-        for fragment in retained {
-            self.event_bus.emit_raw_stdout(thread_id, fragment.clone());
-            let events = self
-                .thread_manager
-                .provider_adapter_mut(thread_id)
-                .map(|adapter| adapter.parse_stdout_event(&fragment))
-                .unwrap_or_default();
-            self.emit_provider_partials(thread_id, events);
-        }
-    }
-
-    pub fn emit_provider_stderr(&mut self, thread_id: &str, text: String) {
-        self.event_bus.emit_raw_stderr(thread_id, text.clone());
-        if let Some(running) = self.running_processes.get_mut(thread_id) {
-            append_provider_stderr(&mut running.stderr, &mut running.stderr_truncated, &text);
-        }
-        let events = self
-            .thread_manager
-            .provider_adapter_mut(thread_id)
-            .map(|adapter| adapter.parse_stderr_event(&text))
-            .unwrap_or_default();
-        self.emit_provider_partials(thread_id, events);
-    }
-
-    pub fn complete_provider_process(
-        &mut self,
-        thread_id: &str,
-        process_id: u32,
-        status: ExitStatus,
-    ) {
-        let running = if self
-            .running_processes
-            .get(thread_id)
-            .is_some_and(|running| running.process_id == process_id)
-        {
-            self.running_processes.remove(thread_id)
-        } else {
-            None
-        };
-        let Some(running) = running else {
-            return;
-        };
-        self.pending_provider_operations.remove(thread_id);
-        self.clear_active_provider_turn(thread_id);
-        // A completed provider process means the provider turn is over. This
-        // is distinct from a provider's child shell timing out while the
-        // provider process remains alive, which does not reach this path.
-        self.tool_request_broker.clear_thread(thread_id);
-        let purpose = running.purpose;
-        let had_provider_error = running.had_provider_error;
-        let prepare_assistant_output = running.prepare_assistant_output.clone();
-        let prepare_assistant_output_truncated = running.prepare_assistant_output_truncated;
-
-        let prepare_missing_provider_session_id = purpose == RunningProviderProcessPurpose::Prepare
-            && self
-                .thread_manager
-                .provider_state(thread_id)
-                .and_then(|state| state.provider_session_id.as_deref())
-                .is_none();
-        let prepare_ack_invalid = purpose == RunningProviderProcessPurpose::Prepare
-            && !prepare_missing_provider_session_id
-            && (prepare_assistant_output_truncated
-                || prepare_assistant_output.trim() != "PEDELEC_PREPARED");
-
-        if purpose == RunningProviderProcessPurpose::Prepare
-            && (had_provider_error
-                || !status.success()
-                || prepare_missing_provider_session_id
-                || prepare_ack_invalid)
-        {
-            self.discard_failed_prepare_provider_session(thread_id);
-        }
-
-        let Ok(thread) = self.thread_manager.thread_mut(thread_id) else {
-            return;
-        };
-        if thread.process_id == Some(process_id) {
-            thread.process_id = None;
-        }
-        if matches!(thread.status, ThreadStatus::Ended | ThreadStatus::Stopping) {
-            thread.updated_at = Utc::now();
-            return;
-        }
-
-        if status.success() {
-            let is_prepare = purpose == RunningProviderProcessPurpose::Prepare;
-            if had_provider_error && !is_prepare {
-                self.tool_request_broker.clear_thread(thread_id);
-                thread.updated_at = Utc::now();
-                return;
-            }
-            thread.status = ThreadStatus::Idle;
-            thread.updated_at = Utc::now();
-            if prepare_missing_provider_session_id && !had_provider_error {
-                self.tool_request_broker.clear_thread(thread_id);
-                self.emit_thread_provider_error(
-                    thread_id,
-                    PedelecError::with_details(
-                        error_codes::PREPARE_SESSION_ID_MISSING,
-                        "provider session id was not found after prepare",
-                        serde_json::json!({ "threadId": thread_id }),
-                    ),
-                );
-            } else if prepare_ack_invalid && !had_provider_error {
-                let mut details = serde_json::json!({
-                    "threadId": thread_id,
-                    "provider": provider_code_as_str(&thread.provider),
-                    "assistantOutput": prepare_assistant_output
-                });
-                if prepare_assistant_output_truncated {
-                    details["assistantOutputTruncated"] = Value::Bool(true);
-                }
-                self.emit_thread_provider_error(
-                    thread_id,
-                    PedelecError::with_details(
-                        error_codes::PREPARE_ACK_INVALID,
-                        "provider did not acknowledge session preparation",
-                        details,
-                    ),
-                );
-            }
-            if !had_provider_error || is_prepare {
-                self.event_bus
-                    .emit_status_changed(thread_id, ThreadStatus::Idle);
-            }
-        } else {
-            let is_prepare = purpose == RunningProviderProcessPurpose::Prepare;
-            thread.status = if is_prepare {
-                ThreadStatus::Idle
-            } else {
-                ThreadStatus::Error
-            };
-            thread.updated_at = Utc::now();
-            self.tool_request_broker.clear_thread(thread_id);
-            if had_provider_error {
-                if is_prepare {
-                    self.event_bus
-                        .emit_status_changed(thread_id, ThreadStatus::Idle);
-                }
-                return;
-            }
-            let next_status = thread.status.clone();
-            let stderr_message = running.stderr.trim().to_string();
-            let mut details = serde_json::json!({
-                "threadId": thread_id,
-                "processId": process_id,
-                "exitCode": status.code()
-            });
-            let message = if stderr_message.is_empty() {
-                "provider command failed"
-            } else {
-                if let Some(details) = details.as_object_mut() {
-                    details.insert("stderr".to_string(), Value::String(running.stderr));
-                    if running.stderr_truncated {
-                        details.insert("stderrTruncated".to_string(), Value::Bool(true));
-                    }
-                }
-                stderr_message.as_str()
-            };
-            let error =
-                PedelecError::with_details(error_codes::PROVIDER_COMMAND_FAILED, message, details);
-            if is_prepare {
-                self.emit_thread_provider_error(thread_id, error);
-                self.event_bus.emit_status_changed(thread_id, next_status);
-            } else {
-                self.event_bus.emit_status_changed(thread_id, next_status);
-                self.emit_thread_provider_error(thread_id, error);
-            }
-        }
-    }
-
-    pub fn fail_provider_process_wait(&mut self, thread_id: &str, process_id: u32, err: String) {
-        let purpose = if self
-            .running_processes
-            .get(thread_id)
-            .is_some_and(|running| running.process_id == process_id)
-        {
-            self.running_processes
-                .remove(thread_id)
-                .map(|running| running.purpose)
-        } else {
-            None
-        };
-        if purpose == Some(RunningProviderProcessPurpose::Prepare) {
-            self.discard_failed_prepare_provider_session(thread_id);
-        }
-        if purpose.is_some() {
-            self.pending_provider_operations.remove(thread_id);
-            self.clear_active_provider_turn(thread_id);
-            self.tool_request_broker.clear_thread(thread_id);
-        }
-        if self.rollback_debug_reactivation(thread_id) {
-            return;
-        }
-        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
-            if thread.process_id == Some(process_id) {
-                thread.process_id = None;
-            }
-            if !matches!(thread.status, ThreadStatus::Ended | ThreadStatus::Stopping) {
-                let is_prepare = purpose == Some(RunningProviderProcessPurpose::Prepare);
-                thread.status = if is_prepare {
-                    ThreadStatus::Idle
-                } else {
-                    ThreadStatus::Error
-                };
-                thread.updated_at = Utc::now();
-                let next_status = thread.status.clone();
-                let error = PedelecError::with_details(
-                    error_codes::PROVIDER_COMMAND_FAILED,
-                    "provider command wait failed",
-                    serde_json::json!({
-                        "threadId": thread_id,
-                        "processId": process_id,
-                        "error": err
-                    }),
-                );
-                if is_prepare {
-                    self.emit_thread_provider_error(thread_id, error);
-                    self.event_bus.emit_status_changed(thread_id, next_status);
-                } else {
-                    self.event_bus.emit_status_changed(thread_id, next_status);
-                    self.emit_thread_provider_error(thread_id, error);
-                }
-            }
-        }
-    }
-
     /// Reduce a normalized persistent-runtime event into Pedelec state. This
     /// method only performs short state/event mutations; provider I/O belongs
     /// to the runtime executor that produced the event.
@@ -4542,30 +2230,10 @@ impl CoreRuntime {
             ProviderRuntimeEvent::RuntimeDisconnected { thread_id, error } => {
                 if let Some(thread_id) = thread_id {
                     self.thread_manager.thread(&thread_id)?;
-                    let is_persistent = self
-                        .thread_manager
-                        .thread(&thread_id)
-                        .map(|thread| {
-                            self.provider_execution_family(&thread.provider)
-                                == ProviderExecutionFamily::PersistentRuntime
-                        })
-                        .unwrap_or(false);
-                    if is_persistent {
-                        self.fail_persistent_runtime_thread(&thread_id, &error);
-                    }
+                    self.fail_persistent_runtime_thread(&thread_id, &error);
                 } else {
                     for thread_id in self.thread_manager.thread_ids() {
-                        let is_persistent = self
-                            .thread_manager
-                            .thread(&thread_id)
-                            .map(|thread| {
-                                self.provider_execution_family(&thread.provider)
-                                    == ProviderExecutionFamily::PersistentRuntime
-                            })
-                            .unwrap_or(false);
-                        if is_persistent {
-                            self.fail_persistent_runtime_thread(&thread_id, &error);
-                        }
+                        self.fail_persistent_runtime_thread(&thread_id, &error);
                     }
                 }
                 Ok(())
@@ -4793,7 +2461,6 @@ impl CoreRuntime {
         };
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             thread.status = status.clone();
-            thread.process_id = None;
             thread.updated_at = Utc::now();
         }
         if operation != ProviderExecutionOperationKind::End {
@@ -4829,11 +2496,7 @@ impl CoreRuntime {
             let belongs_to_runtime = self
                 .thread_manager
                 .thread(&thread_id)
-                .map(|thread| {
-                    thread.provider == provider
-                        && self.provider_execution_family(&thread.provider)
-                            == ProviderExecutionFamily::PersistentRuntime
-                })
+                .map(|thread| thread.provider == provider)
                 .unwrap_or(false);
             if !belongs_to_runtime {
                 continue;
@@ -4885,7 +2548,6 @@ impl CoreRuntime {
             .clear_thread_with_error(thread_id, error.clone());
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             thread.status = ThreadStatus::Error;
-            thread.process_id = None;
             thread.updated_at = Utc::now();
         }
         self.event_bus
@@ -4895,16 +2557,6 @@ impl CoreRuntime {
 
     pub fn provider_usage(&self, thread_id: &str) -> Option<&Value> {
         self.provider_usage.get(thread_id)
-    }
-
-    pub fn running_process_id(&self, thread_id: &str) -> Option<u32> {
-        self.running_processes
-            .get(thread_id)
-            .map(|running| running.process_id)
-    }
-
-    pub fn running_process_count(&self) -> usize {
-        self.running_processes.len()
     }
 
     fn update_provider_session_id(&mut self, thread_id: &str, provider_session_id: String) {
@@ -4919,52 +2571,12 @@ impl CoreRuntime {
             .emit_provider_session_id_updated(thread_id, provider_session_id);
     }
 
-    fn emit_provider_partials(&mut self, thread_id: &str, events: Vec<ThreadEventPartial>) {
-        for event in events {
-            match event {
-                ThreadEventPartial::AssistantMessage { text } => {
-                    if let Some(running) = self.running_processes.get_mut(thread_id) {
-                        if running.purpose == RunningProviderProcessPurpose::Prepare {
-                            append_prepare_assistant_output(
-                                &mut running.prepare_assistant_output,
-                                &mut running.prepare_assistant_output_truncated,
-                                &text,
-                            );
-                        }
-                    }
-                    self.event_bus.emit_assistant_message(thread_id, text);
-                }
-                ThreadEventPartial::ProviderSessionIdUpdated {
-                    provider_session_id,
-                } => self.update_provider_session_id(thread_id, provider_session_id),
-                ThreadEventPartial::ProviderError { error } => {
-                    if let Some(running) = self.running_processes.get_mut(thread_id) {
-                        running.had_provider_error = true;
-                    }
-                    if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
-                        thread.status = ThreadStatus::Error;
-                    }
-                    self.event_bus
-                        .emit_status_changed(thread_id, ThreadStatus::Error);
-                    self.emit_thread_provider_error(thread_id, error);
-                }
-            }
-        }
-    }
-
     fn emit_thread_provider_error(&mut self, thread_id: &str, error: PedelecError) {
         let Ok(thread) = self.thread_manager.thread(thread_id) else {
             return;
         };
         self.event_bus
             .emit_provider_error(thread_id, thread.provider.clone(), error);
-    }
-
-    fn discard_failed_prepare_provider_session(&mut self, thread_id: &str) {
-        if let Some(provider_state) = self.thread_manager.provider_state_mut(thread_id) {
-            provider_state.provider_session_id = None;
-            provider_state.has_user_message = false;
-        }
     }
 
     fn clear_active_provider_turn(&mut self, thread_id: &str) {
@@ -4984,7 +2596,6 @@ impl CoreRuntime {
         self.event_bus.unregister_thread_log(thread_id);
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             thread.status = ThreadStatus::Ended;
-            thread.process_id = None;
             thread.updated_at = Utc::now();
         }
         self.event_bus
@@ -4992,17 +2603,8 @@ impl CoreRuntime {
         true
     }
 
-    fn take_running_process_for_stop(&mut self, thread_id: &str) -> Option<ProviderProcessStop> {
-        let running = self.running_processes.remove(thread_id)?;
-        Some(ProviderProcessStop {
-            process_id: running.process_id,
-            child: running.child,
-            termination: running.termination,
-        })
-    }
-
-    /// Begins thread termination and returns the provider-side work that must
-    /// happen after the Core lock is released.
+    /// Begins thread termination and returns the persistent-runtime end
+    /// operation that must be dispatched after the Core lock is released.
     pub fn begin_end_thread(
         &mut self,
         input: EndThreadInput,
@@ -5020,28 +2622,19 @@ impl CoreRuntime {
             }
         }
 
-        let execution = match self.provider_execution_family(&thread.provider) {
-            ProviderExecutionFamily::LegacyCommand => EndThreadExecutionIntent::LegacyProcess(
-                self.take_running_process_for_stop(&input.thread_id),
-            ),
-            ProviderExecutionFamily::PersistentRuntime => {
-                EndThreadExecutionIntent::PersistentRuntime(
-                    PersistentRuntimeOperation::EndSession {
-                        session: PersistentProviderEndIntent {
-                            thread_id: input.thread_id.clone(),
-                            provider: thread.provider.clone(),
-                            provider_session_id: self
-                                .thread_manager
-                                .provider_state(&input.thread_id)
-                                .and_then(|state| state.provider_session_id.clone()),
-                            active_provider_turn_id: self
-                                .thread_manager
-                                .provider_state(&input.thread_id)
-                                .and_then(|state| state.active_provider_turn_id.clone()),
-                        },
-                    },
-                )
-            }
+        let execution = PersistentRuntimeOperation::EndSession {
+            session: PersistentProviderEndIntent {
+                thread_id: input.thread_id.clone(),
+                provider: thread.provider.clone(),
+                provider_session_id: self
+                    .thread_manager
+                    .provider_state(&input.thread_id)
+                    .and_then(|state| state.provider_session_id.clone()),
+                active_provider_turn_id: self
+                    .thread_manager
+                    .provider_state(&input.thread_id)
+                    .and_then(|state| state.active_provider_turn_id.clone()),
+            },
         };
         Ok(EndThreadStart {
             thread_id: input.thread_id,
@@ -5065,7 +2658,6 @@ impl CoreRuntime {
 
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             thread.status = ThreadStatus::Ended;
-            thread.process_id = None;
             thread.updated_at = Utc::now();
         }
         self.event_bus
@@ -5076,13 +2668,10 @@ impl CoreRuntime {
     }
 
     /// Compatibility wrapper for direct Core users. IPC/Tauri should use
-    /// `begin_end_thread`, perform the returned work outside the mutex, and
-    /// then call `finish_end_thread`.
+    /// `begin_end_thread`, dispatch the returned persistent operation outside
+    /// the mutex, and then call `finish_end_thread`.
     pub fn end_thread(&mut self, input: EndThreadInput) -> Result<(), PedelecError> {
         let start = self.begin_end_thread(input)?;
-        if let EndThreadExecutionIntent::LegacyProcess(Some(stop)) = start.execution {
-            stop.stop();
-        }
         self.finish_end_thread(&start.thread_id)
     }
 
@@ -5098,12 +2687,6 @@ impl CoreRuntime {
 
         self.workspace_manager.remove_all_thread_workspaces()
     }
-    pub fn active_process_id(&self, thread_id: &str) -> Option<u32> {
-        self.thread_manager
-            .thread(thread_id)
-            .ok()
-            .and_then(|thread| thread.process_id)
-    }
 
     pub fn thread_status(&self, thread_id: &str) -> Option<ThreadStatus> {
         self.thread_manager
@@ -5112,7 +2695,7 @@ impl CoreRuntime {
             .map(|thread| thread.status.clone())
     }
 
-    pub fn provider_state(&self, thread_id: &str) -> Option<&ProviderAdapterState> {
+    pub fn provider_state(&self, thread_id: &str) -> Option<&ProviderSessionState> {
         self.thread_manager.provider_state(thread_id)
     }
 
@@ -5339,34 +2922,6 @@ impl CoreRuntime {
     }
 }
 
-fn append_provider_stderr(stderr: &mut String, truncated: &mut bool, text: &str) {
-    stderr.push_str(text);
-    if stderr.len() <= MAX_PROVIDER_STDERR_BYTES {
-        return;
-    }
-
-    let mut drop_until = stderr.len() - MAX_PROVIDER_STDERR_BYTES;
-    while !stderr.is_char_boundary(drop_until) {
-        drop_until += 1;
-    }
-    stderr.drain(..drop_until);
-    *truncated = true;
-}
-
-fn append_prepare_assistant_output(output: &mut String, truncated: &mut bool, text: &str) {
-    output.push_str(text);
-    if output.len() <= MAX_PREPARE_ASSISTANT_OUTPUT_BYTES {
-        return;
-    }
-
-    let mut drop_until = output.len() - MAX_PREPARE_ASSISTANT_OUTPUT_BYTES;
-    while !output.is_char_boundary(drop_until) {
-        drop_until += 1;
-    }
-    output.drain(..drop_until);
-    *truncated = true;
-}
-
 /// Waits until the initial provider snapshot has been installed.
 ///
 /// The readiness handle is copied while briefly holding the runtime mutex and
@@ -5427,20 +2982,7 @@ pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo
     // profile is user-controlled and may take several seconds to finish.
     let scan_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let path_value = path_override.unwrap_or_else(resolve_provider_path_value);
-        let mut provider_scan = scan_external_providers(Some(path_value.clone()));
-        let probe_legacy_opencode_flags = runtime
-            .lock()
-            .map(|runtime| {
-                !runtime
-                    .persistent_providers
-                    .contains(&ProviderCode::OpenCode)
-            })
-            .unwrap_or(false);
-        apply_provider_bootstrap_capabilities(
-            &mut provider_scan,
-            Some(&path_value),
-            probe_legacy_opencode_flags,
-        );
+        let provider_scan = scan_external_providers(Some(path_value.clone()));
         (path_value, provider_scan)
     }));
 
@@ -5569,7 +3111,6 @@ impl ProviderProtocolTrafficBus {
 pub struct ThreadManager {
     threads: HashMap<String, ThreadState>,
     provider_sessions: HashMap<String, ProviderSessionState>,
-    provider_adapters: HashMap<String, ProviderAdapterInstance>,
     next_thread_number: u64,
 }
 
@@ -5608,13 +3149,8 @@ impl ThreadManager {
 
     pub fn insert_thread(&mut self, state: ThreadState, provider_session: ProviderSessionState) {
         let thread_id = state.thread_id.clone();
-        let provider_adapter = ProviderAdapterInstance::new(state.provider.clone());
         self.threads.insert(thread_id.clone(), state);
-        self.provider_sessions
-            .insert(thread_id.clone(), provider_session);
-        if let Some(provider_adapter) = provider_adapter {
-            self.provider_adapters.insert(thread_id, provider_adapter);
-        }
+        self.provider_sessions.insert(thread_id, provider_session);
     }
 
     pub fn thread(&self, thread_id: &str) -> Result<&ThreadState, PedelecError> {
@@ -5648,28 +3184,14 @@ impl ThreadManager {
         self.provider_sessions.get_mut(thread_id)
     }
 
-    /// Compatibility name for legacy adapter callers.
+    /// Shorthand accessor for provider session state.
     pub fn provider_state(&self, thread_id: &str) -> Option<&ProviderSessionState> {
         self.provider_session_state(thread_id)
     }
 
-    /// Compatibility name for legacy adapter callers.
+    /// Shorthand accessor for provider session state.
     pub fn provider_state_mut(&mut self, thread_id: &str) -> Option<&mut ProviderSessionState> {
         self.provider_session_state_mut(thread_id)
-    }
-
-    fn provider_adapter(&self, thread_id: &str) -> Result<&ProviderAdapterInstance, PedelecError> {
-        self.provider_adapters.get(thread_id).ok_or_else(|| {
-            PedelecError::with_details(
-                error_codes::PROVIDER_NOT_FOUND,
-                "provider adapter was not found for thread",
-                serde_json::json!({ "threadId": thread_id }),
-            )
-        })
-    }
-
-    fn provider_adapter_mut(&mut self, thread_id: &str) -> Option<&mut ProviderAdapterInstance> {
-        self.provider_adapters.get_mut(thread_id)
     }
 }
 
@@ -7243,30 +4765,6 @@ impl EventBus {
         );
     }
 
-    pub fn emit_raw_stdout(&mut self, thread_id: &str, text: String) {
-        let seq = self.next_seq(thread_id);
-        self.emit(
-            thread_id,
-            ThreadEvent::RawStdout {
-                seq,
-                thread_id: thread_id.to_string(),
-                text,
-            },
-        );
-    }
-
-    pub fn emit_raw_stderr(&mut self, thread_id: &str, text: String) {
-        let seq = self.next_seq(thread_id);
-        self.emit(
-            thread_id,
-            ThreadEvent::RawStderr {
-                seq,
-                thread_id: thread_id.to_string(),
-                text,
-            },
-        );
-    }
-
     pub fn emit_assistant_delta(&mut self, thread_id: &str, text: String) {
         let seq = self.next_seq(thread_id);
         self.emit(
@@ -7327,27 +4825,6 @@ impl EventBus {
                 request_id: request_id.to_string(),
                 tool_name: tool_name.to_string(),
                 result,
-            },
-        );
-    }
-
-    pub fn emit_provider_command_started(
-        &mut self,
-        thread_id: &str,
-        process_id: u32,
-        command: &CommandSpec,
-    ) {
-        let seq = self.next_seq(thread_id);
-        self.emit(
-            thread_id,
-            ThreadEvent::ProviderCommandStarted {
-                seq,
-                thread_id: thread_id.to_string(),
-                process_id,
-                program: command.program.clone(),
-                args: command.args.clone(),
-                cwd: path_for_external_use(&command.cwd),
-                prompt: command.prompt.clone(),
             },
         );
     }
@@ -8056,7 +5533,6 @@ pub(crate) struct ProviderCli {
     path: Option<PathBuf>,
     version: Option<ProviderVersion>,
     error: Option<String>,
-    bootstrap_capabilities: Option<ProviderBootstrapCapabilities>,
     /// `Some(false)` means the executable was found and versioned, but it
     /// cannot satisfy Pedelec's App Server-only Codex execution contract.
     /// `None` is retained for synthetic/test snapshots created before the
@@ -8384,120 +5860,6 @@ fn scan_external_providers(path_value: Option<OsString>) -> HashMap<ProviderCode
         .collect()
 }
 
-fn apply_provider_bootstrap_capabilities(
-    provider_scan: &mut HashMap<ProviderCode, ProviderCli>,
-    path_value: Option<&OsString>,
-    probe_legacy_opencode_flags: bool,
-) {
-    for provider in external_provider_codes() {
-        let capability = provider_bootstrap_capability_for_scan(
-            &provider,
-            provider_scan.get(&provider),
-            path_value,
-            probe_legacy_opencode_flags,
-        );
-        if let Some(scan) = provider_scan.get_mut(&provider) {
-            scan.bootstrap_capabilities = Some(capability);
-        }
-    }
-}
-
-fn provider_bootstrap_capability_for_scan(
-    provider: &ProviderCode,
-    scan: Option<&ProviderCli>,
-    path_value: Option<&OsString>,
-    probe_legacy_opencode_flags: bool,
-) -> ProviderBootstrapCapabilities {
-    let claude_flag_supported = scan.is_some_and(|scan| {
-        provider_cli_supports_flag(scan, path_value, "--append-system-prompt", false)
-    });
-    // The `opencode run --agent` probe belongs only to the neutral legacy
-    // adapter. The application uses OpenCode ACP and must not inspect or
-    // depend on process-per-turn CLI flags during production refresh.
-    let opencode_flag_supported = probe_legacy_opencode_flags
-        && scan.is_some_and(|scan| provider_cli_supports_flag(scan, path_value, "--agent", true));
-    provider_bootstrap_capability_from_probe(
-        provider,
-        scan,
-        claude_flag_supported,
-        opencode_flag_supported,
-    )
-}
-
-fn provider_bootstrap_capability_from_probe(
-    provider: &ProviderCode,
-    scan: Option<&ProviderCli>,
-    claude_flag_supported: bool,
-    opencode_flag_supported: bool,
-) -> ProviderBootstrapCapabilities {
-    let privileged_bootstrap = match provider {
-        ProviderCode::Codex => ProviderBootstrapMode::CodexDeveloperInstructions,
-        ProviderCode::Claude => {
-            if claude_flag_supported {
-                ProviderBootstrapMode::ClaudeAppendSystemPrompt
-            } else {
-                ProviderBootstrapMode::UserPromptFallback
-            }
-        }
-        ProviderCode::OpenCode => {
-            if opencode_flag_supported {
-                ProviderBootstrapMode::OpenCodeInlineAgent
-            } else {
-                ProviderBootstrapMode::UserPromptFallback
-            }
-        }
-        ProviderCode::Antigravity => scan
-            .and_then(|scan| scan.version.as_ref())
-            .filter(|version| antigravity_custom_agent_version_supported(version))
-            .map(|_| ProviderBootstrapMode::AntigravityWorkspaceAgent)
-            .unwrap_or(ProviderBootstrapMode::UserPromptFallback),
-        ProviderCode::Cursor => ProviderBootstrapMode::UserPromptFallback,
-        ProviderCode::Ollama => ProviderBootstrapMode::NativeSystemPrompt,
-    };
-    ProviderBootstrapCapabilities {
-        privileged_bootstrap,
-    }
-}
-
-fn provider_cli_supports_flag(
-    scan: &ProviderCli,
-    path_value: Option<&OsString>,
-    flag: &str,
-    is_opencode_run_flag: bool,
-) -> bool {
-    if scan.path.is_none() || scan.version.is_none() {
-        return false;
-    }
-    #[cfg(test)]
-    {
-        let _ = (path_value, flag, is_opencode_run_flag);
-        true
-    }
-    #[cfg(not(test))]
-    {
-        let Some(path) = scan.path.as_deref() else {
-            return false;
-        };
-        let mut command = provider_version_command(path, path_value);
-        if is_opencode_run_flag {
-            command.arg("run");
-        }
-        let output = run_bounded_provider_probe({
-            command.arg("--help");
-            command
-        });
-        output.is_some_and(|output| {
-            output.status.success()
-                && format!(
-                    "{}\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                )
-                .contains(flag)
-        })
-    }
-}
-
 fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCli {
     let Some(path_value) = path_value else {
         return ProviderCli {
@@ -8587,7 +5949,6 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
                 path: Some(path),
                 version: Some(version),
                 error,
-                bootstrap_capabilities: None,
                 app_server_capability,
                 acp_capability,
                 stream_json_capability,
@@ -8601,7 +5962,6 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
             } else {
                 format!("{program} executable was not found in PATH")
             }),
-            bootstrap_capabilities: None,
             app_server_capability: None,
             acp_capability: None,
             stream_json_capability: None,
@@ -8823,20 +6183,6 @@ fn provider_version_command(path: &Path, path_value: Option<&OsString>) -> Comma
             command.env("PATH", path_value);
         }
         command
-    }
-}
-
-#[cfg(test)]
-fn success_exit_status() -> ExitStatus {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        ExitStatus::from_raw(0)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::ExitStatusExt;
-        ExitStatus::from_raw(0)
     }
 }
 
@@ -9590,106 +6936,71 @@ fn required_ollama_model_from_args(args: &[String]) -> Result<String, PedelecErr
         })
 }
 
-fn remove_codex_developer_instruction_override(args: &mut Vec<String>) {
-    let mut index = 0;
-    while index + 1 < args.len() {
-        if args[index] == "-c" && args[index + 1].starts_with("developer_instructions=") {
-            args.drain(index..=index + 1);
-        } else {
-            index += 1;
-        }
+fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) -> String {
+    build_provider_host_context_with_configuration(
+        thread,
+        registry,
+        registry.has_skills_configuration(),
+    )
+}
+
+fn build_provider_host_context_with_configuration(
+    thread: &ThreadState,
+    registry: &ToolRegistry,
+    include_configuration: bool,
+) -> String {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AppTool<'a> {
+        name: &'a str,
+        description: &'a str,
+        read_spec_command: String,
+        call_command: String,
     }
-}
-
-fn remove_agent_selector(args: &mut Vec<String>) {
-    let mut index = 0;
-    while index < args.len() {
-        if args[index] == "--agent" {
-            args.remove(index);
-            if index < args.len() {
-                args.remove(index);
-            }
-        } else if args[index].starts_with("--agent=") {
-            args.remove(index);
-        } else {
-            index += 1;
-        }
+    #[derive(Serialize)]
+    struct AppToolConfiguration<'a> {
+        guidance: &'a str,
+        tools: Vec<AppTool<'a>>,
     }
+
+    let mut tools: Vec<&ToolDefinition> = registry.tools().collect();
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    let configuration = AppToolConfiguration {
+        guidance: registry.guidance().unwrap_or_default(),
+        tools: tools
+            .into_iter()
+            .map(|tool| AppTool {
+                name: &tool.name,
+                description: &tool.description,
+                read_spec_command: format!(
+                    "pedelec-cli --thread-id {} tool-spec {}",
+                    thread.thread_id, tool.name
+                ),
+                call_command: format!(
+                    "pedelec-cli --thread-id {} tool-call {} '<json_args>'",
+                    thread.thread_id, tool.name
+                ),
+            })
+            .collect(),
+    };
+    let configuration = serde_json::to_string_pretty(&configuration)
+        .expect("App tool configuration is always serializable");
+    let mut context = format!(
+        "[Pedelec Host Context]\nWorkspace Path: {}\n",
+        path_for_external_use(&thread.workspace_path)
+    );
+    if include_configuration {
+        context.push_str(&format!(
+            "\n[Pedelec App Tool Configuration]\n{configuration}\n[/Pedelec App Tool Configuration]\n"
+        ));
+    }
+    context.push_str("[/Pedelec Host Context]\n\n------\n\n");
+    context
 }
 
-fn insert_agent_selector(mut args: Vec<String>, agent: &str) -> Vec<String> {
-    let insertion_index = args.iter().position(|arg| arg == "-").unwrap_or(args.len());
-    args.splice(
-        insertion_index..insertion_index,
-        ["--agent".to_string(), agent.to_string()],
-    );
-    args
-}
-
-fn merge_opencode_runtime_agent_config(command: &CommandSpec) -> Result<String, PedelecError> {
-    let existing = command
-        .env
-        .iter()
-        .rev()
-        .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT_ENV)
-        .map(|(_, value)| value.clone())
-        .or_else(|| env::var(OPENCODE_CONFIG_CONTENT_ENV).ok());
-    let mut config = match existing.as_deref() {
-        Some(existing) => serde_json::from_str::<Value>(existing).map_err(|error| {
-            PedelecError::with_details(
-                error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID,
-                "OPENCODE_CONFIG_CONTENT must be valid JSON",
-                serde_json::json!({
-                    "provider": "opencode",
-                    "key": OPENCODE_CONFIG_CONTENT_ENV,
-                    "error": error.to_string()
-                }),
-            )
-        })?,
-        None => Value::Object(serde_json::Map::new()),
-    };
-    let Some(config_object) = config.as_object_mut() else {
-        return Err(PedelecError::with_details(
-            error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID,
-            "OPENCODE_CONFIG_CONTENT must contain a JSON object",
-            serde_json::json!({
-                "provider": "opencode",
-                "key": OPENCODE_CONFIG_CONTENT_ENV
-            }),
-        ));
-    };
-    let agent_value = config_object
-        .entry("agent")
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    let Some(agents) = agent_value.as_object_mut() else {
-        return Err(PedelecError::with_details(
-            error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID,
-            "OPENCODE_CONFIG_CONTENT.agent must contain a JSON object",
-            serde_json::json!({
-                "provider": "opencode",
-                "key": OPENCODE_CONFIG_CONTENT_ENV,
-                "field": "agent"
-            }),
-        ));
-    };
-    agents.insert(
-        PEDELEC_OPENCODE_AGENT.to_string(),
-        serde_json::json!({
-            "mode": "primary",
-            "prompt": build_pedelec_bootstrap_instruction()
-        }),
-    );
-    serde_json::to_string(&config).map_err(|error| {
-        PedelecError::with_details(
-            error_codes::PROVIDER_BOOTSTRAP_CONFIG_INVALID,
-            "failed to serialize OPENCODE_CONFIG_CONTENT",
-            serde_json::json!({
-                "provider": "opencode",
-                "key": OPENCODE_CONFIG_CONTENT_ENV,
-                "error": error.to_string()
-            }),
-        )
-    })
+#[allow(dead_code)]
+fn build_provider_instruction(thread: &ThreadState, registry: &ToolRegistry) -> String {
+    build_provider_host_context(thread, registry)
 }
 
 fn insert_antigravity_custom_agent_body(bootstrap: &str) -> String {
@@ -9698,6 +7009,8 @@ fn insert_antigravity_custom_agent_body(bootstrap: &str) -> String {
     )
 }
 
+/// Materializes the static Antigravity workspace agent required by the
+/// persistent `--agent pedelec-runtime` launch contract.
 fn ensure_antigravity_custom_agent(workspace_path: &Path) -> Result<(), PedelecError> {
     let agent_dir = workspace_path.join(PEDELEC_ANTIGRAVITY_AGENT_DIR);
     let agent_path = agent_dir.join(PEDELEC_ANTIGRAVITY_AGENT_FILE);
@@ -9731,160 +7044,6 @@ fn ensure_antigravity_custom_agent(workspace_path: &Path) -> Result<(), PedelecE
 
 fn antigravity_custom_agent_version_supported(version: &ProviderVersion) -> bool {
     version.0.as_slice() >= &[1, 1, 6]
-}
-
-/// Restrict provider-native skill discovery without changing the provider's
-/// sandbox, native tools, or the Pedelec App tool registry.
-fn apply_provider_native_skills_policy(provider: &ProviderCode, command: &mut CommandSpec) {
-    match provider {
-        ProviderCode::Codex => {
-            if !command
-                .args
-                .windows(2)
-                .any(|args| args[0] == "-c" && args[1] == CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG)
-            {
-                let insertion_index = command
-                    .args
-                    .iter()
-                    .position(|arg| arg == "exec")
-                    .map_or(0, |index| index + 1);
-                command.args.splice(
-                    insertion_index..insertion_index,
-                    [
-                        "-c".to_string(),
-                        CODEX_SKILLS_INCLUDE_INSTRUCTIONS_CONFIG.to_string(),
-                    ],
-                );
-            }
-        }
-        ProviderCode::Antigravity | ProviderCode::Claude => {
-            if !command
-                .args
-                .iter()
-                .any(|arg| arg == "--disable-slash-commands")
-            {
-                command.args.push("--disable-slash-commands".to_string());
-            }
-        }
-        ProviderCode::OpenCode => {
-            let existing_permission = command
-                .env
-                .iter()
-                .rev()
-                .find(|(key, _)| key == OPENCODE_PERMISSION_ENV)
-                .map(|(_, value)| value.clone())
-                .or_else(|| env::var(OPENCODE_PERMISSION_ENV).ok());
-
-            // An invalid or non-object parent value is left untouched. This
-            // avoids replacing a user's permission configuration with a
-            // potentially broader or otherwise incompatible one.
-            if let Some(permission) =
-                build_opencode_permission_overlay(existing_permission.as_deref())
-            {
-                set_command_env(command, OPENCODE_PERMISSION_ENV, permission);
-            }
-        }
-        ProviderCode::Cursor | ProviderCode::Ollama => {}
-    }
-}
-
-fn build_opencode_permission_overlay(existing: Option<&str>) -> Option<String> {
-    let mut permissions = match existing {
-        Some(existing) => match serde_json::from_str::<Value>(existing).ok()? {
-            Value::Object(permissions) => permissions,
-            _ => return None,
-        },
-        None => serde_json::Map::new(),
-    };
-
-    permissions.insert("skill".to_string(), Value::String("deny".to_string()));
-    serde_json::to_string(&Value::Object(permissions)).ok()
-}
-
-fn set_command_env(command: &mut CommandSpec, key: &str, value: String) {
-    if let Some((_, existing_value)) = command
-        .env
-        .iter_mut()
-        .find(|(candidate, _)| candidate == key)
-    {
-        *existing_value = value;
-    } else {
-        command.env.push((key.to_string(), value));
-    }
-}
-
-fn build_provider_env(
-    ctx: &RunPromptProviderContext,
-) -> Result<Vec<(String, String)>, PedelecError> {
-    let provider = provider_code_as_str(&ctx.thread.provider).to_string();
-    let mut env = vec![
-        ("PEDELEC_PROVIDER".to_string(), provider),
-        (
-            "PEDELEC_WORKSPACE_PATH".to_string(),
-            path_for_external_use(&ctx.thread.workspace_path),
-        ),
-        (
-            "PEDELEC_CORE_IPC_ENDPOINT".to_string(),
-            ctx.core_ipc_endpoint.clone(),
-        ),
-        (
-            "PEDELEC_CORE_IPC_RUNTIME_FILE".to_string(),
-            ctx.core_ipc_runtime_file_path.to_string_lossy().to_string(),
-        ),
-    ];
-    let provider_path = provider_process_path(ctx.provider_resolved_path.as_ref())?;
-    env.push((
-        "PATH".to_string(),
-        provider_path.to_string_lossy().to_string(),
-    ));
-    Ok(env)
-}
-
-fn provider_process_path(resolved_path: Option<&OsString>) -> Result<OsString, PedelecError> {
-    let pedelec_dir = pedelec_shared::paths::pedelec_home_dir().map_err(|err| PedelecError {
-        code: err.code,
-        message: err.message,
-        details: err.details,
-    })?;
-    let mut paths =
-        resolved_path.map_or_else(Vec::new, |path| env::split_paths(path).collect::<Vec<_>>());
-    paths.retain(|path| path != &pedelec_dir);
-    paths.insert(0, pedelec_dir);
-    env::join_paths(paths)
-        .map_err(|err| PedelecError::new(error_codes::IPC_UNAVAILABLE, err.to_string()))
-}
-
-fn build_provider_run_prompt(
-    thread: &ThreadState,
-    registry: &ToolRegistry,
-    message: &str,
-    include_fallback_bootstrap: bool,
-) -> String {
-    let bootstrap = if include_fallback_bootstrap {
-        build_provider_fallback_bootstrap()
-    } else {
-        String::new()
-    };
-    let host_context = build_provider_host_context(thread, registry);
-    if message.starts_with("[Session Preparation]") {
-        return format!("{bootstrap}{host_context}{message}");
-    }
-    format!(
-        "{bootstrap}{host_context}{}",
-        build_provider_user_message_task(message)
-    )
-}
-
-fn build_provider_user_message_task(message: &str) -> String {
-    format!("[User Message]\n{message}")
-}
-
-fn build_provider_prepare_task() -> String {
-    "[Session Preparation]".to_string()
-}
-
-fn build_provider_resume_prompt(message: &str) -> String {
-    message.to_string()
 }
 
 fn build_pedelec_bootstrap_instruction() -> String {
@@ -9956,711 +7115,10 @@ This is Pedelec host-provided integration bootstrap for this persistent provider
     }
 }
 
-fn build_provider_fallback_bootstrap() -> String {
-    format!(
-        "[Pedelec Host Bootstrap]\n\
-This is Pedelec host-provided integration bootstrap for this provider conversation. It is not a provider-native system message.\n\n\
-{}\n\
-[/Pedelec Host Bootstrap]\n\n",
-        build_pedelec_bootstrap_instruction()
-    )
-}
-
-fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) -> String {
-    build_provider_host_context_with_configuration(
-        thread,
-        registry,
-        registry.has_skills_configuration(),
-    )
-}
-
-fn build_provider_host_context_with_configuration(
-    thread: &ThreadState,
-    registry: &ToolRegistry,
-    include_configuration: bool,
-) -> String {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct AppTool<'a> {
-        name: &'a str,
-        description: &'a str,
-        read_spec_command: String,
-        call_command: String,
-    }
-    #[derive(Serialize)]
-    struct AppToolConfiguration<'a> {
-        guidance: &'a str,
-        tools: Vec<AppTool<'a>>,
-    }
-
-    let mut tools: Vec<&ToolDefinition> = registry.tools().collect();
-    tools.sort_by(|left, right| left.name.cmp(&right.name));
-    let configuration = AppToolConfiguration {
-        guidance: registry.guidance().unwrap_or_default(),
-        tools: tools
-            .into_iter()
-            .map(|tool| AppTool {
-                name: &tool.name,
-                description: &tool.description,
-                read_spec_command: format!(
-                    "pedelec-cli --thread-id {} tool-spec {}",
-                    thread.thread_id, tool.name
-                ),
-                call_command: format!(
-                    "pedelec-cli --thread-id {} tool-call {} '<json_args>'",
-                    thread.thread_id, tool.name
-                ),
-            })
-            .collect(),
-    };
-    let configuration = serde_json::to_string_pretty(&configuration)
-        .expect("App tool configuration is always serializable");
-    let mut context = format!(
-        "[Pedelec Host Context]\nWorkspace Path: {}\n",
-        path_for_external_use(&thread.workspace_path)
-    );
-    if include_configuration {
-        context.push_str(&format!(
-            "\n[Pedelec App Tool Configuration]\n{configuration}\n[/Pedelec App Tool Configuration]\n"
-        ));
-    }
-    context.push_str("[/Pedelec Host Context]\n\n------\n\n");
-    context
-}
-
-#[allow(dead_code)]
-fn build_provider_instruction(thread: &ThreadState, registry: &ToolRegistry) -> String {
-    build_provider_host_context(thread, registry)
-}
-
 fn default_runtime_file_path_for_provider() -> PathBuf {
     pedelec_shared::paths::pedelec_home_dir()
         .map(|home| home.join("runtime.json"))
         .unwrap_or_else(|_| PathBuf::from("runtime.json"))
-}
-
-fn provider_unsupported_error(thread: &ThreadState, message: &str) -> PedelecError {
-    PedelecError::with_details(
-        error_codes::PROVIDER_UNSUPPORTED,
-        message,
-        serde_json::json!({
-            "threadId": thread.thread_id,
-            "provider": provider_code_as_str(&thread.provider)
-        }),
-    )
-}
-
-fn parse_provider_chunk(
-    buffer: &mut String,
-    chunk: &str,
-    find_assistant_text: fn(&Value) -> Option<String>,
-) -> Vec<ThreadEventPartial> {
-    buffer.push_str(chunk);
-    let mut events: Vec<ThreadEventPartial> = Vec::new();
-
-    while let Some(newline_index) = buffer.find('\n') {
-        let mut line = buffer[..newline_index].to_string();
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        buffer.drain(..=newline_index);
-        events.extend(parse_provider_line(&line, find_assistant_text));
-    }
-
-    if buffer.len() > 64 * 1024 {
-        buffer.clear();
-    }
-
-    events
-}
-
-fn parse_antigravity_provider_chunk(buffer: &mut String, chunk: &str) -> Vec<ThreadEventPartial> {
-    buffer.push_str(chunk);
-    let mut events = Vec::new();
-    while let Some(newline_index) = buffer.find('\n') {
-        let mut line = buffer[..newline_index].to_string();
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        buffer.drain(..=newline_index);
-        events.extend(parse_antigravity_provider_line(&line));
-    }
-    if buffer.len() > 64 * 1024 {
-        buffer.clear();
-        events.push(ThreadEventPartial::ProviderError {
-            error: PedelecError::new(
-                error_codes::PROVIDER_COMMAND_FAILED,
-                "antigravity emitted an unterminated JSON event",
-            ),
-        });
-    }
-    events
-}
-
-fn parse_antigravity_provider_line(line: &str) -> Vec<ThreadEventPartial> {
-    if line.trim().is_empty() {
-        return Vec::new();
-    }
-    let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
-    };
-    if let Some(error) = parse_root_provider_error(&value) {
-        return vec![ThreadEventPartial::ProviderError { error }];
-    }
-    let Some(object) = value.as_object() else {
-        return Vec::new();
-    };
-    match object.get("event").and_then(Value::as_str) {
-        Some("init") => object
-            .get("conversation_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(
-                |provider_session_id| ThreadEventPartial::ProviderSessionIdUpdated {
-                    provider_session_id: provider_session_id.to_string(),
-                },
-            )
-            .into_iter()
-            .collect(),
-        Some("step_update") => Vec::new(),
-        Some("result") => {
-            let Some(result) = object.get("result").and_then(Value::as_object) else {
-                return Vec::new();
-            };
-            let status = result
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if status == "SUCCESS" {
-                return result
-                    .get("response")
-                    .and_then(Value::as_str)
-                    .filter(|response| !response.is_empty())
-                    .map(|text| ThreadEventPartial::AssistantMessage {
-                        text: text.to_string(),
-                    })
-                    .into_iter()
-                    .collect();
-            }
-            vec![ThreadEventPartial::ProviderError {
-                error: PedelecError::with_details(
-                    error_codes::PROVIDER_COMMAND_FAILED,
-                    "antigravity returned an unsuccessful result",
-                    serde_json::json!({
-                        "status": status,
-                        "conversation_id": result.get("conversation_id"),
-                        "response": result.get("response"),
-                    }),
-                ),
-            }]
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn parse_opencode_provider_chunk(buffer: &mut String, chunk: &str) -> Vec<ThreadEventPartial> {
-    buffer.push_str(chunk);
-    let mut events: Vec<ThreadEventPartial> = Vec::new();
-
-    while let Some(newline_index) = buffer.find('\n') {
-        let mut line = buffer[..newline_index].to_string();
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        buffer.drain(..=newline_index);
-        events.extend(parse_opencode_provider_line(&line));
-    }
-
-    if buffer.len() > 64 * 1024 {
-        buffer.clear();
-        events.push(ThreadEventPartial::ProviderError {
-            error: PedelecError::new(
-                error_codes::PROVIDER_COMMAND_FAILED,
-                "opencode emitted an unterminated JSON event",
-            ),
-        });
-    }
-
-    events
-}
-
-fn parse_cursor_provider_chunk(buffer: &mut String, chunk: &str) -> Vec<ThreadEventPartial> {
-    buffer.push_str(chunk);
-    let mut events: Vec<ThreadEventPartial> = Vec::new();
-
-    while let Some(newline_index) = buffer.find('\n') {
-        let mut line = buffer[..newline_index].to_string();
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        buffer.drain(..=newline_index);
-        events.extend(parse_cursor_provider_line(&line));
-    }
-
-    if buffer.len() > 64 * 1024 {
-        buffer.clear();
-        events.push(ThreadEventPartial::ProviderError {
-            error: PedelecError::new(
-                error_codes::PROVIDER_COMMAND_FAILED,
-                "cursor emitted an unterminated JSON event",
-            ),
-        });
-    }
-
-    events
-}
-
-fn parse_claude_provider_chunk(buffer: &mut String, chunk: &str) -> Vec<ThreadEventPartial> {
-    buffer.push_str(chunk);
-    let mut events: Vec<ThreadEventPartial> = Vec::new();
-
-    while let Some(newline_index) = buffer.find('\n') {
-        let mut line = buffer[..newline_index].to_string();
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        buffer.drain(..=newline_index);
-        events.extend(parse_claude_provider_line(&line));
-    }
-
-    if buffer.len() > 64 * 1024 {
-        buffer.clear();
-        events.push(ThreadEventPartial::ProviderError {
-            error: PedelecError::new(
-                error_codes::PROVIDER_COMMAND_FAILED,
-                "claude emitted an unterminated JSON event",
-            ),
-        });
-    }
-
-    events
-}
-
-fn parse_opencode_provider_line(line: &str) -> Vec<ThreadEventPartial> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return Vec::new();
-    }
-
-    let value = match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) => value,
-        Err(err) => {
-            return vec![ThreadEventPartial::ProviderError {
-                error: PedelecError::with_details(
-                    error_codes::PROVIDER_COMMAND_FAILED,
-                    "opencode emitted invalid JSON",
-                    serde_json::json!({ "error": err.to_string() }),
-                ),
-            }]
-        }
-    };
-    if let Some(error) = parse_root_provider_error(&value) {
-        return vec![ThreadEventPartial::ProviderError { error }];
-    }
-
-    let mut events = Vec::new();
-    if let Some(provider_session_id) = find_opencode_session_id_in_json(&value) {
-        events.push(ThreadEventPartial::ProviderSessionIdUpdated {
-            provider_session_id,
-        });
-    }
-    if let Some(text) = find_opencode_assistant_text_in_json(&value) {
-        events.push(ThreadEventPartial::AssistantMessage { text });
-    }
-    events
-}
-
-fn parse_cursor_provider_line(line: &str) -> Vec<ThreadEventPartial> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return Vec::new();
-    }
-
-    let value = match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) => value,
-        Err(err) => {
-            return vec![ThreadEventPartial::ProviderError {
-                error: PedelecError::with_details(
-                    error_codes::PROVIDER_COMMAND_FAILED,
-                    "cursor emitted invalid JSON",
-                    serde_json::json!({ "error": err.to_string() }),
-                ),
-            }]
-        }
-    };
-    if let Some(error) = parse_root_provider_error(&value) {
-        return vec![ThreadEventPartial::ProviderError { error }];
-    }
-
-    let mut events = Vec::new();
-    if let Some(provider_session_id) = find_cursor_session_id_in_json(&value) {
-        events.push(ThreadEventPartial::ProviderSessionIdUpdated {
-            provider_session_id,
-        });
-    }
-    if let Some(text) = find_cursor_assistant_text_in_json(&value) {
-        events.push(ThreadEventPartial::AssistantMessage { text });
-    }
-    events
-}
-
-fn parse_claude_provider_line(line: &str) -> Vec<ThreadEventPartial> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return Vec::new();
-    }
-
-    let value = match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) => value,
-        Err(err) => {
-            return vec![ThreadEventPartial::ProviderError {
-                error: PedelecError::with_details(
-                    error_codes::PROVIDER_COMMAND_FAILED,
-                    "claude emitted invalid JSON",
-                    serde_json::json!({ "error": err.to_string() }),
-                ),
-            }]
-        }
-    };
-    if let Some(error) = parse_root_provider_error(&value) {
-        return vec![ThreadEventPartial::ProviderError { error }];
-    }
-
-    let mut events = Vec::new();
-    if let Some(provider_session_id) = find_claude_session_id_in_json(&value) {
-        events.push(ThreadEventPartial::ProviderSessionIdUpdated {
-            provider_session_id,
-        });
-    }
-    if let Some(text) = find_claude_assistant_text_in_json(&value) {
-        events.push(ThreadEventPartial::AssistantMessage { text });
-    }
-    events
-}
-
-fn parse_provider_line(
-    line: &str,
-    find_assistant_text: fn(&Value) -> Option<String>,
-) -> Vec<ThreadEventPartial> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    let mut events = Vec::new();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            if let Some(error) = parse_root_provider_error(&value) {
-                return vec![ThreadEventPartial::ProviderError { error }];
-            }
-            if let Some(provider_session_id) = find_provider_session_id_in_json(&value) {
-                events.push(ThreadEventPartial::ProviderSessionIdUpdated {
-                    provider_session_id,
-                });
-            }
-            if let Some(text) = find_assistant_text(&value) {
-                events.push(ThreadEventPartial::AssistantMessage { text });
-            }
-            return events;
-        }
-    }
-
-    if let Some(provider_session_id) = find_provider_session_id_in_text(trimmed) {
-        events.push(ThreadEventPartial::ProviderSessionIdUpdated {
-            provider_session_id,
-        });
-    }
-    events
-}
-
-fn parse_root_provider_error(value: &Value) -> Option<PedelecError> {
-    let object = value.as_object()?;
-    let event_type = object.get("type")?.as_str()?.trim();
-    if !event_type.eq_ignore_ascii_case("error") {
-        return None;
-    }
-
-    let nested_error = object.get("error");
-    let nested_object = nested_error.and_then(Value::as_object);
-    let non_empty_string = |value: Option<&Value>| {
-        value
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    };
-    let code = non_empty_string(nested_object.and_then(|error| error.get("code")))
-        .or_else(|| non_empty_string(object.get("code")))
-        .unwrap_or_else(|| error_codes::PROVIDER_COMMAND_FAILED.to_string());
-    let message = non_empty_string(nested_object.and_then(|error| error.get("message")))
-        .or_else(|| non_empty_string(object.get("message")))
-        .or_else(|| non_empty_string(nested_error))
-        .unwrap_or_else(|| "provider returned an error".to_string());
-    let details = nested_object
-        .and_then(|error| error.get("details"))
-        .or_else(|| object.get("details"))
-        .filter(|details| !details.is_null())
-        .cloned();
-
-    Some(match details {
-        Some(details) => PedelecError::with_details(code, message, details),
-        None => PedelecError::new(code, message),
-    })
-}
-
-fn find_provider_session_id_in_json(value: &Value) -> Option<String> {
-    if let Some(provider_session_id) = find_codex_thread_started_id(value) {
-        return Some(provider_session_id);
-    }
-
-    find_string_for_keys(
-        value,
-        &[
-            "sessionId",
-            "session_id",
-            "conversationId",
-            "conversation_id",
-        ],
-    )
-    .filter(|value| !value.trim().is_empty())
-}
-
-fn find_opencode_session_id_in_json(value: &Value) -> Option<String> {
-    if let Some(id) = find_string_for_keys(
-        value,
-        &[
-            "sessionId",
-            "session_id",
-            "conversationId",
-            "conversation_id",
-            "sessionID",
-        ],
-    )
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty())
-    {
-        return Some(id);
-    }
-
-    let object = value.as_object()?;
-    let event_type = object
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if event_type.contains("session") {
-        return object
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-    }
-
-    None
-}
-
-fn find_cursor_session_id_in_json(value: &Value) -> Option<String> {
-    find_string_for_keys(
-        value,
-        &[
-            "sessionId",
-            "session_id",
-            "conversationId",
-            "conversation_id",
-            "sessionID",
-        ],
-    )
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty())
-}
-
-fn find_claude_session_id_in_json(value: &Value) -> Option<String> {
-    let object = value.as_object()?;
-    if object.get("type").and_then(Value::as_str) != Some("system") {
-        return None;
-    }
-    if object.get("subtype").and_then(Value::as_str) != Some("init") {
-        return None;
-    }
-
-    object
-        .get("session_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn find_codex_thread_started_id(value: &Value) -> Option<String> {
-    let object = value.as_object()?;
-    if object.get("type").and_then(Value::as_str) != Some("thread.started") {
-        return None;
-    }
-
-    object
-        .get("thread_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn find_codex_assistant_text_in_json(value: &Value) -> Option<String> {
-    find_string_for_keys(value, &["text", "content", "message"])
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn find_opencode_assistant_text_in_json(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            let role = map
-                .get("role")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .map(str::to_ascii_lowercase);
-            let event_type = map
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let is_assistant = role.as_deref() == Some("assistant")
-                || event_type.contains("assistant")
-                || event_type.contains("message")
-                || event_type.contains("text")
-                || event_type.contains("part");
-
-            if is_assistant {
-                if let Some(text) =
-                    find_string_for_keys(value, &["delta", "text", "content", "message", "output"])
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty())
-                {
-                    return Some(text);
-                }
-            }
-
-            map.values().find_map(find_opencode_assistant_text_in_json)
-        }
-        Value::Array(values) => values.iter().find_map(find_opencode_assistant_text_in_json),
-        _ => None,
-    }
-}
-
-fn find_cursor_assistant_text_in_json(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            if map.get("type").and_then(Value::as_str).map(str::trim) == Some("assistant") {
-                if let Some(text) =
-                    find_string_for_keys(value, &["delta", "text", "content", "message", "output"])
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty())
-                {
-                    return Some(text);
-                }
-            }
-
-            map.values().find_map(find_cursor_assistant_text_in_json)
-        }
-        Value::Array(values) => values.iter().find_map(find_cursor_assistant_text_in_json),
-        _ => None,
-    }
-}
-
-fn find_claude_assistant_text_in_json(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            let role = map.get("role").and_then(Value::as_str).map(str::trim);
-            let event_type = map.get("type").and_then(Value::as_str).map(str::trim);
-            let is_assistant = role == Some("assistant") || event_type == Some("assistant");
-
-            if is_assistant {
-                if let Some(text) =
-                    find_string_for_keys(value, &["text", "content", "message", "delta", "output"])
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty())
-                {
-                    return Some(text);
-                }
-            }
-
-            map.values().find_map(find_claude_assistant_text_in_json)
-        }
-        Value::Array(values) => values.iter().find_map(find_claude_assistant_text_in_json),
-        _ => None,
-    }
-}
-
-fn find_string_for_keys(value: &Value, keys: &[&str]) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for (key, value) in map {
-                if keys.iter().any(|candidate| key == candidate) {
-                    if let Some(value) = value.as_str() {
-                        return Some(value.to_string());
-                    }
-                }
-            }
-            map.values()
-                .find_map(|value| find_string_for_keys(value, keys))
-        }
-        Value::Array(values) => values
-            .iter()
-            .find_map(|value| find_string_for_keys(value, keys)),
-        _ => None,
-    }
-}
-
-fn find_provider_session_id_in_text(line: &str) -> Option<String> {
-    let lower = line.to_ascii_lowercase();
-    if !(lower.contains("session") || lower.contains("conversation")) {
-        return None;
-    }
-
-    line.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
-        .find(|token| is_uuid_like_token(token))
-        .map(ToOwned::to_owned)
-}
-
-fn is_uuid_like_token(token: &str) -> bool {
-    token.len() >= 8
-        && token.chars().any(|ch| ch == '-')
-        && token.chars().any(|ch| ch.is_ascii_digit())
-        && token
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-}
-
-fn kill_process_by_id(process_id: u32) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        std::process::Command::new("taskkill")
-            .args(["/PID", &process_id.to_string(), "/T", "/F"])
-            .status()
-            .map(|_| ())
-    }
-
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("kill")
-            .args(["-KILL", &process_id.to_string()])
-            .status()
-            .map(|_| ())
-    }
 }
 
 fn to_base36(mut value: u64) -> String {

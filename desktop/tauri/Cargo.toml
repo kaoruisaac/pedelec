@@ -22,7 +22,6 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 dirs = "6"
-encoding_rs = "0.8"
 jsonschema = { version = "0.46.5", default-features = false }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
 sha2 = "0.10"
@@ -50,7 +49,6 @@ pedelec-ipc.workspace = true
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
-    "Win32_Globalization",
     "Win32_UI_WindowsAndMessaging",
 ] }
 winreg = "0.52"
