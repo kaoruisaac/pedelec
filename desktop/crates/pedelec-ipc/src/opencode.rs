@@ -693,6 +693,7 @@ impl PersistentRuntimeDispatcher for AcpRuntimeDispatcher {
                     } else {
                         turn.message.clone()
                     };
+                    let prompt = shape_user_prompt_for_provider(self.provider, &prompt);
                     controller
                         .start_turn(&turn.thread_id, &provider_id, &turn.local_turn_id, &prompt)
                         .map_err(|error| {
@@ -725,6 +726,14 @@ impl PersistentRuntimeDispatcher for AcpRuntimeDispatcher {
                 PersistentRuntimeOperation::EndSession { .. } => unreachable!(),
             }
         }
+    }
+}
+
+fn shape_user_prompt_for_provider(provider: AcpProviderKind, prompt: &str) -> String {
+    if provider == AcpProviderKind::OpenCode && prompt.trim_start().starts_with('/') {
+        format!("- {prompt}")
+    } else {
+        prompt.to_owned()
     }
 }
 
@@ -1595,6 +1604,39 @@ mod tests {
     }
 
     #[test]
+    fn leading_slash_prompt_shaping_is_opencode_only_and_preserves_raw_text() {
+        for (message, expected) in [
+            ("/foo", "- /foo"),
+            ("/upl_123.jpg 裡有什麼?", "- /upl_123.jpg 裡有什麼?"),
+            ("   /foo", "-    /foo"),
+            ("\t/foo", "- \t/foo"),
+            ("\n/foo", "- \n/foo"),
+        ] {
+            assert_eq!(
+                shape_user_prompt_for_provider(AcpProviderKind::OpenCode, message),
+                expected
+            );
+        }
+
+        for message in [
+            "foo",
+            "foo /bar",
+            "- /foo",
+            "> /foo",
+            "https://example.com/foo",
+        ] {
+            assert_eq!(
+                shape_user_prompt_for_provider(AcpProviderKind::OpenCode, message),
+                message
+            );
+        }
+        assert_eq!(
+            shape_user_prompt_for_provider(AcpProviderKind::Cursor, "/foo"),
+            "/foo"
+        );
+    }
+
+    #[test]
     fn workspace_permission_resolution_is_session_scoped_and_rejects_detached_threads() {
         let temp = tempdir().unwrap();
         let workspace_a = temp.path().join("workspace-a");
@@ -1817,6 +1859,7 @@ mod tests {
         for (local_turn_id, message) in [
             ("cursor-first", "first task"),
             ("cursor-second", "second task"),
+            ("cursor-leading-slash", "/foo"),
         ] {
             {
                 let mut core = runtime.lock().unwrap();
@@ -1886,7 +1929,7 @@ mod tests {
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(|frame| frame["method"] == "session/prompt")
             .collect::<Vec<_>>();
-        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts.len(), 3);
         assert!(prompts[0]["params"]["prompt"][0]["text"]
             .as_str()
             .unwrap()
@@ -1896,6 +1939,7 @@ mod tests {
             .unwrap()
             .contains("first task"));
         assert_eq!(prompts[1]["params"]["prompt"][0]["text"], "second task");
+        assert_eq!(prompts[2]["params"]["prompt"][0]["text"], "/foo");
         assert!(!frames.contains("PEDELEC_PREPARED"));
         let _ = owner.shutdown();
     }
@@ -2318,6 +2362,137 @@ mod tests {
             serde_json::to_value(stderr).unwrap()["type"],
             "provider_runtime_stderr"
         );
+        let _ = owner.shutdown();
+    }
+
+    #[test]
+    fn opencode_dispatcher_escapes_leading_slash_in_acp_frame_and_preserves_whitespace() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let log = temp.path().join("frames.jsonl");
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let thread_id = "thread-open-leading-slash";
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            ThreadState {
+                thread_id: thread_id.into(),
+                provider: ProviderCode::OpenCode,
+                effort_level: EffortLevel::Default,
+                effort_args: vec!["--model".into(), "fake/selected".into()],
+                workspace_path: workspace.clone(),
+                skills: vec![],
+                status: ThreadStatus::Running,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                sdk_origin: None,
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+        runtime.lock().unwrap().pending_provider_operations.insert(
+            thread_id.into(),
+            PendingProviderOperation {
+                operation_id: "test-operation".into(),
+                kind: PendingProviderOperationKind::Prepare,
+                started_at: Utc::now(),
+            },
+        );
+
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher = OpenCodeRuntimeDispatcher::new(owner.clone(), Arc::clone(&runtime))
+            .with_program_for_test(fake_opencode_program(temp.path()))
+            .with_process_cwd_for_test(temp.path())
+            .with_env_for_test("FAKE_ACP_LOG", log.to_string_lossy())
+            .with_env_for_test("FAKE_ACP_WORKSPACE", workspace.to_string_lossy())
+            .with_env_for_test("FAKE_ACP_LOAD", "true");
+        let mut session = session_intent(&workspace, None);
+        session.thread_id = thread_id.into();
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession {
+                session: session.clone(),
+            })
+            .unwrap();
+        let provider_id = runtime
+            .lock()
+            .unwrap()
+            .thread_manager
+            .provider_session_state(thread_id)
+            .unwrap()
+            .provider_session_id
+            .clone()
+            .unwrap();
+        session.provider_session_id = Some(provider_id.clone());
+
+        for (local_turn_id, message) in [
+            ("leading-slash-image", "/upl_test.jpg 裡有什麼?"),
+            ("leading-slash-whitespace", "   /foo"),
+        ] {
+            {
+                let mut core = runtime.lock().unwrap();
+                core.thread_manager.thread_mut(thread_id).unwrap().status = ThreadStatus::Running;
+                core.thread_manager
+                    .provider_session_state_mut(thread_id)
+                    .unwrap()
+                    .active_provider_turn_id = Some(local_turn_id.into());
+                core.pending_provider_operations.insert(
+                    thread_id.into(),
+                    PendingProviderOperation {
+                        operation_id: "test-operation".into(),
+                        kind: PendingProviderOperationKind::UserTurn,
+                        started_at: Utc::now(),
+                    },
+                );
+            }
+            dispatcher
+                .dispatch(PersistentRuntimeOperation::StartTurn {
+                    turn: PersistentProviderTurnIntent {
+                        thread_id: thread_id.into(),
+                        local_turn_id: local_turn_id.into(),
+                        provider_session_id: Some(provider_id.clone()),
+                        message: message.into(),
+                        session: session.clone(),
+                    },
+                })
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline
+                && runtime
+                    .lock()
+                    .unwrap()
+                    .thread_manager
+                    .thread(thread_id)
+                    .unwrap()
+                    .status
+                    != ThreadStatus::Idle
+            {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(
+                runtime
+                    .lock()
+                    .unwrap()
+                    .thread_manager
+                    .thread(thread_id)
+                    .unwrap()
+                    .status,
+                ThreadStatus::Idle
+            );
+        }
+
+        let prompts = fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|frame| frame["method"] == "session/prompt")
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(
+            prompts[0]["params"]["prompt"][0]["text"],
+            "- /upl_test.jpg 裡有什麼?"
+        );
+        assert_eq!(prompts[1]["params"]["prompt"][0]["text"], "-    /foo");
         let _ = owner.shutdown();
     }
 

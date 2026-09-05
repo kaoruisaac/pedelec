@@ -1,4 +1,6 @@
 $counter = 0
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8NoBom
 $supportsLoad = $env:FAKE_ACP_LOAD -eq 'true'
 $authMethods = if ($env:FAKE_ACP_AUTH -eq 'cursor_login') { @(@{ id = 'cursor_login'; name = 'Cursor Login' }) } else { @() }
 $modes = @{
@@ -10,7 +12,7 @@ $modes = @{
     )
 }
 while ($null -ne ($line = [Console]::In.ReadLine())) {
-    Add-Content -LiteralPath $env:FAKE_ACP_LOG -Value $line
+    [System.IO.File]::AppendAllText($env:FAKE_ACP_LOG, $line + [Environment]::NewLine, $utf8NoBom)
     $request = $line | ConvertFrom-Json
     if ($request.method -eq 'initialize') {
         $result = @{
@@ -48,7 +50,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             } | ConvertTo-Json -Compress -Depth 12 | Write-Output
             [Console]::Out.Flush()
             $cancel = [Console]::In.ReadLine()
-            Add-Content -LiteralPath $env:FAKE_ACP_LOG -Value $cancel
+            [System.IO.File]::AppendAllText($env:FAKE_ACP_LOG, $cancel + [Environment]::NewLine, $utf8NoBom)
             $result = @{ stopReason = 'cancelled' }
             if ($null -ne $request.id) {
                 @{
@@ -105,7 +107,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             } | ConvertTo-Json -Compress -Depth 12 | Write-Output
             [Console]::Out.Flush()
             $permissionResponse = [Console]::In.ReadLine()
-            Add-Content -LiteralPath $env:FAKE_ACP_LOG -Value $permissionResponse
+            [System.IO.File]::AppendAllText($env:FAKE_ACP_LOG, $permissionResponse + [Environment]::NewLine, $utf8NoBom)
         }
         @{
             jsonrpc = '2.0'
