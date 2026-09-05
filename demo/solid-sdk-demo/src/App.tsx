@@ -63,6 +63,9 @@ type DemoSessionState = {
   createdAt: number;
   updatedAt: number;
   sending: boolean;
+  hasStartedSendText: boolean;
+  prepared: boolean;
+  preparing: boolean;
   assets: Asset[];
   assetsLoading: boolean;
   assetsLoaded: boolean;
@@ -160,9 +163,17 @@ export default function App() {
     return [...sessionErrors, ...globalErrors()].sort((a, b) => b.createdAt - a.createdAt);
   });
   const activeEvents = createMemo(() => activeSession()?.events ?? globalEvents());
+  const canPrepare = createMemo(() => canPrepareSession(activeSession()));
   const canSend = createMemo(() => {
     const session = activeSession();
-    return Boolean(session && prompt().trim() && session.status === "idle" && !session.sending && !session.uploadingAsset);
+    return Boolean(
+      session &&
+        prompt().trim() &&
+        session.status === "idle" &&
+        !session.sending &&
+        !session.preparing &&
+        !session.uploadingAsset,
+    );
   });
   const canUploadAsset = createMemo(() => {
     const session = activeSession();
@@ -173,6 +184,7 @@ export default function App() {
         file.size <= MAX_ASSET_SIZE_BYTES &&
         session.status === "idle" &&
         !session.uploadingAsset &&
+        !session.preparing &&
         !session.sending,
     );
   });
@@ -297,6 +309,24 @@ export default function App() {
     }
   }
 
+  async function prepareSession() {
+    const state = activeSession();
+    if (!state || !canPrepareSession(state)) return;
+
+    updateSession(state.sessionId, (current) => ({ ...current, preparing: true, updatedAt: Date.now() }));
+    appendSessionEvent(state.sessionId, "prepare_session_requested", {});
+
+    try {
+      await state.session.prepare();
+      updateSession(state.sessionId, (current) => ({ ...current, prepared: true, updatedAt: Date.now() }));
+      appendSessionEvent(state.sessionId, "prepare_session_resolved", {});
+    } catch (err) {
+      recordError(toDemoError(err, state.sessionId), state.sessionId);
+    } finally {
+      updateSession(state.sessionId, (current) => ({ ...current, preparing: false, updatedAt: Date.now() }));
+    }
+  }
+
   async function sendText(event: SubmitEvent) {
     event.preventDefault();
     const session = activeSession();
@@ -311,6 +341,7 @@ export default function App() {
     const message = makeMessage(session.sessionId, "user", text);
     updateSession(session.sessionId, (current) => ({
       ...current,
+      hasStartedSendText: true,
       sending: true,
       transcript: [...current.transcript, message],
       updatedAt: Date.now(),
@@ -453,6 +484,9 @@ export default function App() {
       createdAt: now,
       updatedAt: now,
       sending: false,
+      hasStartedSendText: false,
+      prepared: false,
+      preparing: false,
       assets: [],
       assetsLoading: false,
       assetsLoaded: false,
@@ -834,14 +868,19 @@ export default function App() {
                     <Info label="Created" value={formatTime(session().createdAt)} />
                     <Info label="Updated" value={formatTime(session().updatedAt)} />
                   </div>
-                  <button
-                    type="button"
-                    class="danger"
-                    disabled={session().status === "ended"}
-                    onClick={() => endSession(session().sessionId)}
-                  >
-                    End Session
-                  </button>
+                  <div class="session-actions">
+                    <button type="button" disabled={!canPrepare()} onClick={() => void prepareSession()}>
+                      {session().preparing ? "Preparing..." : "Prepare"}
+                    </button>
+                    <button
+                      type="button"
+                      class="danger"
+                      disabled={session().status === "ended"}
+                      onClick={() => endSession(session().sessionId)}
+                    >
+                      End Session
+                    </button>
+                  </div>
                 </div>
               )}
             </Show>
@@ -983,6 +1022,19 @@ export default function App() {
         )}
       </Show>
     </main>
+  );
+}
+
+function canPrepareSession(session: DemoSessionState | undefined): boolean {
+  return Boolean(
+    session &&
+      !session.resumed &&
+      !session.hasStartedSendText &&
+      !session.prepared &&
+      !session.preparing &&
+      session.status === "idle" &&
+      !session.sending &&
+      !session.uploadingAsset,
   );
 }
 

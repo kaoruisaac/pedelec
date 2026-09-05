@@ -7,7 +7,7 @@ The transcript follows the current SDK chat contract: `onChatDelta()` is used fo
 It demonstrates:
 
 - SDK initialization and extension diagnostics
-- `createSession` and `resumeSession`
+- `createSession`, `resumeSession`, and explicit `prepare()` before the first user turn
 - multiple independent sessions
 - `sendText`, completed chat messages, streaming chat deltas, session errors, and ended sessions
 - frontend tool handlers and tool result/error display

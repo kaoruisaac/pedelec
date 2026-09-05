@@ -278,6 +278,12 @@ label {
   gap: 12px;
 }
 
+.session-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .transcript {
   display: grid;
   gap: 10px;
