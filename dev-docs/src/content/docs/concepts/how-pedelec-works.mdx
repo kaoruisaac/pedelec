@@ -104,7 +104,7 @@ Provider emits assistant output and/or a tool call
   ↓
 SDK dispatches onChat(), onChatDelta(), onStatus(), or onTool()
   ↓
-Runtime emits done/idle
+Runtime emits the operation-scoped completion and observable status events
   ↓
 sendText() resolves
 ```

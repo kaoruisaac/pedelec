@@ -193,7 +193,7 @@ session.onChatDelta((delta) => {
 });
 ```
 
-If the provider supplies a completed message, `onChat()` is the authoritative place to reconcile the final rendered text. `sendText()` completion remains driven by normal turn completion/status events, not by either chat callback.
+If the provider supplies a completed message, `onChat()` is the authoritative place to reconcile the final rendered text. `sendText()` completion remains driven by the matching internal operation completion, not by either chat callback or an `idle` status alone.
 
 ## Unsubscribe and component cleanup
 
@@ -215,7 +215,7 @@ Repeatedly mounting a component without cleanup causes duplicate callback work a
 
 ## Error and completion boundaries
 
-`onChat()` is a completed-message callback, but it does not determine whether `sendText()` resolves. Turn completion remains driven by `done` / `idle` and normal error/ended events.
+`onChat()` is a completed-message callback, but it does not determine whether `sendText()` resolves. Turn completion is correlated to the matching internal operation ID; status and error events remain observable state/diagnostics, while `operation_completed` is the semantic terminal.
 
 A failed turn may still have emitted partial deltas. Decide whether to retain, mark, or discard that live partial response. Do not synthesize a completed message from deltas in the SDK contract.
 

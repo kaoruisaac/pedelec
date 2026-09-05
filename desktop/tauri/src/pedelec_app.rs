@@ -787,6 +787,7 @@ mod debug_send_text_tests {
             .begin_debug_send_text_intent(SendTextInput {
                 thread_id: "t000001".into(),
                 message: "What did you just change?".into(),
+                operation_id: None,
             })
             .expect("debug send should reach the provider start path");
 
@@ -818,6 +819,7 @@ mod debug_send_text_tests {
             .begin_debug_send_text_intent(SendTextInput {
                 thread_id: "t000001".into(),
                 message: "This must be rejected while running.".into(),
+                operation_id: None,
             })
             .unwrap_err();
 

@@ -1297,6 +1297,7 @@ mod tests {
             .unwrap()
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.to_string(),
+                operation_id: None,
             })
             .unwrap();
         let Some(operation) = start.intent else {
@@ -1317,6 +1318,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.to_string(),
                 message: message.to_string(),
+                operation_id: None,
             })
             .unwrap();
         let operation = start.intent;

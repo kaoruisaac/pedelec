@@ -32,6 +32,8 @@ const DEMO_SKILLS = {
 };
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30000;
+const INITIAL_THREAD_RECOVERY_DELAY_MS = 1000;
+const MAX_THREAD_RECOVERY_DELAY_MS = 30000;
 const MAX_EVENTS = 80;
 const SDK_INTERNAL_PORT_NAME = "pedelec-sdk-internal";
 const SDK_EXTERNAL_PORT_NAME = "pedelec-sdk-external";
@@ -72,6 +74,8 @@ function createBackground(runtimeChrome, options = {}) {
   const popupPorts = new Set();
   const pendingRequests = new Map();
   const activeThreadIds = new Set();
+  const threadSubscriptions = new Map();
+  const pendingThreadSnapshots = new Map();
   const sdkPorts = new Set();
   const sdkChannelsByPort = new Map();
   const sdkContextsByPort = new Map();
@@ -84,6 +88,14 @@ function createBackground(runtimeChrome, options = {}) {
   let providerErrorByTab = Object.create(null);
   let providerErrorCacheLoaded = false;
   const sdkHandshakeTimeoutMs = options.sdkHandshakeTimeoutMs ?? DEFAULT_SDK_HANDSHAKE_TIMEOUT_MS;
+  const threadRecoveryInitialDelayMs = Math.max(
+    1,
+    options.threadRecoveryInitialDelayMs ?? INITIAL_THREAD_RECOVERY_DELAY_MS,
+  );
+  const threadRecoveryMaxDelayMs = Math.max(
+    threadRecoveryInitialDelayMs,
+    options.threadRecoveryMaxDelayMs ?? MAX_THREAD_RECOVERY_DELAY_MS,
+  );
   const sdkWarningByTab = Object.create(null);
   let versionWarningOperation = Promise.resolve();
   let popupOpenPromise = null;
@@ -1194,6 +1206,7 @@ function createBackground(runtimeChrome, options = {}) {
       connected: true,
       error: null,
     });
+    void restoreActiveThreadSubscriptions();
     return true;
   }
 
@@ -1206,6 +1219,10 @@ function createBackground(runtimeChrome, options = {}) {
     const err = runtimeChrome.runtime.lastError;
     const error = normalizeError(err, "NATIVE_CONNECTION_CLOSED", "Native host disconnected.");
     nativePort = null;
+    for (const threadId of activeThreadIds) {
+      const subscription = threadSubscriptions.get(threadId);
+      if (subscription) subscription.health = "restoring";
+    }
     applyDesktopPingFailure();
     enqueueVersionWarningOperation(async () => {
       await broadcastVersionWarningStates();
@@ -1240,6 +1257,7 @@ function createBackground(runtimeChrome, options = {}) {
     }
 
     if (message?.type === "thread_event") {
+      updateThreadSubscriptionSeq(message.event);
       handleProviderErrorPopupSideEffect(message.event);
       applyThreadEvent(message.event);
       dispatchSdkThreadEvent(message.event);
@@ -1248,6 +1266,20 @@ function createBackground(runtimeChrome, options = {}) {
         forgetSdkSession(message.event.threadId);
         maybeDisconnectNativeIfIdle();
       }
+      return;
+    }
+
+    if (message?.type === "thread_subscription_closed") {
+      const threadId = message.threadId;
+      const subscription = threadSubscriptions.get(threadId);
+      if (!threadId || !subscription || !activeThreadIds.has(threadId)) return;
+      subscription.health = "closed";
+      subscription.lastError = normalizeError(
+        message.error,
+        "THREAD_SUBSCRIPTION_CLOSED",
+        "The Core thread subscription closed.",
+      );
+      void recoverThreadSubscription(threadId);
       return;
     }
 
@@ -1307,7 +1339,9 @@ function createBackground(runtimeChrome, options = {}) {
       }
 
       try {
-        await sendNativeRequest("subscribe_thread", { threadId });
+        const subscriptionResult = await sendNativeRequest("subscribe_thread", { threadId });
+        addActiveThread(threadId);
+        applyThreadSnapshot(threadId, subscriptionResult);
       } catch (err) {
         await sendNativeRequest("end_thread", { threadId }).catch(() => {});
         throw err;
@@ -1325,6 +1359,7 @@ function createBackground(runtimeChrome, options = {}) {
     if (!state.threadId) {
       throw new Error("Create a thread first.");
     }
+    await ensureThreadSubscriptionHealthy(state.threadId, {});
     await sendNativeRequest("send_text", {
       threadId: state.threadId,
       message,
@@ -1535,13 +1570,203 @@ function createBackground(runtimeChrome, options = {}) {
     }
   }
 
-  function addActiveThread(threadId) {
-    if (threadId) activeThreadIds.add(threadId);
+  function getThreadSubscription(threadId, origin) {
+    if (!threadId) return null;
+    let subscription = threadSubscriptions.get(threadId);
+    if (!subscription) {
+      subscription = {
+        threadId,
+        origin: typeof origin === "string" ? origin : null,
+        health: "restoring",
+        lastSeq: null,
+        recoveryPromise: null,
+        recoveryTimer: null,
+        recoveryDelayMs: threadRecoveryInitialDelayMs,
+        recoveryGeneration: 0,
+        lastError: null,
+      };
+      threadSubscriptions.set(threadId, subscription);
+    } else if (typeof origin === "string" && origin && !subscription.origin) {
+      subscription.origin = origin;
+    }
+    return subscription;
+  }
+
+  function addActiveThread(threadId, origin = null) {
+    if (threadId) {
+      activeThreadIds.add(threadId);
+      getThreadSubscription(threadId, origin);
+    }
   }
 
   function removeActiveThread(threadId) {
-    if (threadId) activeThreadIds.delete(threadId);
+    if (threadId) {
+      activeThreadIds.delete(threadId);
+      const subscription = threadSubscriptions.get(threadId);
+      if (subscription) {
+        subscription.recoveryGeneration += 1;
+        clearThreadRecoveryTimer(subscription);
+      }
+      threadSubscriptions.delete(threadId);
+      pendingThreadSnapshots.delete(threadId);
+    }
     if (activeThreadIds.size === 0) clearReconnectTimer();
+  }
+
+  function updateThreadSubscriptionSeq(event) {
+    if (!event?.threadId || !activeThreadIds.has(event.threadId) || typeof event.seq !== "number") return;
+    const subscription = getThreadSubscription(event.threadId);
+    if (subscription && (subscription.lastSeq == null || event.seq > subscription.lastSeq)) {
+      subscription.lastSeq = event.seq;
+    }
+  }
+
+  function dispatchSdkSnapshot(threadId, snapshot) {
+    if (!threadId || !snapshot) return;
+    pendingThreadSnapshots.set(threadId, snapshot);
+    const routes = sdkRoutesBySession.get(threadId);
+    if (!routes) return;
+    for (const [port, channelIds] of routes) {
+      for (const channelId of channelIds) {
+        postSdkEvent(port, {
+          type: "session_snapshot",
+          sessionId: threadId,
+          seq: snapshot.latestSeq,
+          snapshot,
+          channelId,
+        });
+      }
+    }
+  }
+
+  function applyThreadSnapshot(threadId, result) {
+    const snapshot = result?.snapshot;
+    if (!snapshot || snapshot.threadId !== threadId || typeof snapshot.latestSeq !== "number" || !snapshot.status) {
+      throw {
+        code: "SDK_PROTOCOL_ERROR",
+        message: "subscribe_thread response did not include a valid lifecycle snapshot.",
+      };
+    }
+    const subscription = getThreadSubscription(threadId);
+    if (subscription && typeof snapshot.latestSeq === "number") {
+      subscription.lastSeq = Math.max(subscription.lastSeq ?? 0, snapshot.latestSeq);
+      subscription.health = "healthy";
+      subscription.lastError = null;
+      clearThreadRecoveryTimer(subscription);
+      subscription.recoveryDelayMs = threadRecoveryInitialDelayMs;
+    }
+    dispatchSdkSnapshot(threadId, snapshot);
+    if (state.threadId === threadId) {
+      setState({ threadStatus: snapshot.status });
+      broadcastState();
+    }
+    return snapshot;
+  }
+
+  function subscribeThreadForContext(threadId, context = {}, { recovery = false } = {}) {
+    const subscription = getThreadSubscription(threadId, context.origin);
+    if (!subscription) return Promise.reject({ code: "INVALID_INPUT", message: "threadId is required" });
+    if (subscription.origin && context.origin && subscription.origin !== context.origin) {
+      return Promise.reject({
+        code: "THREAD_ACCESS_DENIED",
+        message: "The session belongs to a different SDK origin.",
+      });
+    }
+    if (subscription.recoveryPromise && !recovery) return subscription.recoveryPromise;
+    const metadata = subscription.origin ? { callerOrigin: subscription.origin } : {};
+    const promise = sendNativeRequest("subscribe_thread", { threadId }, metadata)
+      .then((result) => applyThreadSnapshot(threadId, result))
+      .catch((err) => {
+        subscription.health = "closed";
+        subscription.lastError = normalizeError(err, "THREAD_SUBSCRIPTION_UNAVAILABLE", "Thread subscription could not be restored.");
+        scheduleReconnect();
+        throw subscription.lastError;
+      })
+      .finally(() => {
+        if (subscription.recoveryPromise === promise) subscription.recoveryPromise = null;
+        if (
+          subscription.recoveryPromise === null &&
+          threadSubscriptions.get(threadId) === subscription &&
+          activeThreadIds.has(threadId) &&
+          subscription.health !== "healthy"
+        ) {
+          scheduleThreadRecovery(threadId);
+        }
+      });
+    subscription.recoveryPromise = promise;
+    return promise;
+  }
+
+  function recoverThreadSubscription(threadId) {
+    if (!activeThreadIds.has(threadId)) return Promise.resolve(null);
+    const subscription = threadSubscriptions.get(threadId);
+    if (!subscription) return Promise.resolve(null);
+    subscription.health = "restoring";
+    if (subscription.recoveryPromise) return subscription.recoveryPromise;
+    if (subscription.recoveryTimer) return Promise.resolve(null);
+    if (!nativePort && !connectNative({ quiet: true })) {
+      scheduleReconnect();
+      scheduleThreadRecovery(threadId);
+      return Promise.resolve(null);
+    }
+    if (subscription.recoveryPromise) return subscription.recoveryPromise;
+    return subscribeThreadForContext(threadId, { origin: subscription.origin }, { recovery: true }).catch(() => null);
+  }
+
+  async function restoreActiveThreadSubscriptions() {
+    if (!nativePort) return;
+    for (const threadId of activeThreadIds) {
+      const subscription = getThreadSubscription(threadId);
+      if (!subscription || subscription.health === "healthy" || subscription.recoveryPromise) continue;
+      void recoverThreadSubscription(threadId);
+    }
+  }
+
+  function clearThreadRecoveryTimer(subscription) {
+    if (!subscription?.recoveryTimer) return;
+    clearTimeout(subscription.recoveryTimer);
+    subscription.recoveryTimer = null;
+  }
+
+  function scheduleThreadRecovery(threadId) {
+    if (!activeThreadIds.has(threadId)) return;
+    const subscription = threadSubscriptions.get(threadId);
+    if (!subscription || subscription.health === "healthy" || subscription.recoveryPromise || subscription.recoveryTimer) {
+      return;
+    }
+
+    const generation = subscription.recoveryGeneration;
+    const delayMs = subscription.recoveryDelayMs;
+    subscription.recoveryTimer = setTimeout(() => {
+      subscription.recoveryTimer = null;
+      if (
+        threadSubscriptions.get(threadId) !== subscription ||
+        subscription.recoveryGeneration !== generation ||
+        !activeThreadIds.has(threadId) ||
+        subscription.health === "healthy"
+      ) {
+        return;
+      }
+      void recoverThreadSubscription(threadId);
+    }, delayMs);
+    subscription.recoveryDelayMs = Math.min(delayMs * 2, threadRecoveryMaxDelayMs);
+    subscription.recoveryTimer.unref?.();
+  }
+
+  async function ensureThreadSubscriptionHealthy(threadId, context) {
+    const subscription = getThreadSubscription(threadId, context?.origin);
+    if (!subscription) {
+      throw { code: "THREAD_SUBSCRIPTION_UNAVAILABLE", message: "Thread subscription is unavailable." };
+    }
+    if (subscription.health !== "healthy") {
+      await recoverThreadSubscription(threadId);
+    }
+    if (subscription.health !== "healthy") {
+      throw subscription.lastError || {
+        code: "THREAD_SUBSCRIPTION_UNAVAILABLE",
+        message: "Thread subscription is not healthy.",
+      };
+    }
   }
 
   function addSdkSession(port, channelId, sessionId) {
@@ -1584,6 +1809,10 @@ function createBackground(runtimeChrome, options = {}) {
     }
     if (routes?.size === 0) {
       sdkRoutesBySession.delete(sessionId);
+    }
+    const snapshot = pendingThreadSnapshots.get(sessionId);
+    if (snapshot && sdkRoutesBySession.has(sessionId)) {
+      dispatchSdkSnapshot(sessionId, snapshot);
     }
   }
 
@@ -1664,7 +1893,11 @@ function createBackground(runtimeChrome, options = {}) {
 
   function sdkEventFromThreadEvent(event) {
     if (!event?.threadId) return null;
-    const base = { sessionId: event.threadId, seq: event.seq };
+    const base = {
+      sessionId: event.threadId,
+      seq: event.seq,
+      ...(event.operationId ? { operationId: event.operationId } : {}),
+    };
     if (event.type === "assistant_delta") {
       return { ...base, type: "chat_delta", text: event.text || "" };
     }
@@ -1683,8 +1916,15 @@ function createBackground(runtimeChrome, options = {}) {
         args: event.args,
       };
     }
-    if (event.type === "done") {
-      return { ...base, type: "done" };
+    if (event.type === "operation_completed") {
+      return {
+        ...base,
+        type: "operation_completed",
+        operationId: event.operationId,
+        operationKind: event.operationKind,
+        success: event.success,
+        ...(event.error ? { error: normalizeError(event.error) } : {}),
+      };
     }
     if (event.type === "error") {
       const source = event.source === "provider" || event.source === "core" ? event.source : undefined;
@@ -1818,19 +2058,21 @@ function createBackground(runtimeChrome, options = {}) {
             throw { code: "SDK_PROTOCOL_ERROR", message: "create_thread response did not include threadId." };
           }
 
-          try {
-            await sendSdkNativeRequest(context, "subscribe_thread", { threadId: sessionId });
-          } catch (err) {
-            await sendSdkNativeRequest(context, "end_thread", { threadId: sessionId }).catch(() => {});
-            throw err;
-          }
-
-          addActiveThread(sessionId);
+          addActiveThread(sessionId, context.origin);
           addSdkSession(port, channelId, sessionId);
           sdkLifecycleBySession.set(sessionId, {
             autoEndOnDisconnect: input.autoEndOnDisconnect !== false,
             origin: context.origin,
           });
+          try {
+            await subscribeThreadForContext(sessionId, context);
+          } catch (err) {
+            await sendSdkNativeRequest(context, "end_thread", { threadId: sessionId }).catch(() => {});
+            removeSdkSession(port, channelId, sessionId);
+            removeActiveThread(sessionId);
+            forgetSdkSession(sessionId);
+            throw err;
+          }
           postSdkResponse(port, channelId, requestId, true, { sessionId });
         });
         return;
@@ -1878,18 +2120,26 @@ function createBackground(runtimeChrome, options = {}) {
           throw { code: "SDK_PROTOCOL_ERROR", message: "sessionId is required" };
         }
         await withNativeOperation(async () => {
-          await sendSdkNativeRequest(context, "subscribe_thread", { threadId: sessionId });
-          addActiveThread(sessionId);
+          addActiveThread(sessionId, context.origin);
           addSdkSession(port, channelId, sessionId);
+          try {
+            await subscribeThreadForContext(sessionId, context);
+          } catch (err) {
+            removeSdkSession(port, channelId, sessionId);
+            if (!sdkRoutesBySession.has(sessionId)) removeActiveThread(sessionId);
+            throw err;
+          }
           postSdkResponse(port, channelId, requestId, true, { sessionId });
         });
         return;
       }
 
       if (message.type === "send_text") {
+        await ensureThreadSubscriptionHealthy(message.sessionId, context);
         await sendSdkNativeRequest(context, "send_text", {
           threadId: message.sessionId,
           message: message.text || "",
+          operationId: message.operationId,
         });
         postSdkResponse(port, channelId, requestId, true, {});
         return;
@@ -1939,14 +2189,17 @@ function createBackground(runtimeChrome, options = {}) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
         }
+        await ensureThreadSubscriptionHealthy(message.sessionId, context);
         await sendSdkNativeRequest(context, "prepare_thread", {
           threadId: message.sessionId,
+          operationId: message.operationId,
         });
         postSdkResponse(port, channelId, requestId, true, {});
         return;
       }
 
       if (message.type === "submit_tool_result") {
+        await ensureThreadSubscriptionHealthy(message.sessionId, context);
         await sendSdkNativeRequest(context, "submit_tool_result", {
           threadId: message.sessionId,
           toolRequestId: message.toolRequestId,

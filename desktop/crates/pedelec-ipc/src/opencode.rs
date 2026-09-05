@@ -1554,9 +1554,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use pedelec_core::{
-        EffortLevel, PendingProviderOperation, PersistentApprovalPolicy,
-        PersistentProviderEndIntent, PersistentProviderTurnIntent, PersistentSandboxPolicy,
-        ProviderSessionState, ThreadState, ThreadStatus,
+        EffortLevel, PendingProviderOperation, PendingProviderOperationKind,
+        PersistentApprovalPolicy, PersistentProviderEndIntent, PersistentProviderTurnIntent,
+        PersistentSandboxPolicy, ProviderSessionState, ThreadState, ThreadStatus,
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -1673,8 +1673,14 @@ mod tests {
                             active_provider_turn_id: Some(format!("turn-{id}")),
                         },
                     );
-                    core.pending_provider_operations
-                        .insert(id, PendingProviderOperation::UserTurn);
+                    core.pending_provider_operations.insert(
+                        id,
+                        PendingProviderOperation {
+                            operation_id: "test-operation".into(),
+                            kind: PendingProviderOperationKind::UserTurn,
+                            started_at: Utc::now(),
+                        },
+                    );
                 }
             }
             let log = temp.path().join("crash-scope.jsonl");
@@ -1774,11 +1780,14 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
-        runtime
-            .lock()
-            .unwrap()
-            .pending_provider_operations
-            .insert("thread-cursor".into(), PendingProviderOperation::Prepare);
+        runtime.lock().unwrap().pending_provider_operations.insert(
+            "thread-cursor".into(),
+            PendingProviderOperation {
+                operation_id: "test-operation".into(),
+                kind: PendingProviderOperationKind::Prepare,
+                started_at: Utc::now(),
+            },
+        );
         let owner = ProviderRuntimeOwner::new();
         let dispatcher = CursorRuntimeDispatcher::new(owner.clone(), Arc::clone(&runtime))
             .with_program_for_test(fake_program)
@@ -1819,8 +1828,14 @@ mod tests {
                     .provider_session_state_mut("thread-cursor")
                     .unwrap()
                     .active_provider_turn_id = Some(local_turn_id.into());
-                core.pending_provider_operations
-                    .insert("thread-cursor".into(), PendingProviderOperation::UserTurn);
+                core.pending_provider_operations.insert(
+                    "thread-cursor".into(),
+                    PendingProviderOperation {
+                        operation_id: "test-operation".into(),
+                        kind: PendingProviderOperationKind::UserTurn,
+                        started_at: Utc::now(),
+                    },
+                );
             }
             dispatcher
                 .dispatch(PersistentRuntimeOperation::StartTurn {
@@ -1921,8 +1936,14 @@ mod tests {
                         active_provider_turn_id: None,
                     },
                 );
-                core.pending_provider_operations
-                    .insert(thread_id.clone(), PendingProviderOperation::Prepare);
+                core.pending_provider_operations.insert(
+                    thread_id.clone(),
+                    PendingProviderOperation {
+                        operation_id: "test-operation".into(),
+                        kind: PendingProviderOperationKind::Prepare,
+                        started_at: Utc::now(),
+                    },
+                );
             }
             let owner = ProviderRuntimeOwner::new();
             let mut dispatcher = AcpRuntimeDispatcher::new_for_provider(
@@ -1953,8 +1974,14 @@ mod tests {
                     .provider_session_state_mut(&thread_id)
                     .unwrap()
                     .active_provider_turn_id = Some("resume-turn".into());
-                core.pending_provider_operations
-                    .insert(thread_id.clone(), PendingProviderOperation::UserTurn);
+                core.pending_provider_operations.insert(
+                    thread_id.clone(),
+                    PendingProviderOperation {
+                        operation_id: "test-operation".into(),
+                        kind: PendingProviderOperationKind::UserTurn,
+                        started_at: Utc::now(),
+                    },
+                );
             }
             dispatcher
                 .dispatch(PersistentRuntimeOperation::StartTurn {
@@ -2128,11 +2155,14 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
-        runtime
-            .lock()
-            .unwrap()
-            .pending_provider_operations
-            .insert("thread-open".into(), PendingProviderOperation::Prepare);
+        runtime.lock().unwrap().pending_provider_operations.insert(
+            "thread-open".into(),
+            PendingProviderOperation {
+                operation_id: "test-operation".into(),
+                kind: PendingProviderOperationKind::Prepare,
+                started_at: Utc::now(),
+            },
+        );
         let owner = ProviderRuntimeOwner::new();
         let dispatcher = OpenCodeRuntimeDispatcher::new(owner.clone(), Arc::clone(&runtime))
             .with_program_for_test(fake_program)
@@ -2169,8 +2199,14 @@ mod tests {
                 .provider_session_state_mut("thread-open")
                 .unwrap()
                 .active_provider_turn_id = Some("local-open".into());
-            core.pending_provider_operations
-                .insert("thread-open".into(), PendingProviderOperation::UserTurn);
+            core.pending_provider_operations.insert(
+                "thread-open".into(),
+                PendingProviderOperation {
+                    operation_id: "test-operation".into(),
+                    kind: PendingProviderOperationKind::UserTurn,
+                    started_at: Utc::now(),
+                },
+            );
         }
         dispatcher
             .dispatch(PersistentRuntimeOperation::StartTurn {

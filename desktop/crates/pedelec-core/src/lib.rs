@@ -254,6 +254,32 @@ pub enum ThreadStatus {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadOperationKind {
+    User,
+    Prepare,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveOperationSnapshot {
+    pub operation_id: String,
+    pub operation_kind: ThreadOperationKind,
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedOperationSnapshot {
+    pub operation_id: String,
+    pub operation_kind: ThreadOperationKind,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<PedelecError>,
+    pub completed_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderCode {
@@ -655,21 +681,28 @@ pub enum ThreadEvent {
     StatusChanged {
         seq: u64,
         thread_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         status: ThreadStatus,
     },
     AssistantDelta {
         seq: u64,
         thread_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         text: String,
     },
     AssistantMessage {
         seq: u64,
         thread_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         text: String,
     },
     ToolCall {
         seq: u64,
         thread_id: String,
+        operation_id: String,
         request_id: String,
         tool_name: String,
         args: Value,
@@ -677,6 +710,7 @@ pub enum ThreadEvent {
     ToolResult {
         seq: u64,
         thread_id: String,
+        operation_id: String,
         request_id: String,
         tool_name: String,
         result: Value,
@@ -684,15 +718,24 @@ pub enum ThreadEvent {
     ProviderSessionIdUpdated {
         seq: u64,
         thread_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         provider_session_id: String,
     },
-    Done {
+    OperationCompleted {
         seq: u64,
         thread_id: String,
+        operation_id: String,
+        operation_kind: ThreadOperationKind,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<PedelecError>,
     },
     Error {
         seq: u64,
         thread_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         #[serde(flatten)]
         source: ThreadErrorSource,
         error: PedelecError,
@@ -713,7 +756,7 @@ impl ThreadEvent {
             | ThreadEvent::ToolCall { seq, .. }
             | ThreadEvent::ToolResult { seq, .. }
             | ThreadEvent::ProviderSessionIdUpdated { seq, .. }
-            | ThreadEvent::Done { seq, .. }
+            | ThreadEvent::OperationCompleted { seq, .. }
             | ThreadEvent::Error { seq, .. }
             | ThreadEvent::Ended { seq, .. } => *seq,
         }
@@ -770,24 +813,30 @@ pub struct WorkspaceFolderInspection {
 pub struct SendTextInput {
     pub thread_id: String,
     pub message: String,
+    #[serde(default)]
+    pub operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SendTextOutput {
     pub thread_id: String,
+    pub operation_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareThreadInput {
     pub thread_id: String,
+    #[serde(default)]
+    pub operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareThreadOutput {
     pub thread_id: String,
+    pub operation_id: String,
     pub prepared: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub already_prepared: Option<bool>,
@@ -851,9 +900,30 @@ pub struct SubscribeThreadInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadSnapshot {
+    pub thread_id: String,
+    pub status: ThreadStatus,
+    pub latest_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_operation: Option<ActiveOperationSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_completed_operation: Option<CompletedOperationSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_tool_request: Option<PendingToolRequest>,
+}
+
+#[derive(Debug)]
+pub struct ThreadSubscription {
+    pub events: mpsc::Receiver<ThreadEvent>,
+    pub snapshot: ThreadSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingToolRequest {
     pub request_id: String,
     pub thread_id: String,
+    pub operation_id: String,
     pub tool_name: String,
     pub args: Value,
     pub created_at: DateTime<Utc>,
@@ -1131,9 +1201,38 @@ impl ProviderRuntimeDiagnostic {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingProviderOperation {
+pub enum PendingProviderOperationKind {
     UserTurn,
     Prepare,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingProviderOperation {
+    pub operation_id: String,
+    pub kind: PendingProviderOperationKind,
+    pub started_at: DateTime<Utc>,
+}
+
+impl PendingProviderOperation {
+    fn user(operation_id: String) -> Self {
+        Self {
+            operation_id,
+            kind: PendingProviderOperationKind::UserTurn,
+            started_at: Utc::now(),
+        }
+    }
+
+    fn prepare(operation_id: String) -> Self {
+        Self {
+            operation_id,
+            kind: PendingProviderOperationKind::Prepare,
+            started_at: Utc::now(),
+        }
+    }
+
+    fn kind(&self) -> PendingProviderOperationKind {
+        self.kind
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1264,6 +1363,7 @@ pub struct CoreRuntime {
     pub asset_download_tickets: HashMap<String, AssetDownloadTicket>,
     pub provider_path_value_override: Option<OsString>,
     pub pending_provider_operations: HashMap<String, PendingProviderOperation>,
+    pub last_completed_operations: HashMap<String, CompletedOperationSnapshot>,
     pub provider_usage: HashMap<String, Value>,
     /// Threads in this set have restored ended-thread diagnostic resources
     /// and are waiting for the trusted dispatch boundary to admit the turn.
@@ -1930,11 +2030,16 @@ impl CoreRuntime {
             }
         };
         let provider_session_id = session.provider_session_id.clone();
-        let local_turn_id =
-            self.mark_user_turn_started(&input.thread_id, reactivated_event_log_path)?;
+        let operation_id = resolve_operation_id(input.operation_id)?;
+        let local_turn_id = self.mark_user_turn_started(
+            &input.thread_id,
+            operation_id.clone(),
+            reactivated_event_log_path,
+        )?;
         Ok(ProviderExecutionStart {
             output: SendTextOutput {
                 thread_id: input.thread_id.clone(),
+                operation_id,
             },
             intent: PersistentRuntimeOperation::StartTurn {
                 turn: PersistentProviderTurnIntent {
@@ -1951,6 +2056,7 @@ impl CoreRuntime {
     fn mark_user_turn_started(
         &mut self,
         thread_id: &str,
+        operation_id: String,
         reactivated_event_log_path: Option<PathBuf>,
     ) -> Result<String, PedelecError> {
         {
@@ -1966,10 +2072,15 @@ impl CoreRuntime {
         if let Some(provider_state) = self.thread_manager.provider_state_mut(thread_id) {
             provider_state.active_provider_turn_id = Some(local_turn_id.clone());
         }
-        self.pending_provider_operations
-            .insert(thread_id.to_string(), PendingProviderOperation::UserTurn);
-        self.event_bus
-            .emit_status_changed(thread_id, ThreadStatus::Running);
+        self.pending_provider_operations.insert(
+            thread_id.to_string(),
+            PendingProviderOperation::user(operation_id.clone()),
+        );
+        self.event_bus.emit_status_changed_for_operation(
+            thread_id,
+            ThreadStatus::Running,
+            Some(&operation_id),
+        );
         Ok(local_turn_id)
     }
 
@@ -2015,19 +2126,26 @@ impl CoreRuntime {
             }
         }
 
+        let operation_id = resolve_operation_id(input.operation_id)?;
         let session = self.build_persistent_session_intent(&input.thread_id)?;
         let thread_id = input.thread_id;
         let thread = self.thread_manager.thread_mut(&thread_id)?;
         thread.status = ThreadStatus::Running;
         thread.updated_at = Utc::now();
-        self.pending_provider_operations
-            .insert(thread_id.clone(), PendingProviderOperation::Prepare);
-        self.event_bus
-            .emit_status_changed(&thread_id, ThreadStatus::Running);
+        self.pending_provider_operations.insert(
+            thread_id.clone(),
+            PendingProviderOperation::prepare(operation_id.clone()),
+        );
+        self.event_bus.emit_status_changed_for_operation(
+            &thread_id,
+            ThreadStatus::Running,
+            Some(&operation_id),
+        );
 
         Ok(PrepareExecutionStart {
             output: PrepareThreadOutput {
                 thread_id: thread_id.clone(),
+                operation_id,
                 prepared: true,
                 already_prepared: Some(false),
             },
@@ -2158,7 +2276,12 @@ impl CoreRuntime {
                 text,
             } => {
                 self.validate_runtime_turn(&thread_id, provider_turn_id.as_deref())?;
-                self.event_bus.emit_assistant_delta(&thread_id, text);
+                let operation_id = self.active_operation_id(&thread_id);
+                self.event_bus.emit_assistant_delta_for_operation(
+                    &thread_id,
+                    text,
+                    operation_id.as_deref(),
+                );
                 Ok(())
             }
             ProviderRuntimeEvent::AssistantMessage {
@@ -2167,7 +2290,12 @@ impl CoreRuntime {
                 text,
             } => {
                 self.validate_runtime_turn(&thread_id, provider_turn_id.as_deref())?;
-                self.event_bus.emit_assistant_message(&thread_id, text);
+                let operation_id = self.active_operation_id(&thread_id);
+                self.event_bus.emit_assistant_message_for_operation(
+                    &thread_id,
+                    text,
+                    operation_id.as_deref(),
+                );
                 Ok(())
             }
             ProviderRuntimeEvent::UsageUpdated {
@@ -2185,8 +2313,12 @@ impl CoreRuntime {
                 success,
                 error,
             } => {
-                let prepare_without_turn = self.pending_provider_operations.get(&thread_id)
-                    == Some(&PendingProviderOperation::Prepare)
+                let prepare_without_turn = self
+                    .pending_provider_operations
+                    .get(&thread_id)
+                    .is_some_and(|operation| {
+                        operation.kind() == PendingProviderOperationKind::Prepare
+                    })
                     && self
                         .thread_manager
                         .provider_session_state(&thread_id)
@@ -2215,8 +2347,12 @@ impl CoreRuntime {
                 provider_turn_id,
                 error,
             } => {
-                let prepare_without_turn = self.pending_provider_operations.get(&thread_id)
-                    == Some(&PendingProviderOperation::Prepare)
+                let prepare_without_turn = self
+                    .pending_provider_operations
+                    .get(&thread_id)
+                    .is_some_and(|operation| {
+                        operation.kind() == PendingProviderOperationKind::Prepare
+                    })
                     && self
                         .thread_manager
                         .provider_session_state(&thread_id)
@@ -2259,21 +2395,19 @@ impl CoreRuntime {
                 "session ready event targets a thread that is stopping or ended",
             ));
         }
-        self.update_provider_session_id(thread_id, provider_session_id);
+        let operation_id = self.active_operation_id(thread_id);
+        self.update_provider_session_id_for_operation(
+            thread_id,
+            provider_session_id,
+            operation_id.as_deref(),
+        );
 
-        if self.pending_provider_operations.get(thread_id)
-            == Some(&PendingProviderOperation::Prepare)
+        if self
+            .pending_provider_operations
+            .get(thread_id)
+            .is_some_and(|operation| operation.kind() == PendingProviderOperationKind::Prepare)
         {
-            self.pending_provider_operations.remove(thread_id);
-            self.clear_active_provider_turn(thread_id);
-            if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
-                if !matches!(thread.status, ThreadStatus::Ended | ThreadStatus::Stopping) {
-                    thread.status = ThreadStatus::Idle;
-                    thread.updated_at = Utc::now();
-                    self.event_bus
-                        .emit_status_changed(thread_id, ThreadStatus::Idle);
-                }
-            }
+            return self.finish_persistent_operation(thread_id, true, None);
         }
         Ok(())
     }
@@ -2299,8 +2433,10 @@ impl CoreRuntime {
                 "turn started for a thread that is not running",
             ));
         }
-        if self.pending_provider_operations.get(thread_id)
-            != Some(&PendingProviderOperation::UserTurn)
+        if self
+            .pending_provider_operations
+            .get(thread_id)
+            .is_none_or(|operation| operation.kind() != PendingProviderOperationKind::UserTurn)
         {
             return Err(runtime_protocol_error(
                 thread_id,
@@ -2405,8 +2541,18 @@ impl CoreRuntime {
             .pending_provider_operations
             .remove(thread_id)
             .ok_or_else(|| runtime_protocol_error(thread_id, "provider operation is not active"))?;
+        let operation_id = operation.operation_id.clone();
+        let operation_kind = match operation.kind() {
+            PendingProviderOperationKind::UserTurn => ThreadOperationKind::User,
+            PendingProviderOperationKind::Prepare => ThreadOperationKind::Prepare,
+        };
         self.clear_active_provider_turn(thread_id);
-        self.tool_request_broker.clear_thread(thread_id);
+        if let Some(error) = error.as_ref() {
+            self.tool_request_broker
+                .clear_thread_with_error(thread_id, error.clone());
+        } else {
+            self.tool_request_broker.clear_thread(thread_id);
+        }
 
         let stopping = self
             .thread_manager
@@ -2414,26 +2560,66 @@ impl CoreRuntime {
             .map(|thread| thread.status == ThreadStatus::Stopping)
             .unwrap_or(false);
         if stopping {
+            let terminal_error = error.or_else(|| {
+                Some(PedelecError::new(
+                    error_codes::THREAD_ENDED,
+                    "thread ended while the operation was active",
+                ))
+            });
+            self.event_bus.emit_operation_completed(
+                thread_id,
+                &operation_id,
+                operation_kind,
+                false,
+                terminal_error.clone(),
+            );
+            self.last_completed_operations.insert(
+                thread_id.to_string(),
+                CompletedOperationSnapshot {
+                    operation_id,
+                    operation_kind,
+                    success: false,
+                    error: terminal_error,
+                    completed_at: Utc::now(),
+                },
+            );
             return Ok(());
         }
 
-        let next_status = if success || operation == PendingProviderOperation::Prepare {
+        let next_status = if success || operation.kind() == PendingProviderOperationKind::Prepare {
             ThreadStatus::Idle
         } else {
             ThreadStatus::Error
         };
-        if let Some(error) = error {
-            self.emit_thread_provider_error(thread_id, error);
+        if let Some(error) = error.clone() {
+            self.emit_thread_provider_error_for_operation(thread_id, error, Some(&operation_id));
         }
         if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
             thread.status = next_status.clone();
             thread.updated_at = Utc::now();
         }
-        self.event_bus
-            .emit_status_changed(thread_id, next_status.clone());
-        if success && operation == PendingProviderOperation::UserTurn {
-            self.event_bus.emit_done(thread_id);
-        }
+        self.event_bus.emit_status_changed_for_operation(
+            thread_id,
+            next_status.clone(),
+            Some(&operation_id),
+        );
+        self.event_bus.emit_operation_completed(
+            thread_id,
+            &operation_id,
+            operation_kind,
+            success,
+            error.clone(),
+        );
+        self.last_completed_operations.insert(
+            thread_id.to_string(),
+            CompletedOperationSnapshot {
+                operation_id,
+                operation_kind,
+                success,
+                error,
+                completed_at: Utc::now(),
+            },
+        );
         Ok(())
     }
 
@@ -2447,26 +2633,14 @@ impl CoreRuntime {
             let _ = self.finish_end_thread(thread_id);
             return;
         }
-        if self.rollback_debug_reactivation(thread_id) {
-            self.emit_thread_provider_error(thread_id, error);
+        if self.debug_reactivating_threads.contains(thread_id) {
+            let _ = self.finish_persistent_operation(thread_id, false, Some(error));
+            let _ = self.rollback_debug_reactivation(thread_id);
             return;
         }
-        self.pending_provider_operations.remove(thread_id);
-        self.clear_active_provider_turn(thread_id);
-        self.tool_request_broker.clear_thread(thread_id);
-        let status = match operation {
-            ProviderExecutionOperationKind::Prepare => ThreadStatus::Idle,
-            ProviderExecutionOperationKind::UserTurn => ThreadStatus::Error,
-            ProviderExecutionOperationKind::End => ThreadStatus::Ended,
-        };
-        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
-            thread.status = status.clone();
-            thread.updated_at = Utc::now();
-        }
         if operation != ProviderExecutionOperationKind::End {
-            self.emit_thread_provider_error(thread_id, error);
+            let _ = self.finish_persistent_operation(thread_id, false, Some(error));
         }
-        self.event_bus.emit_status_changed(thread_id, status);
     }
 
     /// Applies a fatal failure to the Pedelec threads that belong to one
@@ -2535,31 +2709,40 @@ impl CoreRuntime {
             let _ = self.finish_end_thread(thread_id);
             return;
         }
-        if self.pending_provider_operations.get(thread_id)
-            == Some(&PendingProviderOperation::Prepare)
+        if self
+            .pending_provider_operations
+            .get(thread_id)
+            .is_some_and(|operation| operation.kind() == PendingProviderOperationKind::Prepare)
         {
             let _ = self.finish_persistent_operation(thread_id, false, Some(error.clone()));
             return;
         }
 
-        self.pending_provider_operations.remove(thread_id);
-        self.clear_active_provider_turn(thread_id);
-        self.tool_request_broker
-            .clear_thread_with_error(thread_id, error.clone());
-        if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
-            thread.status = ThreadStatus::Error;
-            thread.updated_at = Utc::now();
+        if self.pending_provider_operations.contains_key(thread_id) {
+            let _ = self.finish_persistent_operation(thread_id, false, Some(error.clone()));
+        } else {
+            self.tool_request_broker
+                .clear_thread_with_error(thread_id, error.clone());
+            if let Ok(thread) = self.thread_manager.thread_mut(thread_id) {
+                thread.status = ThreadStatus::Error;
+                thread.updated_at = Utc::now();
+            }
+            self.event_bus
+                .emit_status_changed(thread_id, ThreadStatus::Error);
+            self.emit_thread_provider_error(thread_id, error.clone());
         }
-        self.event_bus
-            .emit_status_changed(thread_id, ThreadStatus::Error);
-        self.emit_thread_provider_error(thread_id, error.clone());
     }
 
     pub fn provider_usage(&self, thread_id: &str) -> Option<&Value> {
         self.provider_usage.get(thread_id)
     }
 
-    fn update_provider_session_id(&mut self, thread_id: &str, provider_session_id: String) {
+    fn update_provider_session_id_for_operation(
+        &mut self,
+        thread_id: &str,
+        provider_session_id: String,
+        operation_id: Option<&str>,
+    ) {
         let Some(provider_state) = self.thread_manager.provider_state_mut(thread_id) else {
             return;
         };
@@ -2568,15 +2751,39 @@ impl CoreRuntime {
         }
         provider_state.provider_session_id = Some(provider_session_id.clone());
         self.event_bus
-            .emit_provider_session_id_updated(thread_id, provider_session_id);
+            .emit_provider_session_id_updated_for_operation(
+                thread_id,
+                provider_session_id,
+                operation_id,
+            );
     }
 
     fn emit_thread_provider_error(&mut self, thread_id: &str, error: PedelecError) {
+        let operation_id = self.active_operation_id(thread_id);
+        self.emit_thread_provider_error_for_operation(thread_id, error, operation_id.as_deref());
+    }
+
+    fn emit_thread_provider_error_for_operation(
+        &mut self,
+        thread_id: &str,
+        error: PedelecError,
+        operation_id: Option<&str>,
+    ) {
         let Ok(thread) = self.thread_manager.thread(thread_id) else {
             return;
         };
-        self.event_bus
-            .emit_provider_error(thread_id, thread.provider.clone(), error);
+        self.event_bus.emit_provider_error_for_operation(
+            thread_id,
+            thread.provider.clone(),
+            error,
+            operation_id,
+        );
+    }
+
+    fn active_operation_id(&self, thread_id: &str) -> Option<String> {
+        self.pending_provider_operations
+            .get(thread_id)
+            .map(|operation| operation.operation_id.clone())
     }
 
     fn clear_active_provider_turn(&mut self, thread_id: &str) {
@@ -2651,7 +2858,36 @@ impl CoreRuntime {
             return Ok(());
         }
         self.debug_reactivating_threads.remove(thread_id);
-        self.pending_provider_operations.remove(thread_id);
+        if let Some(operation) = self.pending_provider_operations.remove(thread_id) {
+            let operation_id = operation.operation_id.clone();
+            let operation_kind = match operation.kind() {
+                PendingProviderOperationKind::UserTurn => ThreadOperationKind::User,
+                PendingProviderOperationKind::Prepare => ThreadOperationKind::Prepare,
+            };
+            let error = PedelecError::new(
+                error_codes::THREAD_ENDED,
+                "thread ended while the operation was active",
+            );
+            self.tool_request_broker
+                .clear_thread_with_error(thread_id, error.clone());
+            self.event_bus.emit_operation_completed(
+                thread_id,
+                &operation_id,
+                operation_kind,
+                false,
+                Some(error.clone()),
+            );
+            self.last_completed_operations.insert(
+                thread_id.to_string(),
+                CompletedOperationSnapshot {
+                    operation_id,
+                    operation_kind,
+                    success: false,
+                    error: Some(error),
+                    completed_at: Utc::now(),
+                },
+            );
+        }
         self.clear_active_provider_turn(thread_id);
         self.tool_request_broker.clear_thread(thread_id);
         self.tool_registry.remove(thread_id);
@@ -2744,6 +2980,23 @@ impl CoreRuntime {
                 serde_json::json!({ "threadId": input.thread_id }),
             )
         })?;
+        let operation_id = match self.pending_provider_operations.get(&input.thread_id) {
+            Some(operation) if operation.kind() == PendingProviderOperationKind::UserTurn => {
+                operation.operation_id.clone()
+            }
+            Some(_) => {
+                return Err(runtime_protocol_error(
+                    &input.thread_id,
+                    "tool call does not belong to an active user operation",
+                ));
+            }
+            None => {
+                return Err(runtime_protocol_error(
+                    &input.thread_id,
+                    "tool call has no active user operation",
+                ));
+            }
+        };
         let normalized = registry.normalize_tool_call(&input.tool_name, &input.args)?;
         let has_pending = self
             .tool_request_broker
@@ -2757,21 +3010,26 @@ impl CoreRuntime {
                 serde_json::json!({ "threadId": input.thread_id }),
             ));
         }
-        let registration = self.tool_request_broker.begin_or_join(
+        let registration = self.tool_request_broker.begin_or_join_for_operation(
             input.thread_id.clone(),
             input.tool_name.clone(),
             normalized.args.clone(),
             normalized.timeout_ms,
+            operation_id.clone(),
         )?;
 
         if let ToolInvocationRegistration::Created(wait) = &registration {
             let thread = self.thread_manager.thread_mut(&input.thread_id)?;
             thread.status = ThreadStatus::WaitingToolResult;
             thread.updated_at = Utc::now();
-            self.event_bus
-                .emit_status_changed(&input.thread_id, ThreadStatus::WaitingToolResult);
+            self.event_bus.emit_status_changed_for_operation(
+                &input.thread_id,
+                ThreadStatus::WaitingToolResult,
+                Some(&operation_id),
+            );
             self.event_bus.emit_tool_call(
                 &input.thread_id,
+                &operation_id,
                 &wait.request_id,
                 &input.tool_name,
                 normalized.args,
@@ -2814,8 +3072,11 @@ impl CoreRuntime {
             if thread.status == ThreadStatus::WaitingToolResult {
                 thread.status = ThreadStatus::Running;
                 thread.updated_at = Utc::now();
-                self.event_bus
-                    .emit_status_changed(&pending.request.thread_id, ThreadStatus::Running);
+                self.event_bus.emit_status_changed_for_operation(
+                    &pending.request.thread_id,
+                    ThreadStatus::Running,
+                    Some(&pending.request.operation_id),
+                );
             }
         }
     }
@@ -2866,12 +3127,16 @@ impl CoreRuntime {
             if thread.status == ThreadStatus::WaitingToolResult {
                 thread.status = ThreadStatus::Running;
                 thread.updated_at = Utc::now();
-                self.event_bus
-                    .emit_status_changed(&input.thread_id, ThreadStatus::Running);
+                self.event_bus.emit_status_changed_for_operation(
+                    &input.thread_id,
+                    ThreadStatus::Running,
+                    Some(&pending.request.operation_id),
+                );
             }
         }
         self.event_bus.emit_tool_result(
             &input.thread_id,
+            &pending.request.operation_id,
             &input.request_id,
             &pending.request.tool_name,
             input.result,
@@ -2884,8 +3149,42 @@ impl CoreRuntime {
         &mut self,
         input: SubscribeThreadInput,
     ) -> Result<mpsc::Receiver<ThreadEvent>, PedelecError> {
+        Ok(self.subscribe_thread_with_snapshot(input)?.events)
+    }
+
+    pub fn subscribe_thread_with_snapshot(
+        &mut self,
+        input: SubscribeThreadInput,
+    ) -> Result<ThreadSubscription, PedelecError> {
         self.thread_manager.thread(&input.thread_id)?;
-        Ok(self.event_bus.subscribe(&input.thread_id))
+        let events = self.event_bus.subscribe(&input.thread_id);
+        let active_operation = self
+            .pending_provider_operations
+            .get(&input.thread_id)
+            .and_then(|operation| {
+                Some(ActiveOperationSnapshot {
+                    operation_id: operation.operation_id.clone(),
+                    operation_kind: match operation.kind() {
+                        PendingProviderOperationKind::UserTurn => ThreadOperationKind::User,
+                        PendingProviderOperationKind::Prepare => ThreadOperationKind::Prepare,
+                    },
+                    started_at: operation.started_at,
+                })
+            });
+        let snapshot = ThreadSnapshot {
+            thread_id: input.thread_id.clone(),
+            status: self.thread_manager.thread(&input.thread_id)?.status.clone(),
+            latest_seq: self.event_bus.latest_seq(&input.thread_id),
+            active_operation,
+            last_completed_operation: self
+                .last_completed_operations
+                .get(&input.thread_id)
+                .cloned(),
+            pending_tool_request: self
+                .tool_request_broker
+                .pending_for_thread(&input.thread_id),
+        };
+        Ok(ThreadSubscription { events, snapshot })
     }
 
     pub fn subscribe_all_threads(&mut self) -> mpsc::Receiver<ThreadEvent> {
@@ -4455,12 +4754,31 @@ pub struct ToolRequestBroker {
 }
 
 impl ToolRequestBroker {
+    pub fn pending_for_thread(&self, thread_id: &str) -> Option<PendingToolRequest> {
+        self.pending
+            .values()
+            .find(|pending| pending.request.thread_id == thread_id)
+            .map(|pending| pending.request.clone())
+    }
+
     pub fn begin_or_join(
         &mut self,
         thread_id: String,
         tool_name: String,
         args: Value,
         timeout_ms: u64,
+    ) -> Result<ToolInvocationRegistration, PedelecError> {
+        let operation_id = resolve_operation_id(None).expect("operation ID generation cannot fail");
+        self.begin_or_join_for_operation(thread_id, tool_name, args, timeout_ms, operation_id)
+    }
+
+    pub fn begin_or_join_for_operation(
+        &mut self,
+        thread_id: String,
+        tool_name: String,
+        args: Value,
+        timeout_ms: u64,
+        operation_id: String,
     ) -> Result<ToolInvocationRegistration, PedelecError> {
         self.purge_expired_replay_candidates(Instant::now());
         let pending_id = self
@@ -4517,9 +4835,13 @@ impl ToolRequestBroker {
             }));
         }
 
-        Ok(ToolInvocationRegistration::Created(
-            self.create_new(thread_id, tool_name, args, timeout_ms),
-        ))
+        Ok(ToolInvocationRegistration::Created(self.create_new(
+            thread_id,
+            tool_name,
+            args,
+            timeout_ms,
+            operation_id,
+        )))
     }
 
     pub fn create_pending(
@@ -4537,7 +4859,8 @@ impl ToolRequestBroker {
             ));
         }
 
-        let wait = self.create_new(thread_id, tool_name, args, timeout_ms);
+        let operation_id = resolve_operation_id(None).expect("operation ID generation cannot fail");
+        let wait = self.create_new(thread_id, tool_name, args, timeout_ms, operation_id);
         Ok((wait.request_id, wait.result_rx))
     }
 
@@ -4547,6 +4870,7 @@ impl ToolRequestBroker {
         tool_name: String,
         args: Value,
         timeout_ms: u64,
+        operation_id: String,
     ) -> ToolInvocationWait {
         self.next_request_number += 1;
         let request_id = format!(
@@ -4559,6 +4883,7 @@ impl ToolRequestBroker {
         let request = PendingToolRequest {
             request_id: request_id.clone(),
             thread_id,
+            operation_id,
             tool_name,
             args,
             created_at: Utc::now(),
@@ -4742,6 +5067,10 @@ impl EventBus {
         rx
     }
 
+    pub fn latest_seq(&self, thread_id: &str) -> u64 {
+        self.next_seq_by_thread.get(thread_id).copied().unwrap_or(0)
+    }
+
     pub fn emit_created(&mut self, thread_id: &str) {
         let seq = self.next_seq(thread_id);
         self.emit(
@@ -4754,36 +5083,66 @@ impl EventBus {
     }
 
     pub fn emit_status_changed(&mut self, thread_id: &str, status: ThreadStatus) {
+        self.emit_status_changed_for_operation(thread_id, status, None);
+    }
+
+    pub fn emit_status_changed_for_operation(
+        &mut self,
+        thread_id: &str,
+        status: ThreadStatus,
+        operation_id: Option<&str>,
+    ) {
         let seq = self.next_seq(thread_id);
         self.emit(
             thread_id,
             ThreadEvent::StatusChanged {
                 seq,
                 thread_id: thread_id.to_string(),
+                operation_id: operation_id.map(ToOwned::to_owned),
                 status,
             },
         );
     }
 
     pub fn emit_assistant_delta(&mut self, thread_id: &str, text: String) {
+        self.emit_assistant_delta_for_operation(thread_id, text, None);
+    }
+
+    pub fn emit_assistant_delta_for_operation(
+        &mut self,
+        thread_id: &str,
+        text: String,
+        operation_id: Option<&str>,
+    ) {
         let seq = self.next_seq(thread_id);
         self.emit(
             thread_id,
             ThreadEvent::AssistantDelta {
                 seq,
                 thread_id: thread_id.to_string(),
+                operation_id: operation_id.map(ToOwned::to_owned),
                 text,
             },
         );
     }
 
     pub fn emit_assistant_message(&mut self, thread_id: &str, text: String) {
+        self.emit_assistant_message_for_operation(thread_id, text, None);
+    }
+
+    pub fn emit_assistant_message_for_operation(
+        &mut self,
+        thread_id: &str,
+        text: String,
+        operation_id: Option<&str>,
+    ) {
         let seq = self.next_seq(thread_id);
         self.emit(
             thread_id,
             ThreadEvent::AssistantMessage {
                 seq,
                 thread_id: thread_id.to_string(),
+                operation_id: operation_id.map(ToOwned::to_owned),
                 text,
             },
         );
@@ -4792,6 +5151,7 @@ impl EventBus {
     pub fn emit_tool_call(
         &mut self,
         thread_id: &str,
+        operation_id: &str,
         request_id: &str,
         tool_name: &str,
         args: Value,
@@ -4802,6 +5162,7 @@ impl EventBus {
             ThreadEvent::ToolCall {
                 seq,
                 thread_id: thread_id.to_string(),
+                operation_id: operation_id.to_string(),
                 request_id: request_id.to_string(),
                 tool_name: tool_name.to_string(),
                 args,
@@ -4812,6 +5173,7 @@ impl EventBus {
     pub fn emit_tool_result(
         &mut self,
         thread_id: &str,
+        operation_id: &str,
         request_id: &str,
         tool_name: &str,
         result: Value,
@@ -4822,6 +5184,7 @@ impl EventBus {
             ThreadEvent::ToolResult {
                 seq,
                 thread_id: thread_id.to_string(),
+                operation_id: operation_id.to_string(),
                 request_id: request_id.to_string(),
                 tool_name: tool_name.to_string(),
                 result,
@@ -4834,24 +5197,45 @@ impl EventBus {
         thread_id: &str,
         provider_session_id: String,
     ) {
+        self.emit_provider_session_id_updated_for_operation(thread_id, provider_session_id, None);
+    }
+
+    pub fn emit_provider_session_id_updated_for_operation(
+        &mut self,
+        thread_id: &str,
+        provider_session_id: String,
+        operation_id: Option<&str>,
+    ) {
         let seq = self.next_seq(thread_id);
         self.emit(
             thread_id,
             ThreadEvent::ProviderSessionIdUpdated {
                 seq,
                 thread_id: thread_id.to_string(),
+                operation_id: operation_id.map(ToOwned::to_owned),
                 provider_session_id,
             },
         );
     }
 
-    pub fn emit_done(&mut self, thread_id: &str) {
+    pub fn emit_operation_completed(
+        &mut self,
+        thread_id: &str,
+        operation_id: &str,
+        operation_kind: ThreadOperationKind,
+        success: bool,
+        error: Option<PedelecError>,
+    ) {
         let seq = self.next_seq(thread_id);
         self.emit(
             thread_id,
-            ThreadEvent::Done {
+            ThreadEvent::OperationCompleted {
                 seq,
                 thread_id: thread_id.to_string(),
+                operation_id: operation_id.to_string(),
+                operation_kind,
+                success,
+                error,
             },
         );
     }
@@ -4862,20 +5246,42 @@ impl EventBus {
         provider: ProviderCode,
         error: PedelecError,
     ) {
-        self.emit_error(thread_id, ThreadErrorSource::Provider { provider }, error);
+        self.emit_provider_error_for_operation(thread_id, provider, error, None);
+    }
+
+    pub fn emit_provider_error_for_operation(
+        &mut self,
+        thread_id: &str,
+        provider: ProviderCode,
+        error: PedelecError,
+        operation_id: Option<&str>,
+    ) {
+        self.emit_error_for_operation(
+            thread_id,
+            ThreadErrorSource::Provider { provider },
+            error,
+            operation_id,
+        );
     }
 
     pub fn emit_core_error(&mut self, thread_id: &str, error: PedelecError) {
-        self.emit_error(thread_id, ThreadErrorSource::Core, error);
+        self.emit_error_for_operation(thread_id, ThreadErrorSource::Core, error, None);
     }
 
-    fn emit_error(&mut self, thread_id: &str, source: ThreadErrorSource, error: PedelecError) {
+    pub fn emit_error_for_operation(
+        &mut self,
+        thread_id: &str,
+        source: ThreadErrorSource,
+        error: PedelecError,
+        operation_id: Option<&str>,
+    ) {
         let seq = self.next_seq(thread_id);
         self.emit(
             thread_id,
             ThreadEvent::Error {
                 seq,
                 thread_id: thread_id.to_string(),
+                operation_id: operation_id.map(ToOwned::to_owned),
                 source,
                 error,
             },
@@ -5308,6 +5714,24 @@ fn provider_code_as_str(provider: &ProviderCode) -> &'static str {
         ProviderCode::Claude => "claude",
         ProviderCode::Ollama => "ollama",
     }
+}
+
+fn resolve_operation_id(operation_id: Option<String>) -> Result<String, PedelecError> {
+    if let Some(operation_id) = operation_id {
+        if operation_id.trim().is_empty() {
+            return Err(PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "operationId must not be empty",
+            ));
+        }
+        return Ok(operation_id);
+    }
+
+    Ok(format!(
+        "operation_{}_{}",
+        Utc::now().timestamp_millis(),
+        Uuid::new_v4().simple()
+    ))
 }
 
 fn new_provider_turn_id() -> String {

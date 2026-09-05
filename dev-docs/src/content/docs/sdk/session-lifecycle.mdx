@@ -61,7 +61,8 @@ const session = await pedelec.resumeSession(savedSessionId);
 1. requires a non-empty session ID;
 2. triggers origin approval if the current origin is not approved;
 3. subscribes the current SDK route to the existing Core thread;
-4. returns a `PedelecSession` handle.
+4. reconciles the returned authoritative lifecycle snapshot, including status, active/last operation identity, and a pending tool request when present;
+5. returns a synchronized `PedelecSession` handle.
 
 An empty ID rejects with `INVALID_INPUT`.
 
@@ -88,14 +89,14 @@ A generic fallback is useful during migration, but it should not replace deliber
 
 ## Provider and effort metadata after resume
 
-The current resume bridge returns the `sessionId`, not the full Core session record. Therefore a newly constructed resumed handle may expose:
+The resume bridge returns the `sessionId` plus an internal lifecycle snapshot, not the full Core session record. Therefore provider metadata may still be unavailable on a newly constructed resumed handle, while its lifecycle status is authoritative:
 
 ```ts
 session.provider === "";
 session.effortLevel === undefined;
 ```
 
-If the UI needs these fields after reload, save them with the session ID or load them from application-owned persistence. Do not assume `resumeSession()` rehydrates all metadata.
+If the UI needs these fields after reload, save them with the session ID or load them from application-owned persistence. Do not assume `resumeSession()` rehydrates all metadata, but do rely on `getStatus()` for the Core lifecycle state after resume resolves.
 
 `session.sessionCreatedAt` is the time the browser-side handle was constructed, not the original Core session creation time.
 
@@ -170,6 +171,8 @@ The extension can route one session to more than one SDK connection. With automa
 - application state can diverge across tabs.
 
 Unless cross-tab collaboration is intentional, store an ownership token or prevent multiple active controllers.
+
+If the Native Host or an individual thread subscription disconnects, the Extension restores the subscription and reconciles a new snapshot. It does not automatically resend an ambiguous `sendText()`, `prepare()`, or tool-result mutation. Keep operation IDs and promise errors in diagnostics, and let the recovered authoritative state determine the next user action.
 
 ## Choosing a lifecycle
 

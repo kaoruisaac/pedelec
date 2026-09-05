@@ -178,10 +178,31 @@ function respondSettings(
 }
 
 function emitEvent(pageWindow: MockWindow, request: any, event: any): void {
+  const normalizedEvent = event.type === "operation_completed"
+    ? {
+        ...event,
+        operationId: event.operationId ?? request.operationId,
+        operationKind: request.type === "prepare_session" ? "prepare" : "user",
+        success: event.success ?? true,
+      }
+    : (event.operationId === undefined && request.operationId
+      ? { ...event, operationId: request.operationId }
+      : event);
   pageWindow.emitFromExtension({
     source: "pedelec-sdk-extension",
     channelId: request.channelId,
-    ...event,
+    ...normalizedEvent,
+  });
+}
+
+function emitSnapshot(pageWindow: MockWindow, request: any, snapshot: any): void {
+  pageWindow.emitFromExtension({
+    source: "pedelec-sdk-extension",
+    channelId: request.channelId,
+    type: "session_snapshot",
+    sessionId: snapshot.threadId,
+    seq: snapshot.latestSeq,
+    snapshot,
   });
 }
 
@@ -718,7 +739,7 @@ describe("Pedelec SDK", () => {
     const send = resumed.sendText("after resume");
     const sendRequest = requestMessages(portB)[1];
     respondOk(pageWindow, sendRequest);
-    emitEvent(pageWindow, sendRequest, { type: "done", sessionId: session.sessionId, seq: 1 });
+    emitEvent(pageWindow, sendRequest, { type: "operation_completed", sessionId: session.sessionId, seq: 1 });
     await send;
   });
 
@@ -1071,7 +1092,7 @@ describe("Pedelec SDK", () => {
     expect((await promise).sessionId).toBe("thread_resume");
   });
 
-  it("resolves sendText only after done", async () => {
+  it("resolves sendText only after operation_completed", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);
     const statuses: string[] = [];
@@ -1092,7 +1113,7 @@ describe("Pedelec SDK", () => {
     await nextTick();
     expect(resolved).toBe(false);
 
-    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 1 });
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 1 });
     await send;
     expect(resolved).toBe(true);
     expect(session.getStatus()).toBe("idle");
@@ -1111,7 +1132,7 @@ describe("Pedelec SDK", () => {
       code: "SESSION_BUSY",
     });
 
-    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 1 });
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 1 });
     await first;
   });
 
@@ -1220,7 +1241,7 @@ describe("Pedelec SDK", () => {
       seq: 2,
       text: "PEDELEC_PREPARED",
     });
-    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 3 });
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 3 });
 
     await prepare;
     expect(deltas).toEqual([]);
@@ -1238,7 +1259,7 @@ describe("Pedelec SDK", () => {
     const request = pageWindow.lastSent();
     expect(request).toMatchObject({ type: "prepare_session" });
     respondOk(pageWindow, request);
-    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 1 });
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 1 });
     await Promise.all([first, second]);
 
     const sentCount = pageWindow.port.sent.length;
@@ -1266,7 +1287,7 @@ describe("Pedelec SDK", () => {
       text: "after prepare",
     });
     respondOk(pageWindow, sendRequest);
-    emitEvent(pageWindow, sendRequest, { type: "done", sessionId: "thread_1", seq: 1 });
+    emitEvent(pageWindow, sendRequest, { type: "operation_completed", sessionId: "thread_1", seq: 1 });
     await send;
   });
 
@@ -1297,7 +1318,7 @@ describe("Pedelec SDK", () => {
     const sendRequest = pageWindow.lastSent();
     expect(sendRequest).toMatchObject({ type: "send_text", text: "hello" });
     respondOk(pageWindow, sendRequest);
-    emitEvent(pageWindow, sendRequest, { type: "done", sessionId: "thread_1", seq: 3 });
+    emitEvent(pageWindow, sendRequest, { type: "operation_completed", sessionId: "thread_1", seq: 3 });
     await send;
   });
 
@@ -1340,6 +1361,18 @@ describe("Pedelec SDK", () => {
       seq: 4,
       status: "idle",
     });
+    emitEvent(pageWindow, request, {
+      type: "operation_completed",
+      sessionId: "thread_1",
+      seq: 5,
+      operationId: request.operationId,
+      operationKind: "prepare",
+      success: false,
+      error: {
+        code: "PREPARE_ACK_INVALID",
+        message: "provider did not acknowledge session preparation",
+      },
+    });
 
     await expect(prepare).rejects.toMatchObject({ code: "PREPARE_ACK_INVALID" });
     expect(deltas).toEqual([]);
@@ -1374,7 +1407,7 @@ describe("Pedelec SDK", () => {
       result: { ok: true },
     });
     respondOk(pageWindow, pageWindow.lastSent());
-    emitEvent(pageWindow, request, { type: "done", sessionId: "thread_1", seq: 2 });
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 2 });
     await prepare;
     expect(contexts[0]).toMatchObject({
       type: "tool_call",
@@ -1422,7 +1455,7 @@ describe("Pedelec SDK", () => {
       seq: 2,
       text: "hello",
     });
-    emitEvent(pageWindow, firstTurn.request, { type: "done", sessionId: "thread_1", seq: 3 });
+    emitEvent(pageWindow, firstTurn.request, { type: "operation_completed", sessionId: "thread_1", seq: 3 });
     await firstTurn.send;
 
     expect(deltaTexts).toEqual(["hel"]);
@@ -1461,7 +1494,7 @@ describe("Pedelec SDK", () => {
     expect("seq" in chatContexts[0]).toBe(false);
 
     const secondTurn = await startTurn(session, pageWindow);
-    emitEvent(pageWindow, secondTurn.request, { type: "done", sessionId: "thread_1", seq: 4 });
+    emitEvent(pageWindow, secondTurn.request, { type: "operation_completed", sessionId: "thread_1", seq: 4 });
     await secondTurn.send;
     expect(statusContexts.at(-2).turnId).not.toBe(firstTurnId);
   });
@@ -1482,20 +1515,20 @@ describe("Pedelec SDK", () => {
 
     const firstTurn = await startTurn(first, pageWindow);
     const secondTurn = await startTurn(second, pageWindow);
-    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, text: "a" });
-    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_2", seq: 1, text: "b" });
-    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, text: "duplicate delta" });
-    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_1", seq: 2, text: "alpha" });
-    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_2", seq: 2, text: "beta" });
-    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_1", seq: 2, text: "duplicate message" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, operationId: firstTurn.request.operationId, text: "a" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_2", seq: 1, operationId: secondTurn.request.operationId, text: "b" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_delta", sessionId: "thread_1", seq: 1, operationId: firstTurn.request.operationId, text: "duplicate delta" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_1", seq: 2, operationId: firstTurn.request.operationId, text: "alpha" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_2", seq: 2, operationId: secondTurn.request.operationId, text: "beta" });
+    pageWindow.emitFromExtension({ source: "pedelec-sdk-extension", channelId, type: "chat_message", sessionId: "thread_1", seq: 2, operationId: firstTurn.request.operationId, text: "duplicate message" });
 
     expect(firstDeltas).toEqual(["a"]);
     expect(secondDeltas).toEqual(["b"]);
     expect(firstMessages).toEqual(["alpha"]);
     expect(secondMessages).toEqual(["beta"]);
 
-    emitEvent(pageWindow, firstTurn.request, { type: "done", sessionId: "thread_1", seq: 3 });
-    emitEvent(pageWindow, secondTurn.request, { type: "done", sessionId: "thread_2", seq: 3 });
+    emitEvent(pageWindow, firstTurn.request, { type: "operation_completed", sessionId: "thread_1", seq: 3 });
+    emitEvent(pageWindow, secondTurn.request, { type: "operation_completed", sessionId: "thread_2", seq: 3 });
     await firstTurn.send;
     await secondTurn.send;
   });
@@ -1584,6 +1617,7 @@ describe("Pedelec SDK", () => {
       type: "tool_call",
       sessionId: "thread_skills",
       seq: 1,
+      operationId: turn.request.operationId,
       toolRequestId: "tool_override",
       tool: "update_counter",
       args: { delta: 2 },
@@ -1612,6 +1646,7 @@ describe("Pedelec SDK", () => {
       type: "tool_call",
       sessionId: "thread_skills",
       seq: 2,
+      operationId: turn.request.operationId,
       toolRequestId: "tool_inline",
       tool: "update_counter",
       args: { delta: 3 },
@@ -1630,7 +1665,7 @@ describe("Pedelec SDK", () => {
       turnStartedAt: namedContexts[0].turnStartedAt,
     });
     respondOk(pageWindow, pageWindow.lastSent());
-    emitEvent(pageWindow, turn.request, { type: "done", sessionId: "thread_skills", seq: 3 });
+    emitEvent(pageWindow, turn.request, { type: "operation_completed", sessionId: "thread_skills", seq: 3 });
     await turn.send;
   });
 
@@ -1799,6 +1834,7 @@ describe("Pedelec SDK", () => {
       type: "tool_call",
       sessionId: "thread_1",
       seq: 1,
+      operationId: turn.request.operationId,
       toolRequestId: "tool_1",
       tool: "get_current_page",
       args: { url: "https://example.test" },
@@ -1827,7 +1863,7 @@ describe("Pedelec SDK", () => {
       eventEmittedAt: expect.any(Number),
     });
     respondOk(pageWindow, pageWindow.lastSent());
-    emitEvent(pageWindow, turn.request, { type: "done", sessionId: "thread_1", seq: 2 });
+    emitEvent(pageWindow, turn.request, { type: "operation_completed", sessionId: "thread_1", seq: 2 });
     await turn.send;
   });
 
@@ -1843,6 +1879,7 @@ describe("Pedelec SDK", () => {
       type: "tool_call",
       sessionId: "thread_1",
       seq: 1,
+      operationId: turn.request.operationId,
       toolRequestId: "tool_missing",
       tool: "missing",
       args: {},
@@ -1862,6 +1899,7 @@ describe("Pedelec SDK", () => {
       type: "tool_call",
       sessionId: "thread_1",
       seq: 2,
+      operationId: turn.request.operationId,
       toolRequestId: "tool_throw",
       tool: "throws",
       args: {},
@@ -1872,7 +1910,7 @@ describe("Pedelec SDK", () => {
       message: "boom",
     });
     respondOk(pageWindow, pageWindow.lastSent());
-    emitEvent(pageWindow, turn.request, { type: "done", sessionId: "thread_1", seq: 3 });
+    emitEvent(pageWindow, turn.request, { type: "operation_completed", sessionId: "thread_1", seq: 3 });
     await turn.send;
   });
 
@@ -1905,6 +1943,16 @@ describe("Pedelec SDK", () => {
       type: "error",
       sessionId: "thread_1",
       seq: 1,
+      operationId: turn.request.operationId,
+      error: { code: "PROVIDER_ERROR", message: "provider failed" },
+    });
+    emitEvent(pageWindow, turn.request, {
+      type: "operation_completed",
+      sessionId: "thread_1",
+      seq: 2,
+      operationId: turn.request.operationId,
+      operationKind: "user",
+      success: false,
       error: { code: "PROVIDER_ERROR", message: "provider failed" },
     });
 
@@ -1924,7 +1972,7 @@ describe("Pedelec SDK", () => {
       channelId: createRequest.channelId,
       type: "ended",
       sessionId: "thread_1",
-      seq: 2,
+      seq: 3,
     });
 
     expect(endedContexts[0]).toMatchObject({
@@ -1985,11 +2033,7 @@ describe("Pedelec SDK", () => {
     const send = session.sendText("hello");
     const request = pageWindow.lastSent();
     respondOk(pageWindow, request);
-    pageWindow.emitFromExtension({
-      source: "pedelec-sdk-extension",
-      type: "error",
-      error: { code: "EXTENSION_DISCONNECTED", message: "Pedelec extension disconnected." },
-    });
+    pageWindow.port.disconnect();
 
     await expect(send).rejects.toMatchObject({
       code: "EXTENSION_DISCONNECTED",
@@ -2022,11 +2066,319 @@ describe("Pedelec SDK", () => {
       type: "error",
       sessionId: "thread_1",
       seq: 1,
+      operationId: request.operationId,
       error: { code: "PROVIDER_ERROR", message: "provider failed" },
     });
     respondOk(pageWindow, request);
+    emitEvent(pageWindow, request, {
+      type: "operation_completed",
+      sessionId: "thread_1",
+      seq: 2,
+      operationId: request.operationId,
+      operationKind: "user",
+      success: false,
+      error: { code: "PROVIDER_ERROR", message: "provider failed" },
+    });
 
     await send;
+  });
+
+  it("settles only from the matching operation completion and ignores stale tails", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+
+    const first = session.sendText("first");
+    const firstRequest = pageWindow.lastSent();
+    respondOk(pageWindow, firstRequest);
+    emitEvent(pageWindow, firstRequest, {
+      type: "status_changed",
+      sessionId: "thread_1",
+      seq: 1,
+      status: "idle",
+    });
+    let firstSettled = false;
+    void first.then(() => { firstSettled = true; });
+    await nextTick();
+    expect(firstSettled).toBe(false);
+
+    emitEvent(pageWindow, firstRequest, {
+      type: "operation_completed",
+      sessionId: "thread_1",
+      seq: 2,
+      operationKind: "user",
+      success: true,
+    });
+    await first;
+
+    const second = session.sendText("second");
+    const secondRequest = pageWindow.lastSent();
+    respondOk(pageWindow, secondRequest);
+    emitEvent(pageWindow, firstRequest, {
+      type: "status_changed",
+      sessionId: "thread_1",
+      seq: 3,
+      operationId: firstRequest.operationId,
+      status: "idle",
+    });
+    emitEvent(pageWindow, firstRequest, {
+      type: "operation_completed",
+      sessionId: "thread_1",
+      seq: 4,
+      operationId: firstRequest.operationId,
+      operationKind: "user",
+      success: true,
+    });
+    let secondSettled = false;
+    void second.then(() => { secondSettled = true; });
+    await nextTick();
+    expect(secondSettled).toBe(false);
+
+    emitEvent(pageWindow, secondRequest, {
+      type: "operation_completed",
+      sessionId: "thread_1",
+      seq: 5,
+      operationKind: "user",
+      success: true,
+    });
+    await second;
+  });
+
+  it("keeps an operation reserved when completion arrives before its request response", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const send = session.sendText("hello");
+    const request = pageWindow.lastSent();
+
+    emitEvent(pageWindow, request, {
+      type: "operation_completed",
+      sessionId: "thread_1",
+      seq: 1,
+      operationKind: "user",
+      success: true,
+    });
+    let settled = false;
+    void send.then(() => { settled = true; });
+    await nextTick();
+    expect(settled).toBe(false);
+
+    respondOk(pageWindow, request);
+    await send;
+  });
+
+  it("hydrates resumeSession status and recovers a pending tool from the snapshot", async () => {
+    const pedelec = new Pedelec();
+    const resume = pedelec.resumeSession("thread_resume_active");
+    const request = pageWindow.lastSent();
+    emitSnapshot(pageWindow, request, {
+      threadId: "thread_resume_active",
+      status: "waitingToolResult",
+      latestSeq: 12,
+      activeOperation: {
+        operationId: "core-operation",
+        operationKind: "user",
+        startedAt: new Date().toISOString(),
+      },
+      pendingToolRequest: {
+        requestId: "tool-recovered",
+        threadId: "thread_resume_active",
+        operationId: "core-operation",
+        toolName: "get_app_state",
+        args: {},
+        createdAt: new Date().toISOString(),
+        timeoutMs: 30_000,
+      },
+    });
+    respondOk(pageWindow, request, { sessionId: "thread_resume_active" });
+    const session = await resume;
+    expect(session.getStatus()).toBe("waiting_tool_result");
+
+    session.onTool("get_app_state", () => ({ recovered: true }));
+    await nextTick();
+    const toolResultRequest = pageWindow.lastSent();
+    expect(toolResultRequest).toMatchObject({
+      type: "submit_tool_result",
+      sessionId: "thread_resume_active",
+      toolRequestId: "tool-recovered",
+      result: { recovered: true },
+    });
+    respondOk(pageWindow, toolResultRequest);
+  });
+
+  it("retires an external active operation when a later snapshot is idle", async () => {
+    const pedelec = new Pedelec();
+    const resume = pedelec.resumeSession("thread_external_complete");
+    const resumeRequest = pageWindow.lastSent();
+    emitSnapshot(pageWindow, resumeRequest, {
+      threadId: "thread_external_complete",
+      status: "running",
+      latestSeq: 1,
+      activeOperation: {
+        operationId: "operation-a",
+        operationKind: "user",
+        startedAt: new Date().toISOString(),
+      },
+    });
+    respondOk(pageWindow, resumeRequest, { sessionId: "thread_external_complete" });
+    const session = await resume;
+    expect(session.getStatus()).toBe("running");
+
+    emitSnapshot(pageWindow, resumeRequest, {
+      threadId: "thread_external_complete",
+      status: "idle",
+      latestSeq: 2,
+      lastCompletedOperation: {
+        operationId: "operation-a",
+        operationKind: "user",
+        success: true,
+        completedAt: new Date().toISOString(),
+      },
+    });
+    expect(session.getStatus()).toBe("idle");
+
+    const send = session.sendText("after recovery");
+    const sendRequest = pageWindow.lastSent();
+    expect(sendRequest).toMatchObject({ type: "send_text", text: "after recovery" });
+    respondOk(pageWindow, sendRequest);
+    emitEvent(pageWindow, sendRequest, {
+      type: "operation_completed",
+      sessionId: "thread_external_complete",
+      seq: 3,
+      success: true,
+    });
+    await send;
+  });
+
+  it("prunes an obsolete recovered tool before a handler is registered", async () => {
+    const pedelec = new Pedelec();
+    const resume = pedelec.resumeSession("thread_obsolete_tool");
+    const resumeRequest = pageWindow.lastSent();
+    emitSnapshot(pageWindow, resumeRequest, {
+      threadId: "thread_obsolete_tool",
+      status: "waitingToolResult",
+      latestSeq: 1,
+      activeOperation: {
+        operationId: "operation-a",
+        operationKind: "user",
+        startedAt: new Date().toISOString(),
+      },
+      pendingToolRequest: {
+        requestId: "tool-stale",
+        threadId: "thread_obsolete_tool",
+        operationId: "operation-a",
+        toolName: "get_state",
+        args: {},
+        createdAt: new Date().toISOString(),
+        timeoutMs: 30_000,
+      },
+    });
+    respondOk(pageWindow, resumeRequest, { sessionId: "thread_obsolete_tool" });
+    const session = await resume;
+
+    emitSnapshot(pageWindow, resumeRequest, {
+      threadId: "thread_obsolete_tool",
+      status: "idle",
+      latestSeq: 2,
+      lastCompletedOperation: {
+        operationId: "operation-a",
+        operationKind: "user",
+        success: true,
+        completedAt: new Date().toISOString(),
+      },
+    });
+    const sentBeforeHandler = requestMessages(pageWindow.port).length;
+    session.onTool("get_state", () => ({ stale: true }));
+    await nextTick();
+    expect(requestMessages(pageWindow.port).length).toBe(sentBeforeHandler);
+    expect(requestMessages(pageWindow.port).some((request) => request.type === "submit_tool_result")).toBe(false);
+  });
+
+  it("replaces an external operation and discards its recovered tool state", async () => {
+    const pedelec = new Pedelec();
+    const resume = pedelec.resumeSession("thread_operation_replace");
+    const resumeRequest = pageWindow.lastSent();
+    const snapshotTool = (operationId: string, requestId: string, toolName: string, latestSeq: number) => ({
+      threadId: "thread_operation_replace",
+      status: "waitingToolResult",
+      latestSeq,
+      activeOperation: {
+        operationId,
+        operationKind: "user" as const,
+        startedAt: new Date().toISOString(),
+      },
+      pendingToolRequest: {
+        requestId,
+        threadId: "thread_operation_replace",
+        operationId,
+        toolName,
+        args: {},
+        createdAt: new Date().toISOString(),
+        timeoutMs: 30_000,
+      },
+    });
+    emitSnapshot(pageWindow, resumeRequest, snapshotTool("operation-a", "tool-a", "tool_a", 1));
+    respondOk(pageWindow, resumeRequest, { sessionId: "thread_operation_replace" });
+    const session = await resume;
+
+    emitSnapshot(pageWindow, resumeRequest, snapshotTool("operation-b", "tool-b", "tool_b", 2));
+    session.onTool("tool_a", () => ({ stale: true }));
+    session.onTool("tool_b", () => ({ current: true }));
+    await nextTick();
+    const toolResultRequest = pageWindow.lastSent();
+    expect(toolResultRequest).toMatchObject({ type: "submit_tool_result", toolRequestId: "tool-b" });
+    expect(requestMessages(pageWindow.port).some((request) => request.toolRequestId === "tool-a")).toBe(false);
+    respondOk(pageWindow, toolResultRequest);
+  });
+
+  it("reconciles local operations only from matching snapshot branches", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+
+    const preserved = session.sendText("preserved");
+    const preservedRequest = pageWindow.lastSent();
+    respondOk(pageWindow, preservedRequest);
+    emitSnapshot(pageWindow, preservedRequest, {
+      threadId: "thread_1",
+      status: "running",
+      latestSeq: 1,
+      activeOperation: {
+        operationId: preservedRequest.operationId,
+        operationKind: "user",
+        startedAt: new Date().toISOString(),
+      },
+    });
+    expect(session.getStatus()).toBe("running");
+    let preservedSettled = false;
+    void preserved.then(() => { preservedSettled = true; });
+    await nextTick();
+    expect(preservedSettled).toBe(false);
+
+    emitSnapshot(pageWindow, preservedRequest, {
+      threadId: "thread_1",
+      status: "idle",
+      latestSeq: 2,
+      lastCompletedOperation: {
+        operationId: preservedRequest.operationId,
+        operationKind: "user",
+        success: true,
+        completedAt: new Date().toISOString(),
+      },
+    });
+    await preserved;
+
+    const mismatched = session.sendText("mismatched");
+    const mismatchedRequest = pageWindow.lastSent();
+    respondOk(pageWindow, mismatchedRequest);
+    emitSnapshot(pageWindow, mismatchedRequest, {
+      threadId: "thread_1",
+      status: "running",
+      latestSeq: 3,
+      activeOperation: {
+        operationId: "unrelated-operation",
+        operationKind: "user",
+        startedAt: new Date().toISOString(),
+      },
+    });
+    await expect(mismatched).rejects.toMatchObject({ code: "SDK_LIFECYCLE_SYNC_ERROR" });
   });
 
   it("resolves listProviders after a delayed backend readiness response", async () => {

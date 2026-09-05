@@ -133,7 +133,7 @@ session.onError((error) => {
 await session.sendText("Please help me analyze the current page state");
 ```
 
-`sendText()` resolves after the current agent response completes. If the session is already handling a previous prompt, the new `sendText()` call is rejected to prevent multiple concurrent requests from running in the same session.
+`sendText()` resolves after Core reports the matching semantic operation as completed. An `idle` status or bridge request response alone does not complete it. If the session is already handling a previous prompt, the new `sendText()` call is rejected to prevent multiple concurrent requests from running in the same session.
 
 ---
 

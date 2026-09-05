@@ -159,7 +159,7 @@ session.onChatDelta((delta) => {
 });
 ```
 
-如果 Provider 提供 completed message，`onChat()` 是校正最終 rendered text 的權威來源。`sendText()` completion 仍由一般 turn completion/status events 驅動，不由任一 chat callback 決定。
+如果 Provider 提供 completed message，`onChat()` 是校正最終 rendered text 的權威來源。`sendText()` completion 由相符的內部 operation completion 驅動，不由任一 chat callback 或單獨的 `idle` status 決定。
 
 ## Unsubscribe 與 component cleanup
 
@@ -181,7 +181,7 @@ Component 重複 mount 卻不 cleanup，會造成 duplicate append 與 memory gr
 
 ## Error 與 completion boundary
 
-`onChat()` 是 completed-message callback，但不會決定 `sendText()` 是否 resolve。Turn completion 仍由 `done` / `idle` 與一般 error/ended events 驅動。
+`onChat()` 是 completed-message callback，但不會決定 `sendText()` 是否 resolve。Turn completion 依相符的 operation ID；status 與 error event 是可觀察狀態／diagnostic，`operation_completed` 才是語意 terminal。
 
 失敗 turn 仍可能已輸出 partial deltas。產品需決定保留、標記 interrupted 或丟棄這份 live partial response。SDK contract 不會從 deltas 合成 completed message。
 

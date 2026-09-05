@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-一個 session 同時只處理一個 turn。`prepare()` 是 optional optimization；`sendText()` 會啟動 user turn，並在 turn 完成後 resolve。
+一個 session 同時只處理一個 turn。`prepare()` 是 optional optimization；`sendText()` 會啟動 user turn，並在 Core 回報該 operation 完成後 resolve。
 
 ## 操作 session assets
 
@@ -98,7 +98,7 @@ SDK 依序：
 4. 以 `ctx.source === "sdk"` 將 status 設為 `running`；
 5. 經 bridge 傳送 `send_text`；
 6. dispatch completed chat message、optional chat delta、status、tool events；
-7. 收到 `done` 或 `idle` 後 resolve；
+7. 只有收到與本次 operation ID 相符的 completion 才 resolve 或 reject；`idle` 與 `error` status event 只是可觀察狀態，不是 promise terminal；
 8. turn error、session ended 或 transport setup 失敗時 reject。
 
 ## Completion semantics
@@ -116,7 +116,7 @@ console.log("Completed assistant messages:", completedMessages);
 offChat();
 ```
 
-Promise resolve 表示 SDK 觀察到 turn complete，不代表 rendering framework 已經把最後狀態 paint 到畫面。
+Bridge request 成功只表示 Core 已接納 operation。Promise 會等到相符的內部 `operation_completed` event；單獨的 request response 或 `idle` 不會完成 turn。Resolve 也不代表 rendering framework 已把最後狀態 paint 到畫面。
 
 ## 同一 session 不允許 concurrent turns
 
@@ -194,7 +194,7 @@ try {
 }
 ```
 
-Promise rejection 適合處理發起本次 action 的 UI；`onError()` 還能收到 asynchronous session problem，例如 tool-result submission failure 或 Extension disconnect broadcast。
+Promise rejection 適合處理發起本次 action 的 UI。Core `error` event 是 diagnostic，會送到 `onError()`；語意上的 turn rejection 由相符的 failed operation completion 提供。`onError()` 還能收到 asynchronous session problem，例如 tool-result submission failure 或 Extension disconnect broadcast。
 
 常見錯誤包括 `SESSION_BUSY`、`SESSION_ENDED`、`SEND_TEXT_FAILED`、`SESSION_ERROR`、transport error 與 provider-specific error。
 

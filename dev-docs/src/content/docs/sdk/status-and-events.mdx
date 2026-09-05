@@ -26,7 +26,7 @@ type PedelecSessionStatus =
 | `ended` | The session is permanently ended | No |
 | `error` | Runtime reported a session error | No; recover by app policy, often a new/resumed session |
 
-New `PedelecSession` objects begin in `idle` locally.
+New `PedelecSession` objects begin in `idle` locally. A handle returned by `resumeSession()` is synchronized from Core before the promise resolves, so it can initially report `running`, `waiting_tool_result`, `error`, or `ended` instead.
 
 ## Common transitions
 
@@ -55,7 +55,7 @@ waiting_tool_result → error
 waiting_tool_result → ended
 ```
 
-Do not build UI logic that assumes every theoretical intermediate status must appear. Events can be normalized, de-duplicated, or arrive close together.
+Do not build UI logic that assumes every theoretical intermediate status must appear. Events can be normalized, de-duplicated, or arrive close together. `idle` is observable thread state; it is not by itself proof that a particular `prepare()` or `sendText()` promise has completed.
 
 ## Observe status changes
 
@@ -109,7 +109,7 @@ type ErrorEventContext = PedelecEventContext & {
 
 Use `onError()` for session-wide observation, logging, and UI. Also catch promises from the action that initiated work.
 
-An error callback does not always mean the session status becomes `error`. For example, a failed submission of a tool result emits `SUBMIT_TOOL_RESULT_FAILED` from the SDK, while the runtime may later determine the final session state.
+An error callback does not always mean the session status becomes `error`. For example, a failed submission of a tool result emits `SUBMIT_TOOL_RESULT_FAILED` from the SDK, while the runtime may later determine the final session state. Core operation errors are diagnostics; the matching operation completion carries semantic rejection.
 
 ## Ended events
 
@@ -168,7 +168,9 @@ Use `toolRequestId` for diagnostics and application bookkeeping, not for manuall
 
 ## Event order and duplicate protection
 
-Core events can include a per-session sequence number. The client ignores an event whose sequence is not newer than the last one seen for that session. Application code should still be resilient to rapid transitions and late asynchronous work inside its own handlers.
+Core events can include a per-session sequence number. The client ignores an event whose sequence is not newer than the last one seen for that session, and operation-scoped events are accepted only for the active matching operation ID. Application code should still be resilient to rapid transitions and late asynchronous work inside its own handlers.
+
+When a subscription is recreated, the SDK receives an authoritative lifecycle snapshot before live events resume. A resumed or recovered handle uses that snapshot to adopt the Core status and active operation. If Core reports a pending frontend tool, register its handler after `resumeSession()`; the SDK keeps the recovered request queued and submits it once a matching handler is available.
 
 ## UI mapping
 

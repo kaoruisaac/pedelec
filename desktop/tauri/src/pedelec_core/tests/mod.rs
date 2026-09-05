@@ -760,6 +760,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: "thread_ollama_no_model".into(),
                 message: "hello".into(),
+                operation_id: None,
             })
             .unwrap_err();
 
@@ -1575,6 +1576,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.clone(),
                 message: "first".into(),
+                operation_id: None,
             })
             .unwrap();
         let PersistentRuntimeOperation::StartTurn { turn } = first.intent else {
@@ -1596,6 +1598,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id,
                 message: "resume".into(),
+                operation_id: None,
             })
             .unwrap();
         let PersistentRuntimeOperation::StartTurn { turn } = resume.intent else {
@@ -2089,6 +2092,7 @@ mod tests {
         let status_event = ThreadEvent::StatusChanged {
             seq: 1,
             thread_id: "thread_abc123".into(),
+            operation_id: None,
             status: ThreadStatus::WaitingToolResult,
         };
         let status_value = serde_json::to_value(status_event).unwrap();
@@ -2099,6 +2103,7 @@ mod tests {
         let delta_value = serde_json::to_value(ThreadEvent::AssistantDelta {
             seq: 3,
             thread_id: "thread_abc123".into(),
+            operation_id: None,
             text: "hel".into(),
         })
         .unwrap();
@@ -2108,6 +2113,7 @@ mod tests {
         let message_value = serde_json::to_value(ThreadEvent::AssistantMessage {
             seq: 4,
             thread_id: "thread_abc123".into(),
+            operation_id: None,
             text: "hello".into(),
         })
         .unwrap();
@@ -2117,6 +2123,7 @@ mod tests {
         let session_event = ThreadEvent::ProviderSessionIdUpdated {
             seq: 3,
             thread_id: "thread_abc123".into(),
+            operation_id: None,
             provider_session_id: "session_xyz".into(),
         };
         let session_value = serde_json::to_value(session_event).unwrap();
@@ -2127,6 +2134,7 @@ mod tests {
         let provider_error = ThreadEvent::Error {
             seq: 5,
             thread_id: "thread_abc123".into(),
+            operation_id: None,
             source: ThreadErrorSource::Provider {
                 provider: ProviderCode::Codex,
             },
@@ -2142,6 +2150,7 @@ mod tests {
         let core_error = ThreadEvent::Error {
             seq: 6,
             thread_id: "thread_abc123".into(),
+            operation_id: None,
             source: ThreadErrorSource::Core,
             error: PedelecError::new("INTERNAL_ERROR", "Pedelec internal operation failed"),
         };
@@ -2952,6 +2961,92 @@ mod tests {
             tool_event,
             ThreadEvent::ToolCall { args, .. } if args == json!({})
         ));
+    }
+
+    #[test]
+    fn lifecycle_snapshot_reports_active_operation_identity_and_exact_completion() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_snapshot_lifecycle",
+            ThreadStatus::Running,
+            r#"{"tools": []}"#,
+        );
+
+        let active = runtime
+            .subscribe_thread_with_snapshot(SubscribeThreadInput {
+                thread_id: "thread_snapshot_lifecycle".into(),
+            })
+            .unwrap()
+            .snapshot;
+        let active_operation = active.active_operation.expect("active operation snapshot");
+        assert_eq!(active_operation.operation_id, "test-operation-thread_snapshot_lifecycle");
+        assert_eq!(active_operation.operation_kind, ThreadOperationKind::User);
+        assert_eq!(active.status, ThreadStatus::Running);
+
+        let completion_error = PedelecError::new("PROVIDER_FAILED", "provider failed");
+        runtime
+            .finish_persistent_operation(
+                "thread_snapshot_lifecycle",
+                false,
+                Some(completion_error.clone()),
+            )
+            .unwrap();
+        let completed = runtime
+            .subscribe_thread_with_snapshot(SubscribeThreadInput {
+                thread_id: "thread_snapshot_lifecycle".into(),
+            })
+            .unwrap()
+            .snapshot;
+        assert_eq!(completed.status, ThreadStatus::Error);
+        assert!(completed.active_operation.is_none());
+        let last_completed = completed
+            .last_completed_operation
+            .expect("completion snapshot");
+        assert_eq!(last_completed.operation_id, "test-operation-thread_snapshot_lifecycle");
+        assert_eq!(last_completed.operation_kind, ThreadOperationKind::User);
+        assert!(!last_completed.success);
+        assert_eq!(last_completed.error, Some(completion_error));
+    }
+
+    #[test]
+    fn lifecycle_snapshot_reports_the_exact_pending_tool_request_and_operation() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_snapshot_tool",
+            ThreadStatus::Running,
+            r#"{
+                "tools": [{
+                    "name": "get_app_state",
+                    "description": "Read state.",
+                    "argsSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+                    "timeoutMs": 1000
+                }]
+            }"#,
+        );
+
+        let wait = match runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_snapshot_tool".into(),
+                tool_name: "get_app_state".into(),
+                args: json!({}),
+            })
+            .unwrap()
+        {
+            ToolInvocationRegistration::Created(wait) => wait,
+            _ => panic!("the first tool call must create a pending request"),
+        };
+        let snapshot = runtime
+            .subscribe_thread_with_snapshot(SubscribeThreadInput {
+                thread_id: "thread_snapshot_tool".into(),
+            })
+            .unwrap()
+            .snapshot;
+        let active = snapshot.active_operation.expect("active operation snapshot");
+        let pending = snapshot
+            .pending_tool_request
+            .expect("pending tool snapshot");
+        assert_eq!(active.operation_id, "test-operation-thread_snapshot_tool");
+        assert_eq!(pending.operation_id, active.operation_id);
+        assert_eq!(pending.request_id, wait.request_id);
+        assert_eq!(pending.tool_name, "get_app_state");
     }
 
     #[test]
@@ -4526,6 +4621,7 @@ mod tests {
             let result = runtime.begin_debug_send_text_intent(SendTextInput {
                 thread_id: thread_id.clone(),
                 message: "debug".into(),
+                operation_id: None,
             });
             match status {
                 ThreadStatus::Idle | ThreadStatus::Ended => {
@@ -4822,7 +4918,7 @@ mod tests {
                 effort_args: Vec::new(),
                 workspace_path: PathBuf::from("workspace").join(thread_id),
                 skills: vec![],
-                status,
+                status: status.clone(),
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
@@ -4836,6 +4932,19 @@ mod tests {
             thread_id,
             ToolRegistry::from_tools_json_str(tools_json).unwrap(),
         );
+        if matches!(
+            status,
+            ThreadStatus::Running | ThreadStatus::WaitingToolResult
+        ) {
+            runtime.pending_provider_operations.insert(
+                thread_id.to_string(),
+                PendingProviderOperation {
+                    operation_id: format!("test-operation-{thread_id}"),
+                    kind: PendingProviderOperationKind::UserTurn,
+                    started_at: now,
+                },
+            );
+        }
     }
 
     fn runtime_with_provider_thread(
@@ -4926,6 +5035,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "hello persistent".into(),
+                operation_id: None,
             })
             .unwrap();
         match start.intent {
@@ -4962,6 +5072,7 @@ mod tests {
         let start = runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.into(),
+                operation_id: None,
             })
             .unwrap();
         let PersistentRuntimeOperation::EnsureSession { session } = start.intent.unwrap() else {
@@ -5019,6 +5130,7 @@ mod tests {
         let prepare = runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.into(),
+                operation_id: None,
             })
             .unwrap();
         let Some(PersistentRuntimeOperation::EnsureSession { session }) = prepare.intent else {
@@ -5039,6 +5151,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "first user task".into(),
+                operation_id: None,
             })
             .unwrap();
         let PersistentRuntimeOperation::StartTurn { turn } = send.intent else {
@@ -5073,6 +5186,7 @@ mod tests {
         let prepare = runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.into(),
+                operation_id: None,
             })
             .unwrap();
         let Some(PersistentRuntimeOperation::EnsureSession { session }) = prepare.intent else {
@@ -5092,6 +5206,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "first Cursor task".into(),
+                operation_id: None,
             })
             .unwrap();
         let PersistentRuntimeOperation::StartTurn { turn } = send.intent else {
@@ -5133,6 +5248,7 @@ mod tests {
         let prepare = runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.into(),
+                operation_id: None,
             })
             .unwrap();
         let Some(PersistentRuntimeOperation::EnsureSession { session }) = prepare.intent else {
@@ -5159,6 +5275,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "first Ollama task".into(),
+                operation_id: None,
             })
             .unwrap();
         let PersistentRuntimeOperation::StartTurn { turn } = send.intent else {
@@ -5181,7 +5298,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_persistent_completion_emits_done_and_returns_to_idle() {
+    fn normalized_persistent_completion_emits_operation_completed_and_returns_to_idle() {
         let temp = tempfile::tempdir().unwrap();
         let thread_id = "thread_persistent_complete";
         let mut runtime =
@@ -5191,6 +5308,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "hello".into(),
+                operation_id: Some("op_complete".into()),
             })
             .unwrap();
         runtime
@@ -5239,9 +5357,15 @@ mod tests {
             event,
             ThreadEvent::AssistantMessage { text, .. } if text == "answer"
         )));
-        assert!(emitted
-            .iter()
-            .any(|event| matches!(event, ThreadEvent::Done { .. })));
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            ThreadEvent::OperationCompleted {
+                operation_id,
+                operation_kind: ThreadOperationKind::User,
+                success: true,
+                ..
+            } if operation_id == "op_complete"
+        )));
     }
 
     #[test]
@@ -5255,6 +5379,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "fail".into(),
+                operation_id: None,
             })
             .unwrap();
         runtime
@@ -5293,6 +5418,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "stop me".into(),
+                operation_id: None,
             })
             .unwrap();
         let turn_id = runtime
@@ -5335,6 +5461,7 @@ mod tests {
         let start = runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.into(),
+                operation_id: None,
             })
             .unwrap();
         assert!(matches!(
@@ -5397,6 +5524,7 @@ mod tests {
                 .begin_send_text_intent(SendTextInput {
                     thread_id: thread_id.into(),
                     message: "run".into(),
+                    operation_id: None,
                 })
                 .unwrap();
         }
@@ -5408,6 +5536,7 @@ mod tests {
         let busy = runtime.begin_send_text_intent(SendTextInput {
             thread_id: "thread_persistent_a".into(),
             message: "duplicate".into(),
+            operation_id: None,
         });
         assert_eq!(busy.unwrap_err().code, error_codes::THREAD_BUSY);
     }
@@ -5433,6 +5562,7 @@ mod tests {
             .begin_debug_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "diagnose".into(),
+                operation_id: None,
             })
             .unwrap();
         assert!(matches!(
@@ -5461,6 +5591,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "must reject".into(),
+                operation_id: None,
             })
             .unwrap_err();
         assert_eq!(error.code, error_codes::THREAD_ENDED);
@@ -5504,12 +5635,22 @@ mod tests {
             provider_state.active_provider_turn_id = Some(format!("turn-{thread_id}"));
             runtime.thread_manager.insert_thread(thread, provider_state);
         }
-        runtime
-            .pending_provider_operations
-            .insert(running_id.into(), PendingProviderOperation::UserTurn);
-        runtime
-            .pending_provider_operations
-            .insert(waiting_id.into(), PendingProviderOperation::UserTurn);
+        runtime.pending_provider_operations.insert(
+            running_id.into(),
+            PendingProviderOperation {
+                operation_id: "runtime-running".into(),
+                kind: PendingProviderOperationKind::UserTurn,
+                started_at: chrono::Utc::now(),
+            },
+        );
+        runtime.pending_provider_operations.insert(
+            waiting_id.into(),
+            PendingProviderOperation {
+                operation_id: "runtime-waiting".into(),
+                kind: PendingProviderOperationKind::UserTurn,
+                started_at: chrono::Utc::now(),
+            },
+        );
         let waiting_tool_wait = match runtime
             .tool_request_broker
             .begin_or_join(
@@ -5600,6 +5741,7 @@ mod tests {
         runtime
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.into(),
+                operation_id: None,
             })
             .unwrap();
         let error = PedelecError::new(
@@ -5633,6 +5775,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "active".into(),
+                operation_id: None,
             })
             .unwrap();
         runtime
@@ -5698,6 +5841,7 @@ mod tests {
             .begin_debug_send_text_intent(SendTextInput {
                 thread_id: thread_id.into(),
                 message: "diagnose".into(),
+                operation_id: None,
             })
             .unwrap();
         assert!(runtime.tool_registry.get(thread_id).is_some());

@@ -105,7 +105,7 @@ try {
 }
 ```
 
-`sendText()` 會等待 Core 發出 completion，或將 session 恢復成 `idle` 後才 resolve，不是 transport 接到文字後就立即完成。
+`sendText()` 會等待 Core 發出相符的 semantic operation completion 才 resolve；單獨恢復成 `idle` 或 transport 接到文字都不代表完成。
 
 一個 session 同時只接受一個 active turn。Turn 進行中請 disable send button，同時仍需捕捉 `SESSION_BUSY`，避免兩條 application path race。
 

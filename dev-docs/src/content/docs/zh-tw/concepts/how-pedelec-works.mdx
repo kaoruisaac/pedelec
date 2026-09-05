@@ -104,7 +104,7 @@ Provider 輸出 assistant text 或提出 tool call
   ↓
 SDK 觸發 onChat()、onChatDelta()、onStatus() 或 onTool()
   ↓
-Runtime 發出 done / idle
+Runtime 發出 operation-scoped completion 與可觀察的 status events
   ↓
 sendText() resolve
 ```

@@ -88,7 +88,7 @@ sendText(text: string): Promise<void>
 
 Starts one user turn.
 
-The promise resolves after a completion/idle event and rejects when the turn fails, the session ends, or another turn is already active.
+The promise resolves after Core reports the matching semantic operation completion and rejects when that operation fails, the session ends, or another turn is already active. An `idle` event alone is not a completion signal.
 
 Completed assistant messages are delivered through `onChat()`. Best-effort incremental fragments, when the provider exposes them, are delivered separately through `onChatDelta()`.
 

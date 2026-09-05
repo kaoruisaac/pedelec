@@ -307,6 +307,7 @@ type SessionEvent =
       channelId: string;
       sessionId: string;
       seq?: number;
+      operationId?: string;
       text: string;
     }
   | {
@@ -314,6 +315,7 @@ type SessionEvent =
       channelId: string;
       sessionId: string;
       seq?: number;
+      operationId?: string;
       text: string;
     }
   | {
@@ -321,6 +323,7 @@ type SessionEvent =
       channelId: string;
       sessionId: string;
       seq?: number;
+      operationId?: string;
       status: PedelecSessionStatus;
     }
   | {
@@ -328,21 +331,27 @@ type SessionEvent =
       channelId: string;
       sessionId: string;
       seq?: number;
+      operationId: string;
       toolRequestId: string;
       tool: string;
       args: unknown;
     }
   | {
-      type: "done";
+      type: "operation_completed";
       channelId: string;
       sessionId: string;
       seq?: number;
+      operationId: string;
+      operationKind: "user" | "prepare";
+      success: boolean;
+      error?: PedelecError;
     }
   | {
       type: "error";
       channelId?: string;
       sessionId?: string;
       seq?: number;
+      operationId?: string;
       error?: PedelecError;
     }
   | {
@@ -352,7 +361,7 @@ type SessionEvent =
       seq?: number;
     };
 
-type PortMessage = ResponseMessage | SessionEvent;
+type PortMessage = ResponseMessage | SessionEvent | SessionSnapshotMessage;
 
 type RuntimePort = {
   postMessage: (message: unknown) => void;
@@ -384,10 +393,55 @@ type PendingSend = {
   reject: (error: PedelecError) => void;
 };
 
+type SessionSnapshot = {
+  threadId: string;
+  status: string;
+  latestSeq: number;
+  activeOperation?: {
+    operationId: string;
+    operationKind: "user" | "prepare";
+    startedAt: string;
+  };
+  lastCompletedOperation?: {
+    operationId: string;
+    operationKind: "user" | "prepare";
+    success: boolean;
+    error?: PedelecError;
+    completedAt: string;
+  };
+  pendingToolRequest?: {
+    requestId: string;
+    threadId: string;
+    operationId: string;
+    toolName: string;
+    args: unknown;
+    createdAt: string;
+    timeoutMs: number;
+  };
+};
+
+type SessionSnapshotMessage = {
+  type: "session_snapshot";
+  channelId: string;
+  sessionId: string;
+  seq?: number;
+  snapshot: SessionSnapshot;
+};
+
+type PendingOperation = {
+  turn: ActiveTurn;
+  resolve: () => void;
+  reject: (error: PedelecError) => void;
+  priorStatus: PedelecSessionStatus;
+  requestSettled: boolean;
+  completed?: { success: boolean; error?: PedelecError };
+};
+
 type ActiveTurn = {
   turnId: string;
   turnStartedAt: number;
   kind: "user" | "prepare";
+  external?: boolean;
 };
 
 type EventDispatchMeta = {
@@ -608,15 +662,24 @@ export class Pedelec {
       throw makeError("INVALID_INPUT", "sessionId is required");
     }
 
-    const result = await this.request<{ sessionId: string }>("resume_session", {
-      sessionId,
-    });
+    const existing = this.sessions.get(sessionId);
+    const session = existing && !existing.isTransportDetached()
+      ? existing
+      : this.registerSession(sessionId, "", undefined);
+    try {
+      const result = await this.request<{ sessionId: string }>("resume_session", {
+        sessionId,
+      });
 
-    if (!result.sessionId) {
-      throw makeError("SDK_PROTOCOL_ERROR", "resume_session response did not include sessionId");
+      if (!result.sessionId) {
+        throw makeError("SDK_PROTOCOL_ERROR", "resume_session response did not include sessionId");
+      }
+
+      return session;
+    } catch (error) {
+      if (session !== existing) this.unregisterSession(sessionId);
+      throw error;
     }
-
-    return this.registerSession(result.sessionId, "", undefined);
   }
 
   request<T>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
@@ -956,6 +1019,23 @@ export class Pedelec {
       return;
     }
 
+    if (message.type === "session_snapshot") {
+      if (message.sessionId) {
+        const latestSeq = message.snapshot?.latestSeq;
+        if (typeof latestSeq === "number") {
+          const current = this.lastSeqBySession.get(message.sessionId);
+          if (current === undefined || latestSeq > current) {
+            this.lastSeqBySession.set(message.sessionId, latestSeq);
+          }
+        }
+        this.sessions.get(message.sessionId)?.handleSnapshot(message.snapshot, {
+          source: "core",
+          eventReceivedAt: Date.now(),
+        });
+      }
+      return;
+    }
+
     if (isSessionEvent(message) && this.isNewEvent(message)) {
       const eventReceivedAt = Date.now();
       if (message.sessionId) {
@@ -1052,8 +1132,7 @@ export class PedelecSession<TToolName extends string = string> {
   readonly sessionCreatedAt = Date.now();
 
   private status: PedelecSessionStatus = "idle";
-  private pendingSend: PendingSend | null = null;
-  private pendingPrepare: PendingSend | null = null;
+  private pendingOperation: PendingOperation | null = null;
   private preparePromise: Promise<void> | null = null;
   private uploadPromise: Promise<AssetPath> | null = null;
   private ending = false;
@@ -1068,6 +1147,9 @@ export class PedelecSession<TToolName extends string = string> {
   private readonly errorHandlers = new Set<ErrorHandler>();
   private readonly statusHandlers = new Set<StatusHandler>();
   private readonly endedHandlers = new Set<EndedHandler>();
+  private readonly recoveredToolCalls = new Map<string, Extract<SessionEvent, { type: "tool_call" }>>();
+  private readonly handledToolRequestIds = new Set<string>();
+  private authoritativePendingToolRequest: { operationId: string; requestId: string } | null | undefined = undefined;
 
   constructor(
     private readonly client: Pedelec,
@@ -1087,7 +1169,9 @@ export class PedelecSession<TToolName extends string = string> {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
 
-    if (this.pendingSend) {
+    if (this.pendingOperation?.turn.kind === "user" ||
+        (this.activeTurn && this.activeTurn.kind !== "prepare") ||
+        this.activeTurn?.external) {
       return Promise.reject(makeError("SESSION_BUSY", "session is already running", { sessionId: this.sessionId }));
     }
 
@@ -1100,26 +1184,34 @@ export class PedelecSession<TToolName extends string = string> {
     }
 
     const turn = createTurn("prepare");
+    const priorStatus = this.status;
     this.activeTurn = turn;
     this.setStatus("running", { source: "sdk" });
 
-    const donePromise = new Promise<void>((resolve, reject) => {
-      this.pendingPrepare = { resolve, reject };
+    const operationPromise = new Promise<void>((resolve, reject) => {
+      this.pendingOperation = {
+        turn,
+        resolve,
+        reject,
+        priorStatus,
+        requestSettled: false,
+      };
     });
 
-    const requestPromise = this.client
+    void this.client
       .request("prepare_session", {
         sessionId: this.sessionId,
+        operationId: turn.turnId,
       })
-      .catch((err) => {
+      .then(() => {
+        this.markOperationRequestSettled(turn);
+      }, (err) => {
         const error = normalizeError(err, "PREPARE_FAILED", "prepare failed");
         if (!this.transportDetached) this.emitError(error, { source: "sdk" });
-        this.clearPendingPrepare();
-        this.finishActiveTurn(turn);
-        throw error;
+        this.failOperationFromRequest(turn, error);
       });
 
-    this.preparePromise = Promise.all([requestPromise, donePromise])
+    this.preparePromise = operationPromise
       .then(() => {
         this.prepared = true;
       })
@@ -1143,32 +1235,40 @@ export class PedelecSession<TToolName extends string = string> {
       return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
     }
 
-    if (this.pendingSend || this.pendingPrepare) {
+    if (this.pendingOperation || this.activeTurn) {
       return Promise.reject(makeError("SESSION_BUSY", "session is already running", { sessionId: this.sessionId }));
     }
 
     const turn = createTurn("user");
+    const priorStatus = this.status;
     this.activeTurn = turn;
     this.setStatus("running", { source: "sdk" });
 
-    const donePromise = new Promise<void>((resolve, reject) => {
-      this.pendingSend = { resolve, reject };
+    const operationPromise = new Promise<void>((resolve, reject) => {
+      this.pendingOperation = {
+        turn,
+        resolve,
+        reject,
+        priorStatus,
+        requestSettled: false,
+      };
     });
 
-    const requestPromise = this.client
+    void this.client
       .request("send_text", {
         sessionId: this.sessionId,
         text,
+        operationId: turn.turnId,
       })
-      .catch((err) => {
+      .then(() => {
+        this.markOperationRequestSettled(turn);
+      }, (err) => {
         const error = normalizeError(err, "SEND_TEXT_FAILED", "sendText failed");
         if (!this.transportDetached) this.emitError(error, { source: "sdk" });
-        this.clearPendingSend();
-        this.finishActiveTurn(turn);
-        throw error;
+        this.failOperationFromRequest(turn, error);
       });
 
-    return Promise.all([requestPromise, donePromise]).then(() => undefined);
+    return operationPromise;
   }
 
   onChat(handler: ChatHandler): () => void {
@@ -1199,6 +1299,7 @@ export class PedelecSession<TToolName extends string = string> {
         throw makeError("INVALID_INPUT", "tool handler must be a function", { toolName });
       }
       this.namedToolHandlers.set(toolName, maybeHandler as ToolSpecificHandler);
+      void this.drainRecoveredToolCalls();
       return () => {
         if (this.namedToolHandlers.get(toolName) === maybeHandler) {
           this.namedToolHandlers.delete(toolName);
@@ -1208,6 +1309,7 @@ export class PedelecSession<TToolName extends string = string> {
 
     const handler = toolNameOrHandler;
     this.genericToolHandler = handler;
+    void this.drainRecoveredToolCalls();
     return () => {
       if (this.genericToolHandler === handler) {
         this.genericToolHandler = null;
@@ -1331,7 +1433,7 @@ export class PedelecSession<TToolName extends string = string> {
 
   handleEvent(event: SessionEvent, meta: EventDispatchMeta = { source: "sdk" }): void {
     if (event.type === "chat_delta") {
-      const turn = this.requireActiveTurn("chat_delta", meta);
+      const turn = this.requireOperationTurn(event.operationId, "chat_delta", meta);
       if (!turn) return;
       if (turn.kind === "prepare") return;
       for (const handler of this.chatDeltaHandlers) {
@@ -1341,7 +1443,7 @@ export class PedelecSession<TToolName extends string = string> {
     }
 
     if (event.type === "chat_message") {
-      const turn = this.requireActiveTurn("chat_message", meta);
+      const turn = this.requireOperationTurn(event.operationId, "chat_message", meta);
       if (!turn) return;
       if (turn.kind === "prepare") return;
       for (const handler of this.chatHandlers) {
@@ -1351,44 +1453,103 @@ export class PedelecSession<TToolName extends string = string> {
     }
 
     if (event.type === "status_changed") {
+      if (event.operationId && !this.matchesActiveOperation(event.operationId)) return;
+      if (!event.operationId && this.activeTurn) return;
       this.setStatus(event.status, meta);
-      if (event.status === "idle") {
-        this.resolveActivePending();
-      } else if (event.status === "ended") {
+      if (event.status === "ended") {
         this.markEnded(meta);
       } else if (event.status === "error") {
         const error = makeError("SESSION_ERROR", "session entered error status", { sessionId: this.sessionId });
         this.emitError(error, meta);
-        this.rejectActivePending(error);
       }
       return;
     }
 
     if (event.type === "tool_call") {
-      const turn = this.requireActiveTurn("tool_call", meta);
+      const turn = this.requireOperationTurn(event.operationId, "tool_call", meta);
       if (!turn) return;
+      this.authoritativePendingToolRequest = {
+        operationId: event.operationId,
+        requestId: event.toolRequestId,
+      };
       this.setStatus("waiting_tool_result", meta);
-      this.handleToolCall(event, meta, turn);
+      if (this.recoveredToolCalls.has(event.toolRequestId)) {
+        this.recoveredToolCalls.delete(event.toolRequestId);
+      }
+      if (turn.external && !this.hasToolHandler(event.tool)) {
+        this.recoveredToolCalls.set(event.toolRequestId, event);
+        return;
+      }
+      void this.handleToolCallOnce(event, meta, turn);
       return;
     }
 
-    if (event.type === "done") {
-      this.setStatus("idle", meta);
-      this.resolveActivePending();
+    if (event.type === "operation_completed") {
+      if (!this.matchesActiveOperation(event.operationId)) return;
+      if (this.activeTurn?.kind !== event.operationKind) return;
+      this.authoritativePendingToolRequest = null;
+      this.setStatus(event.success ? "idle" : event.operationKind === "prepare" ? "idle" : "error", meta);
+      this.completeOperation(this.activeTurn, event.success, event.error);
       return;
     }
 
     if (event.type === "error") {
-      this.setStatus("error", meta);
+      if (event.operationId && !this.matchesActiveOperation(event.operationId)) return;
       const error = normalizeError(event.error, "SESSION_ERROR", "session error");
       this.emitError(error, meta);
-      this.rejectActivePending(error);
+      if (!event.operationId) this.setStatus("error", meta);
       return;
     }
 
     if (event.type === "ended") {
       this.markEnded(meta);
     }
+  }
+
+  /** @internal */
+  handleSnapshot(snapshot: SessionSnapshot, meta: EventDispatchMeta = { source: "core" }): void {
+    if (!snapshot || snapshot.threadId !== this.sessionId) return;
+    const active = snapshot.activeOperation;
+    const pending = this.pendingOperation;
+    this.reconcileRecoveredToolCalls(snapshot);
+    if (!pending) {
+      this.setStatus(coreStatusToSdkStatus(snapshot.status), meta);
+      if (active) {
+        this.activeTurn = {
+          turnId: active.operationId,
+          turnStartedAt: parseSnapshotTime(active.startedAt),
+          kind: active.operationKind,
+          external: true,
+        };
+        this.queueSnapshotTool(snapshot, this.activeTurn);
+      } else if (this.activeTurn?.external) {
+        this.activeTurn = null;
+      }
+      if (snapshot.status === "ended") this.markEnded(meta);
+      return;
+    }
+
+    if (active?.operationId === pending.turn.turnId && active.operationKind === pending.turn.kind) {
+      this.setStatus(coreStatusToSdkStatus(snapshot.status), meta);
+      this.queueSnapshotTool(snapshot, pending.turn);
+      return;
+    }
+
+    const completed = snapshot.lastCompletedOperation;
+    if (completed?.operationId === pending.turn.turnId && completed.operationKind === pending.turn.kind) {
+      this.setStatus(completed.success ? "idle" : completed.operationKind === "prepare" ? "idle" : "error", meta);
+      this.completeOperation(pending.turn, completed.success, completed.error);
+      return;
+    }
+
+    const error = makeError(
+      "SDK_LIFECYCLE_SYNC_ERROR",
+      "authoritative session snapshot did not match the active SDK operation",
+      { sessionId: this.sessionId, operationId: pending.turn.turnId },
+    );
+    this.emitError(error, { source: "sdk" });
+    this.rejectOperation(pending.turn, error);
+    this.setStatus(coreStatusToSdkStatus(snapshot.status), meta);
   }
 
   replaceInlineToolHandlers(handlers: Map<string, ToolSpecificHandler>): void {
@@ -1409,11 +1570,13 @@ export class PedelecSession<TToolName extends string = string> {
     this.rejectActivePending(error);
   }
 
-  private async handleToolCall(
+  private async handleToolCallOnce(
     event: Extract<SessionEvent, { type: "tool_call" }>,
     meta: EventDispatchMeta,
     turn: ActiveTurn
   ): Promise<void> {
+    if (this.handledToolRequestIds.has(event.toolRequestId)) return;
+    this.handledToolRequestIds.add(event.toolRequestId);
     let result: unknown;
     const namedHandler = this.namedToolHandlers.get(event.tool);
     const inlineHandler = this.inlineToolHandlers.get(event.tool);
@@ -1453,7 +1616,7 @@ export class PedelecSession<TToolName extends string = string> {
       };
     }
 
-    if (this.transportDetached) return;
+    if (this.transportDetached || !this.isAuthoritativeToolRequestCurrent(event)) return;
 
     try {
       await this.client.request("submit_tool_result", {
@@ -1468,56 +1631,9 @@ export class PedelecSession<TToolName extends string = string> {
     }
   }
 
-  private resolvePendingSend(): void {
-    const pending = this.pendingSend;
-    this.pendingSend = null;
-    pending?.resolve();
-    this.finishActiveTurn();
-  }
-
-  private resolvePendingPrepare(): void {
-    const pending = this.pendingPrepare;
-    this.pendingPrepare = null;
-    pending?.resolve();
-    this.finishActiveTurn();
-  }
-
-  private resolveActivePending(): void {
-    if (this.activeTurn?.kind === "prepare") {
-      this.resolvePendingPrepare();
-    } else {
-      this.resolvePendingSend();
-    }
-  }
-
-  private rejectPendingSend(error: PedelecError): void {
-    const pending = this.pendingSend;
-    this.pendingSend = null;
-    pending?.reject(error);
-    this.finishActiveTurn();
-  }
-
-  private rejectPendingPrepare(error: PedelecError): void {
-    const pending = this.pendingPrepare;
-    this.pendingPrepare = null;
-    pending?.reject(error);
-    this.finishActiveTurn();
-  }
-
   private rejectActivePending(error: PedelecError): void {
-    if (this.activeTurn?.kind === "prepare") {
-      this.rejectPendingPrepare(error);
-    } else {
-      this.rejectPendingSend(error);
-    }
-  }
-
-  private clearPendingSend(): void {
-    this.pendingSend = null;
-  }
-
-  private clearPendingPrepare(): void {
-    this.pendingPrepare = null;
+    const turn = this.activeTurn;
+    if (turn) this.rejectOperation(turn, error);
   }
 
   private markEnded(meta: EventDispatchMeta = { source: "sdk" }): void {
@@ -1528,9 +1644,8 @@ export class PedelecSession<TToolName extends string = string> {
         handler(this.createEndedContext(meta));
       }
     }
-    this.rejectPendingSend(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
-    this.rejectPendingPrepare(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
-    this.finishActiveTurn();
+    const error = makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId });
+    if (this.activeTurn) this.rejectOperation(this.activeTurn, error);
   }
 
   private emitError(error: PedelecError, meta: EventDispatchMeta = { source: "sdk" }): void {
@@ -1548,16 +1663,155 @@ export class PedelecSession<TToolName extends string = string> {
     }
   }
 
-  private requireActiveTurn(type: "chat_delta" | "chat_message" | "tool_call", meta: EventDispatchMeta): ActiveTurn | null {
-    if (this.activeTurn) return this.activeTurn;
+  private requireOperationTurn(
+    operationId: string | undefined,
+    type: "chat_delta" | "chat_message" | "tool_call",
+    meta: EventDispatchMeta,
+  ): ActiveTurn | null {
+    if (operationId && this.activeTurn?.turnId === operationId) {
+      return this.activeTurn;
+    }
 
     this.emitError(
-      makeError("SDK_PROTOCOL_ERROR", `${type} event was received without an active turn`, {
+      makeError("SDK_PROTOCOL_ERROR", `${type} event did not match the active operation`, {
         sessionId: this.sessionId,
+        operationId,
       }),
       { source: "sdk", eventReceivedAt: meta.eventReceivedAt }
     );
     return null;
+  }
+
+  private matchesActiveOperation(operationId: string): boolean {
+    return this.activeTurn?.turnId === operationId;
+  }
+
+  private markOperationRequestSettled(turn: ActiveTurn): void {
+    const pending = this.pendingOperation;
+    if (!pending || pending.turn.turnId !== turn.turnId) return;
+    pending.requestSettled = true;
+    this.maybeSettleOperation(pending);
+  }
+
+  private failOperationFromRequest(turn: ActiveTurn, error: PedelecError): void {
+    const pending = this.pendingOperation;
+    if (!pending || pending.turn.turnId !== turn.turnId) return;
+
+    // A semantic terminal may have arrived before the bridge response. Keep the
+    // operation reserved until that response boundary is observed, but never let
+    // a delayed request failure overwrite its matching terminal result.
+    if (pending.completed) {
+      pending.requestSettled = true;
+      this.maybeSettleOperation(pending);
+      return;
+    }
+
+    this.setStatus(
+      turn.kind === "prepare" || isAdmissionRejection(error) ? pending.priorStatus : "error",
+      { source: "sdk" },
+    );
+    this.rejectOperation(turn, error);
+  }
+
+  private completeOperation(
+    turn: ActiveTurn,
+    success: boolean,
+    error?: PedelecError,
+  ): void {
+    const pending = this.pendingOperation;
+    if (!pending || pending.turn.turnId !== turn.turnId) {
+      if (this.activeTurn?.turnId === turn.turnId && turn.external) this.finishActiveTurn(turn);
+      return;
+    }
+    pending.completed = { success, error };
+    this.maybeSettleOperation(pending);
+  }
+
+  private maybeSettleOperation(pending: PendingOperation): void {
+    if (!pending.requestSettled || !pending.completed) return;
+    const turn = pending.turn;
+    this.pendingOperation = null;
+    this.finishActiveTurn(turn);
+    if (pending.completed.success) pending.resolve();
+    else pending.reject(pending.completed.error ?? makeError("SESSION_ERROR", "session operation failed"));
+  }
+
+  private rejectOperation(turn: ActiveTurn, error: PedelecError): void {
+    const pending = this.pendingOperation;
+    if (pending && pending.turn.turnId === turn.turnId) {
+      this.pendingOperation = null;
+      this.finishActiveTurn(turn);
+      pending.reject(error);
+      return;
+    }
+    this.finishActiveTurn(turn);
+  }
+
+  private queueSnapshotTool(snapshot: SessionSnapshot, turn: ActiveTurn): void {
+    const request = snapshot.pendingToolRequest;
+    if (!request || request.operationId !== turn.turnId) return;
+    if (this.handledToolRequestIds.has(request.requestId)) return;
+    this.recoveredToolCalls.set(request.requestId, {
+      type: "tool_call",
+      channelId: "",
+      sessionId: this.sessionId,
+      seq: snapshot.latestSeq,
+      operationId: request.operationId,
+      toolRequestId: request.requestId,
+      tool: request.toolName,
+      args: request.args,
+    });
+    void this.drainRecoveredToolCalls();
+  }
+
+  private reconcileRecoveredToolCalls(snapshot: SessionSnapshot): void {
+    const active = snapshot.activeOperation;
+    const pending = active && snapshot.pendingToolRequest?.operationId === active.operationId
+      ? snapshot.pendingToolRequest
+      : undefined;
+    this.authoritativePendingToolRequest = pending
+      ? { operationId: pending.operationId, requestId: pending.requestId }
+      : null;
+
+    for (const [requestId, event] of this.recoveredToolCalls) {
+      if (
+        !active ||
+        !pending ||
+        event.operationId !== active.operationId ||
+        event.toolRequestId !== pending.requestId
+      ) {
+        this.recoveredToolCalls.delete(requestId);
+      }
+    }
+  }
+
+  private isAuthoritativeToolRequestCurrent(
+    event: Extract<SessionEvent, { type: "tool_call" }>,
+  ): boolean {
+    const pending = this.authoritativePendingToolRequest;
+    if (pending === undefined) return true;
+    if (pending === null) return false;
+    return (
+      pending.operationId === event.operationId &&
+      pending.requestId === event.toolRequestId
+    );
+  }
+
+  private hasToolHandler(toolName: string): boolean {
+    return this.namedToolHandlers.has(toolName) ||
+      this.inlineToolHandlers.has(toolName) ||
+      this.genericToolHandler !== null;
+  }
+
+  private async drainRecoveredToolCalls(): Promise<void> {
+    const turn = this.activeTurn;
+    if (!turn) return;
+    for (const [requestId, event] of Array.from(this.recoveredToolCalls.entries())) {
+      if (event.operationId !== turn.turnId || !this.hasToolHandler(event.tool)) continue;
+      this.recoveredToolCalls.delete(requestId);
+      this.setStatus("waiting_tool_result", { source: "core" });
+      await this.handleToolCallOnce(event, { source: "core", eventReceivedAt: Date.now() }, turn);
+    }
   }
 
   private finishActiveTurn(turn: ActiveTurn | null = this.activeTurn): void {
@@ -1653,7 +1907,7 @@ function isSessionEvent(message: PortMessage): message is SessionEvent {
     message.type === "chat_message" ||
     message.type === "status_changed" ||
     message.type === "tool_call" ||
-    message.type === "done" ||
+    message.type === "operation_completed" ||
     message.type === "error" ||
     message.type === "ended"
   );
@@ -1735,6 +1989,20 @@ function createTurn(kind: ActiveTurn["kind"] = "user"): ActiveTurn {
   };
 }
 
+function coreStatusToSdkStatus(status: string): PedelecSessionStatus {
+  if (status === "waitingToolResult") return "waiting_tool_result";
+  if (status === "starting" || status === "stopping") return "running";
+  if (status === "idle" || status === "running" || status === "ended" || status === "error") {
+    return status;
+  }
+  return "error";
+}
+
+function parseSnapshotTime(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
 function getCurrentOrigin(pageWindow: Window | null): string | null {
   const origin = pageWindow?.location?.origin;
   return typeof origin === "string" && origin ? origin : null;
@@ -1742,6 +2010,14 @@ function getCurrentOrigin(pageWindow: Window | null): string | null {
 
 function isExtensionUnavailableError(error: PedelecError): boolean {
   return error.code === "EXTENSION_UNAVAILABLE" || error.code === "EXTENSION_DISCONNECTED";
+}
+
+function isAdmissionRejection(error: PedelecError): boolean {
+  return error.code === "THREAD_BUSY" ||
+    error.code === "THREAD_ENDED" ||
+    error.code === "THREAD_ACCESS_DENIED" ||
+    error.code === "THREAD_NOT_FOUND" ||
+    error.code === "INVALID_INPUT";
 }
 
 function normalizeError(err: unknown, fallbackCode: string, fallbackMessage: string): PedelecError {

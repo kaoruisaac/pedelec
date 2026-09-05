@@ -105,7 +105,7 @@ try {
 }
 ```
 
-`sendText()` resolves after Core emits a completion or returns the session to `idle`. It does not resolve as soon as the text has been placed on the transport.
+`sendText()` resolves after Core emits the matching semantic operation completion. It does not resolve merely because the request reached the transport or the session reported `idle`.
 
 A session accepts only one active turn. Disable the send button while a turn is active and still handle `SESSION_BUSY` in case two application paths race.
 

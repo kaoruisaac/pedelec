@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-A session processes one turn at a time. `prepare()` is an optional optimization; `sendText()` starts a user turn and resolves after that turn completes.
+A session processes one turn at a time. `prepare()` is an optional optimization; `sendText()` starts a user turn and resolves after Core reports that exact operation as completed.
 
 ## Work with session assets
 
@@ -98,7 +98,7 @@ The SDK performs these steps:
 4. sets status to `running` with `ctx.source === "sdk"`;
 5. sends `send_text` through the bridge;
 6. dispatches completed chat messages, optional chat deltas, status, and tool events;
-7. resolves when a `done` event or `idle` status completes the active turn;
+7. resolves or rejects only when the matching operation completion is reported; `idle` and `error` status events are observable state, not promise terminals;
 8. rejects if the turn errors, the session ends, or transport setup fails.
 
 ## Completion semantics
@@ -116,7 +116,7 @@ console.log("Completed assistant messages:", completedMessages);
 offChat();
 ```
 
-The promise resolving means the SDK observed turn completion. It does not mean your rendering framework has necessarily painted the final state to the screen.
+The bridge request succeeding only means that Core admitted the operation. The promise resolves after the matching internal `operation_completed` event, so an `idle` status or a request response alone cannot complete a turn. It does not mean your rendering framework has necessarily painted the final state to the screen.
 
 ## No concurrent turns in one session
 
@@ -194,7 +194,7 @@ try {
 }
 ```
 
-Promise rejection is useful for the action that initiated the turn. `onError()` also captures asynchronous session-level problems such as a failed tool-result submission or extension disconnect broadcast.
+Promise rejection is useful for the action that initiated the turn. A Core `error` event is diagnostic and reaches `onError()`; the semantic turn rejection is carried by the matching failed operation completion. `onError()` also captures asynchronous session-level problems such as a failed tool-result submission or extension disconnect broadcast.
 
 Common errors:
 

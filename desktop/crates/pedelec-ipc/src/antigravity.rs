@@ -918,7 +918,7 @@ mod tests {
         )));
         assert!(events
             .iter()
-            .any(|event| matches!(event, ThreadEvent::Done { .. })));
+            .any(|event| matches!(event, ThreadEvent::OperationCompleted { success: true, .. })));
 
         dispatch_turn(&dispatcher, &runtime, &thread_id, "第二輪");
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
@@ -1143,6 +1143,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.clone(),
                 message: "must not spawn".into(),
+                operation_id: None,
             })
             .unwrap();
         let operation = start.intent;
@@ -1274,6 +1275,7 @@ mod tests {
             .unwrap()
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.to_string(),
+                operation_id: None,
             })
             .unwrap();
         let Some(operation) = start.intent else {
@@ -1294,6 +1296,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.to_string(),
                 message: message.to_string(),
+                operation_id: None,
             })
             .unwrap();
         let operation = start.intent;

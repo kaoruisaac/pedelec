@@ -249,6 +249,12 @@ function providerErrorEvent(threadId, provider = "codex", message = "provider fa
   };
 }
 
+function subscriptionRequests(nativePort, threadId = null) {
+  return nativePort.sent.filter((message) =>
+    message.type === "subscribe_thread" && (threadId == null || message.threadId === threadId)
+  );
+}
+
 function emitPageActivity(port, active) {
   port.emit({ type: "page_activity", active });
 }
@@ -276,7 +282,9 @@ async function createSdkSession(background, sdkPort, nativePort, sessionId, auto
     input: { provider: "codex", autoEndOnDisconnect },
   });
   await respondToNative(background, nativePort, { threadId: sessionId }, minimumMessageCount);
-  await respondToNative(background, nativePort, {}, minimumMessageCount + 1);
+  await respondToNative(background, nativePort, {
+    snapshot: { threadId: sessionId, status: "idle", latestSeq: 0 },
+  }, minimumMessageCount + 1);
   await waitFor(() => sdkPort.sent.some((message) => message.requestId === requestId));
   return sdkPort.sent.find((message) => message.requestId === requestId);
 }
@@ -302,7 +310,9 @@ test("create_session forwards an explicit workspace without inventing a path", a
   const nativeCreate = await respondToNative(background, native, { threadId: "thread_custom" });
   assert.deepEqual(nativeCreate.workspace, { path: "C:\\workspace\\project-a" });
 
-  await respondToNative(background, native, {}, 2);
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_custom", status: "idle", latestSeq: 0 },
+  }, 2);
   await waitFor(() => sdk.sent.some((message) => message.requestId === "create_custom"));
 
   const defaultSdk = connectExternal(chrome);
@@ -314,7 +324,9 @@ test("create_session forwards an explicit workspace without inventing a path", a
   });
   const nativeDefault = await respondToNative(background, native, { threadId: "thread_default" }, 3);
   assert.equal(nativeDefault.workspace, undefined);
-  await respondToNative(background, native, {}, 4);
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_default", status: "idle", latestSeq: 0 },
+  }, 4);
 });
 
 test("create_session forwards effortLevel and never forwards model", async () => {
@@ -471,7 +483,9 @@ test("create_session forwards SDK version metadata separately from consumer inpu
   const request = await respondToNative(background, native, { threadId: "thread_version" });
   assert.equal(request.callerSdkVersion, "mock-sdk-version");
   assert.equal(request.workspace.callerSdkVersion, "consumer-value");
-  await respondToNative(background, native, {}, 2);
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_version", status: "idle", latestSeq: 0 },
+  }, 2);
 });
 
 test("legacy pick_sandbox_folder SDK request is rejected", async () => {
@@ -562,7 +576,9 @@ test("autoEndOnDisconnect false keeps the native session but requires explicit r
   const portB = connectExternal(chrome);
   const nativeMessagesBeforeResume = native.sent.length;
   portB.emit({ channelId: "channel_b", requestId: "resume_1", type: "resume_session", sessionId: "thread_resume" });
-  await respondToNative(background, native, {}, nativeMessagesBeforeResume + 1);
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_resume", status: "idle", latestSeq: 0 },
+  }, nativeMessagesBeforeResume + 1);
   await waitFor(() => portB.sent.some((message) => message.requestId === "resume_1"));
   assert.equal(background.getSdkRouteCount(), 1);
 
@@ -582,6 +598,159 @@ test("autoEndOnDisconnect false keeps the native session but requires explicit r
     seq: 2,
     type: "chat_message",
     text: "resumed",
+  });
+});
+
+test("failed per-thread recovery retries on the connected Native Host and preserves caller origin", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, {
+    disableReconnect: true,
+    threadRecoveryInitialDelayMs: 5,
+  });
+  background.start();
+  const sdk = connectExternal(chrome, "https://app.example.test/page", 17);
+
+  await createSdkSession(background, sdk, native, "thread_recovery");
+  background.handleNativeMessage({
+    type: "thread_subscription_closed",
+    threadId: "thread_recovery",
+    error: { code: "IPC_CLOSED", message: "subscription closed" },
+  });
+  await waitFor(() => subscriptionRequests(native, "thread_recovery").length === 2);
+  const failed = subscriptionRequests(native, "thread_recovery").at(-1);
+  assert.equal(failed.callerOrigin, "https://app.example.test");
+  background.handleNativeMessage({
+    type: "response",
+    requestId: failed.requestId,
+    ok: false,
+    error: { code: "IPC_UNAVAILABLE", message: "temporary failure" },
+  });
+
+  await delay(15);
+  await waitFor(() => subscriptionRequests(native, "thread_recovery").length === 3);
+  const retry = subscriptionRequests(native, "thread_recovery").at(-1);
+  assert.equal(retry.callerOrigin, "https://app.example.test");
+  background.handleNativeMessage({
+    type: "response",
+    requestId: retry.requestId,
+    ok: true,
+    result: { snapshot: { threadId: "thread_recovery", status: "idle", latestSeq: 2 } },
+  });
+  await flush();
+  await delay(15);
+  assert.equal(subscriptionRequests(native, "thread_recovery").length, 3);
+  assert.equal(background.getState().connected, true);
+});
+
+test("per-thread recovery does not create a retry storm", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, {
+    disableReconnect: true,
+    threadRecoveryInitialDelayMs: 5,
+  });
+  background.start();
+  const sdk = connectExternal(chrome);
+  await createSdkSession(background, sdk, native, "thread_no_storm");
+
+  const closed = {
+    type: "thread_subscription_closed",
+    threadId: "thread_no_storm",
+    error: { code: "IPC_CLOSED", message: "subscription closed" },
+  };
+  background.handleNativeMessage(closed);
+  background.handleNativeMessage(closed);
+  await waitFor(() => subscriptionRequests(native, "thread_no_storm").length === 2);
+  const firstRecovery = subscriptionRequests(native, "thread_no_storm").at(-1);
+  background.handleNativeMessage({
+    type: "response",
+    requestId: firstRecovery.requestId,
+    ok: false,
+    error: { code: "IPC_UNAVAILABLE", message: "temporary failure" },
+  });
+  background.handleNativeMessage(closed);
+  background.handleNativeMessage(closed);
+  assert.equal(subscriptionRequests(native, "thread_no_storm").length, 2);
+
+  await delay(15);
+  await waitFor(() => subscriptionRequests(native, "thread_no_storm").length === 3);
+  assert.equal(subscriptionRequests(native, "thread_no_storm").length, 3);
+});
+
+test("removing a thread cancels its pending recovery retry", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, {
+    disableReconnect: true,
+    threadRecoveryInitialDelayMs: 5,
+  });
+  background.start();
+  const sdk = connectExternal(chrome);
+  await createSdkSession(background, sdk, native, "thread_removed");
+
+  background.handleNativeMessage({
+    type: "thread_subscription_closed",
+    threadId: "thread_removed",
+    error: { code: "IPC_CLOSED", message: "subscription closed" },
+  });
+  await waitFor(() => subscriptionRequests(native, "thread_removed").length === 2);
+  const failed = subscriptionRequests(native, "thread_removed").at(-1);
+  background.handleNativeMessage({
+    type: "response",
+    requestId: failed.requestId,
+    ok: false,
+    error: { code: "IPC_UNAVAILABLE", message: "temporary failure" },
+  });
+  const requestCount = subscriptionRequests(native, "thread_removed").length;
+  background.handleNativeMessage({
+    type: "thread_event",
+    event: { threadId: "thread_removed", type: "ended", seq: 1 },
+  });
+  await delay(15);
+  assert.equal(subscriptionRequests(native, "thread_removed").length, requestCount);
+  assert.equal(background.getActiveThreadCount(), 0);
+});
+
+test("recovering one thread does not resubscribe a healthy unrelated thread", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, {
+    disableReconnect: true,
+    threadRecoveryInitialDelayMs: 5,
+  });
+  background.start();
+  const sdk = connectExternal(chrome);
+  await createSdkSession(background, sdk, native, "thread_unhealthy");
+  await createSdkSession(background, sdk, native, "thread_healthy", true, "channel_b");
+  const healthyCount = subscriptionRequests(native, "thread_healthy").length;
+
+  background.handleNativeMessage({
+    type: "thread_subscription_closed",
+    threadId: "thread_unhealthy",
+    error: { code: "IPC_CLOSED", message: "subscription closed" },
+  });
+  await waitFor(() => subscriptionRequests(native, "thread_unhealthy").length === 2);
+  const failed = subscriptionRequests(native, "thread_unhealthy").at(-1);
+  background.handleNativeMessage({
+    type: "response",
+    requestId: failed.requestId,
+    ok: false,
+    error: { code: "IPC_UNAVAILABLE", message: "temporary failure" },
+  });
+  await delay(15);
+  await waitFor(() => subscriptionRequests(native, "thread_unhealthy").length === 3);
+  assert.equal(subscriptionRequests(native, "thread_healthy").length, healthyCount);
+  const retry = subscriptionRequests(native, "thread_unhealthy").at(-1);
+  background.handleNativeMessage({
+    type: "response",
+    requestId: retry.requestId,
+    ok: true,
+    result: { snapshot: { threadId: "thread_unhealthy", status: "idle", latestSeq: 2 } },
   });
 });
 
@@ -792,7 +961,9 @@ test("a session routed to multiple tabs stores the provider error on every route
     type: "resume_session",
     sessionId: "thread_shared",
   });
-  await respondToNative(background, native, {}, nativeMessagesBeforeResume + 1);
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_shared", status: "idle", latestSeq: 0 },
+  }, nativeMessagesBeforeResume + 1);
   await waitFor(() => tabB.sent.some((message) => message.requestId === "resume_shared"));
 
   background.handleNativeMessage({

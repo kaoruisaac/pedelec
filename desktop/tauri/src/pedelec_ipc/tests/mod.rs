@@ -7,13 +7,17 @@ mod tests {
     use pedelec_core::{
         workspace_assets_root, workspace_logs_root, CommandSpec, CoreRuntime, CreateThreadOutput,
         CreateThreadSkillsInput, CreateThreadToolInput, EffortLevel, EndThreadInput,
-        PedelecSettings, PersistentRuntimeOperation, ProviderCode, ProviderRuntimeEvent,
-        ProviderSessionState, ThreadState, ThreadStatus, ToolRegistry, WorkspaceManager,
+        PedelecSettings, PendingProviderOperation, PendingProviderOperationKind,
+        PersistentRuntimeOperation, ProviderCode, ProviderRuntimeEvent, ProviderSessionState,
+        ThreadOperationKind, ThreadSnapshot, ThreadState, ThreadStatus, ThreadSubscription,
+        ToolRegistry, WorkspaceManager,
     };
     use serde_json::{json, Value};
     use std::env;
+    use std::io::BufReader;
+    use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -370,12 +374,77 @@ mod tests {
         let response_line = read_bounded_json_line(&mut reader).unwrap();
         let response: CoreIpcResponse = serde_json::from_slice(&response_line).unwrap();
         assert!(response.ok);
+        assert_eq!(response.result.as_ref().unwrap()["snapshot"]["latestSeq"], json!(0));
 
-        runtime.lock().unwrap().event_bus.emit_done("thread_sub");
+        runtime.lock().unwrap().event_bus.emit_operation_completed(
+            "thread_sub",
+            "test-operation",
+            ThreadOperationKind::User,
+            true,
+            None,
+        );
         let event_line = read_bounded_json_line(&mut reader).unwrap();
         let event: CoreIpcEventMessage = serde_json::from_slice(&event_line).unwrap();
 
         assert_eq!(event.r#type, "thread_event");
+    }
+
+    #[test]
+    fn subscription_forwarder_filters_events_at_or_below_snapshot_cutoff() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(client);
+
+        spawn_thread_subscription_forwarder(
+            ThreadSubscription {
+                events: event_rx,
+                snapshot: ThreadSnapshot {
+                    thread_id: "thread_cutoff".into(),
+                    status: ThreadStatus::Idle,
+                    latest_seq: 1,
+                    active_operation: None,
+                    last_completed_operation: None,
+                    pending_tool_request: None,
+                },
+            },
+            Arc::new(Mutex::new(server)),
+        );
+        reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+
+        event_tx
+            .send(ThreadEvent::StatusChanged {
+                seq: 1,
+                thread_id: "thread_cutoff".into(),
+                operation_id: None,
+                status: ThreadStatus::Idle,
+            })
+            .unwrap();
+        assert!(read_bounded_json_line(&mut reader).is_err());
+
+        event_tx
+            .send(ThreadEvent::StatusChanged {
+                seq: 2,
+                thread_id: "thread_cutoff".into(),
+                operation_id: Some("operation-b".into()),
+                status: ThreadStatus::Running,
+            })
+            .unwrap();
+        let forwarded = read_bounded_json_line(&mut reader).unwrap();
+        let forwarded: CoreIpcEventMessage = serde_json::from_slice(&forwarded).unwrap();
+        assert!(matches!(
+            forwarded.event,
+            ThreadEvent::StatusChanged {
+                seq: 2,
+                operation_id: Some(operation_id),
+                ..
+            } if operation_id == "operation-b"
+        ));
     }
 
     #[test]
@@ -485,7 +554,9 @@ mod tests {
         )
         .unwrap();
         assert!(send.ok);
-        assert_eq!(send.result.unwrap(), json!({ "threadId": thread_id }));
+        let send_result = send.result.unwrap();
+        assert_eq!(send_result["threadId"], json!(thread_id));
+        assert!(send_result["operationId"].as_str().is_some());
 
         let mut events = vec![read_thread_event(&mut subscription).event];
         assert!(matches!(
@@ -681,7 +752,7 @@ mod tests {
         let completion_events = collect_ipc_events_until(&mut subscription, |events| {
             events
                 .iter()
-                .any(|event| matches!(event, ThreadEvent::Done { .. }))
+                .any(|event| matches!(event, ThreadEvent::OperationCompleted { .. }))
         });
         assert!(completion_events.iter().any(|event| {
             matches!(
@@ -695,7 +766,7 @@ mod tests {
         events.extend(completion_events);
         assert!(events
             .iter()
-            .any(|event| matches!(event, ThreadEvent::Done { .. })));
+            .any(|event| matches!(event, ThreadEvent::OperationCompleted { .. })));
         assert_eq!(
             runtime.lock().unwrap().thread_status(&thread_id),
             Some(ThreadStatus::Idle)
@@ -731,7 +802,7 @@ mod tests {
             .unwrap();
         let done_index = events
             .iter()
-            .position(|event| matches!(event, ThreadEvent::Done { .. }))
+            .position(|event| matches!(event, ThreadEvent::OperationCompleted { .. }))
             .unwrap();
         let idle_index = events
             .iter()
@@ -1621,6 +1692,7 @@ mod tests {
             SendTextInput {
                 thread_id: "thread_persistent_ipc".into(),
                 message: "hello".into(),
+                operation_id: None,
             },
         )
         .unwrap();
@@ -1659,6 +1731,7 @@ mod tests {
             SendTextInput {
                 thread_id: "thread_debug_persistent_ipc".into(),
                 message: "debug hello".into(),
+                operation_id: None,
             },
         )
         .unwrap();
@@ -1690,6 +1763,7 @@ mod tests {
             dispatcher.clone(),
             PrepareThreadInput {
                 thread_id: "thread_prepare_persistent_ipc".into(),
+                operation_id: None,
             },
         )
         .unwrap();
@@ -1784,6 +1858,7 @@ mod tests {
             SendTextInput {
                 thread_id: "thread_persistent_dispatch_failure".into(),
                 message: "hello".into(),
+                operation_id: None,
             },
         )
         .unwrap_err();
@@ -1824,6 +1899,7 @@ mod tests {
             dispatcher,
             PrepareThreadInput {
                 thread_id: "thread_persistent_prepare_dispatch_failure".into(),
+                operation_id: None,
             },
         )
         .unwrap_err();
@@ -1903,7 +1979,7 @@ mod tests {
                 effort_args: vec![],
                 workspace_path,
                 skills: vec![],
-                status,
+                status: status.clone(),
                 created_at: now,
                 updated_at: now,
                 sdk_origin: None,
@@ -1944,6 +2020,19 @@ mod tests {
             ))
             .unwrap(),
         );
+        if matches!(
+            status,
+            ThreadStatus::Running | ThreadStatus::WaitingToolResult
+        ) {
+            runtime.pending_provider_operations.insert(
+                thread_id.to_string(),
+                PendingProviderOperation {
+                    operation_id: format!("test-operation-{thread_id}"),
+                    kind: PendingProviderOperationKind::UserTurn,
+                    started_at: now,
+                },
+            );
+        }
     }
 
     fn collect_events_until(

@@ -86,7 +86,7 @@ await session.prepare().catch(() => {
 sendText(text: string): Promise<void>
 ```
 
-開始一個 user turn。Completion/idle 後 resolve；turn failed、session ended 或已有 active turn 時 reject。
+開始一個 user turn。Core 回報相符的 semantic operation completion 後 resolve；單獨的 `idle` 不是 completion signal。Turn failed、session ended 或已有 active turn 時 reject。
 
 完成的 assistant message 由 `onChat()` 提供；Provider 有提供增量串流時，best-effort fragment 另外由 `onChatDelta()` 提供。
 

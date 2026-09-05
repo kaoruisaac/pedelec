@@ -1337,7 +1337,7 @@ mod tests {
         )));
         assert!(emitted
             .iter()
-            .any(|event| matches!(event, ThreadEvent::Done { .. })));
+            .any(|event| matches!(event, ThreadEvent::OperationCompleted { success: true, .. })));
         assert!(!emitted.iter().any(|event| match event {
             ThreadEvent::ToolCall { .. } | ThreadEvent::ToolResult { .. } => true,
             _ => event_mentions_tool(event),
@@ -1638,6 +1638,7 @@ mod tests {
             .unwrap()
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.clone(),
+                operation_id: None,
             })
             .unwrap();
         let Some(operation) = start.intent else {
@@ -1964,9 +1965,9 @@ mod tests {
         assert!(!prepare_events
             .iter()
             .any(|event| matches!(event, ThreadEvent::AssistantDelta { .. })));
-        assert!(!prepare_events
+        assert!(prepare_events
             .iter()
-            .any(|event| matches!(event, ThreadEvent::Done { .. })));
+            .any(|event| matches!(event, ThreadEvent::OperationCompleted { success: true, .. })));
 
         dispatch_turn(&dispatcher, &runtime, &thread_id, "hello");
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
@@ -2000,7 +2001,7 @@ mod tests {
         assert_eq!(usage["totalTokens"], json!(7));
         assert!(emitted
             .iter()
-            .any(|event| matches!(event, ThreadEvent::Done { .. })));
+            .any(|event| matches!(event, ThreadEvent::OperationCompleted { success: true, .. })));
         let _ = owner.shutdown();
     }
 
@@ -2077,6 +2078,7 @@ mod tests {
             .unwrap()
             .begin_prepare_thread_intent(PrepareThreadInput {
                 thread_id: thread_id.to_string(),
+                operation_id: None,
             })
             .unwrap();
         let Some(operation) = start.intent else {
@@ -2097,6 +2099,7 @@ mod tests {
             .begin_send_text_intent(SendTextInput {
                 thread_id: thread_id.to_string(),
                 message: message.to_string(),
+                operation_id: None,
             })
             .unwrap();
         let operation = start.intent;

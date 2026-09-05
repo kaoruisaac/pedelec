@@ -3,9 +3,9 @@ use pedelec_core::{
     CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError,
     PedelecSettings, PersistentRuntimeOperation, PrepareThreadInput, PrepareThreadOutput,
     ProviderCode, ProviderProtocolTraffic, ProviderRuntimeDiagnostic, SendTextInput,
-    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ToolCallInput,
-    ToolInvocationOutcome, ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput,
-    UpdateSettingsInput,
+    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
+    ThreadSubscription, ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration,
+    ToolInvocationWait, ToolSpecInput, UpdateSettingsInput,
 };
 use pedelec_runtime::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
@@ -1643,9 +1643,14 @@ fn handle_core_ipc_connection(
         };
 
         if request.r#type == "subscribe_thread" {
-            let response = handle_subscribe_thread(&request, &runtime, Arc::clone(&writer));
-            let mut writer = writer.lock().unwrap();
-            write_json_line(&mut *writer, &response)?;
+            let (response, subscription) = handle_subscribe_thread(&request, &runtime);
+            {
+                let mut writer = writer.lock().unwrap();
+                write_json_line(&mut *writer, &response)?;
+            }
+            if let Some(subscription) = subscription {
+                spawn_thread_subscription_forwarder(subscription, Arc::clone(&writer));
+            }
             continue;
         }
 
@@ -1937,23 +1942,44 @@ fn handle_pick_workspace_folder_request(
 fn handle_subscribe_thread(
     request: &CoreIpcRequest,
     runtime: &SharedCoreRuntime,
-    writer: Arc<Mutex<TcpStream>>,
-) -> CoreIpcResponse {
+) -> (CoreIpcResponse, Option<ThreadSubscription>) {
     let input = match decode_payload::<SubscribeThreadInput>(request) {
         Ok(input) => input,
-        Err(err) => return error_response(&request.request_id, err),
+        Err(err) => return (error_response(&request.request_id, err), None),
     };
 
     if let Err(err) = authorize_thread_request(runtime, request, &input.thread_id) {
-        return error_response(&request.request_id, err);
+        return (error_response(&request.request_id, err), None);
     }
-    let event_rx = match runtime.lock().unwrap().subscribe_thread(input) {
-        Ok(event_rx) => event_rx,
-        Err(err) => return error_response(&request.request_id, err),
+    let subscription = match runtime
+        .lock()
+        .unwrap()
+        .subscribe_thread_with_snapshot(input)
+    {
+        Ok(subscription) => subscription,
+        Err(err) => return (error_response(&request.request_id, err), None),
     };
 
+    let snapshot = subscription.snapshot.clone();
+    (
+        ok_response(
+            &request.request_id,
+            serde_json::json!({ "subscribed": true, "snapshot": snapshot }),
+        ),
+        Some(subscription),
+    )
+}
+
+fn spawn_thread_subscription_forwarder(
+    subscription: ThreadSubscription,
+    writer: Arc<Mutex<TcpStream>>,
+) {
+    let cutoff = subscription.snapshot.latest_seq;
     thread::spawn(move || {
-        while let Ok(event) = event_rx.recv() {
+        while let Ok(event) = subscription.events.recv() {
+            if event.seq() <= cutoff {
+                continue;
+            }
             let message = CoreIpcEventMessage {
                 r#type: "thread_event".to_string(),
                 event,
@@ -1966,11 +1992,6 @@ fn handle_subscribe_thread(
             }
         }
     });
-
-    ok_response(
-        &request.request_id,
-        serde_json::json!({ "subscribed": true }),
-    )
 }
 
 fn authorize_thread_request(
@@ -2792,6 +2813,7 @@ mod tests {
                     SendTextInput {
                         thread_id: "send_text_wait".into(),
                         message: "hello".into(),
+                        operation_id: None,
                     },
                 ))
                 .unwrap();
@@ -2836,6 +2858,7 @@ mod tests {
                     request_runtime,
                     PrepareThreadInput {
                         thread_id: "prepare_thread_wait".into(),
+                        operation_id: None,
                     },
                 ))
                 .unwrap();

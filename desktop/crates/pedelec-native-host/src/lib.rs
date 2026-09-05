@@ -25,7 +25,7 @@ pub fn run() -> io::Result<()> {
 fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> {
     let mut stdin = io::stdin();
     let stdout = Arc::new(Mutex::new(io::stdout()));
-    let mut connection = NativeConnectionState::default();
+    let connection = Arc::new(Mutex::new(NativeConnectionState::default()));
 
     #[cfg(debug_assertions)]
     eprintln!("pedelec-native-host started");
@@ -69,7 +69,11 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
                 continue;
             };
 
-            if !connection.mark_subscription(&thread_id, request.caller_origin.as_deref()) {
+            let marked = connection
+                .lock()
+                .unwrap()
+                .mark_subscription(&thread_id, request.caller_origin.as_deref());
+            if !marked {
                 let mut stdout = stdout.lock().unwrap();
                 write_chrome_message(
                     &mut *stdout,
@@ -84,15 +88,20 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
             let result = start_forward_subscription(
                 request.clone(),
                 Arc::clone(&stdout),
+                Arc::clone(&connection),
                 runtime_file_path.as_deref(),
             );
             match result {
                 Ok(true) => {}
-                Ok(false) => {
-                    connection.remove_subscription(&thread_id, request.caller_origin.as_deref())
-                }
+                Ok(false) => connection
+                    .lock()
+                    .unwrap()
+                    .remove_subscription(&thread_id, request.caller_origin.as_deref()),
                 Err(err) => {
-                    connection.remove_subscription(&thread_id, request.caller_origin.as_deref());
+                    connection
+                        .lock()
+                        .unwrap()
+                        .remove_subscription(&thread_id, request.caller_origin.as_deref());
                     let mut stdout = stdout.lock().unwrap();
                     write_chrome_message(
                         &mut *stdout,
@@ -392,6 +401,7 @@ fn native_error_response(request_id: &str, error: PedelecError) -> NativeProtoco
 fn start_forward_subscription(
     request: CoreIpcRequest,
     stdout: Arc<Mutex<io::Stdout>>,
+    connection: Arc<Mutex<NativeConnectionState>>,
     runtime_file_path: Option<&Path>,
 ) -> Result<bool, PedelecError> {
     let mut stream = match runtime_file_path {
@@ -431,12 +441,18 @@ fn start_forward_subscription(
         return Ok(false);
     }
 
+    let thread_id = subscription_thread_id(&request).unwrap_or_default();
+    let caller_origin = request.caller_origin.clone();
     thread::spawn(move || loop {
         let line = match read_bounded_json_line(&mut reader) {
             Ok(line) => line,
             Err(err) => {
-                let response = native_error_response(
-                    "",
+                connection
+                    .lock()
+                    .unwrap()
+                    .remove_subscription(&thread_id, caller_origin.as_deref());
+                let response = subscription_closed_notification(
+                    &thread_id,
                     PedelecError::with_details(
                         error_codes::NATIVE_CONNECTION_CLOSED,
                         "Core IPC subscription closed",
@@ -453,31 +469,51 @@ fn start_forward_subscription(
         let message: Value = match serde_json::from_slice(&line) {
             Ok(message) => message,
             Err(err) => {
-                let response = native_error_response(
-                    "",
+                let response = subscription_closed_notification(
+                    &thread_id,
                     PedelecError::with_details(
                         error_codes::IPC_UNAVAILABLE,
                         "Core IPC event was not valid JSON",
                         serde_json::json!({ "error": err.to_string() }),
                     ),
                 );
+                connection
+                    .lock()
+                    .unwrap()
+                    .remove_subscription(&thread_id, caller_origin.as_deref());
                 if let Ok(mut stdout) = stdout.lock() {
                     let _ = write_chrome_message(&mut *stdout, &response);
                 }
-                continue;
+                break;
             }
         };
 
         if let Ok(mut stdout) = stdout.lock() {
             if write_chrome_message(&mut *stdout, &message).is_err() {
+                connection
+                    .lock()
+                    .unwrap()
+                    .remove_subscription(&thread_id, caller_origin.as_deref());
                 break;
             }
         } else {
+            connection
+                .lock()
+                .unwrap()
+                .remove_subscription(&thread_id, caller_origin.as_deref());
             break;
         }
     });
 
     Ok(true)
+}
+
+fn subscription_closed_notification(thread_id: &str, error: PedelecError) -> Value {
+    serde_json::json!({
+        "type": "thread_subscription_closed",
+        "threadId": thread_id,
+        "error": error,
+    })
 }
 
 fn core_subscription_error(err: io::Error) -> PedelecError {
@@ -892,6 +928,37 @@ mod tests {
         assert!(!state.mark_subscription("thread_1", Some("https://app.example.com")));
         assert!(state.mark_subscription("thread_1", Some("https://other.example.com")));
         assert!(state.mark_subscription("thread_2", None));
+        assert_eq!(state.subscriptions.len(), 3);
+    }
+
+    #[test]
+    fn subscription_closed_notification_contains_the_thread_id() {
+        let notification = subscription_closed_notification(
+            "thread_closed",
+            PedelecError::new(error_codes::NATIVE_CONNECTION_CLOSED, "closed"),
+        );
+
+        assert_eq!(notification["type"], json!("thread_subscription_closed"));
+        assert_eq!(notification["threadId"], json!("thread_closed"));
+        assert_eq!(notification["error"]["code"], json!(error_codes::NATIVE_CONNECTION_CLOSED));
+    }
+
+    #[test]
+    fn retired_subscription_can_be_readded_without_retiring_unrelated_members() {
+        let mut state = NativeConnectionState::default();
+        assert!(state.mark_subscription("thread_a", Some("https://app.example.com")));
+        assert!(state.mark_subscription("thread_b", Some("https://app.example.com")));
+
+        state.remove_subscription("thread_a", Some("https://app.example.com"));
+        assert!(!state.subscriptions.contains(&NativeSubscriptionKey {
+            thread_id: "thread_a".into(),
+            caller_origin: Some("https://app.example.com".into()),
+        }));
+        assert!(state.subscriptions.contains(&NativeSubscriptionKey {
+            thread_id: "thread_b".into(),
+            caller_origin: Some("https://app.example.com".into()),
+        }));
+        assert!(state.mark_subscription("thread_a", Some("https://app.example.com")));
     }
 
     #[test]
@@ -914,7 +981,11 @@ mod tests {
         assert!(native.ok);
         assert_eq!(native.r#type, "response");
         assert_eq!(native.request_id, "req_subscribe");
-        assert_eq!(native.result.unwrap(), json!({ "subscribed": true }));
+        let result = native.result.unwrap();
+        assert_eq!(result["subscribed"], json!(true));
+        assert_eq!(result["snapshot"]["threadId"], json!("thread_subscribe"));
+        assert_eq!(result["snapshot"]["status"], json!("idle"));
+        assert!(result["snapshot"]["latestSeq"].is_number());
     }
 
     #[test]

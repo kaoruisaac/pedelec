@@ -61,7 +61,8 @@ const session = await pedelec.resumeSession(savedSessionId);
 1. 要求 non-empty session ID；
 2. 目前 origin 未核准時觸發 approval；
 3. 將目前 SDK route subscribe 到既有 Core thread；
-4. 回傳 `PedelecSession` handle。
+4. reconciliation 回傳的 authoritative lifecycle snapshot，包括 status、active/last operation identity，以及可能存在的 pending tool request；
+5. 回傳已同步的 `PedelecSession` handle。
 
 空 ID 會收到 `INVALID_INPUT`。
 
@@ -88,14 +89,14 @@ Generic fallback 可協助 migration，但不應取代每個 tool 的 deliberate
 
 ## Resume 後的 provider/effort metadata
 
-目前 resume bridge 回傳 `sessionId`，不是完整 Core session record，因此新 resumed handle 可能是：
+Resume bridge 會回傳 `sessionId` 與內部 lifecycle snapshot，但不是完整 Core session record。因此 provider metadata 仍可能不可用，但 lifecycle status 會是 authoritative：
 
 ```ts
 session.provider === "";
 session.effortLevel === undefined;
 ```
 
-Reload 後 UI 需要 provider 或 effort level 時，請和 session ID 一起保存，或從 application-owned persistence 載入。不要假設 `resumeSession()` 會 rehydrate 所有 metadata。
+Reload 後 UI 需要 provider 或 effort level 時，請和 session ID 一起保存，或從 application-owned persistence 載入。不要假設 `resumeSession()` 會 rehydrate 所有 metadata；但 `resumeSession()` resolve 後可依 `getStatus()` 取得 Core lifecycle state。
 
 `session.sessionCreatedAt` 是 browser-side handle construction time，不是原始 Core creation time。
 
@@ -170,6 +171,8 @@ Extension 可以將一個 session route 給多條 SDK connections。Automatic en
 - application state 可能在 tabs 間分歧。
 
 除非刻意支援 cross-tab collaboration，建議保存 ownership token 或避免多個 active controller。
+
+Native Host 或單一 thread subscription disconnect 時，Extension 會恢復 subscription 並重新 reconciliation snapshot，不會自動重送可能語意不明的 `sendText()`、`prepare()` 或 tool-result mutation。請保留 operation ID 與 promise error 作為 diagnostics，讓恢復後的 authoritative state 決定下一個操作。
 
 ## 如何選擇 lifecycle
 
