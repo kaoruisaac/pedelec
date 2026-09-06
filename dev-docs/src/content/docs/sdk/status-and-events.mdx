@@ -23,10 +23,12 @@ type PedelecSessionStatus =
 | `idle` | No active turn; ready for another prompt | Yes |
 | `running` | Preparation or a user turn is active | No |
 | `waiting_tool_result` | The agent requested a frontend tool and is waiting | No |
-| `ended` | The session is permanently ended | No |
+| `ended` | The session has ended; the same attached handle may explicitly call `resume()` if Core and its recorded workspace are still recoverable | No until `resume()` succeeds |
 | `error` | Runtime reported a session error | No; recover by app policy, often a new/resumed session |
 
 New `PedelecSession` objects begin in `idle` locally. A handle returned by `resumeSession()` is synchronized from Core before the promise resolves, so it can initially report `running`, `waiting_tool_result`, `error`, or `ended` instead.
+
+`Pedelec.resumeSession(sessionId)` only reattaches to an existing thread, so an ended thread stays `ended`. `PedelecSession.resume()` is the explicit same-handle `ended → idle` transition. It preserves the handle's handlers and session state, and provider runtime work remains lazy until the next normal operation.
 
 ## Common transitions
 
@@ -80,6 +82,7 @@ The SDK can emit a status before Core replies, for responsive UI:
 - `sendText()` and `prepare()` set `running` locally;
 - a tool event sets `waiting_tool_result` while being handled;
 - `end()` marks the session ended locally after its request succeeds.
+- `session.resume()` does not optimistically set `idle`; the authoritative Core snapshot and operation-less `status_changed` event set that state.
 
 Context identifies origin:
 
@@ -125,7 +128,7 @@ type EndedEventContext = PedelecEventContext & {
 };
 ```
 
-`onEnded()` runs once when the session first becomes ended, whether caused by a runtime event or a successful local `end()` call.
+`onEnded()` runs once for each transition into `ended`, whether caused by a runtime event or a successful local `end()` call. Duplicate ended notifications while the handle is already `ended` do not run it again. After a successful same-handle `ended` -> `idle` `resume()`, a later transition back to `ended` runs the callback once for that new lifecycle transition.
 
 Pending `sendText()` or `prepare()` work rejects with `SESSION_ENDED` when the session ends.
 
@@ -170,7 +173,7 @@ Use `toolRequestId` for diagnostics and application bookkeeping, not for manuall
 
 Core events can include a per-session sequence number. The client ignores an event whose sequence is not newer than the last one seen for that session, and operation-scoped events are accepted only for the active matching operation ID. Application code should still be resilient to rapid transitions and late asynchronous work inside its own handlers.
 
-When a subscription is recreated, the SDK receives an authoritative lifecycle snapshot before live events resume. A resumed or recovered handle uses that snapshot to adopt the Core status and active operation. If Core reports a pending frontend tool, register its handler after `resumeSession()`; the SDK keeps the recovered request queued and submits it once a matching handler is available.
+When a subscription is recreated, the SDK receives an authoritative lifecycle snapshot before live events resume. A resumed or recovered handle uses that snapshot to adopt the Core status and active operation. If Core reports a pending frontend tool, register its handler after `resumeSession()`; the SDK keeps the recovered request queued and submits it once a matching handler is available. Same-handle `session.resume()` also reconciles its post-reactivation snapshot before the promise resolves, so `getStatus()` is `idle` at the await boundary.
 
 ## UI mapping
 

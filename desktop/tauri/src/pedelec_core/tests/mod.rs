@@ -4492,6 +4492,261 @@ mod tests {
     }
 
     #[test]
+    fn resume_thread_reactivates_an_ended_managed_workspace_and_returns_idle_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_resume_managed";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Codex,
+            Some("provider-session".into()),
+            None,
+        );
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        let events = runtime.event_bus.subscribe(thread_id);
+        let before = runtime.event_bus.latest_seq(thread_id);
+
+        let resumed = runtime
+            .resume_thread(ResumeThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+
+        assert_eq!(resumed.snapshot.status, ThreadStatus::Idle);
+        assert!(resumed.snapshot.latest_seq > before);
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+        assert!(runtime.tool_registry.get(thread_id).is_some());
+        assert!(runtime.event_log_path(thread_id).is_some());
+        assert_eq!(
+            runtime
+                .provider_state(thread_id)
+                .unwrap()
+                .provider_session_id
+                .as_deref(),
+            Some("provider-session")
+        );
+        let events = collect_available_core_events(&events);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ThreadEvent::StatusChanged {
+                status: ThreadStatus::Idle,
+                operation_id: None,
+                ..
+            }
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::Created { .. })));
+
+        let start = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "continue after resume".into(),
+                operation_id: None,
+            })
+            .unwrap();
+        let PersistentRuntimeOperation::StartTurn { turn } = start.intent else {
+            panic!("expected a persistent StartTurn intent after resume");
+        };
+        assert_eq!(turn.thread_id, thread_id);
+        assert_eq!(
+            turn.provider_session_id.as_deref(),
+            Some("provider-session")
+        );
+    }
+
+    #[test]
+    fn resume_thread_preserves_snapshot_state_and_writes_idle_to_new_event_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_resume_preservation";
+        let mut runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Codex,
+            Some("provider-session-preserved".into()),
+            None,
+        );
+        let old_log_path = temp.path().join("old-events.jsonl");
+        runtime
+            .event_bus
+            .register_thread_log(thread_id, old_log_path.clone());
+        let workspace_path = runtime.thread_workspace_path(thread_id).unwrap();
+        fs::create_dir_all(workspace_skills_root(&workspace_path)).unwrap();
+        fs::write(
+            workspace_skills_root(&workspace_path).join("tools.json"),
+            json!({
+                "tools": [{
+                    "name": "get_app_state",
+                    "description": "Read state.",
+                    "argsSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": false
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        runtime.set_session_total_tokens(thread_id, 37).unwrap();
+        let completed = CompletedOperationSnapshot {
+            operation_id: "completed-before-end".into(),
+            operation_kind: ThreadOperationKind::User,
+            success: true,
+            error: None,
+            completed_at: chrono::Utc::now(),
+        };
+        runtime
+            .last_completed_operations
+            .insert(thread_id.into(), completed.clone());
+
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+
+        let resumed = runtime
+            .resume_thread(ResumeThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            resumed.snapshot.usage,
+            Some(SessionUsage { total_tokens: 37 })
+        );
+        assert_eq!(resumed.snapshot.last_completed_operation, Some(completed));
+        assert_eq!(
+            runtime
+                .provider_session_state(thread_id)
+                .unwrap()
+                .provider_session_id
+                .as_deref(),
+            Some("provider-session-preserved")
+        );
+        let registry = runtime.tool_registry.get(thread_id).unwrap();
+        assert!(registry.get("get_app_state").is_some());
+
+        let new_log_path = runtime.event_log_path(thread_id).unwrap();
+        assert_ne!(new_log_path, old_log_path);
+        let records = fs::read_to_string(new_log_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["event"]["type"], json!("status_changed"));
+        assert_eq!(records[0]["event"]["status"], json!("idle"));
+        assert_eq!(records[0]["seq"], json!(resumed.snapshot.latest_seq));
+    }
+
+    #[test]
+    fn resume_thread_reactivates_an_ended_custom_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_path = temp.path().join("custom-workspace");
+        fs::create_dir_all(workspace_skills_root(&workspace_path)).unwrap();
+        let thread_id = "thread_resume_custom";
+        let mut runtime = CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
+            ..CoreRuntime::default()
+        };
+        let now = chrono::Utc::now();
+        runtime.thread_manager.insert_thread(
+            ThreadState {
+                thread_id: thread_id.into(),
+                provider: ProviderCode::Codex,
+                effort_level: EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: workspace_path.clone(),
+                skills: Vec::new(),
+                status: ThreadStatus::Ended,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: None,
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+
+        let resumed = runtime
+            .resume_thread(ResumeThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+
+        assert_eq!(resumed.snapshot.status, ThreadStatus::Idle);
+        assert_eq!(
+            runtime.thread_workspace_path(thread_id),
+            Some(workspace_path)
+        );
+        assert!(runtime.tool_registry.get(thread_id).is_some());
+    }
+
+    #[test]
+    fn resume_thread_missing_or_non_directory_workspace_stays_ended() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_resume_missing_workspace";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        let workspace_path = runtime.thread_workspace_path(thread_id).unwrap();
+        runtime
+            .end_thread(EndThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        fs::remove_dir_all(&workspace_path).unwrap();
+
+        let error = runtime
+            .resume_thread(ResumeThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::WORKSPACE_OPEN_FAILED);
+        assert_eq!(
+            error.details.as_ref().unwrap()["threadId"],
+            json!(thread_id)
+        );
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Ended));
+        assert!(runtime.tool_registry.get(thread_id).is_none());
+        assert_eq!(runtime.event_log_path(thread_id), None);
+
+        fs::write(&workspace_path, "not a directory").unwrap();
+        let error = runtime
+            .resume_thread(ResumeThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::WORKSPACE_OPEN_FAILED);
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Ended));
+    }
+
+    #[test]
+    fn resume_thread_is_idempotent_when_already_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_resume_idle";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        let before = runtime.event_bus.latest_seq(thread_id);
+
+        let resumed = runtime
+            .resume_thread(ResumeThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+
+        assert_eq!(resumed.snapshot.status, ThreadStatus::Idle);
+        assert_eq!(resumed.snapshot.latest_seq, before);
+    }
+
+    #[test]
     fn cleanup_for_app_exit_removes_orphan_workspace_directories() {
         let temp = tempfile::tempdir().unwrap();
         let workspace_root = temp.path().join("workspace");

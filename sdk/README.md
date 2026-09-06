@@ -144,6 +144,18 @@ await session.sendText("Please help me analyze the current page state");
 
 `sendText()` resolves after Core reports the matching semantic operation as completed. An `idle` status or bridge request response alone does not complete it. If the session is already handling a previous prompt, the new `sendText()` call is rejected to prevent multiple concurrent requests from running in the same session.
 
+## End and resume a session
+
+```ts
+await session.end();
+await session.resume();
+
+console.log(session.getStatus()); // "idle"
+await session.sendText("Continue");
+```
+
+`session.resume()` reactivates the same non-detached handle and Core thread when Core still knows the thread and its recorded workspace still exists. It preserves handlers and session state, does not contact the provider runtime, and leaves provider startup/resume lazy until the next operation. A missing workspace returns `WORKSPACE_OPEN_FAILED`; a thread lost after a Desktop/Core restart returns `THREAD_NOT_FOUND`. `pedelec.resumeSession(sessionId)` is a separate reattachment API: it returns a new handle and does not implicitly revive an ended thread. A transport-detached old handle must use that API.
+
 ## Session assets
 
 ```ts

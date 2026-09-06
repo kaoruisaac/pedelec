@@ -414,6 +414,17 @@ session.onChat((text) => {
 await session.sendText("Continue the previous work");
 ```
 
+`pedelec.resumeSession(sessionId)` only reattaches to an existing Core thread. It does not revive an ended thread. If the original, non-detached handle was explicitly ended, the same JavaScript object can reactivate it while Core still knows the thread and its recorded workspace still exists:
+
+```ts
+await session.end();
+await session.resume();
+console.log(session.getStatus()); // "idle"
+await session.sendText("Continue the previous work");
+```
+
+This preserves the same thread ID, handlers, usage, and session metadata. Reactivation does not contact the provider runtime; provider work resumes lazily on the next operation. A missing recorded workspace returns `WORKSPACE_OPEN_FAILED`, and a thread lost during a Desktop/Core restart returns `THREAD_NOT_FOUND`; workspace contents alone cannot reconstruct it. A transport-detached handle must use `pedelec.resumeSession(sessionId)`, which returns a new handle and leaves an ended thread ended.
+
 ---
 
 ## Ending a Session
@@ -422,7 +433,7 @@ await session.sendText("Continue the previous work");
 await session.end();
 ```
 
-After a session ends, `sendText()` can no longer be called on it. Create a new session with `createSession()` if you need a new conversation.
+After a session ends, `sendText()` cannot be called until the same attached handle successfully calls `session.resume()`, if the thread remains recoverable. Create a new session with `createSession()` for a separate conversation or when reactivation is no longer possible.
 
 Ending a session does not immediately delete its workspace. Sessions without `workspace.path` use temporary Desktop-managed storage: managed workspaces are removed on normal Desktop App exit, and leftover directories are cleaned up on the next app launch. An explicit absolute `workspace.path` is application-managed and is never deleted by Pedelec on session end, app exit, or stale cleanup; multiple active sessions may share it. Closing the main window only hides the app and does not trigger managed cleanup. Ended sessions cannot access retained workspace assets through the asset APIs, and explicit shared workspaces do not receive filesystem conflict coordination.
 

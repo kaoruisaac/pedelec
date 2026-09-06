@@ -903,6 +903,46 @@ mod tests {
             "preserve me"
         );
 
+        let resume = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "persistent_e2e_resume".into(),
+                r#type: "resume_thread".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(json!({ "threadId": thread_id })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+        assert!(resume.ok);
+        assert_eq!(
+            resume.result.as_ref().unwrap()["snapshot"]["status"],
+            "idle"
+        );
+
+        let resume_events = collect_ipc_events_until(&mut subscription, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ThreadEvent::StatusChanged {
+                        status: ThreadStatus::Idle,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(resume_events.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::StatusChanged {
+                    status: ThreadStatus::Idle,
+                    ..
+                }
+            )
+        }));
+        events.extend(resume_events);
+        assert_thread_event_seq_is_strictly_increasing(&events);
+
         let operations = dispatcher.operations.lock().unwrap();
         assert_eq!(operations.len(), 2);
         assert!(matches!(

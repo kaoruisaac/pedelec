@@ -218,7 +218,7 @@ checkAvailability(): Promise<PedelecAvailability>
 resumeSession(sessionId: string): Promise<PedelecSession<string>>
 ```
 
-讓此 SDK client subscribe 到既有 Core session。
+讓此 SDK client 以新的 handle subscribe 到既有 Core session。這是 reattachment，不會把 `Ended` thread 重新啟用；若要在 `end()` 後繼續使用同一個 handle，請改用 `session.resume()`。
 
 ```ts
 const session = await pedelec.resumeSession(savedSessionId);
@@ -228,7 +228,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 | --- | --- | --- |
 | `sessionId` | `string` | Non-empty Core session/thread identifier。 |
 
-回傳註冊於此 client 的 session handle。目前 bridge 只回傳 ID，因此新的 resumed handle 可能沒有 provider/effort metadata。
+回傳註冊於此 client 的 session handle。目前 bridge 只回傳 ID，因此新的 resumed handle 可能沒有 provider/effort metadata。若 Core session 已是 `Ended`，這個 handle 會維持 `ended`，直到明確呼叫 `session.resume()`（且 workspace 仍可載入）或建立新的 session。
 
 常見 errors：空 ID 的 `INVALID_INPUT`、approval errors、caller origin 無法傳遞時的 `SDK_ORIGIN_UNAVAILABLE`、session 屬於其他 origin 時的 `THREAD_ACCESS_DENIED`、Core 已找不到 ID 時的 `THREAD_NOT_FOUND`，以及 transport errors。
 
@@ -273,7 +273,7 @@ const result = await pedelec.request<{ sessionId: string }>(
 
 ## Client disconnection
 
-Extension port disconnect 時，已透過該 port 送出的 request 會 reject，registered sessions 收到 SDK error event。Parent client 仍可 reuse，下一個新的 operation 會 reconnect；舊 session handle 不會靜默遷移，因此要繼續明確保留的 session 時請呼叫 `resumeSession(sessionId)`。
+Extension port disconnect 時，已透過該 port 送出的 request 會 reject，registered sessions 收到 SDK error event。Parent client 仍可 reuse，下一個新的 operation 會 reconnect；舊 session handle 不會靜默遷移。若 handle 只是 transport-detached，請呼叫 `resumeSession(sessionId)` 取得新的 handle；若 handle 是明確 `end()` 且仍符合 reactivation 條件，則可在同一個 handle 上呼叫 `session.resume()`。
 
 ## Related references
 

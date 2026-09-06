@@ -121,7 +121,7 @@ unsubscribeError();
 unsubscribeEnded();
 ```
 
-對已 ended 的 session 再呼叫 `end()` 不會重複執行。Session 一旦結束，就不能再接收新訊息。
+對已 ended 的 session 再呼叫 `end()` 不會重複執行。Session 處於 ended 期間，相同 handle 必須先成功呼叫 `session.resume()` 回到 `idle`，才能接收新訊息。
 
 ## 完整範例
 

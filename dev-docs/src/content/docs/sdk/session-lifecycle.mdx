@@ -46,7 +46,7 @@ localStorage.setItem("pedelec-session", JSON.stringify(record));
 
 With `false`, loss of the SDK route does not automatically end the Core session. The application can later resume using the saved ID.
 
-The browser-side `PedelecSession` handle remains bound to the SDK route that created it. If that runtime port disconnects, the handle becomes unusable even when the parent `Pedelec` client reconnects. Call `resumeSession(sessionId)` explicitly to subscribe a new handle to the surviving Core session; the SDK does not silently migrate old session operations.
+The browser-side `PedelecSession` handle remains bound to the SDK route that created it. If that runtime port disconnects, the handle becomes unusable even when the parent `Pedelec` client reconnects. Call `resumeSession(sessionId)` explicitly to subscribe a new handle to the surviving Core session; the SDK does not silently migrate old session operations. A handle that is explicitly ended is different: if its transport is still attached, the same object can call `session.resume()` to reactivate the ended Core thread.
 
 Use this only when you have a deliberate retention and cleanup policy. A session that is never resumed or ended can remain in Desktop state longer than the UI implies.
 
@@ -61,7 +61,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 1. requires a non-empty session ID;
 2. triggers origin approval if the current origin is not approved;
 3. subscribes the current SDK route to the existing Core thread;
-4. reconciles the returned authoritative lifecycle snapshot, including status, active/last operation identity, and a pending tool request when present;
+4. reconciles the returned authoritative lifecycle snapshot, including status, active/last operation identity, and a pending tool request when present. An ended thread remains ended; this method never implicitly calls Core `resume_thread`;
 5. returns a synchronized `PedelecSession` handle.
 
 When Core already knows normalized token usage, the same resume snapshot hydrates `session.usage.totalTokens`. A missing usage field means that no supported total is known yet; it does not reset usage on an existing handle.
@@ -70,9 +70,31 @@ An empty ID rejects with `INVALID_INPUT`.
 
 If Core no longer knows the ID, it returns `THREAD_NOT_FOUND`; remove stale persistence or create another session. If the session belongs to another browser origin, access rejects with `THREAD_ACCESS_DENIED`. The SDK does not silently create a replacement session.
 
+## Reactivate the same ended handle
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+
+await session.sendText("First task");
+await session.end();
+await session.resume();
+
+console.log(session.getStatus()); // "idle"
+await session.sendText("Continue");
+```
+
+`PedelecSession.resume()` is an explicit `Ended → Idle` Core lifecycle transition for the same non-detached browser handle. It preserves the thread ID, handlers, usage, provider/effort metadata, `prepared` state, and provider session identity. It does not start or contact the provider runtime; the next `sendText()` or other normal operation resumes provider work lazily.
+
+Reactivation succeeds only while Core still knows the thread and its recorded `workspace_path` still exists and is a directory. Managed and explicit application workspaces are both supported. A missing or unusable workspace rejects with `WORKSPACE_OPEN_FAILED`; workspace contents alone cannot reconstruct a thread after a Desktop/Core restart. A missing Core thread rejects with `THREAD_NOT_FOUND`.
+
+`resume()` is idempotent for an active handle, and concurrent calls on one ended handle share one request. A transport-detached handle rejects; use `pedelec.resumeSession(sessionId)` to attach a new handle to a surviving Core thread instead. The detached-handle rule also applies when the Core thread is ended.
+
 ## Re-register every browser handler
 
-Handlers are JavaScript functions and cannot survive reload. Resume first, then attach them again:
+Handlers are JavaScript functions and cannot survive reload. For `Pedelec.resumeSession()`, resume first, then attach them again:
 
 ```ts
 const session = await pedelec.resumeSession(record.sessionId);
@@ -85,11 +107,11 @@ const offEnded = session.onEnded(handleEnded);
 const offTool = session.onTool("update_counter", handleUpdateCounter);
 ```
 
-Inline handlers from the original `createSession({ skills })` call are not automatically reconstructed by a new page. The Core session still has its tool manifest, but the newly resumed browser must register handlers for any tools the agent may call.
+Inline handlers from the original `createSession({ skills })` call are not automatically reconstructed by a new page. The Core session still has its tool manifest, but the newly resumed browser must register handlers for any tools the agent may call. Same-handle `session.resume()` keeps its existing handlers, including inline handlers.
 
 A generic fallback is useful during migration, but it should not replace deliberate per-tool validation.
 
-## Provider and effort metadata after resume
+## Provider and effort metadata after reattachment
 
 The resume bridge returns the `sessionId` plus an internal lifecycle snapshot, not the full Core session record. Therefore provider metadata may still be unavailable on a newly constructed resumed handle, while its lifecycle status is authoritative:
 
@@ -98,13 +120,13 @@ session.provider === "";
 session.effortLevel === undefined;
 ```
 
-If the UI needs these fields after reload, save them with the session ID or load them from application-owned persistence. Do not assume `resumeSession()` rehydrates all metadata, but do rely on `getStatus()` for the Core lifecycle state after resume resolves.
+If the UI needs these fields after reload, save them with the session ID or load them from application-owned persistence. Do not assume `resumeSession()` rehydrates all metadata, but do rely on `getStatus()` for the Core lifecycle state after it resolves. Same-handle `session.resume()` preserves the metadata already known by that object.
 
 `session.sessionCreatedAt` is the time the browser-side handle was constructed, not the original Core session creation time.
 
 ## Avoid resuming twice accidentally
 
-SSR hydration, React Strict Mode development behavior, or duplicated effects can call resume more than once. Guard the operation in application state:
+SSR hydration, React Strict Mode development behavior, or duplicated effects can call `resumeSession()` more than once. Guard reattachment in application state:
 
 ```ts
 let resumePromise: Promise<PedelecSession> | null = null;
@@ -127,9 +149,9 @@ A successful `end()`:
 
 - asks Core to end the session;
 - marks the SDK handle `ended`;
-- emits `onEnded()` once;
+- emits `onEnded()` once for this transition into `ended`;
 - unregisters the session from the client; and
-- causes future `sendText()`/`prepare()` calls to reject with `SESSION_ENDED`.
+- causes future `sendText()`/`prepare()` calls to reject with `SESSION_ENDED` until same-handle `resume()` succeeds.
 
 `end()` does not immediately delete the session workspace. The lifecycle depends on how the session was created:
 
@@ -139,6 +161,8 @@ A successful `end()`:
 The ended handle cannot access assets through `uploadAsset()`, `listAssets()`, or `readAsset()`, even before cleanup runs. Shared workspaces do not receive filesystem conflict coordination from Pedelec, and an explicit path must not overlap the managed workspace root. Locked files can leave managed cleanup for a later launch.
 
 Calling `end()` again on the same already-ended handle resolves without another request.
+
+`session.resume()` is the separate explicit reactivation operation; it requires the same handle's transport to remain attached and does not reconstruct a thread from workspace contents.
 
 If the end request fails, `end()` emits an SDK error and rejects. The session is not locally marked ended by that failed call, because Core state is uncertain.
 

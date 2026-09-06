@@ -632,7 +632,8 @@ export class Pedelec {
       result.sessionId,
       resolvedInput.provider,
       resolvedInput.effortLevel,
-      resolvedInput.inlineToolHandlers
+      resolvedInput.inlineToolHandlers,
+      resolvedInput.autoEndOnDisconnect,
     );
   }
 
@@ -679,14 +680,18 @@ export class Pedelec {
     const existing = this.sessions.get(sessionId);
     const session = existing && !existing.isTransportDetached()
       ? existing
-      : this.registerSession(sessionId, "", undefined);
+      : this.registerSession(sessionId, "", undefined, new Map(), false);
     try {
-      const result = await this.request<{ sessionId: string }>("resume_session", {
+      const result = await this.request<{ sessionId: string; autoEndOnDisconnect?: boolean }>("resume_session", {
         sessionId,
       });
 
       if (!result.sessionId) {
         throw makeError("SDK_PROTOCOL_ERROR", "resume_session response did not include sessionId");
+      }
+
+      if (typeof result.autoEndOnDisconnect === "boolean") {
+        session.setAutoEndOnDisconnect(result.autoEndOnDisconnect);
       }
 
       return session;
@@ -759,6 +764,16 @@ export class Pedelec {
   unregisterSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.lastSeqBySession.delete(sessionId);
+  }
+
+  /** @internal */
+  registerExistingSession(session: PedelecSession<any>): void {
+    this.sessions.set(session.sessionId, session);
+  }
+
+  /** @internal */
+  isSessionRegistered(sessionId: string, session: PedelecSession<any>): boolean {
+    return this.sessions.get(sessionId) === session;
   }
 
   private attachPageActivityListeners(): void {
@@ -974,7 +989,8 @@ export class Pedelec {
     sessionId: string,
     provider: string,
     effortLevel: EffortLevel | undefined,
-    inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map()
+    inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map(),
+    autoEndOnDisconnect = false,
   ): PedelecSession<string> {
     const existing = this.sessions.get(sessionId);
     if (existing && !existing.isTransportDetached()) {
@@ -982,7 +998,14 @@ export class Pedelec {
       return existing;
     }
 
-    const session = new PedelecSession<string>(this, sessionId, provider, effortLevel, inlineToolHandlers);
+    const session = new PedelecSession<string>(
+      this,
+      sessionId,
+      provider,
+      effortLevel,
+      inlineToolHandlers,
+      autoEndOnDisconnect,
+    );
     this.sessions.set(sessionId, session);
     return session;
   }
@@ -1150,8 +1173,10 @@ export class PedelecSession<TToolName extends string = string> {
   private pendingOperation: PendingOperation | null = null;
   private preparePromise: Promise<void> | null = null;
   private uploadPromise: Promise<AssetPath> | null = null;
+  private reactivationPromise: Promise<void> | null = null;
   private ending = false;
   private prepared = false;
+  private autoEndOnDisconnect: boolean;
   private activeTurn: ActiveTurn | null = null;
   private transportDetached = false;
   private genericToolHandler: GenericToolHandler<TToolName> | null = null;
@@ -1171,12 +1196,14 @@ export class PedelecSession<TToolName extends string = string> {
     sessionId: string,
     provider: string,
     effortLevel?: EffortLevel,
-    inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map()
+    inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map(),
+    autoEndOnDisconnect = false,
   ) {
     this.sessionId = sessionId;
     this.provider = provider;
     this.effortLevel = effortLevel;
     this.inlineToolHandlers = new Map(inlineToolHandlers);
+    this.autoEndOnDisconnect = autoEndOnDisconnect;
   }
 
   prepare(): Promise<void> {
@@ -1446,6 +1473,59 @@ export class PedelecSession<TToolName extends string = string> {
     this.client.unregisterSession(this.sessionId);
   }
 
+  resume(): Promise<void> {
+    if (this.transportDetached) {
+      return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
+    }
+    if (this.reactivationPromise) return this.reactivationPromise;
+    if (this.status !== "ended") return Promise.resolve();
+
+    const wasRegistered = this.client.isSessionRegistered(this.sessionId, this);
+    const promise = (async () => {
+      if (!wasRegistered) {
+        // end() intentionally removed the handle from the registry. Put the
+        // exact same object back before the ended snapshot can arrive.
+        this.client.registerExistingSession(this);
+      }
+
+      try {
+        const result = await this.client.request<{ sessionId?: string }>("reactivate_session", {
+          sessionId: this.sessionId,
+          autoEndOnDisconnect: this.autoEndOnDisconnect,
+        });
+        if (result?.sessionId !== this.sessionId) {
+          throw makeError("SDK_PROTOCOL_ERROR", "reactivate_session response did not include sessionId");
+        }
+        if (this.status !== "idle") {
+          throw makeError(
+            "SDK_PROTOCOL_ERROR",
+            "reactivate_session resolved before the authoritative idle snapshot",
+            { sessionId: this.sessionId },
+          );
+        }
+        this.ending = false;
+      } catch (err) {
+        const error = normalizeError(err, "SESSION_RESUME_FAILED", "session resume failed");
+        if (!this.transportDetached) this.emitError(error, { source: "sdk" });
+        if (!wasRegistered && isDeterministicResumeError(error) && this.status !== "idle") {
+          this.client.unregisterSession(this.sessionId);
+        }
+        throw error;
+      }
+    })();
+
+    const guardedPromise = promise.finally(() => {
+      if (this.reactivationPromise === guardedPromise) this.reactivationPromise = null;
+    });
+    this.reactivationPromise = guardedPromise;
+    return guardedPromise;
+  }
+
+  /** @internal */
+  setAutoEndOnDisconnect(autoEndOnDisconnect: boolean): void {
+    this.autoEndOnDisconnect = autoEndOnDisconnect;
+  }
+
   handleEvent(event: SessionEvent, meta: EventDispatchMeta = { source: "sdk" }): void {
     if (event.type === "usage_updated") {
       this.updateUsage(event.totalTokens);
@@ -1476,6 +1556,7 @@ export class PedelecSession<TToolName extends string = string> {
       if (event.operationId && !this.matchesActiveOperation(event.operationId)) return;
       if (!event.operationId && this.activeTurn) return;
       this.setStatus(event.status, meta);
+      if (event.status === "idle") this.ending = false;
       if (event.status === "ended") {
         this.markEnded(meta);
       } else if (event.status === "error") {
@@ -1530,6 +1611,7 @@ export class PedelecSession<TToolName extends string = string> {
   handleSnapshot(snapshot: SessionSnapshot, meta: EventDispatchMeta = { source: "core" }): void {
     if (!snapshot || snapshot.threadId !== this.sessionId) return;
     if (snapshot.usage) this.updateUsage(snapshot.usage.totalTokens);
+    if (snapshot.status === "idle") this.ending = false;
     const active = snapshot.activeOperation;
     const pending = this.pendingOperation;
     this.reconcileRecoveredToolCalls(snapshot);
@@ -2050,6 +2132,16 @@ function isAdmissionRejection(error: PedelecError): boolean {
     error.code === "THREAD_ENDED" ||
     error.code === "THREAD_ACCESS_DENIED" ||
     error.code === "THREAD_NOT_FOUND" ||
+    error.code === "INVALID_INPUT";
+}
+
+function isDeterministicResumeError(error: PedelecError): boolean {
+  return error.code === "THREAD_BUSY" ||
+    error.code === "THREAD_ENDED" ||
+    error.code === "THREAD_ACCESS_DENIED" ||
+    error.code === "THREAD_NOT_FOUND" ||
+    error.code === "WORKSPACE_OPEN_FAILED" ||
+    error.code === "PROVIDER_COMMAND_FAILED" ||
     error.code === "INVALID_INPUT";
 }
 

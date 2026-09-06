@@ -66,6 +66,7 @@ type DemoSessionState = {
   hasStartedSendText: boolean;
   prepared: boolean;
   preparing: boolean;
+  resuming: boolean;
   assets: Asset[];
   assetsLoading: boolean;
   assetsLoaded: boolean;
@@ -164,12 +165,14 @@ export default function App() {
   });
   const activeEvents = createMemo(() => activeSession()?.events ?? globalEvents());
   const canPrepare = createMemo(() => canPrepareSession(activeSession()));
+  const canResume = createMemo(() => canResumeSession(activeSession()));
   const canSend = createMemo(() => {
     const session = activeSession();
     return Boolean(
       session &&
         prompt().trim() &&
         session.status === "idle" &&
+        !session.resuming &&
         !session.sending &&
         !session.preparing &&
         !session.uploadingAsset,
@@ -183,6 +186,7 @@ export default function App() {
         file &&
         file.size <= MAX_ASSET_SIZE_BYTES &&
         session.status === "idle" &&
+        !session.resuming &&
         !session.uploadingAsset &&
         !session.preparing &&
         !session.sending,
@@ -327,11 +331,30 @@ export default function App() {
     }
   }
 
+  async function resumeActiveSession() {
+    const state = activeSession();
+    if (!state || !canResumeSession(state)) return;
+
+    updateSession(state.sessionId, (current) => ({ ...current, resuming: true, updatedAt: Date.now() }));
+    appendSessionEvent(state.sessionId, "session_resume_requested", {});
+
+    try {
+      await state.session.resume();
+      appendSessionEvent(state.sessionId, "session_resume_resolved", {});
+    } catch (err) {
+      recordError(toDemoError(err, state.sessionId), state.sessionId);
+      appendSessionEvent(state.sessionId, "session_resume_rejected", {});
+    } finally {
+      updateSession(state.sessionId, (current) => ({ ...current, resuming: false, updatedAt: Date.now() }));
+    }
+  }
+
   async function sendText(event: SubmitEvent) {
     event.preventDefault();
     const session = activeSession();
     const text = prompt().trim();
     if (!session || !text) return;
+    if (session.resuming) return;
 
     if (session.status === "ended") {
       recordError(toDemoError({ code: "SESSION_ENDED", message: "session has ended" }, session.sessionId));
@@ -361,7 +384,7 @@ export default function App() {
 
   async function endSession(sessionId: string) {
     const state = sessions().find((session) => session.sessionId === sessionId);
-    if (!state) return;
+    if (!state || state.resuming) return;
 
     try {
       appendSessionEvent(sessionId, "end_session_requested", {});
@@ -377,6 +400,7 @@ export default function App() {
     const state = activeSession();
     const file = selectedAsset();
     if (!state || !file) return;
+    if (state.resuming) return;
 
     if (file.size > MAX_ASSET_SIZE_BYTES) {
       recordError(
@@ -487,6 +511,7 @@ export default function App() {
       hasStartedSendText: false,
       prepared: false,
       preparing: false,
+      resuming: false,
       assets: [],
       assetsLoading: false,
       assetsLoaded: false,
@@ -869,13 +894,16 @@ export default function App() {
                     <Info label="Updated" value={formatTime(session().updatedAt)} />
                   </div>
                   <div class="session-actions">
+                    <button type="button" disabled={!canResume()} onClick={() => void resumeActiveSession()}>
+                      {session().resuming ? "Resuming..." : "Resume"}
+                    </button>
                     <button type="button" disabled={!canPrepare()} onClick={() => void prepareSession()}>
                       {session().preparing ? "Preparing..." : "Prepare"}
                     </button>
                     <button
                       type="button"
                       class="danger"
-                      disabled={session().status === "ended"}
+                      disabled={session().status === "ended" || session().resuming}
                       onClick={() => endSession(session().sessionId)}
                     >
                       End Session
@@ -921,7 +949,12 @@ export default function App() {
             <textarea
               rows="4"
               value={prompt()}
-              disabled={!activeSession() || activeSession()?.status === "ended" || activeSession()?.uploadingAsset}
+              disabled={
+                !activeSession() ||
+                activeSession()?.status === "ended" ||
+                activeSession()?.resuming ||
+                activeSession()?.uploadingAsset
+              }
               onInput={(event) => setPrompt(event.currentTarget.value)}
               placeholder="Send text to the active session"
             />
@@ -1033,9 +1066,14 @@ function canPrepareSession(session: DemoSessionState | undefined): boolean {
       !session.prepared &&
       !session.preparing &&
       session.status === "idle" &&
+      !session.resuming &&
       !session.sending &&
       !session.uploadingAsset,
   );
+}
+
+function canResumeSession(session: DemoSessionState | undefined): boolean {
+  return Boolean(session && session.status === "ended" && !session.resuming);
 }
 
 function initializeClient(setClient: (client: Pedelec | null) => void): ConnectionState {
@@ -1119,8 +1157,10 @@ function AssetUploadBlock(props: {
   return (
     <Show when={props.session} fallback={<EmptyText text="Create or resume a session before uploading assets." />}>
       {(session) => {
-        const fileInputDisabled = () => session().status === "ended" || session().uploadingAsset;
+        const fileInputDisabled = () =>
+          session().status === "ended" || session().resuming || session().uploadingAsset;
         const hint = () => {
+          if (session().resuming) return "Wait for the session to finish resuming before uploading assets.";
           if (session().uploadingAsset) return "Uploading asset...";
           if (session().status === "ended") return "Assets cannot be uploaded after the session ends.";
           if (props.selectedFile && props.selectedFile.size > MAX_ASSET_SIZE_BYTES) return "File exceeds the 100 MiB limit.";

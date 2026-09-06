@@ -7,7 +7,7 @@ The transcript follows the current SDK chat contract: `onChatDelta()` is used fo
 It demonstrates:
 
 - SDK initialization and extension diagnostics
-- `createSession`, `resumeSession`, and explicit `prepare()` before the first user turn
+- `createSession`, `resumeSession`, same-handle session resume, and explicit `prepare()` before the first user turn
 - multiple independent sessions
 - `sendText`, completed chat messages, streaming chat deltas, session errors, and ended sessions
 - frontend tool handlers and tool result/error display
@@ -74,4 +74,4 @@ The selected workspace remains in the form after a session is created, so consec
 - `Extension unavailable`: load the Pedelec extension and confirm the extension id matches the SDK.
 - `Approval rejected`: approve this origin from the Pedelec extension popup before creating or resuming a session.
 - `Session busy`: wait for the active session to finish before sending another message.
-- `Session ended`: create or resume another session before sending text.
+- `Session ended`: resume the ended active session or create/resume another session before sending text.

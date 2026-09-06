@@ -46,7 +46,7 @@ localStorage.setItem("pedelec-session", JSON.stringify(record));
 
 `false` 代表 SDK route 消失時不自動 end Core session，application 之後可用 saved ID resume。
 
-Browser-side 的 `PedelecSession` handle 綁定於建立它的 SDK route。若該 runtime port disconnect，即使 parent `Pedelec` client 已 reconnect，這個 handle 仍會變成不可使用。請明確呼叫 `resumeSession(sessionId)`，讓新 handle subscribe 到仍存活的 Core session；SDK 不會靜默搬移舊 session operation。
+Browser-side 的 `PedelecSession` handle 綁定於建立它的 SDK route。若該 runtime port disconnect，即使 parent `Pedelec` client 已 reconnect，這個 handle 仍會變成不可使用。請明確呼叫 `resumeSession(sessionId)`，讓新 handle subscribe 到仍存活的 Core session；SDK 不會靜默搬移舊 session operation。明確 `end()` 的 handle 則不同：只要 transport 尚未 detached，同一個 object 可以呼叫 `session.resume()` 重新啟用已結束的 Core thread。
 
 只有在已有 retention 與 cleanup policy 時使用。永遠不 resume 或 end 的 session 可能在 Desktop state 存活得比 UI 暗示更久。
 
@@ -61,7 +61,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 1. 要求 non-empty session ID；
 2. 目前 origin 未核准時觸發 approval；
 3. 將目前 SDK route subscribe 到既有 Core thread；
-4. reconciliation 回傳的 authoritative lifecycle snapshot，包括 status、active/last operation identity，以及可能存在的 pending tool request；
+4. reconciliation 回傳的 authoritative lifecycle snapshot，包括 status、active/last operation identity，以及可能存在的 pending tool request；Ended thread 仍會保持 ended，這個 method 不會隱式呼叫 Core `resume_thread`；
 5. 回傳已同步的 `PedelecSession` handle。
 
 若 Core 已知 normalized token usage，同一個 resume snapshot 也會 hydrate `session.usage.totalTokens`。缺少 usage field 代表目前尚未知道受支援的 total；對既有 handle 不會因此重設 usage。
@@ -70,9 +70,31 @@ const session = await pedelec.resumeSession(savedSessionId);
 
 Core 不再認得 ID 時會回傳 `THREAD_NOT_FOUND`，應移除 stale persistence 或建立另一個 session。Session 屬於其他 browser origin 時會 reject `THREAD_ACCESS_DENIED`。SDK 不會靜默建立 replacement session。
 
+## 重新啟用同一個 ended handle
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  autoEndOnDisconnect: false,
+});
+
+await session.sendText("第一個任務");
+await session.end();
+await session.resume();
+
+console.log(session.getStatus()); // "idle"
+await session.sendText("繼續");
+```
+
+`PedelecSession.resume()` 是同一個、尚未 transport-detached 的 browser handle 所執行的明確 `Ended → Idle` Core lifecycle transition。它保留 thread ID、handlers、usage、provider/effort metadata、`prepared` 狀態與 provider session identity。它不會啟動或接觸 provider runtime；下一個 `sendText()` 或其他正常 operation 才會 lazy resume provider work。
+
+只有 Core 仍知道 thread，且記錄的 `workspace_path` 仍存在並且是 directory 時才能 reactivation。Desktop-managed 與 application-managed workspace 都支援。Workspace 缺失或無法開啟時 reject `WORKSPACE_OPEN_FAILED`；Desktop/Core restart 後若 Core 不再知道 thread，會 reject `THREAD_NOT_FOUND`，不能只靠 workspace contents 重建 thread。
+
+Active handle 的 `resume()` 是 idempotent，同一個 ended handle 的 concurrent calls 會共用一個 request。Transport-detached handle 會 reject；請改用 `pedelec.resumeSession(sessionId)`，讓新的 handle attach 到仍存活的 Core thread。即使該 Core thread 是 ended，detached handle 也不能用 `session.resume()` 復活。
+
 ## 每次都要重新註冊 browser handlers
 
-JavaScript function 無法跨 reload 保存。Resume 後重新 attach：
+JavaScript function 無法跨 reload 保存。使用 `Pedelec.resumeSession()` 後重新 attach：
 
 ```ts
 const session = await pedelec.resumeSession(record.sessionId);
@@ -86,10 +108,11 @@ const offTool = session.onTool("update_counter", handleUpdateCounter);
 ```
 
 原始 `createSession({ skills })` 的 inline handlers 不會在新 page 自動重建。Core session 仍有 tool manifest，但 resumed browser 必須替可能被 agent 呼叫的 tools 註冊 handlers。
+同一個 handle 使用 `session.resume()` 時，原有 handlers（包括 inline handlers）會保留。
 
 Generic fallback 可協助 migration，但不應取代每個 tool 的 deliberate validation。
 
-## Resume 後的 provider/effort metadata
+## Reattach 後的 provider/effort metadata
 
 Resume bridge 會回傳 `sessionId` 與內部 lifecycle snapshot，但不是完整 Core session record。因此 provider metadata 仍可能不可用，但 lifecycle status 會是 authoritative：
 
@@ -98,13 +121,13 @@ session.provider === "";
 session.effortLevel === undefined;
 ```
 
-Reload 後 UI 需要 provider 或 effort level 時，請和 session ID 一起保存，或從 application-owned persistence 載入。不要假設 `resumeSession()` 會 rehydrate 所有 metadata；但 `resumeSession()` resolve 後可依 `getStatus()` 取得 Core lifecycle state。
+Reload 後 UI 需要 provider 或 effort level 時，請和 session ID 一起保存，或從 application-owned persistence 載入。不要假設 `resumeSession()` 會 rehydrate 所有 metadata；但 `resumeSession()` resolve 後可依 `getStatus()` 取得 Core lifecycle state。同一個 handle 使用 `session.resume()` 時，已知的 metadata 會保留。
 
 `session.sessionCreatedAt` 是 browser-side handle construction time，不是原始 Core creation time。
 
 ## 避免意外 resume 兩次
 
-SSR hydration、React Strict Mode development 或 duplicated effect 可能重複呼叫 resume。請用 application state guard：
+SSR hydration、React Strict Mode development 或 duplicated effect 可能重複呼叫 `resumeSession()`。請用 application state guard：
 
 ```ts
 let resumePromise: Promise<PedelecSession> | null = null;
@@ -127,9 +150,9 @@ await session.end();
 
 - 請 Core end session；
 - 將 SDK handle mark `ended`；
-- emit 一次 `onEnded()`；
+- 針對這次進入 `ended` 的 transition emit 一次 `onEnded()`；
 - 從 client unregister session；
-- 未來 `sendText()`／`prepare()` 收到 `SESSION_ENDED`。
+- 未來 `sendText()`／`prepare()` 在同一個 handle 成功 `resume()` 前收到 `SESSION_ENDED`。
 
 `end()` 不會立即刪除 session workspace；lifecycle 取決於建立 session 時的設定：
 
@@ -139,6 +162,8 @@ await session.end();
 即使 cleanup 尚未執行，ended handle 也不能透過 `uploadAsset()`、`listAssets()` 或 `readAsset()` 存取 asset。Shared workspace 的 filesystem conflict 不由 Pedelec 協調，explicit path 也不得與 managed workspace root overlap。檔案被鎖定時，managed cleanup 可能要到後續啟動才能完成。
 
 同一個已 ended handle 再呼叫 `end()` 會直接 resolve，不送第二次 request。
+
+`session.resume()` 是另外的明確 reactivation operation；它要求原 handle 的 transport 仍然 attached，也不會從 workspace contents 重建 thread。
 
 End request 失敗時，`end()` emit SDK error 並 reject。因 Core state 不確定，failed call 不會先 local mark ended。
 

@@ -23,10 +23,12 @@ type PedelecSessionStatus =
 | `idle` | 沒有 active turn，可接收下一個 prompt | 可以 |
 | `running` | Preparation 或 user turn active | 不可以 |
 | `waiting_tool_result` | Agent 已要求 frontend tool，正在等待 | 不可以 |
-| `ended` | Session 永久結束 | 不可以 |
+| `ended` | Session 已結束；只要 Core 與記錄的 workspace 仍可恢復，同一個 attached handle 可明確呼叫 `resume()` | `resume()` 成功前不可以 |
 | `error` | Runtime 回報 session error | 不可以；依產品策略建立或 resume session |
 
 新 `PedelecSession` object 的 local initial status 是 `idle`。`resumeSession()` 回傳的 handle 會在 promise resolve 前先和 Core 同步，因此初始也可能是 `running`、`waiting_tool_result`、`error` 或 `ended`。
+
+`Pedelec.resumeSession(sessionId)` 只會重新 attach 到既有 thread，因此 ended thread 仍保持 `ended`。`PedelecSession.resume()` 才是同一個 handle 的明確 `ended → idle` transition；它保留 handle handlers 與 session state，provider runtime work 仍會等到下一個正常 operation 才 lazy 執行。
 
 ## 常見 transitions
 
@@ -80,6 +82,7 @@ const offStatus = session.onStatus(renderStatus);
 - `sendText()` 與 `prepare()` local set `running`；
 - tool event 處理時 set `waiting_tool_result`；
 - `end()` request 成功後 local mark ended。
+- `session.resume()` 不會 optimistic set `idle`；這個狀態由 authoritative Core snapshot 與 operation-less `status_changed` event 設定。
 
 Context 可辨識來源：
 
@@ -125,7 +128,7 @@ type EndedEventContext = PedelecEventContext & {
 };
 ```
 
-Session 第一次變成 ended 時，無論是 runtime event 或 local `end()` 成功，都只執行一次 `onEnded()`。
+`onEnded()` 會在每次 transition 進入 `ended` 時執行一次，無論原因是 runtime event 或成功的 local `end()`。Handle 已經是 `ended` 時，重複的 ended notification 不會再次執行 callback。相同 handle 成功透過 `resume()` 由 `ended` 回到 `idle` 後，之後再次 transition 回 `ended` 會視為新的 lifecycle transition，再執行一次 callback。
 
 Session end 時，pending `sendText()` 或 `prepare()` 會 reject `SESSION_ENDED`。
 
@@ -170,7 +173,7 @@ ctx.turnId;
 
 Core event 可包含 per-session sequence number。Client 會忽略 sequence 不比上一個更新的 event，且 operation-scoped event 只有在 operation ID 對應目前 active operation 時才會採用。Application 自己 handler 內的 async work 仍要能處理 rapid transition 與 late completion。
 
-Subscription 重建時，SDK 會先收到 authoritative lifecycle snapshot，再接收 live event。Resume 或 recovery handle 會依 snapshot 採用 Core status 與 active operation；若 Core 回報 pending frontend tool，請在 `resumeSession()` 後註冊 handler，SDK 會先保留 recovered request，等相符 handler 可用後才 submit。
+Subscription 重建時，SDK 會先收到 authoritative lifecycle snapshot，再接收 live event。Resume 或 recovery handle 會依 snapshot 採用 Core status 與 active operation；若 Core 回報 pending frontend tool，請在 `resumeSession()` 後註冊 handler，SDK 會先保留 recovered request，等相符 handler 可用後才 submit。同一個 handle 的 `session.resume()` 也會在 promise resolve 前 reconciliation reactivation 後的 snapshot，因此 await 後 `getStatus()` 一定是 `idle`。
 
 ## UI mapping
 

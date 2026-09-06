@@ -577,6 +577,7 @@ test("autoEndOnDisconnect false keeps the native session but requires explicit r
   const nativeMessagesBeforeResume = native.sent.length;
   portB.emit({ channelId: "channel_b", requestId: "resume_1", type: "resume_session", sessionId: "thread_resume" });
   await respondToNative(background, native, {
+    duplicate: true,
     snapshot: { threadId: "thread_resume", status: "idle", latestSeq: 0 },
   }, nativeMessagesBeforeResume + 1);
   await waitFor(() => portB.sent.some((message) => message.requestId === "resume_1"));
@@ -599,6 +600,315 @@ test("autoEndOnDisconnect false keeps the native session but requires explicit r
     type: "chat_message",
     text: "resumed",
   });
+});
+
+test("reactivate_session subscribes before Core resume and dispatches idle before resolving", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "reactivate_order",
+    type: "reactivate_session",
+    sessionId: "thread_reactivate_order",
+    autoEndOnDisconnect: false,
+  });
+
+  const subscribe = await respondToNative(background, native, {
+    duplicate: true,
+    snapshot: { threadId: "thread_reactivate_order", status: "ended", latestSeq: 4 },
+  });
+  assert.equal(subscribe.type, "subscribe_thread");
+  await waitFor(() => native.sent.some((message) => message.type === "resume_thread"));
+  const resume = native.sent.find((message) => message.type === "resume_thread");
+  assert.deepEqual(native.sent.slice(-2).map((message) => message.type), ["subscribe_thread", "resume_thread"]);
+
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_reactivate_order", status: "idle", latestSeq: 5 },
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "reactivate_order"));
+  const response = sdk.sent.find((message) => message.requestId === "reactivate_order");
+  assert.equal(response.ok, true);
+  assert.equal(response.result.autoEndOnDisconnect, false);
+  assert.equal(sdk.sent.find((message) => message.type === "session_snapshot")?.snapshot.status, "ended");
+  assert.equal(sdk.sent.filter((message) => message.type === "session_snapshot").at(-1).snapshot.status, "idle");
+  assert.equal(resume.threadId, "thread_reactivate_order");
+  assert.equal(background.getSdkRouteCount(), 1);
+  assert.equal(background.getActiveThreadCount(), 1);
+});
+
+test("reactivate_session removes temporary bookkeeping on deterministic Core failure", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "reactivate_failure",
+    type: "reactivate_session",
+    sessionId: "thread_missing_workspace",
+  });
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_missing_workspace", status: "ended", latestSeq: 2 },
+  });
+  await waitFor(() => native.sent.some((message) => message.type === "resume_thread"));
+  const resume = native.sent.find((message) => message.type === "resume_thread");
+  background.handleNativeMessage({
+    type: "response",
+    requestId: resume.requestId,
+    ok: false,
+    error: { code: "WORKSPACE_OPEN_FAILED", message: "workspace is gone" },
+  });
+
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "reactivate_failure"));
+  const response = sdk.sent.find((message) => message.requestId === "reactivate_failure");
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "WORKSPACE_OPEN_FAILED");
+  assert.equal(background.getSdkRouteCount(), 0);
+  assert.equal(background.getActiveThreadCount(), 0);
+});
+
+test("reactivation retries a duplicate Native Host subscription without affecting another active thread", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  await createSdkSession(background, sdk, native, "thread_survivor", false);
+  const beforeFirstReactivation = native.sent.length;
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "reactivate_retry_first",
+    type: "reactivate_session",
+    sessionId: "thread_retry_target",
+  });
+  await respondToNative(background, native, {
+    duplicate: true,
+    snapshot: { threadId: "thread_retry_target", status: "ended", latestSeq: 10 },
+  }, beforeFirstReactivation + 1);
+  await waitFor(() => native.sent.some(
+    (message) => message.type === "resume_thread" && message.threadId === "thread_retry_target",
+  ));
+  const firstResume = [...native.sent].reverse().find(
+    (message) => message.type === "resume_thread" && message.threadId === "thread_retry_target",
+  );
+  background.handleNativeMessage({
+    type: "response",
+    requestId: firstResume.requestId,
+    ok: false,
+    error: { code: "WORKSPACE_OPEN_FAILED", message: "workspace is gone" },
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "reactivate_retry_first"));
+  assert.equal(background.getActiveThreadCount(), 1);
+  assert.equal(background.getSdkRouteCount(), 1);
+
+  const beforeRetry = native.sent.length;
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "reactivate_retry_second",
+    type: "reactivate_session",
+    sessionId: "thread_retry_target",
+  });
+  await respondToNative(background, native, {
+    duplicate: true,
+    snapshot: { threadId: "thread_retry_target", status: "ended", latestSeq: 12 },
+  }, beforeRetry + 1);
+  await waitFor(() => native.sent.filter(
+    (message) => message.type === "resume_thread" && message.threadId === "thread_retry_target",
+  ).length === 2);
+  const secondResume = [...native.sent].reverse().find(
+    (message) => message.type === "resume_thread" && message.threadId === "thread_retry_target",
+  );
+  background.handleNativeMessage({
+    type: "response",
+    requestId: secondResume.requestId,
+    ok: true,
+    result: { snapshot: { threadId: "thread_retry_target", status: "idle", latestSeq: 13 } },
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "reactivate_retry_second"));
+
+  assert.equal(background.getActiveThreadCount(), 2);
+  assert.equal(background.getSdkRouteCount(), 2);
+  assert.equal(subscriptionRequests(native, "thread_survivor").length, 1);
+  assert.equal(subscriptionRequests(native, "thread_retry_target").length, 2);
+  assert.equal(sdk.sent.find((message) => message.requestId === "reactivate_retry_second").ok, true);
+
+  background.dispatchSdkThreadEvent({
+    threadId: "thread_retry_target",
+    type: "assistant_message",
+    seq: 14,
+    text: "after resume",
+  });
+  assert.deepEqual(sdk.sent.at(-1), {
+    channelId: "channel_a",
+    sessionId: "thread_retry_target",
+    seq: 14,
+    type: "chat_message",
+    text: "after resume",
+  });
+
+  background.dispatchSdkThreadEvent({
+    threadId: "thread_survivor",
+    type: "assistant_message",
+    seq: 1,
+    text: "survivor remains routed",
+  });
+  assert.deepEqual(sdk.sent.at(-1), {
+    channelId: "channel_a",
+    sessionId: "thread_survivor",
+    seq: 1,
+    type: "chat_message",
+    text: "survivor remains routed",
+  });
+});
+
+test("subscription recovery after reactivation only resubscribes the closed thread", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, {
+    disableReconnect: true,
+    threadRecoveryInitialDelayMs: 5,
+  });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  await createSdkSession(background, sdk, native, "thread_healthy", false);
+  const beforeReactivation = native.sent.length;
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "reactivate_recovery",
+    type: "reactivate_session",
+    sessionId: "thread_reactivated",
+    autoEndOnDisconnect: false,
+  });
+  await respondToNative(background, native, {
+    duplicate: true,
+    snapshot: { threadId: "thread_reactivated", status: "ended", latestSeq: 4 },
+  }, beforeReactivation + 1);
+  await waitFor(() => native.sent.some(
+    (message) => message.type === "resume_thread" && message.threadId === "thread_reactivated",
+  ));
+  const resume = [...native.sent].reverse().find(
+    (message) => message.type === "resume_thread" && message.threadId === "thread_reactivated",
+  );
+  background.handleNativeMessage({
+    type: "response",
+    requestId: resume.requestId,
+    ok: true,
+    result: { snapshot: { threadId: "thread_reactivated", status: "idle", latestSeq: 5 } },
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "reactivate_recovery"));
+
+  background.handleNativeMessage({
+    type: "thread_subscription_closed",
+    threadId: "thread_reactivated",
+    error: { code: "IPC_CLOSED", message: "subscription closed" },
+  });
+  await waitFor(() => subscriptionRequests(native, "thread_reactivated").length === 2);
+  assert.equal(subscriptionRequests(native, "thread_healthy").length, 1);
+  const recovery = subscriptionRequests(native, "thread_reactivated").at(-1);
+  background.handleNativeMessage({
+    type: "response",
+    requestId: recovery.requestId,
+    ok: true,
+    result: { snapshot: { threadId: "thread_reactivated", status: "idle", latestSeq: 6 } },
+  });
+  await flush();
+
+  background.dispatchSdkThreadEvent({
+    threadId: "thread_reactivated",
+    type: "assistant_message",
+    seq: 7,
+    text: "after recovery",
+  });
+  assert.deepEqual(sdk.sent.at(-1), {
+    channelId: "channel_a",
+    sessionId: "thread_reactivated",
+    seq: 7,
+    type: "chat_message",
+    text: "after recovery",
+  });
+  assert.equal(background.getActiveThreadCount(), 2);
+});
+
+test("resume_session reattaches an ended thread without issuing Core resume", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  await createSdkSession(background, sdk, native, "thread_ended_reattach", false);
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "end_reattach",
+    type: "end_session",
+    sessionId: "thread_ended_reattach",
+  });
+  await respondToNative(background, native, {});
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "end_reattach"));
+  await waitFor(() => background.getSdkRouteCount() === 0 && background.getActiveThreadCount() === 0);
+
+  const nativeB = new MockPort();
+  chrome.nativePortQueue.push(nativeB);
+  const nativeMessageCount = nativeB.sent.length;
+  sdk.emit({
+    channelId: "channel_b",
+    requestId: "reattach_ended",
+    type: "resume_session",
+    sessionId: "thread_ended_reattach",
+  });
+  const subscribe = await respondToNative(background, nativeB, {
+    snapshot: { threadId: "thread_ended_reattach", status: "ended", latestSeq: 3 },
+  }, nativeMessageCount + 1);
+
+  assert.equal(subscribe.type, "subscribe_thread");
+  assert.equal(nativeB.sent.slice(nativeMessageCount).some((message) => message.type === "resume_thread"), false);
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "reattach_ended"));
+  const response = sdk.sent.find((message) => message.requestId === "reattach_ended");
+  assert.equal(response.ok, true);
+  assert.equal(background.getSdkRouteCount(), 1);
+  assert.equal(background.getActiveThreadCount(), 1);
+});
+
+test("reactivation restores autoEndOnDisconnect lifecycle policy", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "reactivate_policy",
+    type: "reactivate_session",
+    sessionId: "thread_reactivate_policy",
+    autoEndOnDisconnect: false,
+  });
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_reactivate_policy", status: "ended", latestSeq: 1 },
+  });
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_reactivate_policy", status: "idle", latestSeq: 2 },
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "reactivate_policy"));
+
+  sdk.disconnect();
+  await flush();
+  assert.equal(native.sent.some((message) => message.type === "end_thread"), false);
+  assert.equal(background.getActiveThreadCount(), 1);
 });
 
 test("maps normalized usage events without changing the token total", () => {

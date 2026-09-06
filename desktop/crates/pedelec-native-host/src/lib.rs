@@ -74,14 +74,10 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
                 .unwrap()
                 .mark_subscription(&thread_id, request.caller_origin.as_deref());
             if !marked {
+                let native_response =
+                    duplicate_subscription_response(&request, runtime_file_path.as_deref());
                 let mut stdout = stdout.lock().unwrap();
-                write_chrome_message(
-                    &mut *stdout,
-                    &native_ok_response(
-                        &request.request_id,
-                        serde_json::json!({ "subscribed": true, "duplicate": true }),
-                    ),
-                )?;
+                write_chrome_message(&mut *stdout, &native_response)?;
                 continue;
             }
 
@@ -118,6 +114,38 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
     }
 
     Ok(())
+}
+
+fn duplicate_subscription_response(
+    request: &CoreIpcRequest,
+    runtime_file_path: Option<&Path>,
+) -> NativeProtocolResponse {
+    let snapshot_request = CoreIpcRequest {
+        r#type: "thread_snapshot".to_string(),
+        ..request.clone()
+    };
+    let snapshot_response = send_core_request(&snapshot_request, runtime_file_path);
+    if !snapshot_response.ok {
+        return core_response_to_native_response(snapshot_response);
+    }
+
+    match snapshot_response.result {
+        Some(snapshot) => native_ok_response(
+            &request.request_id,
+            serde_json::json!({
+                "subscribed": true,
+                "duplicate": true,
+                "snapshot": snapshot,
+            }),
+        ),
+        None => native_error_response(
+            &request.request_id,
+            PedelecError::new(
+                error_codes::IPC_UNAVAILABLE,
+                "thread_snapshot response did not include a snapshot",
+            ),
+        ),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -199,7 +227,9 @@ fn native_message_to_core_request(
         | "send_text"
         | "prepare_thread"
         | "end_thread"
+        | "resume_thread"
         | "subscribe_thread"
+        | "thread_snapshot"
         | "create_asset_upload"
         | "create_asset_download"
         | "list_assets" => Some(Value::Object(object)),
@@ -644,6 +674,15 @@ mod tests {
         assert_eq!(end.r#type, "end_thread");
         assert_eq!(end.payload.unwrap(), json!({ "threadId": "thread_1" }));
 
+        let resume = native_message_to_core_request(json!({
+            "type": "resume_thread",
+            "requestId": "req_resume",
+            "threadId": "thread_1"
+        }))
+        .unwrap();
+        assert_eq!(resume.r#type, "resume_thread");
+        assert_eq!(resume.payload.unwrap(), json!({ "threadId": "thread_1" }));
+
         let submit = native_message_to_core_request(json!({
             "type": "submit_tool_result",
             "requestId": "req_submit",
@@ -940,11 +979,14 @@ mod tests {
 
         assert_eq!(notification["type"], json!("thread_subscription_closed"));
         assert_eq!(notification["threadId"], json!("thread_closed"));
-        assert_eq!(notification["error"]["code"], json!(error_codes::NATIVE_CONNECTION_CLOSED));
+        assert_eq!(
+            notification["error"]["code"],
+            json!(error_codes::NATIVE_CONNECTION_CLOSED)
+        );
     }
 
     #[test]
-    fn retired_subscription_can_be_readded_without_retiring_unrelated_members() {
+    fn closed_subscription_can_be_readded_without_removing_unrelated_members() {
         let mut state = NativeConnectionState::default();
         assert!(state.mark_subscription("thread_a", Some("https://app.example.com")));
         assert!(state.mark_subscription("thread_b", Some("https://app.example.com")));
@@ -986,6 +1028,116 @@ mod tests {
         assert_eq!(result["snapshot"]["threadId"], json!("thread_subscribe"));
         assert_eq!(result["snapshot"]["status"], json!("idle"));
         assert!(result["snapshot"]["latestSeq"].is_number());
+    }
+
+    #[test]
+    fn duplicate_subscribe_returns_fresh_snapshot_and_propagates_snapshot_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime: SharedCoreRuntime = Arc::new(Mutex::new(CoreRuntime::default()));
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
+        insert_idle_thread(&runtime, "thread_duplicate_snapshot");
+
+        let request = CoreIpcRequest {
+            request_id: "req_duplicate_snapshot".into(),
+            r#type: "subscribe_thread".into(),
+            caller_origin: None,
+            caller_sdk_version: None,
+            payload: Some(json!({ "threadId": "thread_duplicate_snapshot" })),
+        };
+        let first = send_core_request(&request, Some(&runtime_path));
+        assert!(first.ok);
+        assert_eq!(
+            first.result.as_ref().unwrap()["snapshot"]["status"],
+            json!("idle")
+        );
+
+        {
+            let mut runtime = runtime.lock().unwrap();
+            runtime
+                .thread_manager
+                .thread_mut("thread_duplicate_snapshot")
+                .unwrap()
+                .status = pedelec_core::ThreadStatus::Ended;
+            runtime.event_bus.emit_status_changed(
+                "thread_duplicate_snapshot",
+                pedelec_core::ThreadStatus::Ended,
+            );
+        }
+
+        let mut connection = NativeConnectionState::default();
+        assert!(connection.mark_subscription("thread_duplicate_snapshot", None));
+        let duplicate = duplicate_subscription_response(&request, Some(&runtime_path));
+        assert!(duplicate.ok);
+        assert_eq!(duplicate.request_id, "req_duplicate_snapshot");
+        assert_eq!(
+            duplicate.result.as_ref().unwrap()["subscribed"],
+            json!(true)
+        );
+        assert_eq!(duplicate.result.as_ref().unwrap()["duplicate"], json!(true));
+        assert_eq!(
+            duplicate.result.as_ref().unwrap()["snapshot"]["status"],
+            json!("ended")
+        );
+        assert!(
+            duplicate.result.as_ref().unwrap()["snapshot"]["latestSeq"]
+                .as_u64()
+                .unwrap()
+                > first.result.as_ref().unwrap()["snapshot"]["latestSeq"]
+                    .as_u64()
+                    .unwrap()
+        );
+
+        {
+            let mut runtime = runtime.lock().unwrap();
+            runtime
+                .thread_manager
+                .thread_mut("thread_duplicate_snapshot")
+                .unwrap()
+                .status = pedelec_core::ThreadStatus::Idle;
+            runtime.event_bus.emit_status_changed(
+                "thread_duplicate_snapshot",
+                pedelec_core::ThreadStatus::Idle,
+            );
+        }
+
+        let resumed_duplicate = duplicate_subscription_response(
+            &CoreIpcRequest {
+                request_id: "req_duplicate_after_resume".into(),
+                ..request.clone()
+            },
+            Some(&runtime_path),
+        );
+        assert!(resumed_duplicate.ok);
+        assert_eq!(
+            resumed_duplicate.result.as_ref().unwrap()["snapshot"]["status"],
+            json!("idle")
+        );
+        assert!(
+            !connection.mark_subscription("thread_duplicate_snapshot", None),
+            "the ended thread's existing forwarding subscription must remain reusable"
+        );
+
+        let wrong_origin_request = CoreIpcRequest {
+            request_id: "req_duplicate_wrong_origin".into(),
+            caller_origin: Some("https://other.example.test".into()),
+            ..request.clone()
+        };
+        assert!(connection.mark_subscription(
+            "thread_duplicate_snapshot",
+            wrong_origin_request.caller_origin.as_deref()
+        ));
+
+        let missing_request = CoreIpcRequest {
+            request_id: "req_duplicate_missing".into(),
+            payload: Some(json!({ "threadId": "thread_does_not_exist" })),
+            ..request
+        };
+        assert!(connection.mark_subscription("thread_does_not_exist", None));
+        let missing = duplicate_subscription_response(&missing_request, Some(&runtime_path));
+        assert!(!missing.ok);
+        assert_eq!(missing.request_id, "req_duplicate_missing");
+        assert_eq!(missing.error.unwrap().code, error_codes::THREAD_NOT_FOUND);
     }
 
     #[test]

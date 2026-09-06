@@ -721,6 +721,16 @@ describe("Pedelec SDK", () => {
     expect(requestMessages(portB).map((message) => message.type)).toEqual(["get_settings"]);
   });
 
+  it("rejects same-handle resume after transport detachment", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const sentBeforeDisconnect = pageWindow.port.sent.length;
+    pageWindow.port.disconnect();
+
+    await expect(session.resume()).rejects.toMatchObject({ code: "SESSION_ENDED" });
+    expect(pageWindow.port.sent.length).toBe(sentBeforeDisconnect);
+  });
+
   it("requires explicit resume to bind a disconnected session to the replacement Port", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);
@@ -1090,6 +1100,32 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, request, { sessionId: "thread_resume" });
 
     expect((await promise).sessionId).toBe("thread_resume");
+  });
+
+  it("keeps resumeSession reattachment-only for an ended session", async () => {
+    const pedelec = new Pedelec();
+    const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
+    pageWindow.emitFromExtension({
+      source: "pedelec-sdk-extension",
+      channelId: createRequest.channelId,
+      type: "ended",
+      sessionId: session.sessionId,
+      seq: 1,
+    });
+
+    const resume = pedelec.resumeSession(session.sessionId);
+    const request = pageWindow.lastSent();
+    expect(request.type).toBe("resume_session");
+    emitSnapshot(pageWindow, request, {
+      threadId: session.sessionId,
+      status: "ended",
+      latestSeq: 2,
+    });
+    respondOk(pageWindow, request, { sessionId: session.sessionId });
+
+    await expect(resume).resolves.toBe(session);
+    expect(session.getStatus()).toBe("ended");
+    expect(requestMessages(pageWindow.port).some((message) => message.type === "reactivate_session")).toBe(false);
   });
 
   it("exposes monotonic session usage without invoking lifecycle callbacks", async () => {
@@ -2028,6 +2064,171 @@ describe("Pedelec SDK", () => {
     });
     expect(session.getStatus()).toBe("ended");
     expect(ended).toEqual(["ended"]);
+  });
+
+  it("fires onEnded once per transition into ended across repeated resume cycles", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    let endedCount = 0;
+    session.onEnded(() => {
+      endedCount += 1;
+    });
+
+    const firstEnd = session.end();
+    const firstEndRequest = pageWindow.lastSent();
+    respondOk(pageWindow, firstEndRequest);
+    await firstEnd;
+    expect(endedCount).toBe(1);
+
+    const resume = session.resume();
+    const resumeRequest = pageWindow.lastSent();
+    emitSnapshot(pageWindow, resumeRequest, {
+      threadId: session.sessionId,
+      status: "idle",
+      latestSeq: 2,
+    });
+    respondOk(pageWindow, resumeRequest, { sessionId: session.sessionId });
+    await resume;
+    expect(session.getStatus()).toBe("idle");
+
+    const secondEnd = session.end();
+    const secondEndRequest = pageWindow.lastSent();
+    respondOk(pageWindow, secondEndRequest);
+    await secondEnd;
+    expect(endedCount).toBe(2);
+
+    session.handleEvent({
+      type: "ended",
+      sessionId: session.sessionId,
+      seq: 4,
+    });
+    expect(endedCount).toBe(2);
+  });
+
+  it("reactivates the same ended handle only after an authoritative idle snapshot", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const statuses: string[] = [];
+    const chats: string[] = [];
+    session.onStatus((status) => statuses.push(status));
+    session.onChat((text) => chats.push(text));
+    const prepared = session.prepare();
+    const prepareRequest = pageWindow.lastSent();
+    respondOk(pageWindow, prepareRequest);
+    emitEvent(pageWindow, prepareRequest, {
+      type: "operation_completed",
+      sessionId: session.sessionId,
+      seq: 1,
+    });
+    await prepared;
+    const sessionCreatedAt = session.sessionCreatedAt;
+
+    const end = session.end();
+    const endRequest = pageWindow.lastSent();
+    respondOk(pageWindow, endRequest);
+    await end;
+
+    const resume = session.resume();
+    const resumeRequest = pageWindow.lastSent();
+    expect(resumeRequest).toMatchObject({
+      type: "reactivate_session",
+      sessionId: session.sessionId,
+      autoEndOnDisconnect: true,
+    });
+    expect(session.getStatus()).toBe("ended");
+
+    emitSnapshot(pageWindow, resumeRequest, {
+      threadId: session.sessionId,
+      status: "idle",
+      latestSeq: 3,
+      usage: { totalTokens: 42 },
+    });
+    respondOk(pageWindow, resumeRequest, { sessionId: session.sessionId });
+    await resume;
+
+    expect(session.getStatus()).toBe("idle");
+    expect(session.usage.totalTokens).toBe(42);
+    expect(session.provider).toBe("codex");
+    expect(session.effortLevel).toBe("default");
+    expect(session.sessionCreatedAt).toBe(sessionCreatedAt);
+    expect(statuses).toContain("ended");
+    expect(statuses.at(-1)).toBe("idle");
+    const sentBeforePreparedRetry = pageWindow.port.sent.length;
+    await session.prepare();
+    expect(pageWindow.port.sent.length).toBe(sentBeforePreparedRetry);
+    expect(await session.resume()).toBeUndefined();
+    const send = session.sendText("continue");
+    const sendRequest = pageWindow.lastSent();
+    respondOk(pageWindow, sendRequest);
+    emitEvent(pageWindow, sendRequest, {
+      type: "chat_message",
+      sessionId: session.sessionId,
+      operationId: sendRequest.operationId,
+      seq: 4,
+      text: "continued",
+    });
+    emitEvent(pageWindow, sendRequest, {
+      type: "operation_completed",
+      sessionId: session.sessionId,
+      seq: 5,
+    });
+    await send;
+    expect(chats).toEqual(["continued"]);
+  });
+
+  it("shares concurrent resume requests and clears the guard for a second cycle", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const firstEnd = session.end();
+    respondOk(pageWindow, pageWindow.lastSent());
+    await firstEnd;
+
+    const first = session.resume();
+    const firstResumeRequest = pageWindow.lastSent();
+    expect(requestMessages(pageWindow.port).filter((request) => request.type === "reactivate_session")).toHaveLength(1);
+    emitSnapshot(pageWindow, firstResumeRequest, {
+      threadId: session.sessionId,
+      status: "idle",
+      latestSeq: 2,
+    });
+    const second = session.resume();
+    expect(first).toBe(second);
+    respondOk(pageWindow, firstResumeRequest, { sessionId: session.sessionId });
+    await first;
+
+    const secondEnd = session.end();
+    respondOk(pageWindow, pageWindow.lastSent());
+    await secondEnd;
+    const third = session.resume();
+    const secondResumeRequest = pageWindow.lastSent();
+    expect(secondResumeRequest.type).toBe("reactivate_session");
+    emitSnapshot(pageWindow, secondResumeRequest, {
+      threadId: session.sessionId,
+      status: "idle",
+      latestSeq: 4,
+    });
+    respondOk(pageWindow, secondResumeRequest, { sessionId: session.sessionId });
+    await third;
+    expect(session.getStatus()).toBe("idle");
+  });
+
+  it("rejects deterministic reactivation failures without falsely setting idle", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const end = session.end();
+    respondOk(pageWindow, pageWindow.lastSent());
+    await end;
+
+    const resume = session.resume();
+    const request = pageWindow.lastSent();
+    respondError(pageWindow, request, "WORKSPACE_OPEN_FAILED");
+    await expect(resume).rejects.toMatchObject({ code: "WORKSPACE_OPEN_FAILED" });
+    expect(session.getStatus()).toBe("ended");
+
+    const retry = session.resume();
+    expect(pageWindow.lastSent().type).toBe("reactivate_session");
+    respondError(pageWindow, pageWindow.lastSent(), "WORKSPACE_OPEN_FAILED");
+    await expect(retry).rejects.toMatchObject({ code: "WORKSPACE_OPEN_FAILED" });
   });
 
   it("passes context metadata to error and ended callbacks", async () => {

@@ -230,7 +230,7 @@ It resolves structured unavailable states for bridge, Native Host, Core, timeout
 resumeSession(sessionId: string): Promise<PedelecSession<string>>
 ```
 
-Subscribes this SDK client to an existing Core session.
+Subscribes this SDK client to an existing Core session. This is a reattachment operation, not ended-thread reactivation: if Core reports `ended`, the returned handle remains ended.
 
 ```ts
 const session = await pedelec.resumeSession(savedSessionId);
@@ -296,7 +296,7 @@ The method:
 
 ## Client disconnection
 
-When the Extension port disconnects, requests already sent through that port reject and registered sessions receive an SDK error event. The parent client remains reusable and reconnects on the next new operation; old session handles do not silently migrate, so resume an intentional surviving session with `resumeSession(sessionId)`.
+When the Extension port disconnects, requests already sent through that port reject and registered sessions receive an SDK error event. The parent client remains reusable and reconnects on the next new operation; old session handles do not silently migrate. A transport-detached old handle cannot call `session.resume()`; resume an intentional surviving session with `resumeSession(sessionId)`.
 
 ## Related references
 

@@ -107,6 +107,8 @@ async function typedOnToolNameFromCreateSession() {
     const endedCtx: EndedEventContext = ctx;
     return endedCtx;
   });
+
+  await session.resume();
 }
 
 async function resumedSessionFallsBackToString() {

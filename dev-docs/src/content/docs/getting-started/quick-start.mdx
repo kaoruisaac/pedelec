@@ -121,7 +121,7 @@ unsubscribeError();
 unsubscribeEnded();
 ```
 
-`end()` is idempotent on an already-ended session. Once ended, the same session cannot accept another message.
+`end()` is idempotent on an already-ended session. While ended, the same handle cannot accept another message until `session.resume()` successfully returns it to `idle`.
 
 ## Complete example
 

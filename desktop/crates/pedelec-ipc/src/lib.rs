@@ -2,8 +2,8 @@ use pedelec_core::{
     error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
     CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError,
     PedelecSettings, PersistentRuntimeOperation, PrepareThreadInput, PrepareThreadOutput,
-    ProviderCode, ProviderProtocolTraffic, ProviderRuntimeDiagnostic, SendTextInput,
-    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
+    ProviderCode, ProviderProtocolTraffic, ProviderRuntimeDiagnostic, ResumeThreadInput,
+    SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
     ThreadSubscription, ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration,
     ToolInvocationWait, ToolSpecInput, UpdateSettingsInput,
 };
@@ -1883,6 +1883,24 @@ fn handle_core_ipc_request_with_services(
             },
             Err(err) => error_response(&request.request_id, err),
         },
+        "resume_thread" => match decode_payload::<ResumeThreadInput>(&request) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| runtime.lock().unwrap().resume_thread(input))
+            {
+                Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                Err(err) => error_response(&request.request_id, err),
+            },
+            Err(err) => error_response(&request.request_id, err),
+        },
+        "thread_snapshot" => match decode_payload::<SubscribeThreadInput>(&request) {
+            Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                .and_then(|_| runtime.lock().unwrap().thread_snapshot(input))
+            {
+                Ok(snapshot) => ok_response(&request.request_id, serde_json::json!(snapshot)),
+                Err(err) => error_response(&request.request_id, err),
+            },
+            Err(err) => error_response(&request.request_id, err),
+        },
         "submit_tool_result" => match decode_payload::<SubmitToolResultInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| runtime.lock().unwrap().submit_tool_result(input))
@@ -2682,6 +2700,7 @@ fn core_unavailable_error(_err: io::Error) -> PedelecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::{mpsc, Barrier};
     use std::time::Duration;
 
@@ -2881,6 +2900,203 @@ mod tests {
                 "version": env!("CARGO_PKG_VERSION"),
                 "processId": std::process::id(),
             }))
+        );
+    }
+
+    #[test]
+    fn resume_thread_ipc_authorizes_and_returns_idle_snapshot_without_dispatching_provider_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let thread_id = "thread-ipc-resume";
+        let now = chrono::Utc::now();
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            pedelec_core::ThreadState {
+                thread_id: thread_id.into(),
+                provider: pedelec_core::ProviderCode::Codex,
+                effort_level: pedelec_core::EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: workspace,
+                skills: Vec::new(),
+                status: pedelec_core::ThreadStatus::Ended,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: Some("https://app.example.test".into()),
+            },
+            pedelec_core::ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+
+        let unauthorized = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "resume_wrong_origin".into(),
+                r#type: "resume_thread".into(),
+                caller_origin: Some("https://other.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({ "threadId": thread_id })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert!(!unauthorized.ok);
+        assert_eq!(
+            unauthorized.error.as_ref().unwrap().code,
+            error_codes::THREAD_ACCESS_DENIED
+        );
+
+        let response = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "resume_authorized".into(),
+                r#type: "resume_thread".into(),
+                caller_origin: Some("https://app.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({ "threadId": thread_id })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap()["snapshot"]["status"], "idle");
+        assert_eq!(
+            runtime.lock().unwrap().thread_status(thread_id),
+            Some(pedelec_core::ThreadStatus::Idle)
+        );
+    }
+
+    #[test]
+    fn thread_snapshot_ipc_returns_current_authoritative_state_and_authorizes_origin() {
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let thread_id = "thread-ipc-snapshot";
+        let now = chrono::Utc::now();
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            pedelec_core::ThreadState {
+                thread_id: thread_id.into(),
+                provider: pedelec_core::ProviderCode::Codex,
+                effort_level: pedelec_core::EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: PathBuf::from("."),
+                skills: Vec::new(),
+                status: pedelec_core::ThreadStatus::Idle,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: Some("https://app.example.test".into()),
+            },
+            pedelec_core::ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+
+        let request = CoreIpcRequest {
+            request_id: "snapshot_authorized".into(),
+            r#type: "thread_snapshot".into(),
+            caller_origin: Some("https://app.example.test".into()),
+            caller_sdk_version: None,
+            payload: Some(serde_json::json!({ "threadId": thread_id })),
+        };
+        let response = handle_core_ipc_request(request, Arc::clone(&runtime));
+        assert!(response.ok);
+        assert_eq!(
+            response.result.as_ref().unwrap()["threadId"],
+            json!(thread_id)
+        );
+        assert_eq!(response.result.as_ref().unwrap()["status"], json!("idle"));
+        assert_eq!(response.result.as_ref().unwrap()["latestSeq"], json!(0));
+
+        runtime
+            .lock()
+            .unwrap()
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .status = pedelec_core::ThreadStatus::Ended;
+        let wrong_origin = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "snapshot_wrong_origin".into(),
+                r#type: "thread_snapshot".into(),
+                caller_origin: Some("https://other.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({ "threadId": thread_id })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert!(!wrong_origin.ok);
+        assert_eq!(
+            wrong_origin.error.as_ref().unwrap().code,
+            error_codes::THREAD_ACCESS_DENIED
+        );
+
+        let current = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "snapshot_current".into(),
+                r#type: "thread_snapshot".into(),
+                caller_origin: Some("https://app.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({ "threadId": thread_id })),
+            },
+            runtime,
+        );
+        assert!(current.ok);
+        assert_eq!(current.result.unwrap()["status"], json!("ended"));
+    }
+
+    #[test]
+    fn resume_thread_ipc_passthroughs_thread_not_found_and_missing_workspace_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let not_found = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "resume_missing_thread".into(),
+                r#type: "resume_thread".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({ "threadId": "thread_missing" })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert!(!not_found.ok);
+        assert_eq!(not_found.error.unwrap().code, error_codes::THREAD_NOT_FOUND);
+
+        let thread_id = "thread_missing_workspace";
+        let now = chrono::Utc::now();
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            pedelec_core::ThreadState {
+                thread_id: thread_id.into(),
+                provider: pedelec_core::ProviderCode::Codex,
+                effort_level: pedelec_core::EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: temp.path().join("does-not-exist"),
+                skills: Vec::new(),
+                status: pedelec_core::ThreadStatus::Ended,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: Some("https://app.example.test".into()),
+            },
+            pedelec_core::ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+
+        let missing_workspace = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "resume_missing_workspace".into(),
+                r#type: "resume_thread".into(),
+                caller_origin: Some("https://app.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({ "threadId": thread_id })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert!(!missing_workspace.ok);
+        assert_eq!(
+            missing_workspace.error.unwrap().code,
+            error_codes::WORKSPACE_OPEN_FAILED
+        );
+        assert_eq!(
+            runtime.lock().unwrap().thread_status(thread_id),
+            Some(pedelec_core::ThreadStatus::Ended)
         );
     }
 

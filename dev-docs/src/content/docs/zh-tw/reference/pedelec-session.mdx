@@ -11,7 +11,7 @@ sidebar:
 import type { PedelecSession } from "@kaoruisaac/pedelec";
 ```
 
-Application 應透過 `Pedelec.createSession()` 或 `Pedelec.resumeSession()` 取得，不直接 constructor。
+Application 應透過 `Pedelec.createSession()` 或 `Pedelec.resumeSession()` 取得，不直接 constructor。符合條件的 ended handle 可再用 `session.resume()` 明確 reactivation。
 
 ## Type parameter
 
@@ -63,7 +63,7 @@ readonly usage: PedelecSessionUsage
 
 此 session 已觀察到的 normalized cumulative token usage。`usage.totalTokens` 初始為 `undefined`；只有 provider 回報受支援且有效的 total 時才會填入。SDK handle 存續期間此值只會單調增加，usage update 不會呼叫 chat、status 或 error handlers。
 
-Core snapshot 在已知時也會包含這個值，因此 `resumeSession()` 可以 hydrate usage。Provider 或 payload 不支援有效 total 時則維持 `undefined`；目前 Cursor ACP 即屬於此情況。這個值不是 context-window occupancy、金額 cost，也不保證等同 invoice；目前 API 也不提供 input/output/cache/reasoning breakdown。
+Core snapshot 在已知時也會包含這個值，因此 `resumeSession()` 可以 hydrate usage；同一個 handle 的 `resume()` 會保留 usage。Provider 或 payload 不支援有效 total 時則維持 `undefined`；目前 Cursor ACP 即屬於此情況。這個值不是 context-window occupancy、金額 cost，也不保證等同 invoice；目前 API 也不提供 input/output/cache/reasoning breakdown。
 
 ## `prepare()`
 
@@ -272,7 +272,7 @@ const off = session.onStatus(renderStatus);
 onEnded(handler: (ctx: EndedEventContext) => void): () => void
 ```
 
-Session 第一次 ended 時執行一次。
+每次 transition 進入 `ended` 時執行一次。Handle 已經是 `ended` 時，重複的 ended notification 不會再次執行 callback。相同 handle 成功透過 `resume()` 由 `ended` 回到 `idle` 後，之後再次 transition 回 `ended` 會再執行一次。
 
 ```ts
 const off = session.onEnded(() => {
@@ -296,6 +296,25 @@ if (session.getStatus() === "idle") {
 
 適合 UI gating，但不能取代 catch `SESSION_BUSY`，因 check 與 request 之間 state 可能改變。
 
+## `resume()`
+
+```ts
+resume(): Promise<void>
+```
+
+在成功 `end()` 後，明確 reactivation 同一個 SDK handle。Handle object、Core thread ID、handlers、usage、provider/effort metadata、`prepared` 狀態與 provider session identity 都會保留。成功後 authoritative status 是 `idle`；下一個 provider operation 才會 lazy 啟動或 resume provider work。
+
+Handle 不可 transport-detached；Core 必須仍包含 thread，thread 必須是 `Ended`（或已是 `Idle` 以支援 idempotent retry），且記錄的 workspace 必須仍是可載入 Pedelec skill/tool data 的 directory。Workspace 缺失或無法開啟時 reject `WORKSPACE_OPEN_FAILED`；Core 找不到 thread 時 reject `THREAD_NOT_FOUND`。`resume()` 不會從 workspace contents 重建 thread，也不會接觸 provider runtime。
+
+Active、非 detached handle 呼叫會直接 resolve；同一個 ended handle 的 concurrent calls 共用一個 request。Transport-detached handle 會 reject，請改用 `Pedelec.resumeSession(sessionId)` 建立新的 reattachment handle。
+
+```ts
+await session.end();
+await session.resume();
+console.log(session.getStatus()); // "idle"
+await session.sendText("繼續工作");
+```
+
 ## `end()`
 
 ```ts
@@ -306,10 +325,10 @@ end(): Promise<void>
 
 成功後：
 
-- `onEnded()` 執行一次；
+- `onEnded()` 針對這次進入 `ended` 的 transition 執行一次；
 - pending turn/preparation reject `SESSION_ENDED`；
 - session 從 client registry 移除；
-- 後續 `sendText()`／`prepare()` reject。
+- 後續 `sendText()`／`prepare()` 在同一個 handle 成功 `resume()` 前 reject。
 
 呼叫 `end()` 會結束 session，但不會立即刪除其 workspace。未指定 `workspace.path` 時，session 使用 Desktop 管理的暫存資料：Desktop App 正常退出時清除 managed workspace，異常終止遺留的內容會在下次啟動時嘗試清除。指定 absolute `workspace.path` 時，workspace 由 application 管理，Pedelec 在 session 結束、App 退出或 stale cleanup 時都不會刪除它，多個 active session 可以共用。關閉主視窗只會隱藏 App，不會觸發 managed cleanup。即使 workspace 仍存在，ended session 也不能使用 `uploadAsset()`、`listAssets()` 或 `readAsset()`；shared workspace 的 filesystem conflict 由 application 負責，explicit path 不得與 managed workspace root overlap。
 

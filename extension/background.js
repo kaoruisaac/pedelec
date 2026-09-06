@@ -1257,7 +1257,7 @@ function createBackground(runtimeChrome, options = {}) {
     }
 
     if (message?.type === "thread_event") {
-      updateThreadSubscriptionSeq(message.event);
+      if (!updateThreadSubscriptionSeq(message.event)) return;
       handleProviderErrorPopupSideEffect(message.event);
       applyThreadEvent(message.event);
       dispatchSdkThreadEvent(message.event);
@@ -1614,11 +1614,12 @@ function createBackground(runtimeChrome, options = {}) {
   }
 
   function updateThreadSubscriptionSeq(event) {
-    if (!event?.threadId || !activeThreadIds.has(event.threadId) || typeof event.seq !== "number") return;
+    if (!event?.threadId || !activeThreadIds.has(event.threadId) || typeof event.seq !== "number") return true;
     const subscription = getThreadSubscription(event.threadId);
-    if (subscription && (subscription.lastSeq == null || event.seq > subscription.lastSeq)) {
-      subscription.lastSeq = event.seq;
-    }
+    if (!subscription) return true;
+    if (subscription.lastSeq != null && event.seq <= subscription.lastSeq) return false;
+    subscription.lastSeq = event.seq;
+    return true;
   }
 
   function dispatchSdkSnapshot(threadId, snapshot) {
@@ -1814,6 +1815,10 @@ function createBackground(runtimeChrome, options = {}) {
     if (snapshot && sdkRoutesBySession.has(sessionId)) {
       dispatchSdkSnapshot(sessionId, snapshot);
     }
+  }
+
+  function hasSdkSessionRoute(port, channelId, sessionId) {
+    return sdkChannelsByPort.get(port)?.get(channelId)?.has(sessionId) === true;
   }
 
   function removeSdkSessionRoutes(sessionId) {
@@ -2136,7 +2141,94 @@ function createBackground(runtimeChrome, options = {}) {
             if (!sdkRoutesBySession.has(sessionId)) removeActiveThread(sessionId);
             throw err;
           }
-          postSdkResponse(port, channelId, requestId, true, { sessionId });
+          const lifecycle = sdkLifecycleBySession.get(sessionId);
+          postSdkResponse(port, channelId, requestId, true, {
+            sessionId,
+            autoEndOnDisconnect: lifecycle?.autoEndOnDisconnect === true,
+          });
+        });
+        return;
+      }
+
+      if (message.type === "reactivate_session") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        const sessionId = message.sessionId;
+        if (!sessionId) {
+          throw { code: "SDK_PROTOCOL_ERROR", message: "sessionId is required" };
+        }
+
+        await withNativeOperation(async () => {
+          const routeWasPresent = hasSdkSessionRoute(port, channelId, sessionId);
+          const activeWasPresent = activeThreadIds.has(sessionId);
+          const hadLifecycle = sdkLifecycleBySession.has(sessionId);
+          const previousLifecycle = sdkLifecycleBySession.get(sessionId);
+          const autoEndOnDisconnect = message.autoEndOnDisconnect !== false;
+
+          addActiveThread(sessionId, context.origin);
+          addSdkSession(port, channelId, sessionId);
+          sdkLifecycleBySession.set(sessionId, {
+            autoEndOnDisconnect,
+            origin: context.origin,
+          });
+
+          const cleanupTemporaryState = () => {
+            if (!routeWasPresent) {
+              removeSdkSession(port, channelId, sessionId);
+            }
+            if (!activeWasPresent && !sdkRoutesBySession.has(sessionId)) {
+              removeActiveThread(sessionId);
+            }
+            if (hadLifecycle) {
+              sdkLifecycleBySession.set(sessionId, previousLifecycle);
+            } else {
+              sdkLifecycleBySession.delete(sessionId);
+            }
+          };
+
+          try {
+            // Subscribe while Core is still Ended. The initial Ended snapshot
+            // is expected and closes the observation gap before reactivation.
+            await subscribeThreadForContext(sessionId, context);
+          } catch (err) {
+            cleanupTemporaryState();
+            throw err;
+          }
+
+          try {
+            const result = await sendSdkNativeRequest(context, "resume_thread", {
+              threadId: sessionId,
+            });
+            const snapshot = applyThreadSnapshot(sessionId, result);
+            if (snapshot.status !== "idle") {
+              throw {
+                code: "SDK_PROTOCOL_ERROR",
+                message: "resume_thread response did not contain an idle snapshot.",
+              };
+            }
+            postSdkResponse(port, channelId, requestId, true, {
+              sessionId,
+              autoEndOnDisconnect,
+            });
+          } catch (err) {
+            // A Core lifecycle error is deterministic and the temporary
+            // observation state must be removed. Transport/protocol failures
+            // stay subscribed because Core may already have committed Idle.
+            const normalized = normalizeError(err);
+            const deterministic = new Set([
+              "THREAD_NOT_FOUND",
+              "THREAD_ACCESS_DENIED",
+              "THREAD_BUSY",
+              "THREAD_ENDED",
+              "WORKSPACE_OPEN_FAILED",
+              "PROVIDER_COMMAND_FAILED",
+              "INVALID_INPUT",
+            ]).has(normalized.code);
+            if (deterministic) cleanupTemporaryState();
+            throw err;
+          }
         });
         return;
       }

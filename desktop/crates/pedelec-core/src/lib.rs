@@ -854,6 +854,12 @@ pub struct EndThreadInput {
     pub thread_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeThreadInput {
+    pub thread_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitToolResultInput {
@@ -929,6 +935,12 @@ pub struct SessionUsage {
 #[derive(Debug)]
 pub struct ThreadSubscription {
     pub events: mpsc::Receiver<ThreadEvent>,
+    pub snapshot: ThreadSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeThreadOutput {
     pub snapshot: ThreadSnapshot,
 }
 
@@ -2024,16 +2036,48 @@ impl CoreRuntime {
     }
 
     fn restore_ended_thread_runtime(&mut self, thread_id: &str) -> Result<PathBuf, PedelecError> {
+        let (registry, event_log_path) = self.load_thread_runtime(thread_id, false)?;
+        self.tool_registry.insert(thread_id.to_string(), registry);
+        self.debug_reactivating_threads
+            .insert(thread_id.to_string());
+        Ok(event_log_path)
+    }
+
+    fn load_thread_runtime(
+        &self,
+        thread_id: &str,
+        validate_workspace: bool,
+    ) -> Result<(ToolRegistry, PathBuf), PedelecError> {
         let workspace_path = self
             .thread_manager
             .thread(thread_id)?
             .workspace_path
             .clone();
+
+        if validate_workspace {
+            let metadata = fs::metadata(&workspace_path).map_err(|err| {
+                workspace_open_error(
+                    thread_id,
+                    &workspace_path,
+                    "cannot open recorded workspace",
+                    err,
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(workspace_open_error(
+                    thread_id,
+                    &workspace_path,
+                    "recorded workspace is not a directory",
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "recorded workspace path is not a directory",
+                    ),
+                ));
+            }
+        }
+
         let registry = ToolRegistry::load_from_skills_dir(workspace_skills_root(&workspace_path))?;
-        self.tool_registry.insert(thread_id.to_string(), registry);
-        self.debug_reactivating_threads
-            .insert(thread_id.to_string());
-        Ok(thread_event_log_path(&workspace_path, thread_id))
+        Ok((registry, thread_event_log_path(&workspace_path, thread_id)))
     }
 
     fn begin_send_text_intent_start(
@@ -3022,6 +3066,66 @@ impl CoreRuntime {
         Ok(())
     }
 
+    /// Reactivates an ended thread without contacting its provider runtime.
+    ///
+    /// Workspace and tool-registry restoration happens before the thread is
+    /// mutated, so a failed resume leaves the authoritative thread state
+    /// ended and does not expose partially restored runtime resources.
+    pub fn resume_thread(
+        &mut self,
+        input: ResumeThreadInput,
+    ) -> Result<ResumeThreadOutput, PedelecError> {
+        let status = self.thread_manager.thread(&input.thread_id)?.status.clone();
+        match status {
+            ThreadStatus::Idle => {
+                return Ok(ResumeThreadOutput {
+                    snapshot: self.build_thread_snapshot(&input.thread_id)?,
+                });
+            }
+            ThreadStatus::Ended => {}
+            ThreadStatus::Starting
+            | ThreadStatus::Running
+            | ThreadStatus::WaitingToolResult
+            | ThreadStatus::Stopping => {
+                return Err(PedelecError::with_details(
+                    error_codes::THREAD_BUSY,
+                    "thread is busy",
+                    serde_json::json!({ "threadId": input.thread_id }),
+                ));
+            }
+            ThreadStatus::Error => {
+                return Err(PedelecError::with_details(
+                    error_codes::PROVIDER_COMMAND_FAILED,
+                    "thread is in error state",
+                    serde_json::json!({ "threadId": input.thread_id }),
+                ));
+            }
+        }
+
+        let (registry, event_log_path) = self.load_thread_runtime(&input.thread_id, true)?;
+
+        // An ended thread should already have these cleared. Keep the resume
+        // boundary defensive so stale transient state cannot leak into the
+        // newly idle lifecycle after an interrupted or older cleanup path.
+        self.pending_provider_operations.remove(&input.thread_id);
+        self.clear_active_provider_turn(&input.thread_id);
+        self.tool_request_broker.clear_thread(&input.thread_id);
+        self.tool_registry.insert(input.thread_id.clone(), registry);
+        self.event_bus
+            .register_thread_log(&input.thread_id, event_log_path);
+        self.debug_reactivating_threads.remove(&input.thread_id);
+
+        let thread = self.thread_manager.thread_mut(&input.thread_id)?;
+        thread.status = ThreadStatus::Idle;
+        thread.updated_at = Utc::now();
+        self.event_bus
+            .emit_status_changed(&input.thread_id, ThreadStatus::Idle);
+
+        Ok(ResumeThreadOutput {
+            snapshot: self.build_thread_snapshot(&input.thread_id)?,
+        })
+    }
+
     /// Compatibility wrapper for direct Core users. IPC/Tauri should use
     /// `begin_end_thread`, dispatch the returned persistent operation outside
     /// the mutex, and then call `finish_end_thread`.
@@ -3277,34 +3381,40 @@ impl CoreRuntime {
     ) -> Result<ThreadSubscription, PedelecError> {
         self.thread_manager.thread(&input.thread_id)?;
         let events = self.event_bus.subscribe(&input.thread_id);
+        let snapshot = self.build_thread_snapshot(&input.thread_id)?;
+        Ok(ThreadSubscription { events, snapshot })
+    }
+
+    /// Returns the current authoritative lifecycle snapshot without creating
+    /// an event subscriber or contacting a provider runtime.
+    pub fn thread_snapshot(
+        &self,
+        input: SubscribeThreadInput,
+    ) -> Result<ThreadSnapshot, PedelecError> {
+        self.build_thread_snapshot(&input.thread_id)
+    }
+
+    fn build_thread_snapshot(&self, thread_id: &str) -> Result<ThreadSnapshot, PedelecError> {
         let active_operation = self
             .pending_provider_operations
-            .get(&input.thread_id)
-            .and_then(|operation| {
-                Some(ActiveOperationSnapshot {
-                    operation_id: operation.operation_id.clone(),
-                    operation_kind: match operation.kind() {
-                        PendingProviderOperationKind::UserTurn => ThreadOperationKind::User,
-                        PendingProviderOperationKind::Prepare => ThreadOperationKind::Prepare,
-                    },
-                    started_at: operation.started_at,
-                })
+            .get(thread_id)
+            .map(|operation| ActiveOperationSnapshot {
+                operation_id: operation.operation_id.clone(),
+                operation_kind: match operation.kind() {
+                    PendingProviderOperationKind::UserTurn => ThreadOperationKind::User,
+                    PendingProviderOperationKind::Prepare => ThreadOperationKind::Prepare,
+                },
+                started_at: operation.started_at,
             });
-        let snapshot = ThreadSnapshot {
-            thread_id: input.thread_id.clone(),
-            status: self.thread_manager.thread(&input.thread_id)?.status.clone(),
-            latest_seq: self.event_bus.latest_seq(&input.thread_id),
-            usage: self.session_usage.get(&input.thread_id).cloned(),
+        Ok(ThreadSnapshot {
+            thread_id: thread_id.to_string(),
+            status: self.thread_manager.thread(thread_id)?.status.clone(),
+            latest_seq: self.event_bus.latest_seq(thread_id),
+            usage: self.session_usage.get(thread_id).cloned(),
             active_operation,
-            last_completed_operation: self
-                .last_completed_operations
-                .get(&input.thread_id)
-                .cloned(),
-            pending_tool_request: self
-                .tool_request_broker
-                .pending_for_thread(&input.thread_id),
-        };
-        Ok(ThreadSubscription { events, snapshot })
+            last_completed_operation: self.last_completed_operations.get(thread_id).cloned(),
+            pending_tool_request: self.tool_request_broker.pending_for_thread(thread_id),
+        })
     }
 
     pub fn subscribe_all_threads(&mut self) -> mpsc::Receiver<ThreadEvent> {
@@ -7970,6 +8080,23 @@ fn workspace_io_error(
         code,
         message,
         serde_json::json!({ "path": path_for_external_use(path), "error": err.to_string() }),
+    )
+}
+
+fn workspace_open_error(
+    thread_id: &str,
+    workspace_path: &Path,
+    message: &'static str,
+    err: std::io::Error,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::WORKSPACE_OPEN_FAILED,
+        message,
+        serde_json::json!({
+            "threadId": thread_id,
+            "workspacePath": path_for_external_use(workspace_path),
+            "error": err.to_string(),
+        }),
     )
 }
 
