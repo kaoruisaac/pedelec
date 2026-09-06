@@ -1092,6 +1092,106 @@ describe("Pedelec SDK", () => {
     expect((await promise).sessionId).toBe("thread_resume");
   });
 
+  it("exposes monotonic session usage without invoking lifecycle callbacks", async () => {
+    const pedelec = new Pedelec();
+    const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
+    const statuses: string[] = [];
+    const chats: string[] = [];
+    const errors: unknown[] = [];
+    session.onStatus((status) => statuses.push(status));
+    session.onChat((text) => chats.push(text));
+    session.onError((error) => errors.push(error));
+
+    expect(session.usage.totalTokens).toBeUndefined();
+    pageWindow.emitFromExtension({
+      source: "pedelec-sdk-extension",
+      channelId: createRequest.channelId,
+      type: "usage_updated",
+      sessionId: "thread_1",
+      seq: 1,
+      totalTokens: 12,
+    });
+    expect(session.usage.totalTokens).toBe(12);
+
+    session.handleEvent({
+      type: "usage_updated",
+      channelId: createRequest.channelId,
+      sessionId: "thread_1",
+      totalTokens: 20,
+    } as any);
+    expect(session.usage.totalTokens).toBe(20);
+    session.handleEvent({
+      type: "usage_updated",
+      channelId: createRequest.channelId,
+      sessionId: "thread_1",
+      totalTokens: 4,
+    } as any);
+    session.handleEvent({
+      type: "usage_updated",
+      channelId: createRequest.channelId,
+      sessionId: "thread_1",
+      totalTokens: -1,
+    } as any);
+    session.handleEvent({
+      type: "usage_updated",
+      channelId: createRequest.channelId,
+      sessionId: "thread_1",
+      totalTokens: Number.NaN,
+    } as any);
+    expect(session.usage.totalTokens).toBe(20);
+    expect(statuses).toEqual([]);
+    expect(chats).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("filters stale usage events by the session sequence cursor", async () => {
+    const pedelec = new Pedelec();
+    const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
+    const event = (seq: number, totalTokens: number) => pageWindow.emitFromExtension({
+      source: "pedelec-sdk-extension",
+      channelId: createRequest.channelId,
+      type: "usage_updated",
+      sessionId: "thread_1",
+      seq,
+      totalTokens,
+    });
+
+    event(5, 50);
+    event(4, 100);
+    expect(session.usage.totalTokens).toBe(50);
+    event(6, 60);
+    expect(session.usage.totalTokens).toBe(60);
+  });
+
+  it("hydrates usage from a resume snapshot and preserves it when snapshots omit or lower it", async () => {
+    const pedelec = new Pedelec();
+    const resume = pedelec.resumeSession("thread_resume_usage");
+    const request = pageWindow.lastSent();
+    emitSnapshot(pageWindow, request, {
+      threadId: "thread_resume_usage",
+      status: "idle",
+      latestSeq: 4,
+      usage: { totalTokens: 42 },
+    });
+    respondOk(pageWindow, request, { sessionId: "thread_resume_usage" });
+    const session = await resume;
+    expect(session.usage.totalTokens).toBe(42);
+
+    session.handleSnapshot({
+      threadId: "thread_resume_usage",
+      status: "idle",
+      latestSeq: 5,
+    } as any);
+    expect(session.usage.totalTokens).toBe(42);
+    session.handleSnapshot({
+      threadId: "thread_resume_usage",
+      status: "idle",
+      latestSeq: 6,
+      usage: { totalTokens: 7 },
+    } as any);
+    expect(session.usage.totalTokens).toBe(42);
+  });
+
   it("resolves sendText only after operation_completed", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);

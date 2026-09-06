@@ -87,6 +87,24 @@ describe("EventMonitorApp Debug Prompt", () => {
     expect(textarea.disabled).toBe(false);
   });
 
+  it("renders normalized total tokens in the selected thread summary", async () => {
+    const container = mountMonitor();
+    emitThread("t000123", "idle");
+    await tick();
+
+    expect(summaryValue(container, "Total Tokens")).toBe("-");
+
+    emitThreadEvent({
+      type: "usage_updated",
+      threadId: "t000123",
+      seq: 3,
+      totalTokens: 123456,
+    });
+    await tick();
+
+    expect(summaryValue(container, "Total Tokens")).toBe("123,456");
+  });
+
   it("submits an ended thread through the same guarded path", async () => {
     const container = mountMonitor();
     emitThread("t000123", "ended");
@@ -483,6 +501,13 @@ function metricValue(container: HTMLElement, label: string): string {
     (item) => item.querySelector("span")?.textContent === label,
   );
   return metric?.querySelector("strong")?.textContent || "";
+}
+
+function summaryValue(container: HTMLElement, label: string): string {
+  const summaryItem = [...container.querySelectorAll<HTMLElement>(".event-monitor-summary-item")].find(
+    (item) => item.querySelector("span")?.textContent === label,
+  );
+  return summaryItem?.querySelector("strong")?.textContent || "";
 }
 
 function threadButtons(container: HTMLElement): HTMLButtonElement[] {

@@ -601,6 +601,21 @@ test("autoEndOnDisconnect false keeps the native session but requires explicit r
   });
 });
 
+test("maps normalized usage events without changing the token total", () => {
+  const background = createBackground(createChrome());
+  assert.deepEqual(background.sdkEventFromThreadEvent({
+    threadId: "thread_usage",
+    seq: 9,
+    type: "usage_updated",
+    totalTokens: 123456,
+  }), {
+    sessionId: "thread_usage",
+    seq: 9,
+    type: "usage_updated",
+    totalTokens: 123456,
+  });
+});
+
 test("failed per-thread recovery retries on the connected Native Host and preserves caller origin", async () => {
   const chrome = createChrome();
   const native = new MockPort();

@@ -1,5 +1,6 @@
 #!/bin/sh
 counter=0
+prompt_counter=0
 auth_methods='[]'
 if [ "$FAKE_ACP_AUTH" = "cursor_login" ]; then
   auth_methods='[{"id":"cursor_login","name":"Cursor Login"}]'
@@ -21,6 +22,11 @@ while IFS= read -r line; do
     *'"method":"session/set_mode"'*|*'"method":"session/set_config_option"'*)
       printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
     *'"method":"session/prompt"'*)
+      prompt_counter=$((prompt_counter + 1))
+      prompt_total=10
+      if [ "${FAKE_ACP_USAGE_SEQUENCE:-}" = "10,20" ] && [ "$prompt_counter" -ge 2 ]; then
+        prompt_total=20
+      fi
       session_id=$(printf '%s' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
       case "$line" in *'"text":"malformed"'*) printf 'not-json\n'; exit 7 ;; esac
       case "$line" in
@@ -45,7 +51,11 @@ while IFS= read -r line; do
       esac
       printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"agent_message_chunk","messageId":"message-1","content":{"type":"text","text":"world"}}}}\n' "$session_id"
       printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"usage_update","used":4,"size":100}}}\n' "$session_id"
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id" ;;
+      if [ "${FAKE_ACP_USAGE:-0}" = "1" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn","usage":{"inputTokens":4,"outputTokens":3,"thoughtTokens":1,"cachedReadTokens":2,"cachedWriteTokens":0,"totalTokens":%s}}}\n' "$id" "$prompt_total"
+      else
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
+      fi ;;
     *) ;;
   esac
 done

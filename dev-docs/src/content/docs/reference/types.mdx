@@ -13,6 +13,7 @@ import type {
   ProviderCode,
   ProviderInfo,
   PedelecSessionStatus,
+  PedelecSessionUsage,
   ToolArgsSchema,
   Asset,
   AssetPath,
@@ -193,6 +194,16 @@ type PedelecSessionStatus =
   | "ended"
   | "error";
 ```
+
+### `PedelecSessionUsage`
+
+```ts
+type PedelecSessionUsage = {
+  totalTokens?: number;
+};
+```
+
+`totalTokens` is the normalized cumulative token total observed for one session. It is omitted until a supported provider reports a valid value.
 
 ## JSON value types
 

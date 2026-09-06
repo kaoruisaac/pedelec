@@ -79,10 +79,18 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             status = $status
             conversation_id = $conversationId
             response = ('final-' + $turn)
-            usage = @{ input_tokens = (20 + $turn); output_tokens = (2 * $turn) }
             error = if ($status -eq 'SUCCESS') { $null } else { @{ code = 'fake_failure'; message = 'requested failure' } }
         }
-    } | ConvertTo-Json -Compress -Depth 10
+    }
+    $isPrepare = $request.message.content -like '*Session Preparation*'
+    if (-not $isPrepare -or $env:FAKE_AGY_PREPARE_USAGE -eq '1') {
+        $result.result.usage = @{
+            input_tokens = (20 + $turn)
+            output_tokens = (2 * $turn)
+            total_tokens = (25 + (($turn - 1) * 3))
+        }
+    }
+    $result = $result | ConvertTo-Json -Compress -Depth 10
     [Console]::Out.WriteLine($result)
     [Console]::Out.Flush()
     if ($request.message.content -like '*EXIT_AFTER_RESULT*') {

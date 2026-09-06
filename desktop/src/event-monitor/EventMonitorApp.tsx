@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FaRegularFolderOpen, FaSolidStop, FaSolidTrash } from "solid-icons/fa";
 import {
   errorTitle,
+  formatTokenCount,
   formatTimestamp,
   formatValue,
   prettyJson,
@@ -364,6 +365,7 @@ function ThreadDetail(props: {
           <SummaryItem label="Status" value={thread().status} status={thread().status} />
           <SummaryItem label="Provider Session ID" value={thread().providerSessionId} />
           <SummaryItem label="Provider Turn ID" value={thread().activeProviderTurnId} />
+          <SummaryItem label="Total Tokens" value={formatTokenCount(thread().totalTokens)} />
           <SummaryItem
             label="Runtime PID / Gen"
             value={

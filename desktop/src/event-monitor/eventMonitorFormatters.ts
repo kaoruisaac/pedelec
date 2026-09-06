@@ -31,6 +31,19 @@ export function formatValue(value: unknown): string {
   return String(value);
 }
 
+export function formatTokenCount(value: unknown): string | undefined {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < 0
+  ) {
+    return undefined;
+  }
+
+  return value.toLocaleString("en-US");
+}
+
 export function statusLabel(status: unknown): string {
   return formatValue(status);
 }

@@ -55,6 +55,16 @@ readonly sessionCreatedAt: number
 
 這個 session object construction 的 browser `Date.now()`。Resume 後不保證是原始 Core thread creation time。
 
+### `usage`
+
+```ts
+readonly usage: PedelecSessionUsage
+```
+
+此 session 已觀察到的 normalized cumulative token usage。`usage.totalTokens` 初始為 `undefined`；只有 provider 回報受支援且有效的 total 時才會填入。SDK handle 存續期間此值只會單調增加，usage update 不會呼叫 chat、status 或 error handlers。
+
+Core snapshot 在已知時也會包含這個值，因此 `resumeSession()` 可以 hydrate usage。Provider 或 payload 不支援有效 total 時則維持 `undefined`；目前 Cursor ACP 即屬於此情況。這個值不是 context-window occupancy、金額 cost，也不保證等同 invoice；目前 API 也不提供 input/output/cache/reasoning breakdown。
+
 ## `prepare()`
 
 ```ts

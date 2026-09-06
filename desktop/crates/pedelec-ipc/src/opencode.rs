@@ -1210,6 +1210,15 @@ fn handle_event(
                 usage,
             },
         ),
+        AcpRuntimeEvent::PromptUsageUpdated {
+            pedelec_thread_id,
+            usage,
+            ..
+        } => {
+            if provider == AcpProviderKind::OpenCode {
+                record_opencode_prompt_usage(runtime, &pedelec_thread_id, &usage);
+            }
+        }
         AcpRuntimeEvent::TurnCompleted {
             pedelec_thread_id,
             provider_session_id,
@@ -1379,6 +1388,25 @@ fn reduce(runtime: &SharedCoreRuntime, event: ProviderRuntimeEvent) {
         let _ = core.reduce_provider_runtime_event(event);
     }
 }
+
+fn opencode_prompt_total_tokens(usage: &Value) -> Option<u64> {
+    usage.get("totalTokens").and_then(Value::as_u64)
+}
+
+fn record_opencode_prompt_usage(runtime: &SharedCoreRuntime, thread_id: &str, usage: &Value) {
+    let Some(total_tokens) = opencode_prompt_total_tokens(usage) else {
+        return;
+    };
+    if let Ok(mut core) = runtime.lock() {
+        if let Some(operation_id) = core.current_operation_id(thread_id) {
+            // OpenCode's terminal prompt total is a per-prompt contribution.
+            // Core makes the operation update idempotent if a terminal frame
+            // is replayed, while ACP usage_update remains diagnostic-only.
+            let _ = core.add_session_token_delta_once(thread_id, &operation_id, total_tokens);
+        }
+    }
+}
+
 fn record(runtime: &SharedCoreRuntime, event: ProviderRuntimeDiagnostic) {
     if let Ok(mut core) = runtime.lock() {
         core.record_provider_runtime_diagnostic(event);
@@ -1569,6 +1597,72 @@ mod tests {
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    #[test]
+    fn opencode_usage_parser_accepts_only_native_prompt_total() {
+        assert_eq!(
+            opencode_prompt_total_tokens(&json!({
+                "inputTokens": 4,
+                "outputTokens": 3,
+                "thoughtTokens": 1,
+                "cachedReadTokens": 2,
+                "cachedWriteTokens": 0,
+                "totalTokens": 10,
+            })),
+            Some(10)
+        );
+        assert_eq!(
+            opencode_prompt_total_tokens(&json!({ "used": 4, "size": 100 })),
+            None
+        );
+        assert_eq!(
+            opencode_prompt_total_tokens(&json!({ "totalTokens": "10" })),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_prompt_usage_is_idempotent_for_one_operation() {
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let thread_id = "thread-open";
+        let workspace = tempdir().unwrap().path().to_path_buf();
+        let now = Utc::now();
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            ThreadState {
+                thread_id: thread_id.into(),
+                provider: ProviderCode::OpenCode,
+                effort_level: EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: workspace,
+                skills: Vec::new(),
+                status: ThreadStatus::Running,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: None,
+            },
+            ProviderSessionState {
+                provider_session_id: Some("acp-session-1".into()),
+                active_provider_turn_id: Some("local-turn-1".into()),
+            },
+        );
+        runtime.lock().unwrap().pending_provider_operations.insert(
+            thread_id.into(),
+            PendingProviderOperation {
+                operation_id: "operation-1".into(),
+                kind: PendingProviderOperationKind::UserTurn,
+                started_at: now,
+            },
+        );
+
+        let usage = json!({ "totalTokens": 10 });
+        record_opencode_prompt_usage(&runtime, thread_id, &usage);
+        record_opencode_prompt_usage(&runtime, thread_id, &usage);
+
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens(thread_id),
+            Some(10)
+        );
+    }
 
     #[test]
     fn config_preserves_existing_instructions_and_adds_session_entry() {
@@ -1941,6 +2035,13 @@ mod tests {
         assert_eq!(prompts[1]["params"]["prompt"][0]["text"], "second task");
         assert_eq!(prompts[2]["params"]["prompt"][0]["text"], "/foo");
         assert!(!frames.contains("PEDELEC_PREPARED"));
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .session_total_tokens("thread-cursor"),
+            None
+        );
         let _ = owner.shutdown();
     }
 
@@ -2213,7 +2314,9 @@ mod tests {
             .with_process_cwd_for_test(temp.path())
             .with_env_for_test("FAKE_ACP_LOG", log.to_string_lossy())
             .with_env_for_test("FAKE_ACP_WORKSPACE", workspace.to_string_lossy())
-            .with_env_for_test("FAKE_ACP_LOAD", "true");
+            .with_env_for_test("FAKE_ACP_LOAD", "true")
+            .with_env_for_test("FAKE_ACP_USAGE", "1")
+            .with_env_for_test("FAKE_ACP_USAGE_SEQUENCE", "10,20");
         let mut session = session_intent(&workspace, None);
         dispatcher
             .dispatch(PersistentRuntimeOperation::EnsureSession {
@@ -2257,9 +2360,9 @@ mod tests {
                 turn: PersistentProviderTurnIntent {
                     thread_id: "thread-open".into(),
                     local_turn_id: "local-open".into(),
-                    provider_session_id: Some(provider_id),
+                    provider_session_id: Some(provider_id.clone()),
                     message: "actual user task".into(),
-                    session,
+                    session: session.clone(),
                 },
             })
             .unwrap();
@@ -2286,16 +2389,76 @@ mod tests {
                 .status,
             ThreadStatus::Idle
         );
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens("thread-open"),
+            Some(10)
+        );
+
+        {
+            let mut core = runtime.lock().unwrap();
+            core.thread_manager
+                .thread_mut("thread-open")
+                .unwrap()
+                .status = ThreadStatus::Running;
+            core.thread_manager
+                .provider_session_state_mut("thread-open")
+                .unwrap()
+                .active_provider_turn_id = Some("local-open-2".into());
+            core.pending_provider_operations.insert(
+                "thread-open".into(),
+                PendingProviderOperation {
+                    operation_id: "test-operation-2".into(),
+                    kind: PendingProviderOperationKind::UserTurn,
+                    started_at: Utc::now(),
+                },
+            );
+        }
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::StartTurn {
+                turn: PersistentProviderTurnIntent {
+                    thread_id: "thread-open".into(),
+                    local_turn_id: "local-open-2".into(),
+                    provider_session_id: Some(provider_id),
+                    message: "second user task".into(),
+                    session,
+                },
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && runtime
+                .lock()
+                .unwrap()
+                .thread_manager
+                .thread("thread-open")
+                .unwrap()
+                .status
+                != ThreadStatus::Idle
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens("thread-open"),
+            Some(30)
+        );
         let frames = fs::read_to_string(log).unwrap();
-        let prompt = frames
+        let prompts = frames
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .find(|frame| frame["method"] == "session/prompt")
-            .unwrap();
-        assert_eq!(prompt["params"]["prompt"][0]["text"], "actual user task");
-        assert!(!prompt
+            .filter(|frame| frame["method"] == "session/prompt")
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(
+            prompts[0]["params"]["prompt"][0]["text"],
+            "actual user task"
+        );
+        assert_eq!(
+            prompts[1]["params"]["prompt"][0]["text"],
+            "second user task"
+        );
+        assert!(!prompts.iter().any(|prompt| prompt
             .to_string()
-            .contains("Pedelec is the host application"));
+            .contains("Pedelec is the host application")));
         assert!(frames.contains("session/set_config_option"));
 
         let diagnostic_deadline = Instant::now() + Duration::from_secs(2);
@@ -2406,7 +2569,8 @@ mod tests {
             .with_process_cwd_for_test(temp.path())
             .with_env_for_test("FAKE_ACP_LOG", log.to_string_lossy())
             .with_env_for_test("FAKE_ACP_WORKSPACE", workspace.to_string_lossy())
-            .with_env_for_test("FAKE_ACP_LOAD", "true");
+            .with_env_for_test("FAKE_ACP_LOAD", "true")
+            .with_env_for_test("FAKE_ACP_USAGE", "1");
         let mut session = session_intent(&workspace, None);
         session.thread_id = thread_id.into();
         dispatcher

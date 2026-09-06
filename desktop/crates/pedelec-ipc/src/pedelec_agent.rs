@@ -338,10 +338,11 @@ impl PedelecAgentRuntimeDispatcher {
                         if let Ok(mut core) = runtime.lock() {
                             let _ = core.reduce_provider_runtime_event(
                                 ProviderRuntimeEvent::TurnStarted {
-                                    thread_id: pedelec_thread_id,
-                                    provider_turn_id: turn_id,
+                                    thread_id: pedelec_thread_id.clone(),
+                                    provider_turn_id: turn_id.clone(),
                                 },
                             );
+                            let _ = core.begin_session_usage_turn(&pedelec_thread_id, &turn_id);
                         }
                     }
                     PedelecAgentRuntimeEvent::AssistantDelta {
@@ -385,11 +386,22 @@ impl PedelecAgentRuntimeDispatcher {
                         if let Ok(mut core) = runtime.lock() {
                             let _ = core.reduce_provider_runtime_event(
                                 ProviderRuntimeEvent::UsageUpdated {
-                                    thread_id: pedelec_thread_id,
-                                    provider_turn_id: Some(turn_id),
-                                    usage,
+                                    thread_id: pedelec_thread_id.clone(),
+                                    provider_turn_id: Some(turn_id.clone()),
+                                    usage: usage.clone(),
                                 },
                             );
+                            if let Some(total_tokens) =
+                                usage.get("totalTokens").and_then(serde_json::Value::as_u64)
+                            {
+                                // Pedelec Agent reports the latest cumulative
+                                // usage for the active turn, not a delta.
+                                let _ = core.set_session_turn_total_tokens(
+                                    &pedelec_thread_id,
+                                    &turn_id,
+                                    total_tokens,
+                                );
+                            }
                         }
                     }
                     PedelecAgentRuntimeEvent::TurnCompleted {
@@ -1971,6 +1983,10 @@ mod tests {
 
         dispatch_turn(&dispatcher, &runtime, &thread_id, "hello");
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens(&thread_id),
+            Some(7)
+        );
         let emitted = collect_thread_events(&events);
         let deltas = emitted
             .iter()
@@ -2002,6 +2018,12 @@ mod tests {
         assert!(emitted
             .iter()
             .any(|event| matches!(event, ThreadEvent::OperationCompleted { success: true, .. })));
+        dispatch_turn(&dispatcher, &runtime, &thread_id, "second hello");
+        wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens(&thread_id),
+            Some(14)
+        );
         let _ = owner.shutdown();
     }
 

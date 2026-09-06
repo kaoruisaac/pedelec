@@ -13,6 +13,7 @@ import type {
   ProviderCode,
   ProviderInfo,
   PedelecSessionStatus,
+  PedelecSessionUsage,
   ToolArgsSchema,
   Asset,
   AssetPath,
@@ -193,6 +194,16 @@ type PedelecSessionStatus =
   | "ended"
   | "error";
 ```
+
+### `PedelecSessionUsage`
+
+```ts
+type PedelecSessionUsage = {
+  totalTokens?: number;
+};
+```
+
+`totalTokens` 是單一 session 已觀察到的 normalized cumulative token total。直到受支援的 provider 回報有效值以前都會省略。
 
 ## JSON value types
 

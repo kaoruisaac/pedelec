@@ -292,6 +292,15 @@ pub enum AcpRuntimeEvent {
         local_turn_id: Option<String>,
         usage: Value,
     },
+    /// Usage returned by the terminal session/prompt response. Its
+    /// accumulation semantics are provider-specific and are decided by the
+    /// IPC adapter rather than by the shared ACP runtime.
+    PromptUsageUpdated {
+        pedelec_thread_id: String,
+        provider_session_id: String,
+        local_turn_id: String,
+        usage: Value,
+    },
     TurnCompleted {
         pedelec_thread_id: String,
         provider_session_id: String,
@@ -1345,6 +1354,14 @@ impl AcpController {
                     "cancelled" => AcpTurnStatus::Interrupted,
                     _ => AcpTurnStatus::Failed,
                 };
+                if let Some(usage) = value.get("usage").cloned().filter(|usage| !usage.is_null()) {
+                    let _ = sender.send(AcpRuntimeEvent::PromptUsageUpdated {
+                        pedelec_thread_id: pedelec_thread_id.to_string(),
+                        provider_session_id: provider_session_id.to_string(),
+                        local_turn_id: local_turn_id.to_string(),
+                        usage,
+                    });
+                }
                 let _ = sender.send(AcpRuntimeEvent::TurnCompleted {
                     pedelec_thread_id: pedelec_thread_id.to_string(),
                     provider_session_id: provider_session_id.to_string(),

@@ -1926,6 +1926,13 @@ function createBackground(runtimeChrome, options = {}) {
         ...(event.error ? { error: normalizeError(event.error) } : {}),
       };
     }
+    if (event.type === "usage_updated") {
+      return {
+        ...base,
+        type: "usage_updated",
+        totalTokens: event.totalTokens,
+      };
+    }
     if (event.type === "error") {
       const source = event.source === "provider" || event.source === "core" ? event.source : undefined;
       const provider = source === "provider" && event.provider ? { provider: event.provider } : {};

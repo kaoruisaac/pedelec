@@ -1,4 +1,5 @@
 $counter = 0
+$promptCounter = 0
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = $utf8NoBom
 $supportsLoad = $env:FAKE_ACP_LOAD -eq 'true'
@@ -29,6 +30,11 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             $result.sessionId = $env:FAKE_ACP_LOAD_SESSION_ID
         }
     } elseif ($request.method -eq 'session/prompt') {
+        $promptCounter++
+        $promptTotal = 10
+        if ($env:FAKE_ACP_USAGE_SEQUENCE -eq '10,20' -and $promptCounter -ge 2) {
+            $promptTotal = 20
+        }
         $sessionId = $request.params.sessionId
         if ($request.params.prompt[0].text -eq 'malformed') {
             [Console]::Out.WriteLine('not-json')
@@ -63,7 +69,17 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             continue
         }
         if ($request.params.prompt[0].text -eq 'empty-success') {
-            $result = @{ stopReason = 'end_turn' }
+    $result = @{ stopReason = 'end_turn' }
+    if ($env:FAKE_ACP_USAGE -eq '1') {
+        $result.usage = @{
+            inputTokens = 4
+            outputTokens = 3
+            thoughtTokens = 1
+            cachedReadTokens = 2
+            cachedWriteTokens = 0
+            totalTokens = $promptTotal
+        }
+    }
             if ($null -ne $request.id) {
                 @{
                     jsonrpc = '2.0'
@@ -131,6 +147,16 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         } | ConvertTo-Json -Compress -Depth 12 | Write-Output
         [Console]::Out.Flush()
         $result = @{ stopReason = 'end_turn' }
+        if ($env:FAKE_ACP_USAGE -eq '1') {
+            $result.usage = @{
+                inputTokens = 4
+                outputTokens = 3
+                thoughtTokens = 1
+                cachedReadTokens = 2
+                cachedWriteTokens = 0
+                totalTokens = $promptTotal
+            }
+        }
     } else {
         if ($null -eq $request.id) { continue }
         $result = @{}

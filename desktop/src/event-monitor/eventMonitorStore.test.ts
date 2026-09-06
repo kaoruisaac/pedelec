@@ -153,6 +153,57 @@ describe("event monitor store", () => {
     expect(monitor.store.runtimeByProvider.opencode).toBeUndefined();
   });
 
+  it("projects usage updates monotonically and retains them as semantic events", () => {
+    const monitor = createEventMonitorStore();
+
+    monitor.upsertThreadEvent({
+      type: "usage_updated",
+      threadId: "usage-thread",
+      totalTokens: 100,
+    });
+    expect(monitor.store.threadsById["usage-thread"]?.totalTokens).toBe(100);
+    expect(monitor.store.threadsById["usage-thread"]?.eventCount).toBe(1);
+    expect(monitor.store.threadsById["usage-thread"]?.events[0]?.type).toBe("usage_updated");
+
+    monitor.upsertThreadEvent({
+      type: "usage_updated",
+      threadId: "usage-thread",
+      totalTokens: 150,
+    });
+    expect(monitor.store.threadsById["usage-thread"]?.totalTokens).toBe(150);
+
+    monitor.upsertThreadEvent({
+      type: "usage_updated",
+      threadId: "usage-thread",
+      totalTokens: 120,
+    });
+    expect(monitor.store.threadsById["usage-thread"]?.totalTokens).toBe(150);
+  });
+
+  it("ignores invalid usage totals without changing thread state", () => {
+    const monitor = createEventMonitorStore();
+    monitor.upsertThreadEvent({
+      type: "status_changed",
+      threadId: "usage-thread",
+      status: "running",
+    });
+
+    for (const totalTokens of [-1, 1.5, Number.NaN, "200"]) {
+      expect(() =>
+        monitor.upsertThreadEvent({
+          type: "usage_updated",
+          threadId: "usage-thread",
+          totalTokens,
+        }),
+      ).not.toThrow();
+    }
+
+    const thread = monitor.store.threadsById["usage-thread"]!;
+    expect(thread.totalTokens).toBeUndefined();
+    expect(thread.status).toBe("running");
+    expect(thread.eventCount).toBe(5);
+  });
+
   it("bounds protocol traffic without changing semantic event metrics or truncating messages", () => {
     const monitor = createEventMonitorStore();
     monitor.upsertThreadEvent({ type: "created", threadId: "codex-thread" });

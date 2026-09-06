@@ -11,6 +11,7 @@ export interface MonitorEvent {
   receivedAt: string;
   threadId?: string;
   status?: string;
+  totalTokens?: number;
   text?: string;
   providerSessionId?: string;
   activeProviderTurnId?: string;
@@ -43,6 +44,7 @@ export interface ThreadViewModel {
   provider?: ProviderCode;
   providerSessionId?: string;
   activeProviderTurnId?: string;
+  totalTokens?: number;
   runtimeProcessId?: number;
   runtimeGeneration?: number;
   runtimeAttached?: boolean;
@@ -348,6 +350,7 @@ function createMonitorThreadViewModel({
     provider: undefined,
     providerSessionId: undefined,
     activeProviderTurnId: undefined,
+    totalTokens: undefined,
     runtimeProcessId: undefined,
     runtimeGeneration: undefined,
     runtimeAttached: undefined,
@@ -390,6 +393,14 @@ function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void 
     case "provider_session_id_updated":
       thread.providerSessionId = event.providerSessionId as string | undefined;
       break;
+    case "usage_updated":
+      if (
+        isValidTotalTokens(event.totalTokens) &&
+        (thread.totalTokens === undefined || event.totalTokens >= thread.totalTokens)
+      ) {
+        thread.totalTokens = event.totalTokens;
+      }
+      break;
     case "error":
       thread.status = "error";
       thread.errors.push(event);
@@ -427,6 +438,10 @@ function applyEventToThread(thread: ThreadViewModel, event: MonitorEvent): void 
     default:
       break;
   }
+}
+
+function isValidTotalTokens(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
 }
 
 function isRuntimeDiagnostic(event: MonitorEvent): boolean {

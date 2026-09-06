@@ -9,7 +9,7 @@ use pedelec_runtime::{
     ClaudeReasoningEffort, ClaudeRuntimeError, ClaudeRuntimeEvent, ClaudeRuntimeLaunchConfig,
     ClaudeStreamController, ProviderRuntimeController, ProviderRuntimeOwner, RuntimeRegistryError,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -475,12 +475,25 @@ fn handle_runtime_event(
             local_turn_id,
             usage,
         } => {
+            let total_tokens = claude_operation_total_tokens(&usage);
             if let Ok(mut core) = runtime.lock() {
                 let _ = core.reduce_provider_runtime_event(ProviderRuntimeEvent::UsageUpdated {
                     thread_id: thread_id.to_string(),
-                    provider_turn_id: Some(local_turn_id),
+                    provider_turn_id: local_turn_id,
                     usage,
                 });
+                if let Some(total_tokens) = total_tokens {
+                    if let Some(operation_id) = core.current_operation_id(thread_id) {
+                        // Claude's terminal result is one operation-level
+                        // contribution. Core deduplicates replays by the
+                        // admitted Pedelec operation identity.
+                        let _ = core.add_session_token_delta_once(
+                            thread_id,
+                            &operation_id,
+                            total_tokens,
+                        );
+                    }
+                }
             }
         }
         ClaudeRuntimeEvent::TurnCompleted {
@@ -615,6 +628,62 @@ fn reduce_disconnect(runtime: &SharedCoreRuntime, thread_id: &str, error: Pedele
     }
 }
 
+fn claude_operation_total_tokens(usage: &Value) -> Option<u64> {
+    let object = usage.as_object()?;
+    if let Some(model_usage) = object.get("modelUsage").and_then(Value::as_object) {
+        let mut total = 0u64;
+        let mut found = false;
+        for model in model_usage.values().filter_map(Value::as_object) {
+            if let Some(model_total) = sum_nonnegative_integer_fields(
+                model,
+                [
+                    "inputTokens",
+                    "outputTokens",
+                    "cacheReadInputTokens",
+                    "cacheCreationInputTokens",
+                ],
+            ) {
+                total = total.saturating_add(model_total);
+                found = true;
+            }
+        }
+        if found {
+            return Some(total);
+        }
+    }
+
+    let top_level = object
+        .get("usage")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    sum_nonnegative_integer_fields(
+        top_level,
+        [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ],
+    )
+}
+
+fn sum_nonnegative_integer_fields<const N: usize>(
+    object: &serde_json::Map<String, Value>,
+    fields: [&str; N],
+) -> Option<u64> {
+    let mut total = 0u64;
+    let mut found = false;
+    for field in fields {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        let value = value.as_u64()?;
+        total = total.saturating_add(value);
+        found = true;
+    }
+    found.then_some(total)
+}
+
 fn registry_error(error: RuntimeRegistryError, thread_id: &str) -> PedelecError {
     PedelecError::with_details(
         error_codes::PROVIDER_RUNTIME_START_FAILED,
@@ -732,6 +801,44 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn claude_usage_parser_prefers_model_breakdown_without_double_counting_thinking() {
+        let usage = serde_json::json!({
+            "usage": {
+                "input_tokens": 99,
+                "output_tokens": 99,
+            },
+            "modelUsage": {
+                "claude-a": {
+                    "inputTokens": 10,
+                    "outputTokens": 5,
+                    "thinkingTokens": 100,
+                    "cacheReadInputTokens": 2,
+                    "cacheCreationInputTokens": 1,
+                },
+                "claude-b": {
+                    "inputTokens": 4,
+                    "outputTokens": 3,
+                },
+            },
+        });
+        assert_eq!(claude_operation_total_tokens(&usage), Some(25));
+    }
+
+    #[test]
+    fn claude_usage_parser_falls_back_to_snake_case_usage() {
+        let usage = serde_json::json!({
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 2,
+                "cache_creation_input_tokens": 1,
+            },
+        });
+        assert_eq!(claude_operation_total_tokens(&usage), Some(17));
+        assert_eq!(claude_operation_total_tokens(&serde_json::json!({}),), None);
+    }
+
+    #[test]
     fn prepare_uses_append_system_prompt_and_reuses_one_process() {
         let temp = tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -769,7 +876,8 @@ mod tests {
             temp.path(),
             &stdin_log,
             &start_log,
-        );
+        )
+        .with_env_for_test("FAKE_CLAUDE_PREPARE_USAGE", "1");
 
         dispatch_prepare(&dispatcher, &runtime, &thread_id);
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
@@ -802,6 +910,10 @@ mod tests {
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
         dispatch_turn(&dispatcher, &runtime, &thread_id, "second actual task");
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens(&thread_id),
+            Some(78)
+        );
         assert_eq!(
             dispatcher
                 .current_controller(&thread_id)
@@ -982,6 +1094,10 @@ mod tests {
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
         dispatch_turn(&dispatcher, &runtime, &thread_id, "FAIL_RESULT");
         wait_for_status(&runtime, &thread_id, ThreadStatus::Error);
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens(&thread_id),
+            Some(26)
+        );
         let events = event_rx.try_iter().collect::<Vec<_>>();
         assert!(events.iter().any(|event| matches!(
             event,

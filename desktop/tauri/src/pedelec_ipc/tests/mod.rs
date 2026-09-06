@@ -405,6 +405,7 @@ mod tests {
                     thread_id: "thread_cutoff".into(),
                     status: ThreadStatus::Idle,
                     latest_seq: 1,
+                    usage: None,
                     active_operation: None,
                     last_completed_operation: None,
                     pending_tool_request: None,

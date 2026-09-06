@@ -178,7 +178,7 @@ pub enum ClaudeRuntimeEvent {
         text: String,
     },
     UsageUpdated {
-        local_turn_id: String,
+        local_turn_id: Option<String>,
         usage: Value,
     },
     TurnCompleted {
@@ -828,6 +828,12 @@ fn handle_result(context: &StreamLoopContext, object: &Map<String, Value>) -> Re
 
     match active.kind {
         ActiveOperationKind::Prepare => {
+            if let Some(usage) = usage {
+                let _ = context.event_tx.send(ClaudeRuntimeEvent::UsageUpdated {
+                    local_turn_id: None,
+                    usage,
+                });
+            }
             if success {
                 let _ = context
                     .event_tx
@@ -852,7 +858,7 @@ fn handle_result(context: &StreamLoopContext, object: &Map<String, Value>) -> Re
                 .ok_or_else(|| "Claude user turn is missing local turn id".to_string())?;
             if let Some(usage) = usage {
                 let _ = context.event_tx.send(ClaudeRuntimeEvent::UsageUpdated {
-                    local_turn_id: local_turn_id.clone(),
+                    local_turn_id: Some(local_turn_id.clone()),
                     usage,
                 });
             }

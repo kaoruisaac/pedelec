@@ -240,6 +240,10 @@ export type PedelecSessionStatus =
   | "ended"
   | "error";
 
+export type PedelecSessionUsage = {
+  totalTokens?: number;
+};
+
 export type PedelecEventContext = {
   sessionId: string;
   provider: string;
@@ -347,6 +351,13 @@ type SessionEvent =
       error?: PedelecError;
     }
   | {
+      type: "usage_updated";
+      channelId: string;
+      sessionId: string;
+      seq?: number;
+      totalTokens: number;
+    }
+  | {
       type: "error";
       channelId?: string;
       sessionId?: string;
@@ -397,6 +408,9 @@ type SessionSnapshot = {
   threadId: string;
   status: string;
   latestSeq: number;
+  usage?: {
+    totalTokens: number;
+  };
   activeOperation?: {
     operationId: string;
     operationKind: "user" | "prepare";
@@ -1130,6 +1144,7 @@ export class PedelecSession<TToolName extends string = string> {
   readonly provider: string;
   readonly effortLevel?: EffortLevel;
   readonly sessionCreatedAt = Date.now();
+  readonly usage: PedelecSessionUsage = { totalTokens: undefined };
 
   private status: PedelecSessionStatus = "idle";
   private pendingOperation: PendingOperation | null = null;
@@ -1432,6 +1447,11 @@ export class PedelecSession<TToolName extends string = string> {
   }
 
   handleEvent(event: SessionEvent, meta: EventDispatchMeta = { source: "sdk" }): void {
+    if (event.type === "usage_updated") {
+      this.updateUsage(event.totalTokens);
+      return;
+    }
+
     if (event.type === "chat_delta") {
       const turn = this.requireOperationTurn(event.operationId, "chat_delta", meta);
       if (!turn) return;
@@ -1509,6 +1529,7 @@ export class PedelecSession<TToolName extends string = string> {
   /** @internal */
   handleSnapshot(snapshot: SessionSnapshot, meta: EventDispatchMeta = { source: "core" }): void {
     if (!snapshot || snapshot.threadId !== this.sessionId) return;
+    if (snapshot.usage) this.updateUsage(snapshot.usage.totalTokens);
     const active = snapshot.activeOperation;
     const pending = this.pendingOperation;
     this.reconcileRecoveredToolCalls(snapshot);
@@ -1680,6 +1701,13 @@ export class PedelecSession<TToolName extends string = string> {
       { source: "sdk", eventReceivedAt: meta.eventReceivedAt }
     );
     return null;
+  }
+
+  private updateUsage(totalTokens: unknown): void {
+    if (!isValidSessionUsageTotalTokens(totalTokens)) return;
+    if (this.usage.totalTokens === undefined || totalTokens >= this.usage.totalTokens) {
+      this.usage.totalTokens = totalTokens;
+    }
   }
 
   private matchesActiveOperation(operationId: string): boolean {
@@ -1908,6 +1936,7 @@ function isSessionEvent(message: PortMessage): message is SessionEvent {
     message.type === "status_changed" ||
     message.type === "tool_call" ||
     message.type === "operation_completed" ||
+    message.type === "usage_updated" ||
     message.type === "error" ||
     message.type === "ended"
   );
@@ -1987,6 +2016,10 @@ function createTurn(kind: ActiveTurn["kind"] = "user"): ActiveTurn {
     turnStartedAt: Date.now(),
     kind,
   };
+}
+
+function isValidSessionUsageTotalTokens(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
 }
 
 function coreStatusToSdkStatus(status: string): PedelecSessionStatus {

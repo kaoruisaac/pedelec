@@ -2160,6 +2160,110 @@ mod tests {
     }
 
     #[test]
+    fn normalized_session_usage_is_monotonic_and_snapshot_backed() {
+        let thread_id = "thread_usage";
+        let mut runtime = CoreRuntime::default();
+        add_tool_thread(
+            &mut runtime,
+            thread_id,
+            ThreadStatus::Idle,
+            r#"{"tools": []}"#,
+        );
+        let events = runtime.event_bus.subscribe(thread_id);
+
+        assert_eq!(runtime.session_total_tokens(thread_id), None);
+        assert!(runtime.set_session_total_tokens(thread_id, 0).unwrap());
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ThreadEvent::UsageUpdated {
+                seq: 1,
+                thread_id: ref event_thread_id,
+                total_tokens: 0,
+            } if event_thread_id == thread_id
+        ));
+        assert!(!runtime.set_session_total_tokens(thread_id, 0).unwrap());
+        assert!(runtime.set_session_total_tokens(thread_id, 10).unwrap());
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ThreadEvent::UsageUpdated {
+                seq: 2,
+                total_tokens: 10,
+                ..
+            }
+        ));
+        assert!(!runtime.set_session_total_tokens(thread_id, 4).unwrap());
+        assert_eq!(runtime.session_total_tokens(thread_id), Some(10));
+        assert_eq!(runtime.thread_status(thread_id), Some(ThreadStatus::Idle));
+
+        let snapshot = runtime
+            .subscribe_thread_with_snapshot(SubscribeThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap()
+            .snapshot;
+        assert_eq!(snapshot.usage.unwrap().total_tokens, 10);
+
+        let value = serde_json::to_value(ThreadEvent::UsageUpdated {
+            seq: 9,
+            thread_id: thread_id.into(),
+            total_tokens: 123456,
+        })
+        .unwrap();
+        assert_eq!(value["type"], json!("usage_updated"));
+        assert_eq!(value["totalTokens"], json!(123456));
+        assert_eq!(
+            ThreadEvent::UsageUpdated {
+                seq: 9,
+                thread_id: "thread_usage".into(),
+                total_tokens: 123456,
+            }
+            .seq(),
+            9
+        );
+    }
+
+    #[test]
+    fn normalized_session_usage_helpers_deduplicate_operations_and_track_turn_baselines() {
+        let thread_id = "thread_usage_helpers";
+        let mut runtime = CoreRuntime::default();
+        add_tool_thread(
+            &mut runtime,
+            thread_id,
+            ThreadStatus::Idle,
+            r#"{"tools": []}"#,
+        );
+        let events = runtime.event_bus.subscribe(thread_id);
+
+        assert!(runtime
+            .add_session_token_delta_once(thread_id, "operation-1", 5)
+            .unwrap());
+        assert!(!runtime
+            .add_session_token_delta_once(thread_id, "operation-1", 5)
+            .unwrap());
+        assert_eq!(runtime.session_total_tokens(thread_id), Some(5));
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ThreadEvent::UsageUpdated {
+                total_tokens: 5,
+                ..
+            }
+        ));
+        assert!(events.recv_timeout(Duration::from_millis(50)).is_err());
+
+        runtime
+            .begin_session_usage_turn(thread_id, "turn-1")
+            .unwrap();
+        assert!(runtime
+            .set_session_turn_total_tokens(thread_id, "turn-1", 3)
+            .unwrap());
+        assert_eq!(runtime.session_total_tokens(thread_id), Some(8));
+        assert!(runtime
+            .set_session_turn_total_tokens(thread_id, "turn-1", 7)
+            .unwrap());
+        assert_eq!(runtime.session_total_tokens(thread_id), Some(12));
+    }
+
+    #[test]
     fn all_thread_subscription_receives_later_events_without_crossing_thread_subscription() {
         let mut event_bus = EventBus::default();
         let all_rx = event_bus.subscribe_all();
@@ -2978,7 +3082,10 @@ mod tests {
             .unwrap()
             .snapshot;
         let active_operation = active.active_operation.expect("active operation snapshot");
-        assert_eq!(active_operation.operation_id, "test-operation-thread_snapshot_lifecycle");
+        assert_eq!(
+            active_operation.operation_id,
+            "test-operation-thread_snapshot_lifecycle"
+        );
         assert_eq!(active_operation.operation_kind, ThreadOperationKind::User);
         assert_eq!(active.status, ThreadStatus::Running);
 
@@ -3001,7 +3108,10 @@ mod tests {
         let last_completed = completed
             .last_completed_operation
             .expect("completion snapshot");
-        assert_eq!(last_completed.operation_id, "test-operation-thread_snapshot_lifecycle");
+        assert_eq!(
+            last_completed.operation_id,
+            "test-operation-thread_snapshot_lifecycle"
+        );
         assert_eq!(last_completed.operation_kind, ThreadOperationKind::User);
         assert!(!last_completed.success);
         assert_eq!(last_completed.error, Some(completion_error));
@@ -3039,7 +3149,9 @@ mod tests {
             })
             .unwrap()
             .snapshot;
-        let active = snapshot.active_operation.expect("active operation snapshot");
+        let active = snapshot
+            .active_operation
+            .expect("active operation snapshot");
         let pending = snapshot
             .pending_tool_request
             .expect("pending tool snapshot");

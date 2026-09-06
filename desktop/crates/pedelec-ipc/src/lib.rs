@@ -507,14 +507,27 @@ impl CodexRuntimeDispatcher {
                         usage,
                         ..
                     } => {
+                        let total_tokens = codex_cumulative_total_tokens(&usage);
                         if let Ok(mut core) = runtime.lock() {
+                            // The opaque provider reducer is legacy,
+                            // active-turn diagnostic state and may reject a
+                            // restored/out-of-turn notification. Codex's
+                            // cumulative session total below is independent
+                            // of that validation.
                             let _ = core.reduce_provider_runtime_event(
                                 pedelec_core::ProviderRuntimeEvent::UsageUpdated {
-                                    thread_id: pedelec_thread_id,
+                                    thread_id: pedelec_thread_id.clone(),
                                     provider_turn_id,
                                     usage,
                                 },
                             );
+                            if let Some(total_tokens) = total_tokens {
+                                // Codex reports a cumulative session/thread
+                                // total. Repeated snapshots are assigned to
+                                // Core's monotonic normalized state.
+                                let _ =
+                                    core.set_session_total_tokens(&pedelec_thread_id, total_tokens);
+                            }
                         }
                     }
                     CodexRuntimeEvent::TurnCompleted {
@@ -1040,6 +1053,14 @@ fn codex_turn_status_label(status: CodexTurnStatus) -> &'static str {
         CodexTurnStatus::Failed => "failed",
         CodexTurnStatus::Interrupted => "interrupted",
     }
+}
+
+fn codex_cumulative_total_tokens(usage: &Value) -> Option<u64> {
+    usage
+        .get("total")
+        .and_then(Value::as_object)
+        .and_then(|total| total.get("totalTokens"))
+        .and_then(Value::as_u64)
 }
 
 const MAX_RUNTIME_DIAGNOSTIC_TEXT_BYTES: usize = 4096;
@@ -2683,6 +2704,105 @@ mod tests {
     }
 
     #[test]
+    fn codex_usage_parser_uses_only_the_native_cumulative_total() {
+        let usage = serde_json::json!({
+            "total": { "totalTokens": 100 },
+            "last": { "totalTokens": 12 },
+        });
+        assert_eq!(codex_cumulative_total_tokens(&usage), Some(100));
+        assert_eq!(
+            codex_cumulative_total_tokens(&serde_json::json!({
+                "last": { "totalTokens": 12 }
+            })),
+            None
+        );
+        assert_eq!(
+            codex_cumulative_total_tokens(&serde_json::json!({
+                "total": { "totalTokens": "100" }
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_resume_usage_reaches_core_without_an_active_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let fake_program = fake_codex_resume_program(temp.path());
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let now = chrono::Utc::now();
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            pedelec_core::ThreadState {
+                thread_id: "thread-codex".into(),
+                provider: pedelec_core::ProviderCode::Codex,
+                effort_level: pedelec_core::EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: workspace.clone(),
+                skills: Vec::new(),
+                status: pedelec_core::ThreadStatus::Idle,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: None,
+            },
+            pedelec_core::ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher = CodexRuntimeDispatcher::new(owner.clone(), Arc::clone(&runtime))
+            .with_program_for_test(fake_program)
+            .with_process_cwd_for_test(temp.path());
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession {
+                session: pedelec_core::PersistentProviderSessionIntent {
+                    thread_id: "thread-codex".into(),
+                    provider: pedelec_core::ProviderCode::Codex,
+                    provider_session_id: Some("codex-restored".into()),
+                    workspace_path: workspace.clone(),
+                    effort_level: pedelec_core::EffortLevel::Default,
+                    model: None,
+                    reasoning_effort: None,
+                    antigravity_reasoning_effort: None,
+                    claude_reasoning_effort: None,
+                    approval_policy: pedelec_core::PersistentApprovalPolicy::Never,
+                    sandbox_policy: pedelec_core::PersistentSandboxPolicy::ReadOnly,
+                    host_instructions: "instructions".into(),
+                    config: std::collections::HashMap::new(),
+                    core_ipc_runtime_file_path: workspace.join("runtime.json"),
+                    tools: Vec::new(),
+                    guidance: None,
+                },
+            })
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline
+            && runtime.lock().unwrap().session_total_tokens("thread-codex") != Some(123)
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens("thread-codex"),
+            Some(123)
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_manager
+                .provider_session_state("thread-codex")
+                .unwrap()
+                .provider_session_id
+                .as_deref(),
+            Some("codex-restored")
+        );
+        let _ = owner.shutdown();
+    }
+
+    #[test]
     fn list_providers_waits_for_initial_provider_scan_without_holding_runtime_lock() {
         let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
         runtime.lock().unwrap().provider_path_value_override = Some(OsString::new());
@@ -3082,6 +3202,69 @@ mod tests {
 
         let error = run_provider_command_captured(spec, Duration::from_secs(1)).unwrap_err();
         assert_eq!(error.code, error_codes::PROVIDER_PROCESS_START_FAILED);
+    }
+
+    fn fake_codex_resume_program(directory: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let script = directory.join("fake-codex-resume.ps1");
+            fs::write(
+                &script,
+                r#"$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    $request = $line | ConvertFrom-Json
+    if ($null -eq $request.id -or $null -eq $request.method) { continue }
+    if ($request.method -eq 'initialize') {
+        $result = @{ userAgent = 'fake-codex'; codexHome = 'fake-home'; platformFamily = 'windows'; platformOs = 'windows' }
+    } elseif ($request.method -eq 'thread/resume') {
+        $threadId = $request.params.threadId
+        $usage = @{ method = 'thread/tokenUsage/updated'; params = @{ threadId = $threadId; tokenUsage = @{ total = @{ totalTokens = 123 } } } } | ConvertTo-Json -Compress -Depth 10
+        [Console]::Out.WriteLine($usage)
+        [Console]::Out.Flush()
+        $result = @{ thread = @{ id = $threadId } }
+    } else {
+        $result = @{}
+    }
+    $response = @{ id = $request.id; result = $result } | ConvertTo-Json -Compress -Depth 10
+    [Console]::Out.WriteLine($response)
+    [Console]::Out.Flush()
+}"#,
+            )
+            .unwrap();
+            let target = directory.join("fake-codex-resume.cmd");
+            fs::write(
+                &target,
+                format!(
+                    "@echo off\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"\r\n",
+                    script.display()
+                ),
+            )
+            .unwrap();
+            target
+        }
+        #[cfg(unix)]
+        {
+            let target = directory.join("fake-codex-resume");
+            fs::write(
+                &target,
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake-codex","codexHome":"fake-home","platformFamily":"unix","platformOs":"unix"}}\n' "$id" ;;
+    *'"method":"initialized"'*) : ;;
+    *'"method":"thread/resume"'*) thread_id=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'); printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"%s","tokenUsage":{"total":{"totalTokens":123}}}}\n' "$thread_id"; printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$thread_id" ;;
+    *) printf '{"id":%s,"result":{}}\n' "$id" ;;
+  esac
+done
+"#,
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+            target
+        }
     }
 
     fn waiting_provider_runtime(thread_id: &str) -> SharedCoreRuntime {

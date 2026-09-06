@@ -722,6 +722,11 @@ pub enum ThreadEvent {
         operation_id: Option<String>,
         provider_session_id: String,
     },
+    UsageUpdated {
+        seq: u64,
+        thread_id: String,
+        total_tokens: u64,
+    },
     OperationCompleted {
         seq: u64,
         thread_id: String,
@@ -756,6 +761,7 @@ impl ThreadEvent {
             | ThreadEvent::ToolCall { seq, .. }
             | ThreadEvent::ToolResult { seq, .. }
             | ThreadEvent::ProviderSessionIdUpdated { seq, .. }
+            | ThreadEvent::UsageUpdated { seq, .. }
             | ThreadEvent::OperationCompleted { seq, .. }
             | ThreadEvent::Error { seq, .. }
             | ThreadEvent::Ended { seq, .. } => *seq,
@@ -905,11 +911,19 @@ pub struct ThreadSnapshot {
     pub status: ThreadStatus,
     pub latest_seq: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SessionUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_operation: Option<ActiveOperationSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_completed_operation: Option<CompletedOperationSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_tool_request: Option<PendingToolRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsage {
+    pub total_tokens: u64,
 }
 
 #[derive(Debug)]
@@ -1364,6 +1378,14 @@ pub struct CoreRuntime {
     pub provider_path_value_override: Option<OsString>,
     pub pending_provider_operations: HashMap<String, PendingProviderOperation>,
     pub last_completed_operations: HashMap<String, CompletedOperationSnapshot>,
+    /// The authoritative normalized cumulative token total for each thread.
+    /// This is intentionally separate from `provider_usage`, which retains
+    /// opaque provider payloads for diagnostics.
+    pub session_usage: HashMap<String, SessionUsage>,
+    /// Baselines for providers that report cumulative usage within one turn.
+    pub session_usage_turn_baselines: HashMap<(String, String), u64>,
+    /// Operation identities already included in the normalized total.
+    pub session_usage_operations: HashSet<(String, String)>,
     pub provider_usage: HashMap<String, Value>,
     /// Threads in this set have restored ended-thread diagnostic resources
     /// and are waiting for the trusted dispatch boundary to admit the turn.
@@ -2737,6 +2759,103 @@ impl CoreRuntime {
         self.provider_usage.get(thread_id)
     }
 
+    /// Returns the normalized cumulative usage currently known for a thread.
+    pub fn session_usage(&self, thread_id: &str) -> Option<&SessionUsage> {
+        self.session_usage.get(thread_id)
+    }
+
+    /// Returns the current normalized cumulative token total, if one is known.
+    pub fn session_total_tokens(&self, thread_id: &str) -> Option<u64> {
+        self.session_usage(thread_id)
+            .map(|usage| usage.total_tokens)
+    }
+
+    /// Publishes an already-normalized cumulative session total.
+    ///
+    /// The value is monotonic: stale or repeated provider snapshots are
+    /// accepted without changing Core state or emitting a duplicate event.
+    pub fn set_session_total_tokens(
+        &mut self,
+        thread_id: &str,
+        total_tokens: u64,
+    ) -> Result<bool, PedelecError> {
+        self.thread_manager.thread(thread_id)?;
+        if self
+            .session_total_tokens(thread_id)
+            .is_some_and(|current| total_tokens <= current)
+        {
+            return Ok(false);
+        }
+
+        self.session_usage
+            .insert(thread_id.to_string(), SessionUsage { total_tokens });
+        self.event_bus.emit_usage_updated(thread_id, total_tokens);
+        Ok(true)
+    }
+
+    /// Starts a provider turn whose usage is cumulative within that turn.
+    /// The baseline is retained by Core so runtime replacement cannot reset
+    /// the accounting state.
+    pub fn begin_session_usage_turn(
+        &mut self,
+        thread_id: &str,
+        provider_turn_id: &str,
+    ) -> Result<(), PedelecError> {
+        self.thread_manager.thread(thread_id)?;
+        let baseline = self.session_total_tokens(thread_id).unwrap_or(0);
+        self.session_usage_turn_baselines.insert(
+            (thread_id.to_string(), provider_turn_id.to_string()),
+            baseline,
+        );
+        Ok(())
+    }
+
+    /// Publishes the latest cumulative usage for one active provider turn.
+    /// The provider-specific adapter owns the meaning of `turn_total_tokens`.
+    pub fn set_session_turn_total_tokens(
+        &mut self,
+        thread_id: &str,
+        provider_turn_id: &str,
+        turn_total_tokens: u64,
+    ) -> Result<bool, PedelecError> {
+        self.thread_manager.thread(thread_id)?;
+        let key = (thread_id.to_string(), provider_turn_id.to_string());
+        let baseline = if let Some(baseline) = self.session_usage_turn_baselines.get(&key) {
+            *baseline
+        } else {
+            let baseline = self.session_total_tokens(thread_id).unwrap_or(0);
+            self.session_usage_turn_baselines.insert(key, baseline);
+            baseline
+        };
+        self.set_session_total_tokens(thread_id, baseline.saturating_add(turn_total_tokens))
+    }
+
+    /// Adds a per-operation usage contribution at most once.
+    ///
+    /// Provider adapters use their operation/turn identity for deduplication;
+    /// Core only performs the atomic state update and event emission.
+    pub fn add_session_token_delta_once(
+        &mut self,
+        thread_id: &str,
+        operation_id: &str,
+        total_tokens: u64,
+    ) -> Result<bool, PedelecError> {
+        self.thread_manager.thread(thread_id)?;
+        let key = (thread_id.to_string(), operation_id.to_string());
+        if !self.session_usage_operations.insert(key) {
+            return Ok(false);
+        }
+        let current = self.session_total_tokens(thread_id).unwrap_or(0);
+        self.set_session_total_tokens(thread_id, current.saturating_add(total_tokens))
+    }
+
+    /// Returns the Core operation currently associated with a thread.
+    /// Provider adapters use this to associate terminal usage with the
+    /// operation whose contribution is being accounted.
+    pub fn current_operation_id(&self, thread_id: &str) -> Option<String> {
+        self.active_operation_id(thread_id)
+    }
+
     fn update_provider_session_id_for_operation(
         &mut self,
         thread_id: &str,
@@ -3175,6 +3294,7 @@ impl CoreRuntime {
             thread_id: input.thread_id.clone(),
             status: self.thread_manager.thread(&input.thread_id)?.status.clone(),
             latest_seq: self.event_bus.latest_seq(&input.thread_id),
+            usage: self.session_usage.get(&input.thread_id).cloned(),
             active_operation,
             last_completed_operation: self
                 .last_completed_operations
@@ -5214,6 +5334,18 @@ impl EventBus {
                 thread_id: thread_id.to_string(),
                 operation_id: operation_id.map(ToOwned::to_owned),
                 provider_session_id,
+            },
+        );
+    }
+
+    pub fn emit_usage_updated(&mut self, thread_id: &str, total_tokens: u64) {
+        let seq = self.next_seq(thread_id);
+        self.emit(
+            thread_id,
+            ThreadEvent::UsageUpdated {
+                seq,
+                thread_id: thread_id.to_string(),
+                total_tokens,
             },
         );
     }

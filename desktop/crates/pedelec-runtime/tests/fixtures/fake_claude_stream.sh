@@ -92,10 +92,26 @@ while IFS= read -r line; do
     esac
   fi
 
+  prepare=0
+  case "$line" in
+    *"Session Preparation"*) prepare=1 ;;
+  esac
+  include_usage=1
+  if [ "$prepare" -eq 1 ] && [ "${FAKE_CLAUDE_PREPARE_USAGE:-0}" != "1" ]; then
+    include_usage=0
+  fi
   if [ "$fail" -eq 1 ]; then
+    if [ "$include_usage" -eq 1 ]; then
       printf '{"type":"result","subtype":"error","is_error":true,"terminal_reason":"error","session_id":"%s","usage":{"input_tokens":%s,"output_tokens":%s},"modelUsage":{"claude-test":{"inputTokens":%s,"outputTokens":%s}},"result":"should-not-emit"}\n' "$emit_session" "$((20 + turn))" "$((2 * turn))" "$((20 + turn))" "$((2 * turn))"
+    else
+      printf '{"type":"result","subtype":"error","is_error":true,"terminal_reason":"error","session_id":"%s","result":"should-not-emit"}\n' "$emit_session"
+    fi
   else
+    if [ "$include_usage" -eq 1 ]; then
       printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"%s","usage":{"input_tokens":%s,"output_tokens":%s},"modelUsage":{"claude-test":{"inputTokens":%s,"outputTokens":%s}},"result":"should-not-emit"}\n' "$emit_session" "$((20 + turn))" "$((2 * turn))" "$((20 + turn))" "$((2 * turn))"
+    else
+      printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"%s","result":"should-not-emit"}\n' "$emit_session"
+    fi
   fi
 
   case "$line" in

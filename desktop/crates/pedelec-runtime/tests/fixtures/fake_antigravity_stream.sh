@@ -59,7 +59,19 @@ while IFS= read -r line; do
     *FAIL_RESULT*|*FAIL_PREPARE*"[Session Preparation]"*) status="ERROR"; error='{"code":"fake_failure","message":"requested failure"}' ;;
     *) status="SUCCESS"; error='null' ;;
   esac
-  printf '{"event":"result","result":{"status":"%s","conversation_id":"%s","response":"final-%s","usage":{"input_tokens":%s,"output_tokens":%s},"error":%s}}\n' "$status" "$conversation_id" "$turn" "$((20 + turn))" "$((2 * turn))" "$error"
+  prepare=0
+  case "$line" in
+    *"Session Preparation"*) prepare=1 ;;
+  esac
+  include_usage=1
+  if [ "$prepare" -eq 1 ] && [ "${FAKE_AGY_PREPARE_USAGE:-0}" != "1" ]; then
+    include_usage=0
+  fi
+  if [ "$include_usage" -eq 1 ]; then
+    printf '{"event":"result","result":{"status":"%s","conversation_id":"%s","response":"final-%s","usage":{"input_tokens":%s,"output_tokens":%s,"total_tokens":%s},"error":%s}}\n' "$status" "$conversation_id" "$turn" "$((20 + turn))" "$((2 * turn))" "$((25 + (turn - 1) * 3))" "$error"
+  else
+    printf '{"event":"result","result":{"status":"%s","conversation_id":"%s","response":"final-%s","error":%s}}\n' "$status" "$conversation_id" "$turn" "$error"
+  fi
   case "$line" in
     *EXIT_AFTER_RESULT*) exit 92 ;;
   esac

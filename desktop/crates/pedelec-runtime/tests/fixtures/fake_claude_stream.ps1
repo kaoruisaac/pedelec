@@ -116,10 +116,14 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         is_error = $fail
         terminal_reason = $(if ($fail) { 'error' } else { 'completed' })
         session_id = $emitSession
-        usage = @{ input_tokens = (20 + $turn); output_tokens = (2 * $turn) }
-        modelUsage = @{ 'claude-test' = @{ inputTokens = (20 + $turn); outputTokens = (2 * $turn) } }
         result = 'should-not-emit'
-    } | ConvertTo-Json -Compress -Depth 10
+    }
+    $isPrepare = $line -like '*Session Preparation*'
+    if (-not $isPrepare -or $env:FAKE_CLAUDE_PREPARE_USAGE -eq '1') {
+        $result.usage = @{ input_tokens = (20 + $turn); output_tokens = (2 * $turn) }
+        $result.modelUsage = @{ 'claude-test' = @{ inputTokens = (20 + $turn); outputTokens = (2 * $turn) } }
+    }
+    $result = $result | ConvertTo-Json -Compress -Depth 10
     [Console]::Out.WriteLine($result)
     [Console]::Out.Flush()
     if ($line -like '*EXIT_AFTER_RESULT*') {

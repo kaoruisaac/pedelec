@@ -64,6 +64,8 @@ const session = await pedelec.resumeSession(savedSessionId);
 4. reconciliation 回傳的 authoritative lifecycle snapshot，包括 status、active/last operation identity，以及可能存在的 pending tool request；
 5. 回傳已同步的 `PedelecSession` handle。
 
+若 Core 已知 normalized token usage，同一個 resume snapshot 也會 hydrate `session.usage.totalTokens`。缺少 usage field 代表目前尚未知道受支援的 total；對既有 handle 不會因此重設 usage。
+
 空 ID 會收到 `INVALID_INPUT`。
 
 Core 不再認得 ID 時會回傳 `THREAD_NOT_FOUND`，應移除 stale persistence 或建立另一個 session。Session 屬於其他 browser origin 時會 reject `THREAD_ACCESS_DENIED`。SDK 不會靜默建立 replacement session。

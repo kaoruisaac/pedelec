@@ -55,6 +55,16 @@ readonly sessionCreatedAt: number
 
 Browser `Date.now()` timestamp when this session object was constructed. It is not guaranteed to be the original Core thread creation time after resume.
 
+### `usage`
+
+```ts
+readonly usage: PedelecSessionUsage
+```
+
+Normalized cumulative token usage observed for this session. `usage.totalTokens` starts as `undefined` and is populated only when the provider reports a supported, valid total. It is monotonic for the lifetime of this SDK handle, and usage updates do not invoke chat, status, or error handlers.
+
+The value is also included in a Core snapshot when known, so `resumeSession()` can hydrate it. Providers or payloads without a supported total leave it `undefined`; this currently includes Cursor ACP. The value is not context-window occupancy, monetary cost, or a guaranteed invoice-equivalent total, and no input/output/cache/reasoning breakdown is part of this API.
+
 ## `prepare()`
 
 ```ts

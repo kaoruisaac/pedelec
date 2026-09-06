@@ -511,6 +511,18 @@ fn handle_runtime_event(
                 });
             }
         }
+        AntigravityRuntimeEvent::CumulativeUsageUpdated { usage, .. } => {
+            if let Some(total_tokens) = usage
+                .get("total_tokens")
+                .and_then(serde_json::Value::as_u64)
+            {
+                if let Ok(mut core) = runtime.lock() {
+                    // Antigravity terminal usage is cumulative for the
+                    // conversation. Step-level usage remains diagnostic only.
+                    let _ = core.set_session_total_tokens(thread_id, total_tokens);
+                }
+            }
+        }
         AntigravityRuntimeEvent::TurnCompleted {
             local_turn_id,
             status,
@@ -793,7 +805,8 @@ mod tests {
             &stdin_log,
             &start_log,
         )
-        .with_env_for_test("FAKE_AGY_REQUIRE_AGENT_FILE", "1");
+        .with_env_for_test("FAKE_AGY_REQUIRE_AGENT_FILE", "1")
+        .with_env_for_test("FAKE_AGY_PREPARE_USAGE", "1");
 
         dispatch_prepare(&dispatcher, &runtime, &thread_id);
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
@@ -822,6 +835,10 @@ mod tests {
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
         dispatch_turn(&dispatcher, &runtime, &thread_id, "second actual task");
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens(&thread_id),
+            Some(31)
+        );
         assert_eq!(
             dispatcher
                 .current_controller(&thread_id)
@@ -899,6 +916,10 @@ mod tests {
 
         dispatch_turn(&dispatcher, &runtime, &thread_id, "直接開始");
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens(&thread_id),
+            Some(25)
+        );
         let process_id = dispatcher
             .current_controller(&thread_id)
             .unwrap()
@@ -922,6 +943,10 @@ mod tests {
 
         dispatch_turn(&dispatcher, &runtime, &thread_id, "第二輪");
         wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+        assert_eq!(
+            runtime.lock().unwrap().session_total_tokens(&thread_id),
+            Some(28)
+        );
         assert_eq!(
             dispatcher
                 .current_controller(&thread_id)

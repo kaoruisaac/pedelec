@@ -501,6 +501,17 @@ impl SessionMappings {
         }
     }
 
+    fn remove_if_matches(&mut self, pedelec_thread_id: &str, provider_thread_id: &str) {
+        if self
+            .pedelec_to_provider
+            .get(pedelec_thread_id)
+            .map(String::as_str)
+            == Some(provider_thread_id)
+        {
+            self.remove_pedelec(pedelec_thread_id);
+        }
+    }
+
     fn completed_status(
         &self,
         provider_thread_id: &str,
@@ -692,13 +703,47 @@ impl CodexAppServerController {
                 build_thread_start_params(config),
             ),
         };
+        // Codex may replay thread-scoped token usage as soon as resume is
+        // written, before the response waiter gets a chance to register the
+        // returned thread id. The persisted id is already trusted input, so
+        // provision that exact mapping for the duration of the resume. This
+        // is deliberately limited to usage ownership; turn/assistant events
+        // still require their active pending-turn correlation below.
+        let provisional_provider_thread_id = if operation == "thread/resume" {
+            let provider_thread_id = requested_provider_thread_id
+                .as_deref()
+                .expect("thread/resume always has a requested provider thread id");
+            self.mappings
+                .lock()
+                .expect("Codex mappings mutex poisoned")
+                .register(pedelec_thread_id, provider_thread_id)?;
+            Some(provider_thread_id.to_string())
+        } else {
+            None
+        };
         let result = self
             .transport
             .request_scoped(pedelec_thread_id, method, params, self.control_timeout)
-            .map_err(|error| self.map_request_error(operation, error))?;
+            .map_err(|error| {
+                if let Some(provider_thread_id) = provisional_provider_thread_id.as_deref() {
+                    self.mappings
+                        .lock()
+                        .expect("Codex mappings mutex poisoned")
+                        .remove_if_matches(pedelec_thread_id, provider_thread_id);
+                }
+                self.map_request_error(operation, error)
+            })?;
         let provider_thread_id = match parse_provider_thread_id(operation, &result) {
             Ok(provider_thread_id) => provider_thread_id,
             Err(error) => {
+                if let Some(provisional_provider_thread_id) =
+                    provisional_provider_thread_id.as_deref()
+                {
+                    self.mappings
+                        .lock()
+                        .expect("Codex mappings mutex poisoned")
+                        .remove_if_matches(pedelec_thread_id, provisional_provider_thread_id);
+                }
                 self.retire();
                 return Err(error);
             }
@@ -706,6 +751,13 @@ impl CodexAppServerController {
         if operation == "thread/resume"
             && requested_provider_thread_id.as_deref() != Some(provider_thread_id.as_str())
         {
+            if let Some(provisional_provider_thread_id) = provisional_provider_thread_id.as_deref()
+            {
+                self.mappings
+                    .lock()
+                    .expect("Codex mappings mutex poisoned")
+                    .remove_if_matches(pedelec_thread_id, provisional_provider_thread_id);
+            }
             self.retire();
             return Err(CodexRuntimeError::Protocol {
                 operation: operation.to_string(),
@@ -720,6 +772,13 @@ impl CodexAppServerController {
             .expect("Codex mappings mutex poisoned")
             .register(pedelec_thread_id, &provider_thread_id)
         {
+            if let Some(provisional_provider_thread_id) = provisional_provider_thread_id.as_deref()
+            {
+                self.mappings
+                    .lock()
+                    .expect("Codex mappings mutex poisoned")
+                    .remove_if_matches(pedelec_thread_id, provisional_provider_thread_id);
+            }
             self.retire();
             return Err(error);
         }
@@ -1351,6 +1410,54 @@ fn pending_turn_id(
         .map(|(pedelec_thread_id, _)| pedelec_thread_id.clone())
 }
 
+/// Resolves cumulative Codex usage by attached provider-thread identity.
+/// Unlike assistant and turn lifecycle notifications, usage is a
+/// thread/session signal and is therefore valid without an active pending
+/// user turn. The optional active-turn result only controls correlation and
+/// evidence bookkeeping; it never controls ownership.
+fn usage_owner(
+    mappings: &SessionMappings,
+    provider_thread_id: Option<&str>,
+    provider_turn_id: Option<&str>,
+) -> Option<(String, String, Option<String>, bool)> {
+    let pedelec_thread_id = match provider_thread_id {
+        Some(provider_thread_id) => mappings
+            .provider_to_pedelec
+            .get(provider_thread_id)?
+            .clone(),
+        None => pending_turn_id(mappings, None, provider_turn_id)?,
+    };
+    let pending = mappings
+        .pending_turns
+        .get(&pedelec_thread_id)
+        .filter(|turn| {
+            let thread_matches = provider_thread_id
+                .is_none_or(|provider_thread_id| turn.provider_thread_id == provider_thread_id);
+            let turn_matches = provider_turn_id.is_none_or(|provider_turn_id| {
+                turn.provider_turn_id
+                    .as_deref()
+                    .is_none_or(|active| active == provider_turn_id)
+                    && !mappings.completed_provider_turns.contains(&(
+                        turn.provider_thread_id.clone(),
+                        provider_turn_id.to_string(),
+                    ))
+            });
+            thread_matches && turn_matches
+        });
+    let canonical_provider_thread_id = provider_thread_id
+        .map(str::to_string)
+        .or_else(|| pending.map(|turn| turn.provider_thread_id.clone()))?;
+    let correlated_provider_turn_id = pending
+        .and_then(|turn| turn.provider_turn_id.clone())
+        .or_else(|| provider_turn_id.map(str::to_string));
+    Some((
+        pedelec_thread_id,
+        canonical_provider_thread_id,
+        correlated_provider_turn_id,
+        pending.is_some(),
+    ))
+}
+
 fn protocol_event(
     mappings: &SessionMappings,
     provider_thread_id: Option<&str>,
@@ -1565,21 +1672,24 @@ fn decode_codex_notification(
             };
             let provider_turn_id = non_empty_string(params.get("turnId"));
             let provider_thread_id = notification_thread_id(params, None);
-            let Some(pedelec_thread_id) = pending_turn_id(
-                &mappings,
-                provider_thread_id.as_deref(),
-                provider_turn_id.as_deref(),
-            ) else {
+            let Some((pedelec_thread_id, provider_thread_id, provider_turn_id, active_turn)) =
+                usage_owner(
+                    &mappings,
+                    provider_thread_id.as_deref(),
+                    provider_turn_id.as_deref(),
+                )
+            else {
                 return Vec::new();
             };
-            let Some(pending) = mappings.pending_turns.get_mut(&pedelec_thread_id) else {
-                return Vec::new();
-            };
-            pending.saw_evidence = true;
+            if active_turn {
+                if let Some(pending) = mappings.pending_turns.get_mut(&pedelec_thread_id) {
+                    pending.saw_evidence = true;
+                }
+            }
             vec![CodexRuntimeEvent::UsageUpdated {
                 pedelec_thread_id,
-                provider_thread_id: pending.provider_thread_id.clone(),
-                provider_turn_id: pending.provider_turn_id.clone().or(provider_turn_id),
+                provider_thread_id,
+                provider_turn_id,
                 usage,
             }]
         }
@@ -1868,7 +1978,7 @@ mod tests {
                 (
                     "fake-codex.cmd",
                     r#"@echo off
- powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$counter=0; $turnCounter=0; while($null -ne ($line=[Console]::In.ReadLine())) { Add-Content -LiteralPath $env:FAKE_CODEX_LOG -Value $line; $request=$line | ConvertFrom-Json; if($null -eq $request.id) { if($request.method -eq 'initialized' -and $env:FAKE_CODEX_UNSUPPORTED_REQUEST -eq '1') { $serverRequest=@{id=999;method='workspace/unknown';params=@{sentinel='unsupported-server-request'}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($serverRequest); [Console]::Out.Flush() }; continue }; if($null -eq $request.method) { continue }; if($request.method -eq 'initialize') { $result=@{userAgent='fake-codex';codexHome='fake-home';platformFamily='windows';platformOs='windows'} } elseif($request.method -eq 'thread/start') { if($env:FAKE_CODEX_STDERR -eq '1') { [Console]::Error.WriteLine('fake Codex diagnostic'); [Console]::Error.Flush() }; $counter++; $result=@{thread=@{id=('codex-thread-' + $counter)}} } elseif($request.method -eq 'thread/resume') { $result=@{thread=@{id=$request.params.threadId}} } elseif($request.method -eq 'turn/start') { $turnCounter++; $threadId=$request.params.threadId; $turnId=('provider-turn-' + $turnCounter); $started=@{method='turn/started';params=@{threadId=$threadId;turn=@{id=$turnId;status='inProgress'}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($started); $delta=@{method='item/agentMessage/delta';params=@{threadId=$threadId;turnId=$turnId;itemId=('item-' + $turnCounter);delta='hello'}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($delta); $completed=@{method='turn/completed';params=@{threadId=$threadId;turn=@{id=$turnId;status='completed';items=@(@{id=('item-' + $turnCounter);type='agentMessage';text='hello'})}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($completed); [Console]::Out.Flush(); $result=@{turn=@{id=$turnId}} } else { $result=@{} }; $response=@{id=$request.id;result=$result} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($response); [Console]::Out.Flush() }"
+ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$counter=0; $turnCounter=0; while($null -ne ($line=[Console]::In.ReadLine())) { Add-Content -LiteralPath $env:FAKE_CODEX_LOG -Value $line; $request=$line | ConvertFrom-Json; if($null -eq $request.id) { if($request.method -eq 'initialized' -and $env:FAKE_CODEX_UNSUPPORTED_REQUEST -eq '1') { $serverRequest=@{id=999;method='workspace/unknown';params=@{sentinel='unsupported-server-request'}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($serverRequest); [Console]::Out.Flush() }; continue }; if($null -eq $request.method) { continue }; if($request.method -eq 'initialize') { $result=@{userAgent='fake-codex';codexHome='fake-home';platformFamily='windows';platformOs='windows'} } elseif($request.method -eq 'thread/start') { if($env:FAKE_CODEX_STDERR -eq '1') { [Console]::Error.WriteLine('fake Codex diagnostic'); [Console]::Error.Flush() }; $counter++; $result=@{thread=@{id=('codex-thread-' + $counter)}} } elseif($request.method -eq 'thread/resume') { $threadId=$request.params.threadId; if($env:FAKE_CODEX_RESUME_USAGE -eq '1') { $usage=@{method='thread/tokenUsage/updated';params=@{threadId=$threadId;tokenUsage=@{total=@{totalTokens=123}}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($usage); [Console]::Out.Flush() }; $result=@{thread=@{id=$threadId}} } elseif($request.method -eq 'turn/start') { $turnCounter++; $threadId=$request.params.threadId; $turnId=('provider-turn-' + $turnCounter); $started=@{method='turn/started';params=@{threadId=$threadId;turn=@{id=$turnId;status='inProgress'}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($started); $delta=@{method='item/agentMessage/delta';params=@{threadId=$threadId;turnId=$turnId;itemId=('item-' + $turnCounter);delta='hello'}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($delta); $completed=@{method='turn/completed';params=@{threadId=$threadId;turn=@{id=$turnId;status='completed';items=@(@{id=('item-' + $turnCounter);type='agentMessage';text='hello'})}}} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($completed); [Console]::Out.Flush(); $result=@{turn=@{id=$turnId}} } else { $result=@{} }; $response=@{id=$request.id;result=$result} | ConvertTo-Json -Compress -Depth 10; [Console]::Out.WriteLine($response); [Console]::Out.Flush() }"
 "#,
                 )
             } else {
@@ -1884,7 +1994,7 @@ while IFS= read -r line; do
     *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"fake-codex","codexHome":"fake-home","platformFamily":"unix","platformOs":"unix"}}\n' "$id" ;;
     *'"method":"initialized"'*) if [ "${FAKE_CODEX_UNSUPPORTED_REQUEST:-}" = "1" ]; then printf '{"id":999,"method":"workspace/unknown","params":{"sentinel":"unsupported-server-request"}}\n'; fi ;;
     *'"method":"thread/start"'*) if [ "${FAKE_CODEX_STDERR:-}" = "1" ]; then printf 'fake Codex diagnostic\n' >&2; fi; counter=$((counter + 1)); printf '{"id":%s,"result":{"thread":{"id":"codex-thread-%s"}}}\n' "$id" "$counter" ;;
-     *'"method":"thread/resume"'*) thread_id=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'); printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$thread_id" ;;
+     *'"method":"thread/resume"'*) thread_id=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'); if [ "${FAKE_CODEX_RESUME_USAGE:-}" = "1" ]; then printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"%s","tokenUsage":{"total":{"totalTokens":123}}}}\n' "$thread_id"; fi; printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$thread_id" ;;
      *'"method":"turn/start"'*) turn_counter=$((turn_counter + 1)); thread_id=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'); turn_id="provider-turn-$turn_counter"; item_id="item-$turn_counter"; printf '{"method":"turn/started","params":{"threadId":"%s","turn":{"id":"%s","status":"inProgress"}}}\n' "$thread_id" "$turn_id"; printf '{"method":"item/agentMessage/delta","params":{"threadId":"%s","turnId":"%s","itemId":"%s","delta":"hello"}}\n' "$thread_id" "$turn_id" "$item_id"; printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"%s","status":"completed","items":[{"id":"%s","type":"agentMessage","text":"hello"}]}}}\n' "$thread_id" "$turn_id" "$item_id"; printf '{"id":%s,"result":{"turn":{"id":"%s"}}}\n' "$id" "$turn_id" ;;
     *'"error":'*) : ;;
     *) printf '{"id":%s,"result":{}}\n' "$id" ;;
@@ -2085,6 +2195,98 @@ done
             notification_thread_id(&params, params.get("turn")).as_deref(),
             Some("nested")
         );
+    }
+
+    #[test]
+    fn usage_notifications_route_by_attached_thread_without_requiring_a_pending_turn() {
+        let mappings = Arc::new(Mutex::new(SessionMappings::default()));
+        {
+            let mut mappings = mappings.lock().unwrap();
+            mappings.register("pedelec-a", "codex-a").unwrap();
+        }
+
+        let restored = decode_codex_notification(
+            &mappings,
+            "thread/tokenUsage/updated",
+            &json!({
+                "threadId": "codex-a",
+                "tokenUsage": { "total": { "totalTokens": 123 } }
+            }),
+        );
+        assert!(matches!(
+            restored.as_slice(),
+            [CodexRuntimeEvent::UsageUpdated {
+                pedelec_thread_id,
+                provider_thread_id,
+                provider_turn_id: None,
+                usage,
+            }] if pedelec_thread_id == "pedelec-a"
+                && provider_thread_id == "codex-a"
+                && usage["total"]["totalTokens"] == 123
+        ));
+
+        {
+            let mut mappings = mappings.lock().unwrap();
+            mappings
+                .register_pending_turn("pedelec-a", "codex-a", "local-a")
+                .unwrap();
+            mappings
+                .pending_turns
+                .get_mut("pedelec-a")
+                .unwrap()
+                .provider_turn_id = Some("provider-turn-a".into());
+        }
+        let active = decode_codex_notification(
+            &mappings,
+            "thread/tokenUsage/updated",
+            &json!({
+                "threadId": "codex-a",
+                "turnId": "provider-turn-a",
+                "tokenUsage": { "total": { "totalTokens": 456 } }
+            }),
+        );
+        assert!(matches!(
+            active.as_slice(),
+            [CodexRuntimeEvent::UsageUpdated {
+                pedelec_thread_id,
+                provider_thread_id,
+                provider_turn_id: Some(provider_turn_id),
+                ..
+            }] if pedelec_thread_id == "pedelec-a"
+                && provider_thread_id == "codex-a"
+                && provider_turn_id == "provider-turn-a"
+        ));
+        assert!(mappings
+            .lock()
+            .unwrap()
+            .pending_turns
+            .get("pedelec-a")
+            .is_some_and(|turn| turn.saw_evidence));
+
+        assert!(decode_codex_notification(
+            &mappings,
+            "thread/tokenUsage/updated",
+            &json!({
+                "threadId": "codex-unknown",
+                "turnId": "provider-turn-a",
+                "tokenUsage": { "total": { "totalTokens": 999 } }
+            }),
+        )
+        .is_empty());
+        assert!(decode_codex_notification(
+            &mappings,
+            "thread/tokenUsage/updated",
+            &json!({ "threadId": "codex-a" }),
+        )
+        .is_empty());
+        let malformed = decode_codex_notification(
+            &mappings,
+            "thread/tokenUsage/updated",
+            &json!({ "threadId": "codex-a", "tokenUsage": "not-an-object" }),
+        );
+        assert!(!malformed
+            .iter()
+            .any(|event| matches!(event, CodexRuntimeEvent::ProtocolError { .. })));
     }
 
     #[test]
@@ -2798,6 +3000,52 @@ done
             vec!["initialize", "initialized", "thread/resume"]
         );
         second.shutdown().unwrap();
+    }
+
+    #[test]
+    fn resume_replay_usage_is_routed_before_resume_response_mapping_is_registered() {
+        let fixture = FakeAppServer::new();
+        let controller = CodexAppServerController::spawn(
+            fixture
+                .launch_config()
+                .with_env("FAKE_CODEX_RESUME_USAGE", "1"),
+        )
+        .unwrap();
+        let config = CodexSessionConfig {
+            model: None,
+            effort: None,
+            cwd: fixture._directory.path().to_path_buf(),
+            approval_policy: CodexApprovalPolicy::Never,
+            sandbox: CodexSandboxMode::ReadOnly,
+            developer_instructions: "instructions".into(),
+            config: HashMap::new(),
+        };
+
+        let session = controller
+            .ensure_session("pedelec-a", Some("codex-restored"), &config)
+            .unwrap();
+        assert_eq!(session.provider_thread_id, "codex-restored");
+        let event = controller
+            .recv_event_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(matches!(
+            event,
+            CodexRuntimeEvent::UsageUpdated {
+                pedelec_thread_id,
+                provider_thread_id,
+                provider_turn_id: None,
+                usage,
+            } if pedelec_thread_id == "pedelec-a"
+                && provider_thread_id == "codex-restored"
+                && usage["total"]["totalTokens"] == 123
+        ));
+        assert_eq!(
+            controller
+                .loaded_pedelec_thread_id("codex-restored")
+                .as_deref(),
+            Some("pedelec-a")
+        );
+        controller.shutdown().unwrap();
     }
 
     #[test]

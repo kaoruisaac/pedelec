@@ -172,6 +172,12 @@ pub enum AntigravityRuntimeEvent {
         local_turn_id: String,
         usage: Value,
     },
+    /// Terminal result usage is cumulative for the Antigravity conversation.
+    /// It is intentionally separate from step-level usage telemetry.
+    CumulativeUsageUpdated {
+        local_turn_id: Option<String>,
+        usage: Value,
+    },
     TurnCompleted {
         local_turn_id: Option<String>,
         status: String,
@@ -772,6 +778,14 @@ fn handle_result(
     let success = status == "SUCCESS";
     match active.kind {
         ActiveOperationKind::Prepare => {
+            if let Some(usage) = usage {
+                let _ = context
+                    .event_tx
+                    .send(AntigravityRuntimeEvent::CumulativeUsageUpdated {
+                        local_turn_id: None,
+                        usage,
+                    });
+            }
             if success {
                 let _ = context
                     .event_tx
@@ -800,8 +814,8 @@ fn handle_result(
             if let Some(usage) = usage {
                 let _ = context
                     .event_tx
-                    .send(AntigravityRuntimeEvent::UsageUpdated {
-                        local_turn_id: local_turn_id.clone(),
+                    .send(AntigravityRuntimeEvent::CumulativeUsageUpdated {
+                        local_turn_id: Some(local_turn_id.clone()),
                         usage,
                     });
             }
