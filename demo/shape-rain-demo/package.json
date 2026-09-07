@@ -9,6 +9,7 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "deploy": "npm run build && wrangler pages deploy dist",
     "preview": "vite preview"
   },
   "dependencies": {

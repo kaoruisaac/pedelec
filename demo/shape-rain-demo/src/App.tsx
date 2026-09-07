@@ -45,6 +45,8 @@ type ChatRole = "assistant" | "user" | "error" | "system";
 type TextChatMessage = {
   role: Exclude<ChatRole, "system">;
   text: string;
+  turnId?: string;
+  completed?: boolean;
 };
 
 type SystemChatMessage = {
@@ -417,20 +419,20 @@ export default function App() {
       setUiState("disconnected");
       setMessage("This Pedelec session ended. Connect again to start a new one.");
     });
+    const disposeChatDelta = nextSession.onChatDelta((text, ctx) => {
+      if (generation !== lifecycleId || !isActiveSessionContext(ctx)) return;
+      appendAssistantDelta(text, ctx.turnId);
+    });
     const disposeChat = nextSession.onChat((text, ctx) => {
       if (generation !== lifecycleId || !isActiveSessionContext(ctx)) return;
-      appendConversationMessage("assistant", text);
+      appendAssistantMessage(text, ctx.turnId);
     });
-    const disposeTool = nextSession.onTool((tool, args, ctx) => handleTool(tool, args, ctx));
-    if (nextSession.provider === 'ollama') {
-      nextSession.prepare()
-    }
     sessionDisposer = () => {
       disposeStatus();
       disposeError();
       disposeEnded();
+      disposeChatDelta();
       disposeChat();
-      disposeTool();
     };
     setSession(nextSession);
     setSessionStatus(nextSession.getStatus());
@@ -462,7 +464,31 @@ export default function App() {
 
   function appendConversationMessage(role: TextChatMessage["role"], text: string): void {
     setConversation((current) => [...current, { role, text }]);
-    panelMessageEl?.scrollTo(0, panelMessageEl.scrollHeight)
+    panelMessageEl?.scrollTo(0, panelMessageEl.scrollHeight);
+  }
+
+  function appendAssistantDelta(text: string, turnId: string): void {
+    setConversation((current) => {
+      const last = current.at(-1);
+      if (last?.role === "assistant" && last.turnId === turnId && last.completed === false) {
+        return [...current.slice(0, -1), { ...last, text: last.text + text }];
+      }
+
+      return [...current, { role: "assistant", text, turnId, completed: false }];
+    });
+    panelMessageEl?.scrollTo(0, panelMessageEl.scrollHeight);
+  }
+
+  function appendAssistantMessage(text: string, turnId: string): void {
+    setConversation((current) => {
+      const last = current.at(-1);
+      if (last?.role === "assistant" && last.turnId === turnId && last.completed === false) {
+        return [...current.slice(0, -1), { ...last, text, completed: true }];
+      }
+
+      return [...current, { role: "assistant", text, turnId, completed: true }];
+    });
+    panelMessageEl?.scrollTo(0, panelMessageEl.scrollHeight);
   }
 
   function appendToolConversationMessage(tool: string, result: ToolCallResult): void {
@@ -615,8 +641,8 @@ export default function App() {
       } satisfies PedelecError;
     }
 
-    const [providers, settings] = await Promise.all([client.listProviders(), client.getSettings()]);
-    return { providers, settings };
+    const providers = await client.listProviders();
+    return { providers };
   }
 
   function applySessionSettings(nextSettings: ShapeRainSessionSettings): void {
@@ -764,7 +790,12 @@ export default function App() {
               )}
             </For>
           </Show>
-          <Show when={uiState() === "submitting" || uiState() === "generating"}>
+          <Show
+            when={
+              (uiState() === "submitting" || uiState() === "generating") &&
+              !conversation().some((chatMessage) => chatMessage.role === "assistant" && chatMessage.completed === false)
+            }
+          >
             <div class="chat-row" data-role="assistant">
               <div class="chat-bubble chat-typing-bubble" role="status" aria-label="Assistant is responding">
                 <span class="chat-typing-dot" />
@@ -921,7 +952,10 @@ function normalizeSessionSettings(value: unknown): ShapeRainSessionSettings {
 
   const raw = value as Partial<ShapeRainSessionSettings>;
   if (raw.provider === "default") {
-    return { provider: "default", effortLevel: "default" };
+    return {
+      provider: "default",
+      effortLevel: raw.effortLevel === "low" || raw.effortLevel === "high" ? raw.effortLevel : "default",
+    };
   }
 
   if (!isProviderCode(raw.provider)) {

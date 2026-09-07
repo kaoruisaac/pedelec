@@ -1289,6 +1289,7 @@ fn has_explicit_model_entitlement_denial(provider: WizardProviderCode, text: &st
         "does not exist",
         "cannot be used",
         "can't be used",
+        "cannot use this model",
     ]
     .iter()
     .any(|needle| text.contains(needle));
@@ -1346,6 +1347,7 @@ fn build_probe_command(
         WizardProviderCode::Cursor => vec![
             "--workspace".to_string(),
             workspace.clone(),
+            "--print".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--force".to_string(),
@@ -2526,6 +2528,15 @@ mod tests {
         ));
         assert!(matches!(
             classify_probe_failure(
+                WizardProviderCode::Cursor,
+                Some(1),
+                "Cannot use this model: legacy-model-id",
+                ""
+            ),
+            ProbeExecutionResult::NotEntitled { .. }
+        ));
+        assert!(matches!(
+            classify_probe_failure(
                 WizardProviderCode::Antigravity,
                 Some(1),
                 "malformed json",
@@ -2579,5 +2590,23 @@ mod tests {
         assert!(command.args.contains(&"read-only".to_string()));
         assert_eq!(command.stdin, PROBE_PROMPT);
         assert!(!command.args.iter().any(|arg| arg.contains("pedelec")));
+    }
+
+    #[test]
+    fn cursor_probe_command_enables_print_for_stream_json() {
+        let snapshot = snapshot(WizardProviderCode::Cursor);
+        let probe = snapshot.plan.probe_definition("premium").unwrap();
+        let command = build_probe_command(
+            WizardProviderCode::Cursor,
+            &snapshot.executable,
+            &snapshot.workspace,
+            probe,
+        );
+        assert!(command.args.contains(&"--print".to_string()));
+        assert!(command
+            .args
+            .windows(2)
+            .any(|pair| { pair == ["--output-format".to_string(), "stream-json".to_string()] }));
+        assert_eq!(command.stdin, PROBE_PROMPT);
     }
 }

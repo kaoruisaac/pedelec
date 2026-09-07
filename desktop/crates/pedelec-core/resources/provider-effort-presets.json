@@ -118,19 +118,19 @@
       ]
     },
     "cursor": {
-      "revision": 2,
+      "revision": 3,
       "profiles": {
         "low": [
           "--model",
-          "composer-2.5-medium"
+          "composer-2.5"
         ],
         "default": [
           "--model",
-          "grok-4.6-high"
+          "cursor-grok-4.6-high"
         ],
         "high": [
           "--model",
-          "grok-4.6-xhigh"
+          "cursor-grok-4.6-xhigh"
         ]
       },
       "entryProbe": "premium",
@@ -139,7 +139,7 @@
           "id": "premium",
           "args": [
             "--model",
-            "grok-4.6-xhigh"
+            "cursor-grok-4.6-xhigh"
           ],
           "onSupported": {
             "confirms": ["high", "default"],
@@ -154,7 +154,7 @@
           "id": "baseline",
           "args": [
             "--model",
-            "composer-2.5-medium"
+            "composer-2.5"
           ],
           "onSupported": {
             "confirms": ["low"]

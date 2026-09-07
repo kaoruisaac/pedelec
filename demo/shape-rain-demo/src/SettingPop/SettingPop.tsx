@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { FiChevronDown, FiX } from "solid-icons/fi";
-import type { PedelecError, PedelecSettings, ProviderCode, ProviderInfo } from "@kaoruisaac/pedelec";
+import type { PedelecError, ProviderCode, ProviderInfo } from "@kaoruisaac/pedelec";
 import { forwardPopUp } from "../services/PopUpProvider";
 import "./SettingPop.css";
 
@@ -11,7 +11,6 @@ export type ShapeRainSessionSettings = {
 
 export type PedelecProviderSettings = {
   providers: ProviderInfo[];
-  settings: PedelecSettings;
 };
 
 type ProviderOption = {
@@ -63,7 +62,6 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
       const current = props.value.provider;
       if (current !== "default" && !available.has(current)) {
         setProvider("default");
-        setEffortLevel("default");
       } else {
         setProvider(current);
         setEffortLevel(props.value.effortLevel);
@@ -77,9 +75,6 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
 
   function selectProvider(value: ShapeRainSessionSettings["provider"]): void {
     setProvider(value);
-    if (value === "default") {
-      setEffortLevel("default");
-    }
     setProviderMenuOpen(false);
   }
 
@@ -151,7 +146,7 @@ const SettingPop = forwardPopUp<SettingPopProps>((popup, props) => {
             </select>
           </div>
           <Show when={provider() === "default"}>
-            <p class="SettingPop-helpText">Default uses the Pedelec Desktop default provider and effort profile.</p>
+            <p class="SettingPop-helpText">Default uses the Pedelec Desktop default provider with the selected effort profile.</p>
           </Show>
         </div>
 

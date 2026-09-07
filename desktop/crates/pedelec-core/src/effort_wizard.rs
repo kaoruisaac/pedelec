@@ -1046,7 +1046,7 @@ mod tests {
         assert_eq!(manifest.providers.len(), 4);
         assert_eq!(manifest.providers[&WizardProviderCode::Codex].revision, 1);
         assert_eq!(manifest.providers[&WizardProviderCode::Claude].revision, 2);
-        assert_eq!(manifest.providers[&WizardProviderCode::Cursor].revision, 2);
+        assert_eq!(manifest.providers[&WizardProviderCode::Cursor].revision, 3);
         assert_eq!(
             manifest.providers[&WizardProviderCode::Antigravity].revision,
             1
@@ -1069,19 +1069,19 @@ mod tests {
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Cursor].profiles.low,
-            vec!["--model", "composer-2.5-medium"]
+            vec!["--model", "composer-2.5"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Cursor]
                 .profiles
                 .default,
-            vec!["--model", "grok-4.6-high"]
+            vec!["--model", "cursor-grok-4.6-high"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Cursor]
                 .profiles
                 .high,
-            vec!["--model", "grok-4.6-xhigh"]
+            vec!["--model", "cursor-grok-4.6-xhigh"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Antigravity]
@@ -1517,7 +1517,7 @@ mod tests {
                 .get(&WizardProviderCode::Cursor)
                 .unwrap()
                 .applied_preset_revision,
-            Some(2)
+            Some(3)
         );
     }
 }
