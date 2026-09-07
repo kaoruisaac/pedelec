@@ -1044,7 +1044,7 @@ mod tests {
         let manifest = bundled_effort_wizard_manifest().unwrap();
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.providers.len(), 4);
-        assert_eq!(manifest.providers[&WizardProviderCode::Codex].revision, 1);
+        assert_eq!(manifest.providers[&WizardProviderCode::Codex].revision, 2);
         assert_eq!(manifest.providers[&WizardProviderCode::Claude].revision, 2);
         assert_eq!(manifest.providers[&WizardProviderCode::Cursor].revision, 3);
         assert_eq!(
@@ -1054,6 +1054,10 @@ mod tests {
         assert_eq!(
             manifest.providers[&WizardProviderCode::Codex].profiles.low,
             vec!["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"max\""]
+        );
+        assert_eq!(
+            manifest.providers[&WizardProviderCode::Codex].profiles.high,
+            vec!["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Claude]
@@ -1351,7 +1355,7 @@ mod tests {
                 .get(&WizardProviderCode::Codex)
                 .unwrap()
                 .applied_preset_revision,
-            Some(1)
+            Some(2)
         );
         assert_eq!(
             read_settings_file(&temp.path().join("settings.json")).unwrap(),
@@ -1435,11 +1439,11 @@ mod tests {
             .profiles;
         let stale = EffortWizardProviderApplyPatch {
             provider: WizardProviderCode::Codex,
-            preset_revision: 1,
+            preset_revision: 2,
             expected_current_efforts: EffortsArgs::default(),
             confirmed_recommendation: EffortWizardProviderRecommendation {
                 provider: WizardProviderCode::Codex,
-                preset_revision: 1,
+                preset_revision: 2,
                 confirmed: EffortWizardConfirmedProfiles {
                     default: Some(codex_profiles.default.clone()),
                     ..Default::default()

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "providers": {
     "codex": {
-      "revision": 1,
+      "revision": 2,
       "profiles": {
         "low": [
           "-m",
@@ -18,9 +18,9 @@
         ],
         "high": [
           "-m",
-          "gpt-5.6-sol",
+          "gpt-6-astra",
           "-c",
-          "model_reasoning_effort=\"high\""
+          "model_reasoning_effort=\"medium\""
         ]
       },
       "entryProbe": "premium",
@@ -29,9 +29,9 @@
           "id": "premium",
           "args": [
             "-m",
-            "gpt-5.6-sol",
+            "gpt-6-astra",
             "-c",
-            "model_reasoning_effort=\"high\""
+            "model_reasoning_effort=\"medium\""
           ],
           "onSupported": {
             "confirms": ["high", "default"],
