@@ -190,6 +190,18 @@ pub fn pedelec_tool_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_tool_binary_name()))
 }
 
+pub fn pedelec_deno_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "pedelec-deno.exe"
+    } else {
+        "pedelec-deno"
+    }
+}
+
+pub fn pedelec_deno_install_path() -> Result<PathBuf, PedelecError> {
+    Ok(pedelec_home_dir()?.join(pedelec_deno_binary_name()))
+}
+
 pub fn pedelec_agent_binary_name() -> &'static str {
     if cfg!(windows) {
         "pedelec-agent.exe"
@@ -235,6 +247,31 @@ pub fn install_pedelec_tool_from_paths(
         target,
         "pedelec-cli",
         "cannot install pedelec-cli binary",
+        LockedTargetPolicy::Fail,
+    )
+}
+
+pub fn install_pedelec_deno_from_path(
+    source: impl AsRef<Path>,
+) -> Result<BinaryInstallOutcome, PedelecError> {
+    install_binary_from_paths(
+        source,
+        pedelec_deno_install_path()?,
+        "pedelec-deno",
+        "cannot install pedelec-deno binary",
+        LockedTargetPolicy::Fail,
+    )
+}
+
+pub fn install_pedelec_deno_from_paths(
+    source: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+) -> Result<BinaryInstallOutcome, PedelecError> {
+    install_binary_from_paths(
+        source,
+        target,
+        "pedelec-deno",
+        "cannot install pedelec-deno binary",
         LockedTargetPolicy::Fail,
     )
 }
@@ -557,6 +594,43 @@ mod tests {
         assert_eq!(installed.path, target);
         assert_eq!(installed.status, BinaryInstallStatus::Installed);
         assert_eq!(fs::read(&installed.path).unwrap(), b"fake-tool");
+    }
+
+    #[test]
+    fn install_pedelec_deno_uses_only_the_public_helper_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("deno-resource");
+        let target = temp.path().join(pedelec_deno_binary_name());
+        fs::write(&source, b"fake-pedelec-deno").unwrap();
+
+        let installed = install_pedelec_deno_from_paths(&source, &target).unwrap();
+
+        assert_eq!(
+            installed.path.file_name().unwrap(),
+            pedelec_deno_binary_name()
+        );
+        assert_eq!(
+            installed.path.file_name().unwrap(),
+            if cfg!(windows) {
+                "pedelec-deno.exe"
+            } else {
+                "pedelec-deno"
+            }
+        );
+        assert!(!temp
+            .path()
+            .join(if cfg!(windows) { "deno.exe" } else { "deno" })
+            .exists());
+        assert_eq!(fs::read(&installed.path).unwrap(), b"fake-pedelec-deno");
+    }
+
+    #[test]
+    fn pedelec_deno_install_path_uses_the_public_helper_filename() {
+        let path = pedelec_deno_install_path().unwrap();
+
+        assert_eq!(path.file_name().unwrap(), pedelec_deno_binary_name());
+        assert_ne!(path.file_name().unwrap(), "deno");
+        assert_ne!(path.file_name().unwrap(), "deno.exe");
     }
 
     #[test]

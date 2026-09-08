@@ -1,11 +1,13 @@
+pub use pedelec_core::DenoRuntimeDispatcher;
 use pedelec_core::{
     error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
-    CreateAssetUploadInput, CreateThreadInput, EndThreadInput, ListAssetsInput, PedelecError,
-    PedelecSettings, PersistentRuntimeOperation, PrepareThreadInput, PrepareThreadOutput,
-    ProviderCode, ProviderProtocolTraffic, ProviderRuntimeDiagnostic, ResumeThreadInput,
-    SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
-    ThreadSubscription, ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration,
-    ToolInvocationWait, ToolSpecInput, UpdateSettingsInput,
+    CreateAssetUploadInput, CreateThreadInput, DenoExecutionIntent, DenoRunInput, DenoRunOutput,
+    EndThreadInput, ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation,
+    PrepareThreadInput, PrepareThreadOutput, ProviderCode, ProviderProtocolTraffic,
+    ProviderRuntimeDiagnostic, ResumeThreadInput, SendTextInput, SharedCoreRuntime,
+    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ThreadSubscription, ToolCallInput,
+    ToolInvocationOutcome, ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput,
+    UpdateSettingsInput,
 };
 use pedelec_runtime::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
@@ -1263,6 +1265,22 @@ impl PersistentRuntimeDispatcher for RejectPersistentRuntimeDispatcher {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct RejectDenoRuntimeDispatcher;
+
+impl DenoRuntimeDispatcher for RejectDenoRuntimeDispatcher {
+    fn dispatch(&self, intent: DenoExecutionIntent) -> Result<DenoRunOutput, PedelecError> {
+        Err(PedelecError::with_details(
+            error_codes::DENO_RUNTIME_UNAVAILABLE,
+            "Deno runtime dispatcher is unavailable",
+            serde_json::json!({
+                "threadId": intent.thread_id,
+                "entrypoint": intent.entrypoint,
+            }),
+        ))
+    }
+}
+
 /// Desktop capabilities that Core IPC can invoke without coupling the Core
 /// runtime to a particular desktop toolkit.
 pub trait CoreIpcPlatformServices: Send + Sync + 'static {
@@ -1405,12 +1423,30 @@ pub fn start_core_ipc_server_with_services_and_dispatcher(
     platform_services: Arc<dyn CoreIpcPlatformServices>,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
 ) -> Result<CoreIpcServerHandle, PedelecError> {
+    start_core_ipc_server_with_services_dispatchers(
+        runtime,
+        platform_services,
+        persistent_dispatcher,
+        Arc::new(RejectDenoRuntimeDispatcher),
+    )
+}
+
+/// Starts Core IPC with both the persistent provider dispatcher and the
+/// Desktop-owned Deno dispatcher.  The older constructor above intentionally
+/// remains a compatibility wrapper for non-Desktop/test callers.
+pub fn start_core_ipc_server_with_services_dispatchers(
+    runtime: SharedCoreRuntime,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
+) -> Result<CoreIpcServerHandle, PedelecError> {
     let runtime_file_path = default_runtime_file_path()?;
-    start_core_ipc_server_with_runtime_path_services_and_dispatcher(
+    start_core_ipc_server_with_runtime_path_services_dispatchers(
         runtime,
         runtime_file_path,
         platform_services,
         persistent_dispatcher,
+        deno_dispatcher,
     )
 }
 
@@ -1419,11 +1455,12 @@ pub fn start_core_ipc_server_with_runtime_path_and_services(
     runtime_file_path: impl Into<PathBuf>,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
 ) -> Result<CoreIpcServerHandle, PedelecError> {
-    start_core_ipc_server_with_runtime_path_services_and_dispatcher(
+    start_core_ipc_server_with_runtime_path_services_dispatchers(
         runtime,
         runtime_file_path,
         platform_services,
         Arc::new(RejectPersistentRuntimeDispatcher),
+        Arc::new(RejectDenoRuntimeDispatcher),
     )
 }
 
@@ -1432,6 +1469,22 @@ pub fn start_core_ipc_server_with_runtime_path_services_and_dispatcher(
     runtime_file_path: impl Into<PathBuf>,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+) -> Result<CoreIpcServerHandle, PedelecError> {
+    start_core_ipc_server_with_runtime_path_services_dispatchers(
+        runtime,
+        runtime_file_path,
+        platform_services,
+        persistent_dispatcher,
+        Arc::new(RejectDenoRuntimeDispatcher),
+    )
+}
+
+pub fn start_core_ipc_server_with_runtime_path_services_dispatchers(
+    runtime: SharedCoreRuntime,
+    runtime_file_path: impl Into<PathBuf>,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
 ) -> Result<CoreIpcServerHandle, PedelecError> {
     let listener = TcpListener::bind((CORE_IPC_HOST, 0)).map_err(|err| {
         PedelecError::with_details(
@@ -1470,12 +1523,14 @@ pub fn start_core_ipc_server_with_runtime_path_services_and_dispatcher(
             let runtime = Arc::clone(&runtime);
             let platform_services = Arc::clone(&platform_services);
             let persistent_dispatcher = Arc::clone(&persistent_dispatcher);
+            let deno_dispatcher = Arc::clone(&deno_dispatcher);
             thread::spawn(move || {
                 let _ = handle_core_ipc_connection(
                     stream,
                     runtime,
                     platform_services,
                     persistent_dispatcher,
+                    deno_dispatcher,
                 );
             });
         }
@@ -1613,6 +1668,7 @@ fn handle_core_ipc_connection(
     runtime: SharedCoreRuntime,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
 ) -> io::Result<()> {
     let reader_stream = stream.try_clone()?;
     let mut reader = BufReader::new(reader_stream);
@@ -1684,6 +1740,7 @@ fn handle_core_ipc_connection(
                     Arc::clone(&runtime),
                     Arc::clone(&platform_services),
                     Arc::clone(&persistent_dispatcher),
+                    Arc::clone(&deno_dispatcher),
                 ),
                 tool_delivery_request_id: None,
             }
@@ -1772,6 +1829,7 @@ fn handle_core_ipc_request(request: CoreIpcRequest, runtime: SharedCoreRuntime) 
         runtime,
         Arc::new(NoopCoreIpcPlatformServices),
         Arc::new(RejectPersistentRuntimeDispatcher),
+        Arc::new(RejectDenoRuntimeDispatcher),
     )
 }
 
@@ -1780,6 +1838,7 @@ fn handle_core_ipc_request_with_services(
     runtime: SharedCoreRuntime,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
 ) -> CoreIpcResponse {
     match request.r#type.as_str() {
         "pick_workspace_folder" => {
@@ -1846,6 +1905,7 @@ fn handle_core_ipc_request_with_services(
             },
             Err(err) => error_response(&request.request_id, err),
         },
+        "deno_run" => handle_deno_run_request(&request, runtime, deno_dispatcher),
         "create_asset_upload" => match decode_payload::<CreateAssetUploadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| runtime.lock().unwrap().create_asset_upload(input))
@@ -1876,7 +1936,12 @@ fn handle_core_ipc_request_with_services(
         "end_thread" => match decode_payload::<EndThreadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| {
-                    end_thread_with_dispatcher(runtime, Arc::clone(&persistent_dispatcher), input)
+                    end_thread_with_dispatchers(
+                        runtime,
+                        Arc::clone(&persistent_dispatcher),
+                        Arc::clone(&deno_dispatcher),
+                        input,
+                    )
                 }) {
                 Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
                 Err(err) => error_response(&request.request_id, err),
@@ -1974,6 +2039,38 @@ fn handle_pick_workspace_folder_request(
                 ),
             }
         }
+        Err(err) => error_response(&request.request_id, err),
+    }
+}
+
+fn handle_deno_run_request(
+    request: &CoreIpcRequest,
+    runtime: SharedCoreRuntime,
+    deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
+) -> CoreIpcResponse {
+    let input = match decode_payload::<DenoRunInput>(request) {
+        Ok(input) => input,
+        Err(err) => return error_response(&request.request_id, err),
+    };
+
+    // `deno_run` is a trusted local-helper operation issued by `pedelec-deno`
+    // on behalf of the agent running inside the thread's active provider turn,
+    // not a Web SDK-origin operation. It therefore does not go through
+    // `authorize_thread_request()`: an SDK-owned thread (`sdk_origin: Some(_)`)
+    // must still be usable by the local helper, which sends
+    // `caller_origin: None`. `prepare_deno_run_intent()` below remains the
+    // authoritative admission boundary.
+    //
+    // Admission and workspace resolution happen while Core is locked, but
+    // the child process itself is owned and waited by Desktop after this
+    // guard is dropped.
+    let intent = match runtime.lock().unwrap().prepare_deno_run_intent(input) {
+        Ok(intent) => intent,
+        Err(err) => return error_response(&request.request_id, err),
+    };
+
+    match deno_dispatcher.dispatch(intent) {
+        Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
         Err(err) => error_response(&request.request_id, err),
     }
 }
@@ -2208,6 +2305,24 @@ pub fn end_thread_with_dispatcher(
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
     input: EndThreadInput,
 ) -> Result<(), PedelecError> {
+    end_thread_with_dispatchers(
+        runtime,
+        persistent_dispatcher,
+        Arc::new(RejectDenoRuntimeDispatcher),
+        input,
+    )
+}
+
+pub fn end_thread_with_dispatchers(
+    runtime: SharedCoreRuntime,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
+    input: EndThreadInput,
+) -> Result<(), PedelecError> {
+    // A thread end is also a Deno cancellation boundary.  Cancel before
+    // asking the provider runtime to unsubscribe so no child can outlive the
+    // subsequent Core transition to Ended.
+    deno_dispatcher.cancel_thread(&input.thread_id);
     let start = runtime.lock().unwrap().begin_end_thread(input)?;
     let thread_id = start.thread_id.clone();
     let dispatch_result = persistent_dispatcher.dispatch(start.execution);
@@ -3513,6 +3628,367 @@ done
             .insert(thread_id, pedelec_core::ToolRegistry::default());
         drop(runtime_guard);
         runtime
+    }
+}
+
+#[cfg(test)]
+mod deno_ipc_tests {
+    use super::*;
+    use pedelec_core::{
+        CoreRuntime, DenoExecutionIntent, DenoRunOutput, EffortLevel, ProviderSessionState,
+        ThreadState, ThreadStatus, WorkspaceManager,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct RecordingDenoDispatcher {
+        intents: Mutex<Vec<DenoExecutionIntent>>,
+        error: Option<PedelecError>,
+    }
+
+    impl DenoRuntimeDispatcher for RecordingDenoDispatcher {
+        fn dispatch(&self, intent: DenoExecutionIntent) -> Result<DenoRunOutput, PedelecError> {
+            self.intents.lock().unwrap().push(intent);
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            Ok(DenoRunOutput {
+                exit_code: 0,
+                stdout: "recorded stdout".into(),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            })
+        }
+    }
+
+    fn active_runtime(temp: &std::path::Path, thread_id: &str) -> SharedCoreRuntime {
+        active_runtime_with_sdk_origin(temp, thread_id, None)
+    }
+
+    fn active_runtime_with_sdk_origin(
+        temp: &std::path::Path,
+        thread_id: &str,
+        sdk_origin: Option<String>,
+    ) -> SharedCoreRuntime {
+        let workspace = temp.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("script.ts"), "console.log('ok')").unwrap();
+        let now = chrono::Utc::now();
+        let runtime = Arc::new(Mutex::new(CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.join("managed")),
+            ..CoreRuntime::default()
+        }));
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            ThreadState {
+                thread_id: thread_id.into(),
+                provider: ProviderCode::Codex,
+                effort_level: EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: workspace,
+                skills: Vec::new(),
+                status: ThreadStatus::Running,
+                created_at: now,
+                updated_at: now,
+                sdk_origin,
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: Some("turn-1".into()),
+            },
+        );
+        runtime
+    }
+
+    #[test]
+    fn deno_ipc_admits_authoritative_workspace_without_tool_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = active_runtime(temp.path(), "thread-deno-ipc");
+        let dispatcher = Arc::new(RecordingDenoDispatcher::default());
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path_services_dispatchers(
+            Arc::clone(&runtime),
+            &runtime_path,
+            Arc::new(NoopCoreIpcPlatformServices),
+            Arc::new(RejectPersistentRuntimeDispatcher),
+            dispatcher.clone(),
+        )
+        .unwrap();
+
+        let response = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "deno-ipc-1".into(),
+                r#type: "deno_run".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({
+                    "threadId": "thread-deno-ipc",
+                    "entrypoint": "script.ts",
+                    "args": ["--allow-net", "value"],
+                })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap()["stdout"], "recorded stdout");
+        let intent = dispatcher.intents.lock().unwrap().pop().unwrap();
+        assert_eq!(intent.thread_id, "thread-deno-ipc");
+        assert_eq!(
+            intent.workspace_path,
+            temp.path().join("workspace").canonicalize().unwrap()
+        );
+        assert_eq!(intent.entrypoint, intent.workspace_path.join("script.ts"));
+        assert_eq!(intent.args, vec!["--allow-net", "value"]);
+
+        let runtime = runtime.lock().unwrap();
+        assert_eq!(
+            runtime.thread_status("thread-deno-ipc"),
+            Some(ThreadStatus::Running)
+        );
+        assert!(!runtime
+            .tool_request_broker
+            .has_pending_for_thread("thread-deno-ipc"));
+    }
+
+    /// `pedelec-deno` is a trusted local helper, not a Web SDK caller: it sends
+    /// `caller_origin: None`. Web SDK ownership of a thread must not prevent the
+    /// helper from running during that thread's active provider turn, while
+    /// ordinary SDK-facing operations keep enforcing `sdk_origin`.
+    #[test]
+    fn deno_ipc_admits_sdk_owned_thread_for_local_helper_without_caller_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = active_runtime_with_sdk_origin(
+            temp.path(),
+            "thread-deno-sdk-owned",
+            Some("https://app.example.test".into()),
+        );
+        let dispatcher = Arc::new(RecordingDenoDispatcher::default());
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path_services_dispatchers(
+            Arc::clone(&runtime),
+            &runtime_path,
+            Arc::new(NoopCoreIpcPlatformServices),
+            Arc::new(RejectPersistentRuntimeDispatcher),
+            dispatcher.clone(),
+        )
+        .unwrap();
+
+        let response = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "deno-ipc-sdk-owned".into(),
+                r#type: "deno_run".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({
+                    "threadId": "thread-deno-sdk-owned",
+                    "entrypoint": "script.ts",
+                })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+
+        assert!(
+            response.ok,
+            "SDK-owned thread rejected the local helper: {:?}",
+            response.error
+        );
+        assert_eq!(response.result.unwrap()["stdout"], "recorded stdout");
+        let intent = dispatcher.intents.lock().unwrap().pop().unwrap();
+        assert_eq!(intent.thread_id, "thread-deno-sdk-owned");
+        assert_eq!(
+            intent.workspace_path,
+            temp.path().join("workspace").canonicalize().unwrap()
+        );
+        assert_eq!(intent.entrypoint, intent.workspace_path.join("script.ts"));
+
+        // Ordinary SDK-facing operations still require a matching origin.
+        let snapshot = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "deno-ipc-sdk-owned-snapshot".into(),
+                r#type: "thread_snapshot".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({ "threadId": "thread-deno-sdk-owned" })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.error.unwrap().code,
+            error_codes::THREAD_ACCESS_DENIED
+        );
+
+        let runtime = runtime.lock().unwrap();
+        assert_eq!(
+            runtime.thread_status("thread-deno-sdk-owned"),
+            Some(ThreadStatus::Running)
+        );
+    }
+
+    #[test]
+    fn deno_ipc_rejects_inactive_or_invalid_entrypoints_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = active_runtime(temp.path(), "thread-deno-inactive");
+        runtime
+            .lock()
+            .unwrap()
+            .thread_manager
+            .thread_mut("thread-deno-inactive")
+            .unwrap()
+            .status = ThreadStatus::Idle;
+        let dispatcher = Arc::new(RecordingDenoDispatcher::default());
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path_services_dispatchers(
+            Arc::clone(&runtime),
+            &runtime_path,
+            Arc::new(NoopCoreIpcPlatformServices),
+            Arc::new(RejectPersistentRuntimeDispatcher),
+            dispatcher.clone(),
+        )
+        .unwrap();
+
+        let inactive = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "deno-ipc-inactive".into(),
+                r#type: "deno_run".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({
+                    "threadId": "thread-deno-inactive",
+                    "entrypoint": "script.ts",
+                })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+        assert_eq!(
+            inactive.error.unwrap().code,
+            error_codes::DENO_THREAD_NOT_ACTIVE
+        );
+
+        runtime
+            .lock()
+            .unwrap()
+            .thread_manager
+            .thread_mut("thread-deno-inactive")
+            .unwrap()
+            .status = ThreadStatus::Running;
+        let invalid = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "deno-ipc-invalid".into(),
+                r#type: "deno_run".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({
+                    "threadId": "thread-deno-inactive",
+                    "entrypoint": "../outside.ts",
+                })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+        assert_eq!(
+            invalid.error.unwrap().code,
+            error_codes::DENO_ENTRYPOINT_INVALID
+        );
+        assert!(dispatcher.intents.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deno_ipc_rejects_unknown_and_ended_threads_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = active_runtime(temp.path(), "thread-deno-ended");
+        runtime
+            .lock()
+            .unwrap()
+            .thread_manager
+            .thread_mut("thread-deno-ended")
+            .unwrap()
+            .status = ThreadStatus::Ended;
+        let dispatcher = Arc::new(RecordingDenoDispatcher::default());
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path_services_dispatchers(
+            Arc::clone(&runtime),
+            &runtime_path,
+            Arc::new(NoopCoreIpcPlatformServices),
+            Arc::new(RejectPersistentRuntimeDispatcher),
+            dispatcher.clone(),
+        )
+        .unwrap();
+
+        for (request_id, thread_id, expected_code) in [
+            (
+                "deno-ipc-unknown",
+                "thread-does-not-exist",
+                error_codes::THREAD_NOT_FOUND,
+            ),
+            (
+                "deno-ipc-ended",
+                "thread-deno-ended",
+                error_codes::THREAD_ENDED,
+            ),
+        ] {
+            let response = send_core_ipc_request_with_runtime_path(
+                &CoreIpcRequest {
+                    request_id: request_id.into(),
+                    r#type: "deno_run".into(),
+                    caller_origin: None,
+                    caller_sdk_version: None,
+                    payload: Some(serde_json::json!({
+                        "threadId": thread_id,
+                        "entrypoint": "script.ts",
+                    })),
+                },
+                &runtime_path,
+            )
+            .unwrap();
+            assert_eq!(response.error.unwrap().code, expected_code);
+        }
+        assert!(dispatcher.intents.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deno_ipc_round_trips_dispatcher_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = active_runtime(temp.path(), "thread-deno-error");
+        let dispatcher = Arc::new(RecordingDenoDispatcher {
+            intents: Mutex::new(Vec::new()),
+            error: Some(PedelecError::with_details(
+                error_codes::DENO_EXECUTION_TIMEOUT,
+                "fake Deno timeout",
+                serde_json::json!({ "threadId": "thread-deno-error" }),
+            )),
+        });
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path_services_dispatchers(
+            Arc::clone(&runtime),
+            &runtime_path,
+            Arc::new(NoopCoreIpcPlatformServices),
+            Arc::new(RejectPersistentRuntimeDispatcher),
+            dispatcher,
+        )
+        .unwrap();
+
+        let response = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "deno-ipc-error".into(),
+                r#type: "deno_run".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({
+                    "threadId": "thread-deno-error",
+                    "entrypoint": "script.ts",
+                })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+        let error = response.error.unwrap();
+        assert_eq!(error.code, error_codes::DENO_EXECUTION_TIMEOUT);
+        assert_eq!(error.details.unwrap()["threadId"], "thread-deno-error");
     }
 }
 

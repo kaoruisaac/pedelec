@@ -296,6 +296,10 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      - name: Verify pinned Deno release metadata
+        working-directory: desktop
+        run: npm run test:release-metadata
+
       - name: Prepare Apple signing and notarization credentials
         if: runner.os == 'macOS'
         shell: bash
@@ -404,6 +408,23 @@ jobs:
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
 
+      - name: Verify Windows Deno resources and runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $resourceDir = Join-Path $PWD "desktop/tauri/binaries"
+          $expected = @("pedelec-cli.exe", "pedelec-deno.exe", "pedelec-agent.exe", "pedelec-native-host.exe", "deno.exe")
+          foreach ($name in $expected) {
+            $path = Join-Path $resourceDir $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing staged Windows Tauri resource: $name"
+            }
+          }
+          if (Test-Path -LiteralPath (Join-Path $resourceDir "deno") -PathType Leaf) {
+            throw "Unexpected extensionless raw Deno resource in Windows staging directory."
+          }
+          node desktop/scripts/verify-deno-runtime.mjs --binary (Join-Path $resourceDir "deno.exe")
+
       - name: Build and upload macOS Tauri bundles
         if: runner.os == 'macOS'
         uses: tauri-apps/tauri-action@v0.6.2
@@ -430,6 +451,11 @@ jobs:
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
 
+      - name: Verify staged macOS Deno runtime
+        if: runner.os == 'macOS'
+        shell: bash
+        run: node desktop/scripts/verify-deno-runtime.mjs --binary desktop/tauri/binaries/deno
+
       - name: Build and upload Linux Tauri bundle
         if: runner.os == 'Linux'
         uses: tauri-apps/tauri-action@v0.6.2
@@ -448,6 +474,11 @@ jobs:
           includeUpdaterJson: false
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
+
+      - name: Verify staged Linux Deno runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: node desktop/scripts/verify-deno-runtime.mjs --binary desktop/tauri/binaries/deno
 
       - name: Verify Linux Debian bundle
         if: runner.os == 'Linux'
@@ -474,7 +505,23 @@ jobs:
 
           deb_path="${deb_paths[0]}"
           dpkg-deb --info "$deb_path"
-          dpkg-deb --contents "$deb_path" >/dev/null
+          deb_contents=$(dpkg-deb --contents "$deb_path")
+
+          require_deb_entry() {
+            local pattern="$1"
+            local description="$2"
+            grep -Eq "$pattern" <<<"$deb_contents" || {
+              echo "Missing Debian payload entry: $description" >&2
+              printf '%s\n' "$deb_contents" >&2
+              exit 1
+            }
+          }
+
+          require_deb_entry '/binaries/pedelec-deno$' 'pedelec-deno'
+          require_deb_entry '/binaries/deno$' 'raw deno'
+          require_deb_entry '/third-party-notices/DENO-LICENSE\.txt$' 'Deno license notice'
+          require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-deno$' 'executable pedelec-deno'
+          require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/deno$' 'executable raw deno'
 
           forbidden_paths=()
           while IFS= read -r -d '' forbidden_path; do
@@ -547,7 +594,7 @@ jobs:
           xcrun stapler validate "$app_path"
 
           echo "Verifying helper binary signatures."
-          for helper_name in pedelec-cli pedelec-agent pedelec-native-host; do
+          for helper_name in pedelec-cli pedelec-deno pedelec-agent pedelec-native-host deno; do
             helpers=()
             while IFS= read -r -d '' helper; do
               helpers+=("$helper")

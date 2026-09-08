@@ -374,7 +374,10 @@ mod tests {
         let response_line = read_bounded_json_line(&mut reader).unwrap();
         let response: CoreIpcResponse = serde_json::from_slice(&response_line).unwrap();
         assert!(response.ok);
-        assert_eq!(response.result.as_ref().unwrap()["snapshot"]["latestSeq"], json!(0));
+        assert_eq!(
+            response.result.as_ref().unwrap()["snapshot"]["latestSeq"],
+            json!(0)
+        );
 
         runtime.lock().unwrap().event_bus.emit_operation_completed(
             "thread_sub",

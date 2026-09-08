@@ -71,6 +71,16 @@ Provider 是 session 使用的 agent backend，目前代碼包含 `codex`、`ant
 
 Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 command、加入 Desktop App 能看到的 `PATH`，並完成登入。Ollama session 會使用 Pedelec 內附 agent executable、設定的 Ollama-compatible endpoint（default `http://127.0.0.1:11434`）、非空 API key（本機用 `ollama`）及已安裝的 model。
 
+當 provider 需要執行 guidance、template、agent 產生的 script，或 workspace 既有檔案中的 JavaScript/TypeScript 時，bootstrap 會指定 Pedelec 本機的 `pedelec-deno` helper 為 canonical runtime。是否需要執行由 agent 決定；Web App 與 SDK 只提供 guidance、templates 與 workspace files。Helper 會帶著 session thread id 與 workspace-relative script path 執行，這不是 browser-side code execution，也不是一般 remote-code-execution API。若 helper 不可用，agent 會回報錯誤，不會靜默 fallback 到 Node.js、Bun、raw Deno 或其他 runtime。
+
+Pedelec Desktop 內附固定版本且受權限限制的 Deno runtime，因此使用者不需要預先安裝 Node.js、Bun 或 Deno 才能執行 workspace 內的 script。raw `deno` executable 只作為 Desktop 內部 bundled resource；agent 對外唯一使用的 command 是 `pedelec-deno`：
+
+```text
+pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> -- <script-args...>
+```
+
+這個隨 Desktop 發佈的 runtime 是 Desktop capability，不是 SDK 或 browser API，也不是任意 remote code execution API。它允許 workspace 內的 JS/TS 執行，但拒絕 network、environment、subprocess、FFI 與 system 權限。
+
 ## `createSession()` 的資料流
 
 典型的 explicit-provider session 會依序進行：

@@ -3,6 +3,11 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import {
+  DENO_NOTICE_RESOURCE,
+  platformExecutableName,
+  publicHelperBinaryNames,
+} from "./deno-release.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, "..");
@@ -98,16 +103,25 @@ async function stageArchitecture(architecture) {
   const targetReleaseDir = join(targetDir, architecture.rustTarget, "release");
   const assetsDir = join(stageDir, "Assets");
   const binariesDir = join(stageDir, "binaries");
+  const noticesDir = join(stageDir, "third-party-notices");
 
   await rm(stageDir, { recursive: true, force: true });
   await mkdir(assetsDir, { recursive: true });
   await mkdir(binariesDir, { recursive: true });
+  await mkdir(noticesDir, { recursive: true });
 
   await copyFile(join(targetReleaseDir, "pedelec-app.exe"), join(stageDir, "pedelec-app.exe"));
 
-  for (const binaryName of ["pedelec-cli.exe", "pedelec-agent.exe", "pedelec-native-host.exe"]) {
-    await copyFile(join(targetReleaseDir, binaryName), join(binariesDir, binaryName));
+  for (const binaryName of [
+    ...publicHelperBinaryNames("win32"),
+    platformExecutableName("win32"),
+  ]) {
+    const sourcePath = binaryName === platformExecutableName("win32")
+      ? join(tauriDir, "binaries", binaryName)
+      : join(targetReleaseDir, binaryName);
+    await copyFile(sourcePath, join(binariesDir, binaryName));
   }
+  await copyFile(join(tauriDir, DENO_NOTICE_RESOURCE), join(stageDir, DENO_NOTICE_RESOURCE));
 
   for (const assetName of [
     "StoreLogo.png",

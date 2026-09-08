@@ -79,6 +79,13 @@ pub fn pedelec_tool_binary_name() -> &'static str {
         "pedelec-cli"
     }
 }
+pub fn pedelec_deno_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "pedelec-deno.exe"
+    } else {
+        "pedelec-deno"
+    }
+}
 pub fn pedelec_agent_binary_name() -> &'static str {
     if cfg!(windows) {
         "pedelec-agent.exe"
@@ -93,8 +100,20 @@ pub fn pedelec_native_host_binary_name() -> &'static str {
         "pedelec-native-host"
     }
 }
+/// Name of the raw Deno executable kept as an internal Desktop resource.
+/// This is intentionally distinct from the public `pedelec-deno` helper.
+pub fn bundled_deno_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "deno.exe"
+    } else {
+        "deno"
+    }
+}
 pub fn pedelec_tool_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_tool_binary_name()))
+}
+pub fn pedelec_deno_install_path() -> Result<PathBuf, PedelecError> {
+    Ok(pedelec_home_dir()?.join(pedelec_deno_binary_name()))
 }
 pub fn pedelec_agent_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_agent_binary_name()))
@@ -178,8 +197,18 @@ fn launch_error(reason: impl Into<String>, detail: impl Into<String>) -> Pedelec
 
 #[cfg(test)]
 mod tests {
-    use super::path_for_external_use;
+    use super::{bundled_deno_binary_name, path_for_external_use};
     use std::path::Path;
+
+    #[test]
+    fn raw_deno_resource_name_is_not_the_public_helper_name() {
+        assert_ne!(bundled_deno_binary_name(), "pedelec-deno");
+        assert_ne!(bundled_deno_binary_name(), "pedelec-deno.exe");
+        assert_eq!(
+            bundled_deno_binary_name(),
+            if cfg!(windows) { "deno.exe" } else { "deno" }
+        );
+    }
 
     #[cfg(windows)]
     #[test]

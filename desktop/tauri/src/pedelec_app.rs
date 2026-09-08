@@ -1,11 +1,13 @@
 use crate::directory_picker::TauriCoreIpcPlatformServices;
 use crate::effort_wizard::{cleanup_stale_probe_runs, EffortWizardOwner};
+#[cfg(debug_assertions)]
+use crate::pedelec_binary_install::BinaryInstallOutcome;
 use crate::pedelec_binary_install::{
     ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
-    install_pedelec_native_host_from_path, install_pedelec_tool_from_path,
-    pedelec_agent_binary_name, pedelec_native_host_binary_name, pedelec_tool_binary_name,
-    prepend_pedelec_dir_to_process_path, write_app_launch_config_for_current_exe,
-    BinaryInstallOutcome,
+    install_pedelec_deno_from_path, install_pedelec_native_host_from_path,
+    install_pedelec_tool_from_path, pedelec_agent_binary_name, pedelec_deno_binary_name,
+    pedelec_native_host_binary_name, pedelec_tool_binary_name, prepend_pedelec_dir_to_process_path,
+    write_app_launch_config_for_current_exe,
 };
 use crate::pedelec_native_registration::register_chrome_native_messaging_host;
 use crate::pedelec_upload::start_asset_upload_server;
@@ -18,17 +20,18 @@ use crate::provider_terminal::{
 use pedelec_core::{
     error_codes, refresh_shared_providers, start_initial_provider_scan,
     wait_for_provider_readiness, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
-    CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, EndThreadInput, ListOllamaModelsInput,
-    OllamaModelOption, PedelecError, PedelecSettings, PrepareThreadInput, PrepareThreadOutput,
-    ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime, SubmitToolResultInput,
-    UpdateSettingsInput,
+    CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, DenoRuntimeDispatcher, EndThreadInput,
+    ListOllamaModelsInput, OllamaModelOption, PedelecError, PedelecSettings, PrepareThreadInput,
+    PrepareThreadOutput, ProviderInfo, SendTextInput, SendTextOutput, SharedCoreRuntime,
+    SubmitToolResultInput, UpdateSettingsInput,
 };
 use pedelec_ipc::{
-    end_thread_with_dispatcher, prepare_provider_session_with_dispatcher,
-    start_core_ipc_server_with_services_and_dispatcher, start_debug_provider_turn_with_dispatcher,
+    end_thread_with_dispatchers, prepare_provider_session_with_dispatcher,
+    start_core_ipc_server_with_services_dispatchers, start_debug_provider_turn_with_dispatcher,
     start_provider_turn_with_dispatcher, PersistentRuntimeDispatcher, ProviderRuntimeDispatcher,
 };
-use pedelec_runtime::ProviderRuntimeOwner;
+use pedelec_runtime::{DenoRuntimeOwner, ProviderRuntimeOwner};
+use pedelec_shared::paths::bundled_deno_binary_name;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -50,6 +53,11 @@ pub fn run() {
     let provider_runtime_dispatcher =
         ProviderRuntimeDispatcher::new(provider_runtime_owner.clone(), runtime_for_setup.clone());
     let provider_runtime_for_exit = provider_runtime_dispatcher.clone();
+    // Tauri requires managed state to be registered before `setup`; the
+    // resource-authoritative path is injected before any dispatcher starts.
+    let deno_runtime_owner = DenoRuntimeOwner::new(PathBuf::new());
+    let deno_runtime_for_setup = deno_runtime_owner.clone();
+    let deno_runtime_for_exit = deno_runtime_owner.clone();
     let effort_wizard_owner = EffortWizardOwner::new();
     let effort_wizard_for_exit = effort_wizard_owner.clone();
 
@@ -66,6 +74,7 @@ pub fn run() {
         .manage(runtime_owner)
         .manage(provider_runtime_owner)
         .manage(provider_runtime_dispatcher.clone())
+        .manage(deno_runtime_owner)
         .manage(effort_wizard_owner)
         .invoke_handler(tauri::generate_handler![
             create_thread,
@@ -119,21 +128,29 @@ pub fn run() {
             })?;
             let pedelec_tool_source = bundled_binary_path(app, pedelec_tool_binary_name())?;
             let pedelec_agent_source = bundled_binary_path(app, pedelec_agent_binary_name())?;
-            let pedelec_tool_outcome = install_pedelec_tool_from_path(&pedelec_tool_source)
+            let pedelec_deno_source = bundled_binary_path(app, pedelec_deno_binary_name())?;
+            let _pedelec_tool_outcome = install_pedelec_tool_from_path(&pedelec_tool_source)
                 .map_err(|err| {
                     tauri::Error::from(std::io::Error::other(format!(
                         "cannot install pedelec-cli: {}",
                         err.message
                     )))
                 })?;
-            let pedelec_agent_outcome = install_pedelec_agent_from_path(&pedelec_agent_source)
+            let _pedelec_agent_outcome = install_pedelec_agent_from_path(&pedelec_agent_source)
                 .map_err(|err| {
                     tauri::Error::from(std::io::Error::other(format!(
                         "cannot install pedelec-agent: {}",
                         err.message
                     )))
                 })?;
-            let native_host_outcome = if native_messaging_plan(background_launch).install {
+            let _pedelec_deno_outcome = install_pedelec_deno_from_path(&pedelec_deno_source)
+                .map_err(|err| {
+                    tauri::Error::from(std::io::Error::other(format!(
+                        "cannot install pedelec-deno: {}",
+                        err.message
+                    )))
+                })?;
+            let _native_host_outcome = if native_messaging_plan(background_launch).install {
                 let native_host_source =
                     bundled_binary_path(app, pedelec_native_host_binary_name())?;
                 Some(
@@ -159,6 +176,9 @@ pub fn run() {
                     err.message
                 )))
             })?;
+            let raw_deno_source =
+                required_bundled_binary_path(app, bundled_deno_binary_name(), "raw Deno")?;
+            deno_runtime_for_setup.set_executable_path(raw_deno_source);
             // Provider detection is part of backend initialization, but it is
             // intentionally detached from UI/Core IPC startup.
             cleanup_stale_probe_runs();
@@ -167,10 +187,11 @@ pub fn run() {
             let _asset_upload_server = start_asset_upload_server(runtime_for_setup.clone());
             let platform_services =
                 Arc::new(TauriCoreIpcPlatformServices::new(app.handle().clone()));
-            let _ipc_handle = start_core_ipc_server_with_services_and_dispatcher(
+            let _ipc_handle = start_core_ipc_server_with_services_dispatchers(
                 runtime_for_setup.clone(),
                 platform_services,
                 Arc::new(provider_runtime_dispatcher.clone()),
+                Arc::new(deno_runtime_for_setup.clone()),
             )
             .map_err(|err| {
                 tauri::Error::from(std::io::Error::other(format!(
@@ -188,18 +209,23 @@ pub fn run() {
             #[cfg(debug_assertions)]
             eprintln!(
                 "pedelec-cli installed at {}",
-                install_outcome_message(&pedelec_tool_outcome)
+                install_outcome_message(&_pedelec_tool_outcome)
             );
             #[cfg(debug_assertions)]
             eprintln!(
                 "pedelec-agent installed at {}",
-                install_outcome_message(&pedelec_agent_outcome)
+                install_outcome_message(&_pedelec_agent_outcome)
             );
-            if let Some(native_host_outcome) = &native_host_outcome {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "pedelec-deno installed at {}",
+                install_outcome_message(&_pedelec_deno_outcome)
+            );
+            if let Some(_native_host_outcome) = &_native_host_outcome {
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "pedelec-native-host {}",
-                    install_outcome_message(native_host_outcome)
+                    install_outcome_message(_native_host_outcome)
                 );
             }
             if native_messaging_plan(background_launch).register {
@@ -280,6 +306,7 @@ pub fn run() {
                     api.prevent_exit();
                 } else {
                     effort_wizard_for_exit.cancel_active();
+                    let _deno_runtime_shutdown_errors = deno_runtime_for_exit.shutdown_all();
                     let _provider_runtime_shutdown_errors = provider_runtime_for_exit.shutdown();
                     let _errors = runtime_for_exit.lock().unwrap().cleanup_for_app_exit();
                     #[cfg(debug_assertions)]
@@ -294,6 +321,21 @@ pub fn run() {
 fn bundled_binary_path(app: &App, binary_name: &str) -> Result<PathBuf, tauri::Error> {
     app.path()
         .resolve(format!("binaries/{binary_name}"), BaseDirectory::Resource)
+}
+
+fn required_bundled_binary_path(
+    app: &App,
+    binary_name: &str,
+    label: &str,
+) -> Result<PathBuf, tauri::Error> {
+    let path = bundled_binary_path(app, binary_name)?;
+    if !path.is_absolute() || !path.is_file() {
+        return Err(tauri::Error::from(std::io::Error::other(format!(
+            "required {label} bundled resource is missing or invalid: {}",
+            path.display()
+        ))));
+    }
+    Ok(path)
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -323,6 +365,7 @@ fn native_messaging_plan(background_launch: bool) -> NativeMessagingPlan {
     }
 }
 
+#[cfg(debug_assertions)]
 fn install_outcome_message(outcome: &BinaryInstallOutcome) -> String {
     format!("{:?} at {}", outcome.status, outcome.path.to_string_lossy())
 }
@@ -591,6 +634,7 @@ fn submit_tool_result(
 fn end_thread(
     state: State<'_, CoreRuntimeOwner>,
     provider_runtime: State<'_, ProviderRuntimeDispatcher>,
+    deno_runtime: State<'_, DenoRuntimeOwner>,
     input: EndThreadInput,
 ) -> Result<(), PedelecError> {
     state
@@ -598,9 +642,10 @@ fn end_thread(
         .lock()
         .unwrap()
         .authorize_thread_access(&input.thread_id, None)?;
-    end_thread_with_dispatcher(
+    end_thread_with_dispatchers(
         state.runtime(),
         Arc::new(provider_runtime.inner().clone()),
+        Arc::new(deno_runtime.inner().clone()),
         input,
     )
 }
@@ -609,21 +654,38 @@ fn end_thread(
 fn monitor_end_thread(
     state: State<'_, CoreRuntimeOwner>,
     provider_runtime: State<'_, ProviderRuntimeDispatcher>,
+    deno_runtime: State<'_, DenoRuntimeOwner>,
     input: EndThreadInput,
 ) -> Result<(), PedelecError> {
-    end_thread_from_monitor_with_dispatcher(
+    end_thread_from_monitor_with_dispatchers(
         &state.runtime(),
         Arc::new(provider_runtime.inner().clone()),
+        Arc::new(deno_runtime.inner().clone()),
         input,
     )
 }
 
+#[cfg(test)]
 fn end_thread_from_monitor_with_dispatcher(
     runtime: &SharedCoreRuntime,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
     input: EndThreadInput,
 ) -> Result<(), PedelecError> {
-    end_thread_with_dispatcher(Arc::clone(runtime), persistent_dispatcher, input)
+    pedelec_ipc::end_thread_with_dispatcher(Arc::clone(runtime), persistent_dispatcher, input)
+}
+
+fn end_thread_from_monitor_with_dispatchers(
+    runtime: &SharedCoreRuntime,
+    persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
+    deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
+    input: EndThreadInput,
+) -> Result<(), PedelecError> {
+    end_thread_with_dispatchers(
+        Arc::clone(runtime),
+        persistent_dispatcher,
+        deno_dispatcher,
+        input,
+    )
 }
 
 fn forward_thread_events_to_tauri(app: tauri::AppHandle, runtime: SharedCoreRuntime) {

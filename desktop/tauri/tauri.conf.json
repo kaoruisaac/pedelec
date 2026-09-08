@@ -29,7 +29,8 @@
       "hardenedRuntime": true
     },
     "resources": [
-      "binaries/*"
+      "binaries/*",
+      "third-party-notices/*"
     ],
     "icon": [
       "icons/32x32.png",

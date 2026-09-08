@@ -916,6 +916,11 @@ fn build_launch_config(
             launch = launch.with_env("PEDELEC_CLI_PATH", cli_path.into_os_string());
         }
     }
+    if let Ok(deno_path) = pedelec_shared::paths::pedelec_deno_install_path() {
+        if deno_path.is_file() {
+            launch = launch.with_env("PEDELEC_DENO_PATH", deno_path.into_os_string());
+        }
+    }
     if *provider == ProviderCode::Ollama {
         let api_key = settings.provider_settings.ollama.api_key.trim();
         if api_key.is_empty() {
@@ -1251,6 +1256,34 @@ mod tests {
     }
 
     #[test]
+    fn launch_config_exports_installed_pedelec_deno_path_when_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_file = temp.path().join("core-runtime.json");
+        let settings = PedelecSettings::default();
+        let launch = build_launch_config(
+            temp.path().join("pedelec-agent"),
+            temp.path().to_path_buf(),
+            &ProviderCode::Codex,
+            "codex",
+            &settings,
+            &runtime_file,
+            &[],
+        )
+        .unwrap();
+        let expected = pedelec_shared::paths::pedelec_deno_install_path().unwrap();
+        let configured = launch
+            .env
+            .iter()
+            .find(|(key, _)| key == "PEDELEC_DENO_PATH")
+            .map(|(_, value)| PathBuf::from(value.as_os_str()));
+        if expected.is_file() {
+            assert_eq!(configured, Some(expected));
+        } else {
+            assert_eq!(configured, None);
+        }
+    }
+
+    #[test]
     fn ollama_routes_through_shared_pedelec_agent_generation() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = test_runtime(temp.path());
@@ -1391,6 +1424,43 @@ mod tests {
                 ..
             } if status == "completed"
         )));
+        let _ = owner.shutdown();
+    }
+
+    #[test]
+    fn session_open_logs_non_ascii_host_instructions_as_utf8() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(temp.path());
+        let guidance = "\u{6307}\u{5f15} \u{2014} caf\u{e9} guidance \u{2713}";
+        let thread_id = create_thread(&runtime, &temp.path().join("workspace"), guidance);
+        let stdin_log = temp.path().join("stdin.jsonl");
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher =
+            test_dispatcher(owner.clone(), Arc::clone(&runtime), temp.path(), &stdin_log);
+
+        dispatch_prepare(&dispatcher, &runtime, &thread_id);
+        wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+
+        let frames = stdin_frames(&stdin_log);
+        let open = frames
+            .iter()
+            .find(|frame| frame["method"] == "session/open")
+            .expect("session/open should be logged by the fake agent fixture");
+        let host_instructions = open["params"]["hostInstructions"]
+            .as_str()
+            .expect("session/open should carry hostInstructions");
+        assert!(
+            host_instructions.contains(guidance),
+            "non-ASCII guidance should survive the fixture log round-trip: {host_instructions}"
+        );
+        // The Deno bootstrap ships an em dash, so the fixture must record
+        // arbitrary UTF-8 rather than a legacy Windows code page.
+        assert!(
+            host_instructions
+                .chars()
+                .any(|character| !character.is_ascii()),
+            "host instructions should contain non-ASCII text"
+        );
         let _ = owner.shutdown();
     }
 
@@ -2155,9 +2225,20 @@ mod tests {
     }
 
     fn stdin_frames(path: &Path) -> Vec<Value> {
-        fs::read_to_string(path)
-            .unwrap_or_default()
-            .lines()
+        if !path.exists() {
+            return Vec::new();
+        }
+        // Read the log as bytes so an encoding regression in the fake agent
+        // fixture fails loudly instead of masquerading as missing frames.
+        let bytes = fs::read(path)
+            .unwrap_or_else(|error| panic!("failed to read stdin log {}: {error}", path.display()));
+        let text = String::from_utf8(bytes).unwrap_or_else(|error| {
+            panic!(
+                "stdin log {} is not valid UTF-8: {error}; the fake agent fixture must append BOM-less UTF-8 JSON lines",
+                path.display()
+            )
+        });
+        text.lines()
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect()
     }

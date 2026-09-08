@@ -1057,7 +1057,12 @@ mod tests {
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Codex].profiles.high,
-            vec!["-m", "gpt-6-astra", "-c", "model_reasoning_effort=\"medium\""]
+            vec![
+                "-m",
+                "gpt-6-astra",
+                "-c",
+                "model_reasoning_effort=\"medium\""
+            ]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Claude]

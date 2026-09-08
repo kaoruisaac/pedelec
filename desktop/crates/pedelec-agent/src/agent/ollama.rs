@@ -425,6 +425,7 @@ mod tests {
             api_key: api_key.into(),
             tavily_api_key: None,
             pedelec_cli_path: None,
+            pedelec_deno_path: None,
             core_runtime_file: None,
             session_root: None,
             max_transcript_bytes: 1024,
@@ -433,6 +434,7 @@ mod tests {
             max_file_bytes: 1024,
             max_image_bytes: 20 * 1024 * 1024,
             pedelec_cli_timeout_ms: 1000,
+            pedelec_deno_timeout_ms: 1000,
         }
     }
 

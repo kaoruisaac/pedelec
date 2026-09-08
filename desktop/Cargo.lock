@@ -2854,6 +2854,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pedelec-deno"
+version = "0.3.1"
+dependencies = [
+ "chrono",
+ "pedelec-core",
+ "pedelec-ipc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pedelec-ipc"
 version = "0.3.1"
 dependencies = [
@@ -2886,6 +2897,7 @@ name = "pedelec-runtime"
 version = "0.3.1"
 dependencies = [
  "chrono",
+ "pedelec-core",
  "serde_json",
  "tempfile",
  "uuid",

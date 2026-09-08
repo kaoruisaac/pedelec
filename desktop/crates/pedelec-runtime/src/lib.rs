@@ -8,6 +8,7 @@ mod acp;
 mod antigravity;
 mod claude;
 mod codex;
+mod deno;
 mod jsonl;
 mod owner;
 mod pedelec_agent;
@@ -31,6 +32,10 @@ pub use codex::{
     CodexSessionConfig, CodexSessionResult, CodexTurnConfig, CodexTurnSandboxPolicy,
     CodexTurnStartResult, CodexTurnStatus, CODEX_RUNTIME_KEY, DEFAULT_CONTROL_TIMEOUT,
     DEFAULT_MAX_FRAME_BYTES,
+};
+pub use deno::{
+    build_deno_command_args, DenoRuntimeOwner, DenoRuntimePolicy, DEFAULT_DENO_EXECUTION_TIMEOUT,
+    DEFAULT_DENO_STDERR_CAP_BYTES, DEFAULT_DENO_STDOUT_CAP_BYTES,
 };
 pub use jsonl::{JsonLineChannel, JsonLineEof, JsonLineError, JsonLineEvent, JsonLineFramer};
 pub use owner::{

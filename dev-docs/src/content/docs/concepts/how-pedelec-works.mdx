@@ -71,6 +71,16 @@ A provider is the agent backend selected for a session, such as `codex`, `antigr
 
 Provider availability depends on the user's machine. CLI-backed providers usually require the relevant command to be installed, present in `PATH`, and authenticated. Ollama sessions use Pedelec's bundled agent executable with the configured Ollama-compatible endpoint (default `http://127.0.0.1:11434`), a non-empty API key (`ollama` for local Ollama), and an installed model.
 
+When a provider needs to execute JavaScript or TypeScript from guidance, a template, an agent-generated script, or an existing workspace file, the bootstrap makes Pedelec's local `pedelec-deno` helper the canonical runtime. The agent decides whether execution is needed; the web application and SDK only provide guidance, templates, and workspace files. The helper is invoked with the session thread id and a workspace-relative script path, and it is not browser-side code execution or a general remote-code-execution API. If the helper is unavailable, the agent reports the failure instead of silently falling back to Node.js, Bun, raw Deno, or another runtime.
+
+Pedelec Desktop ships its own pinned, permission-restricted Deno runtime, so users do not need to preinstall Node.js, Bun, or Deno for local workspace scripts. The raw `deno` executable remains an internal bundled resource; `pedelec-deno` is the only agent-facing command:
+
+```text
+pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> -- <script-args...>
+```
+
+This distributed runtime is a Desktop capability, not an SDK or browser API for arbitrary remote code execution. It permits local workspace JS/TS execution while denying network, environment, subprocess, FFI, and system capabilities.
+
 ## What happens during `createSession()`
 
 A typical explicit-provider session follows this flow:

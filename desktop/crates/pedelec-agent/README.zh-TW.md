@@ -1,6 +1,6 @@
 # pedelec-agent 使用說明
 
-`pedelec-agent` 是 Pedelec Desktop 管理的 persistent local server。它以 JSON-RPC 執行，透過 Ollama 呼叫本機模型，並以 read-only 工具讀取指定 sandbox 內的文字檔，或透過 `pedelec-cli` 呼叫 Pedelec host app tools。
+`pedelec-agent` 是 Pedelec Desktop 管理的 persistent local server。它以 JSON-RPC 執行，透過 Ollama 呼叫本機模型，並以 read-only 工具讀取指定 sandbox 內的文字檔、透過 `pedelec-cli` 呼叫 Pedelec host app tools，或透過 `pedelec-deno` 執行 workspace 內的 JavaScript/TypeScript。
 
 同一 process 可承載多個 AgentSession；不同 session 可同時執行 turn，同一 session 同時間最多一個 active turn。stdout 只能出現 JSON-RPC 2.0 frames；diagnostics 走 stderr。
 
@@ -140,8 +140,10 @@ PEDELEC_AGENT_PROVIDER=ollama
 PEDELEC_AGENT_MAX_TRANSCRIPT_BYTES=1048576
 PEDELEC_AGENT_MAX_TOOL_ROUNDS=8
 PEDELEC_CLI_PATH=
+PEDELEC_DENO_PATH=
 PEDELEC_CORE_RUNTIME_FILE=
 PEDELEC_AGENT_PEDELEC_CLI_TIMEOUT_MS=60000
+PEDELEC_AGENT_PEDELEC_DENO_TIMEOUT_MS=75000
 ```
 
 使用 Ollama Cloud 時，`~/.pedelec/settings.json` 的 `providerSettings.ollama.baseUrl` 應為 `https://ollama.com`，不可包含 `/api`。
@@ -152,4 +154,5 @@ PEDELEC_AGENT_PEDELEC_CLI_TIMEOUT_MS=60000
 - stdout 只輸出 JSON-RPC；不要把 diagnostics 寫進 stdout。
 - 不會修改檔案。
 - 不會讀取 sandbox 以外的路徑。
-- `bash` 是受限 command runner，只允許 `pedelec-cli --thread-id <pedelec_thread_id> tool-spec` 與 `pedelec-cli --thread-id <pedelec_thread_id> tool-call`，不開放任意 shell。
+- `bash` 是受限 command runner，只允許精確的 `pedelec-cli --thread-id <pedelec_thread_id> tool-spec`、`pedelec-cli --thread-id <pedelec_thread_id> tool-call`，以及 `pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]`；不開放任意 shell、raw Deno、Node.js、Bun 或其他 executable。
+- `pedelec-deno` 是 JavaScript/TypeScript 的 canonical runtime。若 helper 不可用，不會 fallback 到其他 runtime；檔案編輯仍由 provider 的一般 filesystem 能力負責。

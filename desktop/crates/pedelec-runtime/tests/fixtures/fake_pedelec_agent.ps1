@@ -1,4 +1,13 @@
 $ErrorActionPreference = 'Stop'
+
+# The controller speaks UTF-8 JSON-RPC and the Rust test reader parses both the
+# stdout frames and FAKE_PEDELEC_AGENT_LOG as UTF-8. Windows PowerShell defaults
+# to the legacy console/ANSI code page, so bind explicit BOM-less UTF-8 streams
+# instead of relying on cmdlet defaults.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$stdin = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), $utf8NoBom)
+$stdout = New-Object System.IO.StreamWriter([Console]::OpenStandardOutput(), $utf8NoBom)
+$stdout.AutoFlush = $true
 $sessionCounter = 0
 $initMode = $env:FAKE_PEDELEC_AGENT_INIT_MODE
 if ([string]::IsNullOrWhiteSpace($initMode)) { $initMode = 'ok' }
@@ -15,8 +24,7 @@ if ([string]::IsNullOrWhiteSpace($serverName)) { $serverName = 'pedelec-agent' }
 $pendingTurn = $null
 
 function Write-Frame($obj) {
-    ($obj | ConvertTo-Json -Compress -Depth 12)
-    [Console]::Out.Flush()
+    $stdout.WriteLine(($obj | ConvertTo-Json -Compress -Depth 12))
 }
 
 function Write-Result($id, $result) {
@@ -43,9 +51,11 @@ function Write-Notice($method, $params) {
     Write-Frame @{ jsonrpc = '2.0'; method = $method; params = $params }
 }
 
-while ($null -ne ($line = [Console]::In.ReadLine())) {
+while ($null -ne ($line = $stdin.ReadLine())) {
     if (-not [string]::IsNullOrWhiteSpace($env:FAKE_PEDELEC_AGENT_LOG)) {
-        Add-Content -LiteralPath $env:FAKE_PEDELEC_AGENT_LOG -Value $line
+        # AppendAllText with a BOM-less UTF-8 encoding keeps one JSON object per
+        # line and stays append-safe across controller generations.
+        [System.IO.File]::AppendAllText($env:FAKE_PEDELEC_AGENT_LOG, ($line + "`n"), $utf8NoBom)
     }
     $request = $line | ConvertFrom-Json
     if ($null -eq $request.method -or $null -eq $request.id) {

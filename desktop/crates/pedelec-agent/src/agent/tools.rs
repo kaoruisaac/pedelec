@@ -6,7 +6,7 @@ use super::tavily::TavilyRoundWrapper;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,7 +43,7 @@ pub fn agent_tool_definitions(vision: bool, web_search_enabled: bool) -> Vec<Age
         ),
         tool_def(
             "bash",
-            "Run a restricted Pedelec CLI command. This is not a full shell; only pedelec-cli --thread-id <pedelec_thread_id> tool-spec and pedelec-cli --thread-id <pedelec_thread_id> tool-call commands are allowed.",
+            "Run a restricted Pedelec helper command. This is not a full shell. It permits Pedelec App Tool commands through `pedelec-cli` and JavaScript/TypeScript script execution through `pedelec-deno`. Allowed forms are `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>`, `pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ...`, `pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path>`, or that `pedelec-deno` form followed by `-- <script-args...>`.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -220,23 +220,46 @@ fn bash_tool(args: &Value, config: &ToolHostConfig) -> Result<Value, AgentError>
         .get("command")
         .and_then(Value::as_str)
         .ok_or_else(|| AgentError::new("INVALID_ARGUMENT", "bash requires command"))?;
-    let timeout_ms = args
-        .get("timeoutMs")
-        .and_then(Value::as_u64)
-        .unwrap_or(config.pedelec_cli_timeout_ms);
+    let requested_timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
     let argv = parse_restricted_bash_command(command)?;
-    validate_pedelec_cli_command(&argv)?;
-    let cli_path = resolve_pedelec_cli(config)?;
-    let mut process = Command::new(cli_path);
-    process
-        .args(&argv[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(runtime_file) = &config.core_runtime_file {
-        process.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
+    match validate_restricted_command(&argv)? {
+        RestrictedCommand::PedelecCli => {
+            let timeout_ms = requested_timeout_ms.unwrap_or(config.pedelec_cli_timeout_ms);
+            let cli_path = resolve_pedelec_cli(config)?;
+            let mut process = Command::new(cli_path);
+            process
+                .args(&argv[1..])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(runtime_file) = &config.core_runtime_file {
+                process.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
+            }
+            run_pedelec_cli_command(process, timeout_ms)
+        }
+        RestrictedCommand::PedelecDeno => {
+            let timeout_ms = requested_timeout_ms
+                .unwrap_or(config.pedelec_deno_timeout_ms)
+                .max(config.pedelec_deno_timeout_ms);
+            let deno_path = resolve_pedelec_deno(config)?;
+            let mut process = Command::new(deno_path);
+            process
+                .args(&argv[1..])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(runtime_file) = &config.core_runtime_file {
+                process.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
+            }
+            run_pedelec_deno_command(process, timeout_ms)
+        }
     }
-    run_pedelec_cli_command(process, timeout_ms)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestrictedCommand {
+    PedelecCli,
+    PedelecDeno,
 }
 
 fn parse_restricted_bash_command(command: &str) -> Result<Vec<String>, AgentError> {
@@ -244,7 +267,7 @@ fn parse_restricted_bash_command(command: &str) -> Result<Vec<String>, AgentErro
     if trimmed.is_empty() {
         return Err(AgentError::new(
             "INVALID_ARGUMENT",
-            "command must be a non-empty pedelec-cli command.",
+            "command must be a non-empty restricted Pedelec helper command.",
         ));
     }
 
@@ -312,7 +335,7 @@ fn parse_restricted_bash_command(command: &str) -> Result<Vec<String>, AgentErro
     if args.is_empty() {
         return Err(AgentError::new(
             "INVALID_ARGUMENT",
-            "command must be a non-empty pedelec-cli command.",
+            "command must be a non-empty restricted Pedelec helper command.",
         ));
     }
     Ok(args)
@@ -321,18 +344,47 @@ fn parse_restricted_bash_command(command: &str) -> Result<Vec<String>, AgentErro
 fn unsupported_shell_syntax(message: &str) -> AgentError {
     AgentError::new(
         "UNSUPPORTED_SHELL_SYNTAX",
-        format!("{message} Use only: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name> or pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ..."),
+        format!(
+            "{message} Use only restricted Pedelec helpers: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>, pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ..., or pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]."
+        ),
     )
+}
+
+fn validate_restricted_command(argv: &[String]) -> Result<RestrictedCommand, AgentError> {
+    match argv.first().map(String::as_str) {
+        Some("pedelec-cli") => {
+            validate_pedelec_cli_command(argv)?;
+            Ok(RestrictedCommand::PedelecCli)
+        }
+        Some("pedelec-deno") => {
+            validate_pedelec_deno_command(argv)?;
+            Ok(RestrictedCommand::PedelecDeno)
+        }
+        _ => Err(AgentError::with_details(
+            "COMMAND_NOT_ALLOWED",
+            "Only restricted Pedelec helper commands are allowed; use pedelec-cli for App Tools or pedelec-deno for JavaScript/TypeScript execution.",
+            serde_json::json!({ "allowed": restricted_command_usage() }),
+        )),
+    }
+}
+
+fn restricted_command_usage() -> [&'static str; 3] {
+    [
+        "pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>",
+        "pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ...",
+        "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]",
+    ]
 }
 
 fn validate_pedelec_cli_command(argv: &[String]) -> Result<(), AgentError> {
     if argv.first().map(String::as_str) != Some("pedelec-cli") {
         return Err(AgentError::with_details(
             "COMMAND_NOT_ALLOWED",
-            "Only pedelec-cli tool commands are allowed.",
+            "Only restricted Pedelec helper commands are allowed; use pedelec-cli for App Tools or pedelec-deno for JavaScript/TypeScript execution.",
             serde_json::json!({ "allowed": [
                 "pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>",
-                "pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ..."
+                "pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ...",
+                "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]"
             ] }),
         ));
     }
@@ -367,10 +419,81 @@ fn validate_pedelec_cli_command(argv: &[String]) -> Result<(), AgentError> {
         )),
         _ => Err(AgentError::with_details(
             "COMMAND_NOT_ALLOWED",
-            "Only pedelec-cli --thread-id <pedelec_thread_id> tool-spec and pedelec-cli --thread-id <pedelec_thread_id> tool-call commands are allowed.",
+            "Only pedelec-cli App Tool commands or pedelec-deno JavaScript/TypeScript commands are allowed.",
             serde_json::json!({ "command": argv }),
         )),
     }
+}
+
+fn validate_pedelec_deno_command(argv: &[String]) -> Result<(), AgentError> {
+    if argv.get(1).map(String::as_str) != Some("--thread-id") {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]",
+        ));
+    }
+    if argv
+        .get(2)
+        .map(String::as_str)
+        .is_none_or(|thread_id| thread_id.trim().is_empty())
+    {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "pedelec-deno requires a non-empty --thread-id value.",
+        ));
+    }
+    if argv.get(3).map(String::as_str) != Some("run") {
+        return Err(AgentError::with_details(
+            "COMMAND_NOT_ALLOWED",
+            "Only the pedelec-deno `run` subcommand is allowed.",
+            serde_json::json!({ "allowed": restricted_command_usage() }),
+        ));
+    }
+
+    let entrypoint = argv.get(4).ok_or_else(|| {
+        AgentError::new(
+            "INVALID_ARGUMENT",
+            "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]",
+        )
+    })?;
+    validate_workspace_relative_entrypoint(entrypoint)?;
+
+    match argv.get(5) {
+        None => Ok(()),
+        Some(separator) if separator == "--" => Ok(()),
+        Some(_) => Err(AgentError::new(
+            "COMMAND_NOT_ALLOWED",
+            "Raw Deno options are not allowed; put script arguments after `--`.",
+        )),
+    }
+}
+
+fn validate_workspace_relative_entrypoint(entrypoint: &str) -> Result<(), AgentError> {
+    if entrypoint.trim().is_empty()
+        || entrypoint.starts_with('-')
+        || entrypoint.chars().any(char::is_control)
+    {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "pedelec-deno requires a non-empty workspace-relative script path.",
+        ));
+    }
+
+    let path = Path::new(entrypoint);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::Prefix(_) | Component::RootDir | Component::ParentDir
+            )
+        })
+    {
+        return Err(AgentError::new(
+            "INVALID_ARGUMENT",
+            "pedelec-deno requires a workspace-relative script path without traversal.",
+        ));
+    }
+    Ok(())
 }
 
 fn run_pedelec_cli_command(mut command: Command, timeout_ms: u64) -> Result<Value, AgentError> {
@@ -415,6 +538,48 @@ fn run_pedelec_cli_command(mut command: Command, timeout_ms: u64) -> Result<Valu
     })
 }
 
+fn run_pedelec_deno_command(mut command: Command, timeout_ms: u64) -> Result<Value, AgentError> {
+    let timed_output = run_command_with_timeout(&mut command, timeout_ms).map_err(|err| {
+        AgentError::with_details(
+            "PEDELEC_DENO_FAILED",
+            "Failed to execute pedelec-deno",
+            serde_json::json!({ "error": err.to_string() }),
+        )
+    })?;
+    let output = timed_output.output;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if timed_output.timed_out {
+        return Err(AgentError::with_details(
+            "PEDELEC_DENO_TIMEOUT",
+            "pedelec-deno helper command timed out before returning its structured result.",
+            serde_json::json!({
+                "timeoutMs": timeout_ms,
+                "stdout": stdout,
+                "stderr": stderr,
+            }),
+        ));
+    }
+    if !output.status.success() {
+        return Err(AgentError::with_details(
+            "PEDELEC_DENO_FAILED",
+            "pedelec-deno exited with an error",
+            serde_json::json!({
+                "status": output.status.code(),
+                "stdout": stdout,
+                "stderr": stderr,
+            }),
+        ));
+    }
+    serde_json::from_str::<Value>(&stdout).map_err(|err| {
+        AgentError::with_details(
+            "PEDELEC_DENO_FAILED",
+            "pedelec-deno stdout was not a structured JSON response",
+            serde_json::json!({ "stdout": stdout, "error": err.to_string() }),
+        )
+    })
+}
+
 struct TimedOutput {
     output: Output,
     timed_out: bool,
@@ -454,6 +619,20 @@ fn resolve_pedelec_cli(config: &ToolHostConfig) -> Result<PathBuf, AgentError> {
         .ok_or_else(|| AgentError::new("PEDELEC_CLI_NOT_FOUND", "Cannot find pedelec-cli."))
 }
 
+fn resolve_pedelec_deno(config: &ToolHostConfig) -> Result<PathBuf, AgentError> {
+    if let Some(path) = &config.pedelec_deno_path {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+    find_on_path("pedelec-deno").ok_or_else(|| {
+        AgentError::new(
+            "PEDELEC_DENO_NOT_FOUND",
+            "Cannot find pedelec-deno; do not fall back to another JavaScript runtime.",
+        )
+    })
+}
+
 fn find_on_path(program: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
     for dir in env::split_paths(&path) {
@@ -484,8 +663,10 @@ mod tests {
     fn config() -> ToolHostConfig {
         ToolHostConfig {
             pedelec_cli_path: None,
+            pedelec_deno_path: None,
             core_runtime_file: None,
             pedelec_cli_timeout_ms: 1000,
+            pedelec_deno_timeout_ms: 1000,
         }
     }
 
@@ -522,6 +703,13 @@ mod tests {
         assert!(!names
             .iter()
             .any(|name| name.contains("pedelec_cli.tool_call")));
+        let bash = tools.iter().find(|tool| tool.name == "bash").unwrap();
+        assert!(bash
+            .description
+            .contains("restricted Pedelec helper command"));
+        assert!(bash.description.contains("pedelec-cli"));
+        assert!(bash.description.contains("pedelec-deno"));
+        assert!(bash.description.contains("not a full shell"));
         assert!(tools.iter().all(|tool| tool.input_schema.is_object()));
     }
 
@@ -568,7 +756,40 @@ mod tests {
     }
 
     #[test]
-    fn bash_tool_rejects_non_pedelec_cli_commands() {
+    fn bash_tool_executes_pedelec_deno_and_preserves_structured_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let capture = temp.path().join("args.txt");
+        let deno = fake_pedelec_deno(temp.path(), &capture);
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
+        let mut cfg = config();
+        cfg.pedelec_deno_path = Some(deno);
+
+        let result = execute_tool(
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-deno --thread-id thread_explicit run scripts/test.ts -- foo bar"
+            }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap();
+
+        assert_eq!(result.content["ok"], true);
+        assert_eq!(result.content["result"]["exitCode"], 0);
+        assert_eq!(result.content["result"]["stdout"], "script output");
+        let args = std::fs::read_to_string(capture).unwrap();
+        assert!(args.contains("--thread-id"));
+        assert!(args.contains("thread_explicit"));
+        assert!(args.contains("run"));
+        assert!(args.contains("scripts/test.ts"));
+        assert!(args.contains("foo"));
+        assert!(args.contains("bar"));
+        assert!(!args.contains("session_inner"));
+    }
+
+    #[test]
+    fn bash_tool_rejects_non_pedelec_helper_commands() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
         let cfg = config();
@@ -583,6 +804,91 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.code, "COMMAND_NOT_ALLOWED");
+    }
+
+    #[test]
+    fn parser_accepts_the_pedelec_deno_v1_command_forms() {
+        assert_eq!(
+            parse_restricted_bash_command("pedelec-deno --thread-id thread_1 run scripts/test.ts")
+                .and_then(|argv| {
+                    validate_restricted_command(&argv)?;
+                    Ok(argv)
+                })
+                .unwrap(),
+            vec![
+                "pedelec-deno",
+                "--thread-id",
+                "thread_1",
+                "run",
+                "scripts/test.ts"
+            ]
+        );
+        assert_eq!(
+            parse_restricted_bash_command(
+                "pedelec-deno --thread-id thread_1 run scripts/test.ts -- foo bar"
+            )
+            .and_then(|argv| {
+                validate_restricted_command(&argv)?;
+                Ok(argv)
+            })
+            .unwrap(),
+            vec![
+                "pedelec-deno",
+                "--thread-id",
+                "thread_1",
+                "run",
+                "scripts/test.ts",
+                "--",
+                "foo",
+                "bar"
+            ]
+        );
+    }
+
+    #[test]
+    fn parser_rejects_other_runtimes_and_pedelec_deno_extensions() {
+        for command in [
+            "deno run scripts/test.ts",
+            "node scripts/test.js",
+            "bun scripts/test.ts",
+            "npx something",
+            "pedelec-deno run scripts/test.ts",
+            "pedelec-deno --thread-id thread_1 eval code",
+            "pedelec-deno --thread-id thread_1 --allow-all run scripts/test.ts",
+            "pedelec-deno --thread-id thread_1 run scripts/test.ts && echo nope",
+            "pedelec-deno --thread-id thread_1 run $(cat secret)",
+        ] {
+            let error = parse_restricted_bash_command(command)
+                .and_then(|argv| validate_restricted_command(&argv))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error.code.as_str(),
+                    "COMMAND_NOT_ALLOWED" | "INVALID_ARGUMENT" | "UNSUPPORTED_SHELL_SYNTAX"
+                ),
+                "unexpected error for {command}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_pedelec_deno_entrypoint_escape_and_unseparated_flags() {
+        for command in [
+            "pedelec-deno --thread-id thread_1 run ../outside.ts",
+            "pedelec-deno --thread-id thread_1 run scripts/../../outside.ts",
+        ] {
+            let error = parse_restricted_bash_command(command)
+                .and_then(|argv| validate_restricted_command(&argv))
+                .unwrap_err();
+            assert_eq!(error.code, "INVALID_ARGUMENT");
+        }
+
+        let error = parse_restricted_bash_command(
+            "pedelec-deno --thread-id thread_1 run scripts/test.ts --allow-net",
+        )
+        .and_then(|argv| validate_restricted_command(&argv))
+        .unwrap_err();
+        assert_eq!(error.code, "COMMAND_NOT_ALLOWED");
     }
 
     #[test]
@@ -713,6 +1019,39 @@ mod tests {
             &path,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"ok\":true}}'\n",
+                capture.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(windows)]
+    fn fake_pedelec_deno(dir: &Path, capture: &Path) -> PathBuf {
+        let path = dir.join("pedelec-deno.cmd");
+        std::fs::write(
+            &path,
+            format!(
+                "@echo off\r\necho %* > \"{}\"\r\necho {{\"ok\":true,\"result\":{{\"exitCode\":0,\"stdout\":\"script output\",\"stderr\":\"\",\"stdoutTruncated\":false,\"stderrTruncated\":false}}}}\r\n",
+                capture.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[cfg(not(windows))]
+    fn fake_pedelec_deno(dir: &Path, capture: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("pedelec-deno");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"ok\":true,\"result\":{{\"exitCode\":0,\"stdout\":\"script output\",\"stderr\":\"\",\"stdoutTruncated\":false,\"stderrTruncated\":false}}}}'\n",
                 capture.to_string_lossy()
             ),
         )

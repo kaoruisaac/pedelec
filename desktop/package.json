@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "test": "vitest run --environment node",
+    "test:release-metadata": "node --test scripts/deno-release.metadata.mjs",
+    "test:deno-runtime": "node scripts/verify-deno-runtime.mjs",
     "pack": "node scripts/pack-msix.mjs",
     "pretauri": "node scripts/stage-tauri-binaries.mjs",
     "tauri": "tauri"

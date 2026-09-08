@@ -8,6 +8,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_PEDELEC_DENO_HELPER_TIMEOUT_MS: u64 = 75_000;
+const MIN_PEDELEC_DENO_HELPER_TIMEOUT_MS: u64 = 60_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     Ollama,
@@ -29,6 +32,7 @@ pub struct PedelecAgentServerConfig {
     pub api_key: String,
     pub tavily_api_key: Option<String>,
     pub pedelec_cli_path: Option<PathBuf>,
+    pub pedelec_deno_path: Option<PathBuf>,
     pub core_runtime_file: Option<PathBuf>,
     pub session_root: Option<PathBuf>,
     pub max_transcript_bytes: u64,
@@ -37,14 +41,17 @@ pub struct PedelecAgentServerConfig {
     pub max_file_bytes: u64,
     pub max_image_bytes: u64,
     pub pedelec_cli_timeout_ms: u64,
+    pub pedelec_deno_timeout_ms: u64,
 }
 
 impl PedelecAgentServerConfig {
     pub fn tool_host_config(&self) -> ToolHostConfig {
         ToolHostConfig {
             pedelec_cli_path: self.pedelec_cli_path.clone(),
+            pedelec_deno_path: self.pedelec_deno_path.clone(),
             core_runtime_file: self.core_runtime_file.clone(),
             pedelec_cli_timeout_ms: self.pedelec_cli_timeout_ms,
+            pedelec_deno_timeout_ms: self.pedelec_deno_timeout_ms,
         }
     }
 
@@ -56,8 +63,10 @@ impl PedelecAgentServerConfig {
 #[derive(Debug, Clone)]
 pub struct ToolHostConfig {
     pub pedelec_cli_path: Option<PathBuf>,
+    pub pedelec_deno_path: Option<PathBuf>,
     pub core_runtime_file: Option<PathBuf>,
     pub pedelec_cli_timeout_ms: u64,
+    pub pedelec_deno_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +82,7 @@ pub struct ServerConfigResolveInputs {
     pub env_file: Option<PathBuf>,
     pub settings_path: Option<PathBuf>,
     pub pedelec_cli_path: Option<PathBuf>,
+    pub pedelec_deno_path: Option<PathBuf>,
     pub core_runtime_file: Option<PathBuf>,
     pub session_root: Option<PathBuf>,
 }
@@ -112,6 +122,10 @@ pub fn resolve_server_config_from(
             .pedelec_cli_path
             .or_else(|| env_path("PEDELEC_CLI_PATH"))
             .or_else(|| env_file_path(&file_env, "PEDELEC_CLI_PATH")),
+        pedelec_deno_path: inputs
+            .pedelec_deno_path
+            .or_else(|| env_path("PEDELEC_DENO_PATH"))
+            .or_else(|| env_file_path(&file_env, "PEDELEC_DENO_PATH")),
         core_runtime_file: inputs
             .core_runtime_file
             .or_else(|| env_path("PEDELEC_CORE_RUNTIME_FILE"))
@@ -128,6 +142,12 @@ pub fn resolve_server_config_from(
             20 * 1024 * 1024,
         )?,
         pedelec_cli_timeout_ms: get_u64(&file_env, "PEDELEC_AGENT_PEDELEC_CLI_TIMEOUT_MS", 60_000)?,
+        pedelec_deno_timeout_ms: get_u64(
+            &file_env,
+            "PEDELEC_AGENT_PEDELEC_DENO_TIMEOUT_MS",
+            DEFAULT_PEDELEC_DENO_HELPER_TIMEOUT_MS,
+        )?
+        .max(MIN_PEDELEC_DENO_HELPER_TIMEOUT_MS),
     })
 }
 
@@ -374,6 +394,44 @@ mod tests {
         assert_eq!(config.provider, BackendKind::Ollama);
         assert!(!config.api_key.is_empty());
         assert_eq!(config.max_tool_rounds, 8);
+        assert_eq!(
+            config.pedelec_deno_timeout_ms,
+            DEFAULT_PEDELEC_DENO_HELPER_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn deno_helper_path_can_be_explicitly_configured() {
+        let temp = tempfile::tempdir().unwrap();
+        let deno_path = temp.path().join("pedelec-deno");
+        set_test_ollama_api_key();
+        let config = resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(temp.path().join("missing.env")),
+            settings_path: Some(temp.path().join("missing-settings.json")),
+            pedelec_deno_path: Some(deno_path.clone()),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap();
+        assert_eq!(config.pedelec_deno_path, Some(deno_path));
+    }
+
+    #[test]
+    fn deno_helper_timeout_never_falls_below_runtime_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let env_file = temp.path().join(".env.local");
+        fs::write(&env_file, "PEDELEC_AGENT_PEDELEC_DENO_TIMEOUT_MS=1\n").unwrap();
+        let settings_file = temp.path().join("settings.json");
+        set_test_ollama_api_key();
+        let config = resolve_server_config_from(ServerConfigResolveInputs {
+            env_file: Some(env_file),
+            settings_path: Some(settings_file),
+            ..ServerConfigResolveInputs::default()
+        })
+        .unwrap();
+        assert_eq!(
+            config.pedelec_deno_timeout_ms,
+            MIN_PEDELEC_DENO_HELPER_TIMEOUT_MS
+        );
     }
 
     #[test]
