@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-agent"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-app"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "pedelec-core",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "dirs",
@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-deno"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "pedelec-core",
@@ -2866,7 +2866,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-ipc"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "dirs",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-native-host"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "pedelec-core",
@@ -2894,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-runtime"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "pedelec-core",
@@ -2905,7 +2905,7 @@ dependencies = [
 
 [[package]]
 name = "pedelec-shared"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "dirs",
