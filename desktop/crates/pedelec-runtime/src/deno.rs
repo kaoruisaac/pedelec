@@ -2,6 +2,7 @@ use pedelec_core::{
     error_codes, workspace_runtime_data_root, DenoExecutionIntent, DenoRunOutput,
     DenoRuntimeDispatcher, PedelecError,
 };
+use pedelec_shared::paths::path_for_external_use;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
@@ -177,8 +178,8 @@ impl DenoRuntimeOwner {
 
         let executable_path = self.executable_path();
         validate_executable_path(&executable_path, &intent.thread_id)?;
-        let cache_dir = prepare_deno_cache_dir(&intent.workspace_path)?;
-        let command_args = build_deno_command_args(&intent);
+        let prepared = PreparedDenoExecution::prepare(&intent)?;
+        let command_args = build_deno_command_args(&prepared);
 
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(deno_unavailable_error(
@@ -191,14 +192,14 @@ impl DenoRuntimeOwner {
         let mut command = Command::new(&executable_path);
         command
             .args(command_args)
-            .current_dir(&intent.workspace_path)
+            .current_dir(prepared.workspace())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Do not inherit arbitrary host variables.  These are runtime
             // implementation values, not script-visible host configuration.
             .env_clear()
-            .env("DENO_DIR", &cache_dir)
+            .env("DENO_DIR", prepared.cache_dir())
             .env("DENO_NO_UPDATE_CHECK", "1")
             .env("NO_COLOR", "1");
         #[cfg(windows)]
@@ -371,12 +372,89 @@ impl Drop for ActiveRunRegistration {
     }
 }
 
+/// One Deno execution resolved to a single canonical workspace root.
+///
+/// Every filesystem-sensitive execution value - sandbox permission flags,
+/// process cwd, the executed entrypoint, and the Pedelec-owned Deno cache -
+/// is derived from `workspace`, so no two aliases of the same directory (for
+/// example macOS `/var` versus `/private/var`) can be mixed inside one
+/// invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedDenoExecution {
+    workspace: PathBuf,
+    entrypoint: PathBuf,
+    cache_dir: PathBuf,
+    args: Vec<String>,
+}
+
+impl PreparedDenoExecution {
+    /// Resolves the canonical workspace root once and validates every other
+    /// path against it.  Caller-provided script arguments are carried through
+    /// unchanged; they only ever become script arguments.
+    pub fn prepare(intent: &DenoExecutionIntent) -> Result<Self, PedelecError> {
+        let workspace = canonical_execution_path(&intent.workspace_path, "Deno workspace")?;
+        if !workspace.is_dir() {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_RUNTIME_UNAVAILABLE,
+                "the Deno workspace is not a directory",
+                serde_json::json!({ "path": path_for_external_use(&workspace) }),
+            ));
+        }
+
+        let entrypoint = canonical_execution_path(&intent.entrypoint, "Deno entrypoint")?;
+        if !entrypoint.starts_with(&workspace) {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_ENTRYPOINT_INVALID,
+                "Deno entrypoint resolves outside the canonical workspace",
+                serde_json::json!({
+                    "threadId": intent.thread_id,
+                    "path": path_for_external_use(&entrypoint),
+                    "workspacePath": path_for_external_use(&workspace),
+                }),
+            ));
+        }
+        if !entrypoint.is_file() {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_ENTRYPOINT_INVALID,
+                "Deno entrypoint must resolve to a regular file",
+                serde_json::json!({
+                    "threadId": intent.thread_id,
+                    "path": path_for_external_use(&entrypoint),
+                }),
+            ));
+        }
+
+        let cache_dir = prepare_deno_cache_dir(&workspace)?;
+        Ok(Self {
+            workspace,
+            entrypoint,
+            cache_dir,
+            args: intent.args.clone(),
+        })
+    }
+
+    /// The single canonical workspace root backing this execution.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    /// The canonical entrypoint, always inside [`Self::workspace`].
+    pub fn entrypoint(&self) -> &Path {
+        &self.entrypoint
+    }
+
+    /// The Pedelec-owned Deno cache, always inside [`Self::workspace`].
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+}
+
 /// Builds the only raw-Deno argv accepted by the Desktop owner.  The first
 /// `--` ends Deno option parsing before the authoritative script path; every
 /// caller-provided argument is appended after the script path and therefore
 /// cannot become a permission/runtime option.
-pub fn build_deno_command_args(intent: &DenoExecutionIntent) -> Vec<OsString> {
-    let workspace = intent.workspace_path.to_string_lossy();
+pub fn build_deno_command_args(prepared: &PreparedDenoExecution) -> Vec<OsString> {
+    let workspace = path_for_external_use(prepared.workspace());
     let mut args = vec![
         OsString::from("run"),
         OsString::from("--no-prompt"),
@@ -392,10 +470,28 @@ pub fn build_deno_command_args(intent: &DenoExecutionIntent) -> Vec<OsString> {
         OsString::from("--deny-ffi"),
         OsString::from("--deny-sys"),
         OsString::from("--"),
-        intent.entrypoint.as_os_str().to_os_string(),
+        prepared.entrypoint().as_os_str().to_os_string(),
     ];
-    args.extend(intent.args.iter().cloned().map(OsString::from));
+    args.extend(prepared.args.iter().cloned().map(OsString::from));
     args
+}
+
+/// Canonicalizes one execution path and returns it in the form Deno itself
+/// reports for that file.  On Windows `canonicalize` yields a verbatim
+/// `\\?\` path, which would not match the plain-drive paths Deno compares
+/// permission prefixes against, so the verbatim prefix is removed again.
+fn canonical_execution_path(path: &Path, label: &str) -> Result<PathBuf, PedelecError> {
+    let canonical = path.canonicalize().map_err(|err| {
+        PedelecError::with_details(
+            error_codes::DENO_RUNTIME_UNAVAILABLE,
+            format!("cannot canonicalize the {label}"),
+            serde_json::json!({
+                "path": path_for_external_use(path),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    Ok(PathBuf::from(path_for_external_use(&canonical)))
 }
 
 fn validate_executable_path(path: &Path, thread_id: &str) -> Result<(), PedelecError> {
@@ -409,26 +505,16 @@ fn validate_executable_path(path: &Path, thread_id: &str) -> Result<(), PedelecE
     Ok(())
 }
 
-fn prepare_deno_cache_dir(workspace: &Path) -> Result<PathBuf, PedelecError> {
-    let canonical_workspace = workspace.canonicalize().map_err(|err| {
-        PedelecError::with_details(
-            error_codes::DENO_RUNTIME_UNAVAILABLE,
-            "cannot canonicalize the Deno workspace",
-            serde_json::json!({ "error": err.to_string() }),
-        )
-    })?;
-    let runtime_root = workspace_runtime_data_root(workspace);
+/// Creates and validates the Pedelec-owned Deno cache.  `canonical_workspace`
+/// must already be the canonical execution root so that the containment check
+/// below compares two paths in the same form.
+fn prepare_deno_cache_dir(canonical_workspace: &Path) -> Result<PathBuf, PedelecError> {
+    let runtime_root = workspace_runtime_data_root(canonical_workspace);
     ensure_owned_directory(&runtime_root, "Pedelec runtime data root")?;
     let cache_dir = runtime_root.join("deno");
     ensure_owned_directory(&cache_dir, "Pedelec-owned Deno cache directory")?;
-    let canonical_cache = cache_dir.canonicalize().map_err(|err| {
-        PedelecError::with_details(
-            error_codes::DENO_RUNTIME_UNAVAILABLE,
-            "cannot canonicalize the Pedelec-owned Deno cache",
-            serde_json::json!({ "error": err.to_string() }),
-        )
-    })?;
-    if !canonical_cache.starts_with(&canonical_workspace) {
+    let canonical_cache = canonical_execution_path(&cache_dir, "Pedelec-owned Deno cache")?;
+    if !canonical_cache.starts_with(canonical_workspace) {
         return Err(PedelecError::new(
             error_codes::DENO_RUNTIME_UNAVAILABLE,
             "Pedelec-owned Deno cache resolves outside the workspace",
@@ -622,23 +708,49 @@ fn terminate_child(child: &mut Child) -> io::Result<ExitStatus> {
 mod tests {
     use super::*;
     use pedelec_core::DenoExecutionIntent;
-    #[cfg(unix)]
     use std::fs;
     use std::sync::mpsc;
 
+    /// Every intent used here points at a real entrypoint because the runtime
+    /// resolves and contains the script before spawning Deno.
     fn intent(workspace: &Path, entrypoint: &str, args: Vec<String>) -> DenoExecutionIntent {
+        let entrypoint_path = workspace.join(entrypoint);
+        if !entrypoint_path.exists() {
+            if let Some(parent) = entrypoint_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&entrypoint_path, "// test entrypoint\n").unwrap();
+        }
         DenoExecutionIntent {
             thread_id: "thread-deno-test".into(),
             workspace_path: workspace.to_path_buf(),
-            entrypoint: workspace.join(entrypoint),
+            entrypoint: entrypoint_path,
             args,
         }
+    }
+
+    fn prepared(workspace: &Path, entrypoint: &str, args: Vec<String>) -> PreparedDenoExecution {
+        PreparedDenoExecution::prepare(&intent(workspace, entrypoint, args)).unwrap()
+    }
+
+    fn canonical(path: &Path) -> PathBuf {
+        PathBuf::from(path_for_external_use(&path.canonicalize().unwrap()))
+    }
+
+    fn permission_value(args: &[OsString], flag: &str) -> String {
+        args.iter()
+            .find_map(|arg| {
+                arg.to_string_lossy()
+                    .strip_prefix(&format!("{flag}="))
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| panic!("missing {flag}"))
     }
 
     #[test]
     fn command_args_put_caller_values_after_the_runtime_separator() {
         let temp = tempfile::tempdir().unwrap();
-        let args = build_deno_command_args(&intent(
+        let args = build_deno_command_args(&prepared(
             temp.path(),
             "script.ts",
             vec!["--allow-net".into(), "value".into()],
@@ -647,7 +759,7 @@ mod tests {
         assert!(args[..separator].iter().all(|arg| arg != "--allow-net"));
         assert_eq!(
             args[separator + 1],
-            temp.path().join("script.ts").as_os_str()
+            canonical(&temp.path().join("script.ts")).as_os_str()
         );
         assert_eq!(args[separator + 2], "--allow-net");
         for fixed_flag in [
@@ -730,7 +842,9 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(output.exit_code, 0);
-        assert!(output.stdout.contains(&temp.path().to_string_lossy()));
+        assert!(output
+            .stdout
+            .contains(&canonical(temp.path()).to_string_lossy().into_owned()));
         assert!(output.stdout.contains("--allow-net"));
         assert!(output.stderr.contains("stderr"));
         assert_eq!(owner.active_run_count(), 0);
@@ -865,5 +979,182 @@ mod tests {
         let error = handle.join().unwrap().unwrap_err();
         assert_eq!(error.code, error_codes::DENO_EXECUTION_CANCELLED);
         assert_eq!(owner.active_run_count(), 0);
+    }
+
+    #[test]
+    fn prepared_execution_derives_every_path_from_one_canonical_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+        fs::write(workspace.join("input.txt"), "workspace input\n").unwrap();
+
+        let prepared = prepared(workspace, "script.ts", Vec::new());
+        let canonical_workspace = canonical(workspace);
+
+        assert_eq!(prepared.workspace(), canonical_workspace);
+        assert!(prepared.entrypoint().starts_with(&canonical_workspace));
+        assert!(prepared.cache_dir().starts_with(&canonical_workspace));
+        assert!(prepared.cache_dir().is_dir());
+        // Workspace-local files stay reachable through the canonical root.
+        assert!(canonical_workspace.join("input.txt").is_file());
+
+        let args = build_deno_command_args(&prepared);
+        let expected = path_for_external_use(&canonical_workspace);
+        assert_eq!(permission_value(&args, "--allow-read"), expected);
+        assert_eq!(permission_value(&args, "--allow-write"), expected);
+        // The cwd used by the dispatcher is the very same value.
+        assert_eq!(path_for_external_use(prepared.workspace()), expected);
+    }
+
+    #[test]
+    fn caller_arguments_cannot_broaden_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().parent().unwrap().to_path_buf();
+        let prepared = prepared(
+            temp.path(),
+            "script.ts",
+            vec![
+                "--allow-all".into(),
+                format!("--allow-read={}", outside.display()),
+                "--deny-net=false".into(),
+            ],
+        );
+        let args = build_deno_command_args(&prepared);
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+
+        let expected = path_for_external_use(prepared.workspace());
+        assert_eq!(
+            permission_value(&args[..separator], "--allow-read"),
+            expected
+        );
+        assert_eq!(
+            permission_value(&args[..separator], "--allow-write"),
+            expected
+        );
+        assert!(args[..separator].iter().all(|arg| arg != "--allow-all"));
+        // Everything the caller supplied sits after the entrypoint.
+        assert_eq!(args[separator + 2], "--allow-all");
+        assert_eq!(args.last().unwrap(), "--deny-net=false");
+    }
+
+    #[test]
+    fn entrypoint_outside_the_workspace_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let outside = temp.path().join("outside.ts");
+        fs::write(&outside, "// outside\n").unwrap();
+
+        let error = PreparedDenoExecution::prepare(&DenoExecutionIntent {
+            thread_id: "thread-deno-test".into(),
+            workspace_path: workspace,
+            entrypoint: outside,
+            args: Vec::new(),
+        })
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_ENTRYPOINT_INVALID);
+    }
+
+    #[test]
+    fn traversal_out_of_the_workspace_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(temp.path().join("outside.ts"), "// outside\n").unwrap();
+
+        let error = PreparedDenoExecution::prepare(&DenoExecutionIntent {
+            thread_id: "thread-deno-test".into(),
+            workspace_path: workspace.clone(),
+            entrypoint: workspace.join("..").join("outside.ts"),
+            args: Vec::new(),
+        })
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_ENTRYPOINT_INVALID);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_reached_through_a_symlink_uses_the_canonical_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_workspace = temp.path().join("real-workspace");
+        fs::create_dir_all(&real_workspace).unwrap();
+        fs::write(real_workspace.join("input.txt"), "workspace input\n").unwrap();
+        fs::write(real_workspace.join("script.ts"), "// script\n").unwrap();
+        let alias = temp.path().join("alias-workspace");
+        symlink(&real_workspace, &alias).unwrap();
+
+        let prepared = PreparedDenoExecution::prepare(&DenoExecutionIntent {
+            thread_id: "thread-deno-test".into(),
+            workspace_path: alias.clone(),
+            entrypoint: alias.join("script.ts"),
+            args: Vec::new(),
+        })
+        .unwrap();
+
+        let canonical_workspace = canonical(&real_workspace);
+        assert_eq!(prepared.workspace(), canonical_workspace);
+        assert_eq!(prepared.entrypoint(), canonical_workspace.join("script.ts"));
+        assert!(prepared.cache_dir().starts_with(&canonical_workspace));
+
+        // The granted permission covers the canonical contents the script
+        // actually reads and writes, not the alias Deno never sees.
+        let args = build_deno_command_args(&prepared);
+        let granted = PathBuf::from(permission_value(&args, "--allow-read"));
+        assert_eq!(granted, canonical_workspace);
+        assert!(canonical(&real_workspace.join("input.txt")).starts_with(&granted));
+        assert_eq!(
+            permission_value(&args, "--allow-write"),
+            permission_value(&args, "--allow-read")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escaping_the_workspace_is_not_made_accessible() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let outside = temp.path().join("outside.ts");
+        fs::write(&outside, "// outside\n").unwrap();
+        let escape = workspace.join("escape.ts");
+        symlink(&outside, &escape).unwrap();
+
+        let error = PreparedDenoExecution::prepare(&DenoExecutionIntent {
+            thread_id: "thread-deno-test".into(),
+            workspace_path: workspace.clone(),
+            entrypoint: escape,
+            args: Vec::new(),
+        })
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_ENTRYPOINT_INVALID);
+
+        // The escape target is outside the only granted permission root.
+        let prepared = prepared(&workspace, "script.ts", Vec::new());
+        let granted = PathBuf::from(permission_value(
+            &build_deno_command_args(&prepared),
+            "--allow-read",
+        ));
+        assert!(!canonical(&outside).starts_with(&granted));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_private_var_alias_is_resolved_before_granting_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let prepared = prepared(temp.path(), "script.ts", Vec::new());
+        let args = build_deno_command_args(&prepared);
+        let granted = PathBuf::from(permission_value(&args, "--allow-read"));
+
+        // macOS exposes the temporary root through the /var alias while
+        // canonicalization resolves it through /private/var.
+        assert_eq!(granted, canonical(temp.path()));
+        assert!(prepared.entrypoint().starts_with(&granted));
+        assert!(prepared.cache_dir().starts_with(&granted));
+        if temp.path().starts_with("/var/") {
+            assert!(granted.starts_with("/private/var/"));
+        }
     }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -87,10 +87,16 @@ function verifyVersion(binary) {
 
 async function verifyRuntime(binary) {
   verifyVersion(binary);
-  const root = await mkdtemp(join(tmpdir(), "pedelec-deno-smoke-"));
-  const workspace = join(root, "workspace");
+  const createdRoot = await mkdtemp(join(tmpdir(), "pedelec-deno-smoke-"));
+  await mkdir(join(createdRoot, "workspace"), { recursive: true });
+  // Temporary roots can be exposed through a filesystem alias (on macOS
+  // `/var` while the real path is `/private/var`).  Deno compares permission
+  // prefixes against canonical paths, so the whole smoke test - permission
+  // flags, cwd, script paths and output assertions - must use one canonical
+  // workspace root.
+  const root = await realpath(createdRoot);
+  const workspace = await realpath(join(root, "workspace"));
   const outside = join(root, "outside.txt");
-  await mkdir(workspace, { recursive: true });
   await writeFile(join(workspace, "input.txt"), "workspace input\n");
   await writeFile(outside, "outside input\n");
   await writeFile(
@@ -146,7 +152,7 @@ async function verifyRuntime(binary) {
 
     run(binary, workspace, join(workspace, "remote.ts"), [], 1);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(createdRoot, { recursive: true, force: true });
   }
 }
 

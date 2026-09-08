@@ -2898,6 +2898,7 @@ version = "0.3.2"
 dependencies = [
  "chrono",
  "pedelec-core",
+ "pedelec-shared",
  "serde_json",
  "tempfile",
  "uuid",

@@ -9,6 +9,7 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 pedelec-core.workspace = true
+pedelec-shared.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
