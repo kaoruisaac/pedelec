@@ -210,7 +210,11 @@ mod tests {
 
     #[test]
     fn list_providers_core_ipc_returns_opencode_entry() {
-        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime {
+            settings_file_path: Some(temp.path().join("settings.json")),
+            ..CoreRuntime::default()
+        }));
         runtime
             .lock()
             .unwrap()
@@ -234,7 +238,41 @@ mod tests {
             provider.get("code") == Some(&json!("opencode"))
                 && provider.get("name") == Some(&json!("OpenCode"))
                 && provider.get("available").is_some()
+                && provider.get("isDefault") == Some(&json!(false))
         }));
+    }
+
+    #[test]
+    fn list_providers_core_ipc_propagates_settings_read_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        std::fs::write(&settings_path, "not-json").unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime {
+            settings_file_path: Some(settings_path),
+            ..CoreRuntime::default()
+        }));
+        runtime
+            .lock()
+            .unwrap()
+            .provider_readiness
+            .mark_ready_for_test();
+
+        let response = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "providers_settings_error".into(),
+                r#type: "list_providers".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(json!({})),
+            },
+            runtime,
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.unwrap().code,
+            error_codes::SETTINGS_READ_FAILED
+        );
     }
 
     #[test]

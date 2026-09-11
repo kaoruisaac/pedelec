@@ -9,7 +9,7 @@ Application 選擇 provider 與資源意圖；Desktop 使用者則在 Settings �
 
 ## Provider code
 
-固定的小寫 code 是 `codex`、`antigravity`、`opencode`、`cursor`、`claude` 與 `ollama`。`listProviders()` 只公開名稱、code、availability 與錯誤訊息；credentials、model catalog、`providerSettings` 和 `effortsArgs` 不會穿過 SDK boundary。
+固定的小寫 code 是 `codex`、`antigravity`、`opencode`、`cursor`、`claude` 與 `ollama`。`listProviders()` 只公開名稱、code、availability、`isDefault` 與錯誤訊息。`isDefault` 反映目前 Desktop 的 default provider，與 `available` 無關，即使 default provider unavailable 也仍為 `true`；credentials、model catalog、`providerSettings` 和 `effortsArgs` 不會穿過 SDK boundary。SDK 與 Extension 會忽略 response 中新增的未知欄位，以保持 forward compatibility。
 
 ## Effort levels
 

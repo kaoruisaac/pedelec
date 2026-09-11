@@ -197,6 +197,7 @@ export type ProviderInfo = {
   name: string;
   code: ProviderCode;
   available: boolean;
+  isDefault: boolean;
   error: string | null;
 };
 
@@ -647,7 +648,14 @@ export class Pedelec {
   }
 
   async listProviders(): Promise<ProviderInfo[]> {
-    return normalizeProviderInfoList(await this.request<unknown>("list_providers"));
+    const providers = normalizeProviderInfoList(await this.request<unknown>("list_providers"));
+    if (hasProviderDefaultFlags(providers)) return providers;
+
+    const settings = await this.getSettings();
+    return providers.map((provider) => ({
+      ...provider,
+      isDefault: provider.code === settings.defaultProvider,
+    }));
   }
 
   async getSettings(): Promise<PedelecSettings> {
@@ -2038,8 +2046,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizePedelecSettings(value: unknown): PedelecSettings {
-  if (!isPlainObject(value) || (value.defaultProvider !== null && !isProviderCode(value.defaultProvider)) ||
-      "defaultModels" in value || "providerSettings" in value) {
+  if (!isPlainObject(value) || (value.defaultProvider !== null && !isProviderCode(value.defaultProvider))) {
     throw makeError("SDK_PROTOCOL_ERROR", "get_settings response had invalid shape");
   }
   return { defaultProvider: value.defaultProvider };
@@ -2064,16 +2071,29 @@ function normalizeWorkspaceFolderPickerResponse(value: unknown): WorkspaceFolder
   };
 }
 
-function normalizeProviderInfoList(value: unknown): ProviderInfo[] {
+type NormalizedProviderInfo = Omit<ProviderInfo, "isDefault"> & { isDefault?: boolean };
+
+function normalizeProviderInfoList(value: unknown): NormalizedProviderInfo[] {
   if (!Array.isArray(value)) throw makeError("SDK_PROTOCOL_ERROR", "list_providers response was not an array");
   return value.map((item) => {
     if (!isPlainObject(item) || typeof item.name !== "string" || item.name.length === 0 ||
         !isProviderCode(item.code) || typeof item.available !== "boolean" ||
-        (item.error !== null && typeof item.error !== "string")) {
+        (item.error !== null && typeof item.error !== "string") ||
+        ("isDefault" in item && typeof item.isDefault !== "boolean")) {
       throw makeError("SDK_PROTOCOL_ERROR", "list_providers response had invalid provider data");
     }
-    return { name: item.name, code: item.code, available: item.available, error: item.error };
+    return {
+      name: item.name,
+      code: item.code,
+      available: item.available,
+      ...(typeof item.isDefault === "boolean" ? { isDefault: item.isDefault } : {}),
+      error: item.error,
+    };
   });
+}
+
+function hasProviderDefaultFlags(value: NormalizedProviderInfo[]): value is ProviderInfo[] {
+  return value.every((provider) => typeof provider.isDefault === "boolean");
 }
 
 function makeError(code: string, message: string, details?: unknown): PedelecError {

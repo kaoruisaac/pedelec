@@ -13,7 +13,7 @@ effortLevel: default | low | high
 
 If effort is omitted, use the SDK's documented default behavior, currently `default` in the supported contract. The three levels are product-facing profiles; they do not promise a universal native provider argument or model.
 
-`getSettings()` exposes only `defaultProvider`. `listProviders()` exposes public Provider discovery such as display name, code, availability, and an optional diagnostic error. The Web App must not expect either API to expose actual model mappings, provider-native effort arguments, credentials, API keys, executable paths, endpoint configuration, or the complete Desktop settings object.
+`getSettings()` exposes only `defaultProvider`. `listProviders()` exposes public Provider discovery such as display name, code, availability, `isDefault`, and an optional diagnostic error. `isDefault` reflects the current Desktop default provider and is independent of availability. The Web App must not expect either API to expose actual model mappings, provider-native effort arguments, credentials, API keys, executable paths, endpoint configuration, or the complete Desktop settings object.
 
 ## Provider Setting baseline
 

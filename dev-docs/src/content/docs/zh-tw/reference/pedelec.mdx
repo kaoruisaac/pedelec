@@ -136,6 +136,7 @@ type ProviderInfo = {
   name: string;
   code: ProviderCode;
   available: boolean;
+  isDefault: boolean;
   error: string | null;
 };
 ```
@@ -145,7 +146,7 @@ const providers = await pedelec.listProviders();
 const ready = providers.filter((provider) => provider.available);
 ```
 
-`available` 是 discovery/setup signal，不保證所有 model 或 remote service ready。
+`isDefault` 表示目前 Desktop settings 選擇的 default provider，與 `available` 無關；即使 default provider unavailable，仍會是 `true`。`available` 是 discovery/setup signal，不保證所有 model 或 remote service ready。為了 forward compatibility，SDK 會忽略 Extension response 中新增的未知欄位。
 
 常見 errors 為 Extension、native host、Core IPC 與 bridge timeout。
 
@@ -208,7 +209,7 @@ Protocol/storage 等其他 error 仍可能 reject。
 checkAvailability(): Promise<PedelecAvailability>
 ```
 
-檢查 Extension、目前 origin 的 approval 與 Desktop readiness；不會建立或 resume session，也不會開啟 approval popup。`getApprovalStatus().appConnected` 是非敏感 Core ping 的連線結果，不代表 approval 或 provider ready。`getSettings()` 與 `listProviders()` 需要 origin approval 並可能開啟 popup，且僅分別公開 defaults 與 `name`/`code`/`available`/`error`。
+檢查 Extension、目前 origin 的 approval 與 Desktop readiness；不會建立或 resume session，也不會開啟 approval popup。`getApprovalStatus().appConnected` 是非敏感 Core ping 的連線結果，不代表 approval 或 provider ready。`getSettings()` 與 `listProviders()` 需要 origin approval 並可能開啟 popup，且僅分別公開 defaults 與 `name`/`code`/`available`/`isDefault`/`error`。
 
 `launchAttempted: true` 只代表已送出 settings probe，不能證明 Desktop 已啟動；settings response shape 不合法也會被視為 Desktop unavailable。Extension unavailable 也可能只是 bridge 中斷。
 

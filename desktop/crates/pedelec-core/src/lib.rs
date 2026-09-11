@@ -475,15 +475,18 @@ pub struct SdkProviderInfo {
     pub name: String,
     pub code: ProviderCode,
     pub available: bool,
+    pub is_default: bool,
     pub error: Option<String>,
 }
 
-impl From<ProviderInfo> for SdkProviderInfo {
-    fn from(provider: ProviderInfo) -> Self {
+impl SdkProviderInfo {
+    fn from_provider(provider: ProviderInfo, default_provider: Option<&ProviderCode>) -> Self {
+        let is_default = default_provider == Some(&provider.code);
         Self {
             name: provider.name,
             code: provider.code,
             available: provider.available,
+            is_default,
             error: provider.error,
         }
     }
@@ -1814,11 +1817,13 @@ impl CoreRuntime {
         list_provider_infos_with_scan(&self.provider_scan, self.provider_path_value())
     }
 
-    pub fn list_sdk_providers(&self) -> Vec<SdkProviderInfo> {
-        self.list_providers()
+    pub fn list_sdk_providers(&self) -> Result<Vec<SdkProviderInfo>, PedelecError> {
+        let default_provider = self.get_settings()?.default_provider;
+        Ok(self
+            .list_providers()
             .into_iter()
-            .map(SdkProviderInfo::from)
-            .collect()
+            .map(|provider| SdkProviderInfo::from_provider(provider, default_provider.as_ref()))
+            .collect())
     }
 
     /// Returns only the executable selected and version-validated by the latest

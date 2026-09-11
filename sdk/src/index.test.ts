@@ -482,7 +482,7 @@ describe("Pedelec SDK", () => {
     await nextTick();
     const providersRequest = pageWindow.lastSent();
     respondOk(pageWindow, providersRequest, [
-      { name: "Codex", code: "codex", available: true, error: null },
+      { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
     ]);
     await nextTick();
     const defaultCreate = pageWindow.lastSent();
@@ -782,10 +782,10 @@ describe("Pedelec SDK", () => {
     });
 
     respondOk(pageWindow, listRequest, [
-      { name: "OpenCode", code: "opencode", available: false, error: "program was not found in PATH" },
+      { name: "OpenCode", code: "opencode", available: false, isDefault: false, error: "program was not found in PATH" },
     ]);
     await expect(listPromise).resolves.toEqual([
-      { name: "OpenCode", code: "opencode", available: false, error: "program was not found in PATH" },
+      { name: "OpenCode", code: "opencode", available: false, isDefault: false, error: "program was not found in PATH" },
     ]);
   });
 
@@ -814,11 +814,11 @@ describe("Pedelec SDK", () => {
     const listPromise = pedelec.listProviders();
     const listRequest = pageWindow.lastSent();
     respondOk(pageWindow, listRequest, [
-      { name: "Cursor", code: "cursor", available: false, error: "program was not found in PATH" },
+      { name: "Cursor", code: "cursor", available: false, isDefault: false, error: "program was not found in PATH" },
     ]);
 
     await expect(listPromise).resolves.toEqual([
-      { name: "Cursor", code: "cursor", available: false, error: "program was not found in PATH" },
+      { name: "Cursor", code: "cursor", available: false, isDefault: false, error: "program was not found in PATH" },
     ]);
   });
 
@@ -847,12 +847,90 @@ describe("Pedelec SDK", () => {
     const listPromise = pedelec.listProviders();
     const listRequest = pageWindow.lastSent();
     respondOk(pageWindow, listRequest, [
-      { name: "Claude Code", code: "claude", available: false, error: "program was not found in PATH" },
+      { name: "Claude Code", code: "claude", available: false, isDefault: false, error: "program was not found in PATH" },
     ]);
 
     await expect(listPromise).resolves.toEqual([
-      { name: "Claude Code", code: "claude", available: false, error: "program was not found in PATH" },
+      { name: "Claude Code", code: "claude", available: false, isDefault: false, error: "program was not found in PATH" },
     ]);
+  });
+
+  it("uses provider isDefault directly without requesting settings", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.listProviders();
+    const request = pageWindow.lastSent();
+
+    respondOk(pageWindow, request, [
+      {
+        name: "Codex",
+        code: "codex",
+        available: true,
+        isDefault: true,
+        error: null,
+        futureField: "ignored",
+      },
+    ]);
+
+    await expect(promise).resolves.toEqual([
+      { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
+    ]);
+    expect(requestMessages(pageWindow.port).map((message) => message.type)).toEqual(["list_providers"]);
+  });
+
+  it("fills missing provider isDefault values from settings for an old extension", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.listProviders();
+    const providersRequest = pageWindow.lastSent();
+
+    respondOk(pageWindow, providersRequest, [
+      { name: "Codex", code: "codex", available: true, error: null },
+      { name: "Claude Code", code: "claude", available: true, error: null },
+    ]);
+    await nextTick();
+
+    const settingsRequest = pageWindow.lastSent();
+    expect(settingsRequest).toMatchObject({ type: "get_settings" });
+    respondOk(pageWindow, settingsRequest, { defaultProvider: "claude" });
+
+    await expect(promise).resolves.toEqual([
+      { name: "Codex", code: "codex", available: true, isDefault: false, error: null },
+      { name: "Claude Code", code: "claude", available: true, isDefault: true, error: null },
+    ]);
+  });
+
+  it("recomputes all provider defaults for a mixed provider response", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.listProviders();
+    const providersRequest = pageWindow.lastSent();
+
+    respondOk(pageWindow, providersRequest, [
+      { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
+      { name: "Claude Code", code: "claude", available: true, error: null },
+    ]);
+    await nextTick();
+
+    const settingsRequest = pageWindow.lastSent();
+    expect(settingsRequest).toMatchObject({ type: "get_settings" });
+    respondOk(pageWindow, settingsRequest, { defaultProvider: "claude" });
+
+    await expect(promise).resolves.toEqual([
+      { name: "Codex", code: "codex", available: true, isDefault: false, error: null },
+      { name: "Claude Code", code: "claude", available: true, isDefault: true, error: null },
+    ]);
+  });
+
+  it("rejects a provider isDefault field with the wrong type", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.listProviders();
+    respondOk(pageWindow, pageWindow.lastSent(), [
+      { name: "Codex", code: "codex", available: true, isDefault: "yes", error: null },
+    ]);
+
+    await expect(promise).rejects.toMatchObject({
+      code: "SDK_PROTOCOL_ERROR",
+      message: "list_providers response had invalid provider data",
+    });
+    expect(requestMessages(pageWindow.port).map((message) => message.type)).toEqual(["list_providers"]);
   });
 
   it("gets settings from the extension", async () => {
@@ -866,6 +944,9 @@ describe("Pedelec SDK", () => {
 
     respondOk(pageWindow, request, {
       defaultProvider: "codex",
+      defaultModels: { codex: "future-model" },
+      providerSettings: { codex: { effortsArgs: { default: ["-m", "future-model"] } } },
+      futureField: true,
     });
     await expect(promise).resolves.toEqual({
       defaultProvider: "codex",
@@ -904,7 +985,7 @@ describe("Pedelec SDK", () => {
     const providersRequest = pageWindow.lastSent();
     expect(providersRequest).toMatchObject({ type: "list_providers" });
     respondOk(pageWindow, providersRequest, [
-      { name: "Codex", code: "codex", available: true, error: null },
+      { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
     ]);
     await nextTick();
 
@@ -952,7 +1033,7 @@ describe("Pedelec SDK", () => {
     });
     await nextTick();
     respondOk(pageWindow, pageWindow.lastSent(), [
-      { name: "Ollama", code: "ollama", available: true, error: null },
+      { name: "Ollama", code: "ollama", available: true, isDefault: true, error: null },
     ]);
     await nextTick();
 
@@ -1075,7 +1156,7 @@ describe("Pedelec SDK", () => {
     respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: "codex" });
     await nextTick();
     respondOk(pageWindow, pageWindow.lastSent(), [
-      { name: "Codex", code: "codex", available: false, error: "missing" },
+      { name: "Codex", code: "codex", available: false, isDefault: true, error: "missing" },
     ]);
     await expect(unavailable).rejects.toMatchObject({ code: "DEFAULT_PROVIDER_UNAVAILABLE" });
   });
@@ -2695,10 +2776,10 @@ describe("Pedelec SDK", () => {
     expect(settled).toBe(false);
 
     respondOk(pageWindow, request, [
-      { name: "Codex", code: "codex", available: true, error: null },
+      { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
     ]);
     await expect(providersPromise).resolves.toEqual([
-      { name: "Codex", code: "codex", available: true, error: null },
+      { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
     ]);
   });
 
@@ -2720,6 +2801,7 @@ describe("Pedelec SDK", () => {
       path: "C:\\workspace\\project",
       isEmptyFolder: true,
       hasWorkspaceConfig: false,
+      futureField: true,
     });
 
     await expect(picker).resolves.toEqual({
@@ -2736,6 +2818,7 @@ describe("Pedelec SDK", () => {
       path: "C:\\workspace\\project",
       isEmptyFolder: false,
       hasWorkspaceConfig: true,
+      futureField: true,
     });
 
     await expect(picker).resolves.toEqual({
@@ -2808,9 +2891,9 @@ describe("Pedelec SDK", () => {
     const request = pageWindow.lastSent();
     expect(request).toMatchObject({ type: "list_assets", sessionId: "thread_1" });
     respondOk(pageWindow, request, { assets: [
-      { name: "upl_file.txt", path: "/upl_file.txt", sizeBytes: 4, modifiedAt: 1 },
+      { name: "upl_file.txt", path: "/upl_file.txt", sizeBytes: 4, modifiedAt: 1, futureField: true },
       { name: "report.json", path: "/results/report.json", sizeBytes: 10, modifiedAt: 2 },
-    ] });
+    ], futureField: true });
     await expect(list).resolves.toEqual([
       { name: "upl_file.txt", path: "/upl_file.txt", sizeBytes: 4, modifiedAt: 1 },
       { name: "report.json", path: "/results/report.json", sizeBytes: 10, modifiedAt: 2 },

@@ -1859,10 +1859,10 @@ fn handle_core_ipc_request_with_services(
             Err(err) => error_response(&request.request_id, err),
         },
         "list_providers" => match wait_for_provider_readiness(&runtime) {
-            Ok(()) => ok_response(
-                &request.request_id,
-                serde_json::json!(runtime.lock().unwrap().list_sdk_providers()),
-            ),
+            Ok(()) => match runtime.lock().unwrap().list_sdk_providers() {
+                Ok(providers) => ok_response(&request.request_id, serde_json::json!(providers)),
+                Err(err) => error_response(&request.request_id, err),
+            },
             Err(err) => error_response(&request.request_id, err),
         },
         "get_settings" => match runtime.lock().unwrap().get_sdk_settings() {
@@ -2938,7 +2938,11 @@ mod tests {
 
     #[test]
     fn list_providers_waits_for_initial_provider_scan_without_holding_runtime_lock() {
-        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime {
+            settings_file_path: Some(temp.path().join("settings.json")),
+            ..pedelec_core::CoreRuntime::new()
+        }));
         runtime.lock().unwrap().provider_path_value_override = Some(OsString::new());
 
         // Prevent the request from entering the runtime until it has started.

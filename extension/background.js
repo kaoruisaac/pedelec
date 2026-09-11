@@ -1988,6 +1988,7 @@ function createBackground(runtimeChrome, options = {}) {
         name: provider.name,
         code: provider.code,
         available: provider.available,
+        ...(typeof provider.isDefault === "boolean" ? { isDefault: provider.isDefault } : {}),
         error: provider.error,
       };
     });

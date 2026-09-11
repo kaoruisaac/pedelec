@@ -137,6 +137,7 @@ type ProviderInfo = {
   name: string;
   code: ProviderCode;
   available: boolean;
+  isDefault: boolean;
   error: string | null;
 };
 ```
@@ -146,7 +147,7 @@ const providers = await pedelec.listProviders();
 const ready = providers.filter((provider) => provider.available);
 ```
 
-`available` is a discovery/setup signal, not a guarantee that every model or remote service is ready.
+`isDefault` identifies the provider selected by the current Desktop settings. It is independent of `available`, so it remains true when the selected provider is unavailable. `available` is a discovery/setup signal, not a guarantee that every model or remote service is ready. The SDK ignores unknown fields added to Extension responses for forward compatibility.
 
 ### Common errors
 
@@ -220,7 +221,7 @@ if (availability.available) {
 }
 ```
 
-`getSettings()` and `listProviders()` require origin approval and can trigger its popup. They expose only public defaults and `name`/`code`/`available`/`error` respectively. `getApprovalStatus().appConnected` is the non-sensitive Core ping result for connectivity; it does not imply approval or provider readiness.
+`getSettings()` and `listProviders()` require origin approval and can trigger its popup. They expose only public defaults and `name`/`code`/`available`/`isDefault`/`error` respectively. `getApprovalStatus().appConnected` is the non-sensitive Core ping result for connectivity; it does not imply approval or provider readiness.
 
 It resolves structured unavailable states for bridge, Native Host, Core, timeout, and settings-protocol failures. `launchAttempted: true` means a status ping or settings probe was sent and may have invoked auto-launch; it does not prove Desktop was launched.
 

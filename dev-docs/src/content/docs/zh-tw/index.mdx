@@ -239,7 +239,7 @@ const session = await pedelec.createSession({
 const providers = await pedelec.listProviders();
 
 for (const provider of providers) {
-  console.log(provider.code, provider.available, provider.error);
+  console.log(provider.code, provider.available, provider.isDefault, provider.error);
 }
 ```
 
@@ -250,11 +250,12 @@ type ProviderInfo = {
   name: string;
   code: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
   available: boolean;
+  isDefault: boolean;
   error: string | null;
 };
 ```
 
-`available: false` 通常代表該 provider CLI 沒有安裝，或不在 PATH 裡。
+`isDefault` 表示 Desktop settings 選擇的 provider，與 `available` 無關；即使 default provider unavailable 也仍是 `true`。`available: false` 通常代表該 provider CLI 沒有安裝，或不在 PATH 裡。
 對 Ollama 而言，`available: true` 只代表 Pedelec 找得到 `pedelec-agent`；不代表 endpoint 可連線、credential 有效，或指定 model 已下載。
 
 ---
@@ -353,7 +354,7 @@ session.onError((error, ctx) => {
 
 目前公開 callback context 不會另外提供 provider responsibility 欄位。不要判斷 `ctx.source === "provider"`，也不要預期存在 `ctx.provider`。
 
-`getSettings()` 與 `listProviders()` 需要 origin approval 且可能開啟 popup。Settings 絕不公開 provider credentials，而 provider entry 僅含上述欄位。請以 `getApprovalStatus().appConnected` 做非敏感 Desktop connectivity probe。
+`getSettings()` 與 `listProviders()` 需要 origin approval 且可能開啟 popup。Settings 絕不公開 provider credentials，而 provider entry 僅含上述欄位；SDK 會忽略 Extension response 中新增的未知欄位，以保持 forward compatibility。請以 `getApprovalStatus().appConnected` 做非敏感 Desktop connectivity probe。
 
 ---
 

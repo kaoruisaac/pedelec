@@ -917,6 +917,91 @@ mod tests {
     }
 
     #[test]
+    fn list_sdk_providers_marks_the_settings_default_even_when_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let mut settings = PedelecSettings::default();
+        settings.default_provider = Some(ProviderCode::Codex);
+        write_settings_file(&settings_path, &settings).unwrap();
+
+        let runtime = CoreRuntime {
+            settings_file_path: Some(settings_path.clone()),
+            provider_path_value_override: Some(OsString::new()),
+            ..CoreRuntime::default()
+        };
+        let providers = runtime.list_sdk_providers().unwrap();
+        let default_provider = providers
+            .iter()
+            .find(|provider| provider.code == ProviderCode::Codex)
+            .unwrap();
+
+        assert!(!default_provider.available);
+        assert!(default_provider.is_default);
+        assert_eq!(
+            providers
+                .iter()
+                .filter(|provider| provider.is_default)
+                .count(),
+            1
+        );
+
+        let no_default_path = temp.path().join("no-default-settings.json");
+        write_settings_file(&no_default_path, &PedelecSettings::default()).unwrap();
+        let no_default_runtime = CoreRuntime {
+            settings_file_path: Some(no_default_path),
+            provider_path_value_override: Some(OsString::new()),
+            ..CoreRuntime::default()
+        };
+        assert!(no_default_runtime
+            .list_sdk_providers()
+            .unwrap()
+            .iter()
+            .all(|provider| !provider.is_default));
+    }
+
+    #[test]
+    fn sdk_provider_serialization_is_camel_case_and_excludes_desktop_metadata() {
+        let value = serde_json::to_value(SdkProviderInfo {
+            name: "Codex".into(),
+            code: ProviderCode::Codex,
+            available: false,
+            is_default: true,
+            error: Some("missing".into()),
+        })
+        .unwrap();
+
+        assert_eq!(value["isDefault"], json!(true));
+        assert!(value.get("is_default").is_none());
+        for private_field in [
+            "scanned",
+            "version",
+            "path",
+            "providerSettings",
+            "effortsArgs",
+        ] {
+            assert!(
+                value.get(private_field).is_none(),
+                "unexpected {private_field}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_sdk_providers_propagates_settings_read_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        fs::write(&settings_path, "not-json").unwrap();
+        let runtime = CoreRuntime {
+            settings_file_path: Some(settings_path),
+            provider_path_value_override: Some(OsString::new()),
+            ..CoreRuntime::default()
+        };
+
+        let error = runtime.list_sdk_providers().unwrap_err();
+        assert_eq!(error.code, error_codes::SETTINGS_READ_FAILED);
+    }
+
+    #[test]
     fn settings_missing_file_returns_initial_defaults() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = CoreRuntime {

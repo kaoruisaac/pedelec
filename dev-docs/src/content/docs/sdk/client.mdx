@@ -150,7 +150,7 @@ const providers = approval.installed
 ```
 
 - `getApprovalStatus().appConnected` is the non-sensitive Core connectivity result; it does not imply approval or provider readiness.
-- `getSettings()` and `listProviders()` require origin approval and can trigger its popup. They expose only public defaults and `name`/`code`/`available`/`error`.
+- `getSettings()` and `listProviders()` require origin approval and can trigger its popup. They expose only public defaults and `name`/`code`/`available`/`isDefault`/`error`; unknown response fields are ignored for forward compatibility.
 - Creating a session verifies the selected provider configuration more deeply.
 - Sending a turn verifies provider execution.
 

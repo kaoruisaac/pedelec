@@ -1143,7 +1143,10 @@ mod tests {
     #[test]
     fn native_auto_launch_keeps_list_providers_pending_until_core_readiness() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime: SharedCoreRuntime = Arc::new(Mutex::new(CoreRuntime::new()));
+        let runtime: SharedCoreRuntime = Arc::new(Mutex::new(CoreRuntime {
+            settings_file_path: Some(temp.path().join("settings.json")),
+            ..CoreRuntime::new()
+        }));
         runtime.lock().unwrap().provider_path_value_override = Some(std::ffi::OsString::new());
         runtime
             .lock()

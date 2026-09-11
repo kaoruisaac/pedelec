@@ -225,7 +225,17 @@ console.log(status.installed, status.approved, status.origin);
 
 `getApprovalStatus()` includes `appConnected`, a non-sensitive Core `ping` result. It does not require approval or open the approval popup, but it may use the Native Host's existing Desktop auto-launch fallback. `appConnected` does not mean the origin is approved or a provider is ready.
 
-`getSettings()` and `listProviders()` require origin approval and may open the approval popup. Settings expose only defaults (never provider credentials); providers expose only `name`, `code`, `available`, and `error`. Use `getApprovalStatus().appConnected` rather than `listProviders()` as a connection probe.
+`getSettings()` and `listProviders()` require origin approval and may open the approval popup. Settings expose only defaults (never provider credentials); providers expose only `name`, `code`, `available`, `isDefault`, and `error`. `isDefault` identifies the provider selected by the current Desktop settings and is independent of `available`; it remains true when that provider is unavailable. Use `getApprovalStatus().appConnected` rather than `listProviders()` as a connection probe.
+
+```ts
+type ProviderInfo = {
+  name: string;
+  code: ProviderCode;
+  available: boolean;
+  isDefault: boolean;
+  error: string | null;
+};
+```
 
 For a complete Extension, approval, and Desktop readiness probe, use `checkAvailability()`. It never creates/resumes a session or opens approval. Its status ping may attempt Desktop launch even for an unapproved origin.
 

@@ -359,12 +359,84 @@ test("SDK settings projection strips provider settings and effort args", async (
   sdk.emit({ channelId: "channel_a", requestId: "settings_projection", type: "get_settings" });
   const request = await respondToNative(background, native, {
     defaultProvider: "codex",
+    defaultModels: { codex: "future-model" },
     providerSettings: { codex: { effortsArgs: { default: ["-m", "secret-model"] } } },
+    futureField: true,
   });
   await waitFor(() => sdk.sent.some((message) => message.requestId === "settings_projection"));
   const response = sdk.sent.find((message) => message.requestId === "settings_projection");
   assert.deepEqual(response.result, { defaultProvider: "codex" });
   assert.equal(request.type, "get_settings");
+});
+
+test("SDK provider projection forwards isDefault", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({ channelId: "channel_a", requestId: "providers_default", type: "list_providers" });
+  const request = await respondToNativeType(background, native, "list_providers", [
+    { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
+  ]);
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "providers_default"));
+
+  assert.equal(request.type, "list_providers");
+  assert.deepEqual(sdk.sent.find((message) => message.requestId === "providers_default").result, [
+    { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
+  ]);
+});
+
+test("SDK provider projection accepts legacy providers and does not leak extra metadata", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({ channelId: "channel_a", requestId: "providers_legacy", type: "list_providers" });
+  await respondToNativeType(background, native, "list_providers", [
+    {
+      name: "Codex",
+      code: "codex",
+      available: true,
+      error: null,
+      futureField: true,
+      scanned: true,
+      version: "1.0.0",
+      path: "C:\\providers\\codex.exe",
+      providerSettings: { credentials: "secret" },
+    },
+  ]);
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "providers_legacy"));
+
+  assert.equal(sdk.sent.find((message) => message.requestId === "providers_legacy").ok, true);
+  assert.deepEqual(sdk.sent.find((message) => message.requestId === "providers_legacy").result, [
+    { name: "Codex", code: "codex", available: true, error: null },
+  ]);
+});
+
+test("SDK provider projection does not forward an invalid isDefault value", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({ channelId: "channel_a", requestId: "providers_invalid_default", type: "list_providers" });
+  await respondToNativeType(background, native, "list_providers", [
+    { name: "Codex", code: "codex", available: true, isDefault: "yes", error: null },
+  ]);
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "providers_invalid_default"));
+
+  assert.equal(sdk.sent.find((message) => message.requestId === "providers_invalid_default").ok, true);
+  assert.deepEqual(sdk.sent.find((message) => message.requestId === "providers_invalid_default").result, [
+    { name: "Codex", code: "codex", available: true, error: null },
+  ]);
 });
 
 test("approved pick_workspace_folder forwards the origin and returns folder inspection", async () => {

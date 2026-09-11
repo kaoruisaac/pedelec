@@ -13,7 +13,7 @@ Provider codes are stable lowercase values:
 
 `codex`, `antigravity`, `opencode`, `cursor`, `claude`, and `ollama`.
 
-`listProviders()` exposes only provider name, code, availability, and an optional diagnostic error. Executable paths, credentials, model catalogs, and effort arguments remain Desktop-internal.
+`listProviders()` exposes only provider name, code, availability, `isDefault`, and an optional diagnostic error. `isDefault` reflects the current Desktop default provider and is independent of `available`, including when the default provider is unavailable. Executable paths, credentials, model catalogs, and effort arguments remain Desktop-internal. SDK and Extension response parsing ignores newly added fields for forward compatibility.
 
 ## Effort levels
 

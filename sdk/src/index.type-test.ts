@@ -214,6 +214,8 @@ function publicSecurityTypesAreRestricted() {
     appConnected: true,
   };
   const provider = {} as ProviderInfo;
+  const isDefault: boolean = provider.isDefault;
+  void isDefault;
   // @ts-expect-error SDK provider metadata must not expose executable paths
   provider.path;
   return status;

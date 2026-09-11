@@ -234,7 +234,7 @@ const session = await pedelec.createSession({
 const providers = await pedelec.listProviders();
 
 for (const provider of providers) {
-  console.log(provider.code, provider.available, provider.error);
+  console.log(provider.code, provider.available, provider.isDefault, provider.error);
 }
 ```
 
@@ -245,11 +245,12 @@ type ProviderInfo = {
   name: string;
   code: "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
   available: boolean;
+  isDefault: boolean;
   error: string | null;
 };
 ```
 
-`available: false` usually means that the provider CLI is not installed or is not in `PATH`.
+`isDefault` identifies the provider selected by Desktop settings and is independent of `available`; an unavailable default provider still has `isDefault: true`. `available: false` usually means that the provider CLI is not installed or is not in `PATH`.
 For Ollama, `available: true` only means Pedelec can find `pedelec-agent`; it does not mean its endpoint is reachable, its credentials work, or the selected model is installed.
 
 ---
@@ -348,7 +349,7 @@ session.onError((error, ctx) => {
 
 The current public callback context does not expose a separate provider-responsibility field. Do not branch on `ctx.source === "provider"` or expect `ctx.provider`.
 
-`getSettings()` and `listProviders()` require origin approval and may open its popup. Settings never expose provider credentials, and provider entries contain only the fields shown above. Use `getApprovalStatus().appConnected` for a non-sensitive Desktop connectivity probe.
+`getSettings()` and `listProviders()` require origin approval and may open its popup. Settings never expose provider credentials, and provider entries contain only the fields shown above. The SDK ignores unknown fields added to Extension responses for forward compatibility. Use `getApprovalStatus().appConnected` for a non-sensitive Desktop connectivity probe.
 
 ---
 
