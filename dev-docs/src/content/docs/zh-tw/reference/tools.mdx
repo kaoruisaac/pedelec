@@ -39,6 +39,51 @@ const updateCounter = defineTool<
 
 `defineTool()` 本身不做 validation；session creation 會 normalize/validate tools。
 
+## `defineDenoModule()`
+
+Vite 應用可以用預定的 `skills.denoModules` authoring shape 描述 local 或 package-backed Deno module：
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const spriteTools = defineDenoModule({
+  name: "sprite-tools",
+  description: "Sprite authoring and preview utilities.",
+  entry: "./agent/sprite-tools.ts",
+  usage: `import { previewActorSource } from "sprite-tools";`,
+});
+
+const skills = {
+  guidance: "Use the module when sprite preview is needed.",
+  tools: [],
+  denoModules: [spriteTools],
+};
+```
+
+此階段只涵蓋 build-time authoring。`defineDenoModule()` 保留靜態描述；`pedelecVitePlugin()` 會在 `vite build` 與 `vite dev` 解析 `entry`、打包 self-contained ESM runtime，並 roll-up 獨立的 public declaration artifact。Session transport、Core materialization、Deno import mapping 與 execution 都尚未實作。把 `denoModules` 傳進 `createSession()` 不會載入或執行該 module。
+
+只使用 root SDK、從不 import `@kaoruisaac/pedelec/vite` 的應用不需要 Vite；Vite peer 是 optional。使用 plugin 的應用必須安裝支援的 Vite 8：
+
+```bash
+npm install @kaoruisaac/pedelec vite
+```
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { pedelecVitePlugin } from "@kaoruisaac/pedelec/vite";
+
+export default defineConfig({
+  plugins: [pedelecVitePlugin()],
+});
+```
+
+`entry` 必須是靜態字串。相對路徑從宣告所在 source file 解析。Vite string alias 與已安裝 package specifier（含 `package.json` `exports` subpath）會走應用程式的 Vite resolver（runtime）與 TypeScript bundler resolution（public types）。Remote URL、computed value、inline source 與 imported module object 都不支援。
+
+Plugin 會在轉換後的 module object 上附加 private、non-enumerable 的 runtime/types artifact，並移除原始 authoring `entry` path。它不會寫入應用程式的 Pedelec workspace，也不會 mutate 既有 session。
+
+`usage` 請保持精簡：它是常見情境的 agent hint；需要檢查 enum 或 option shape 時，以 generated declaration bundle 為準。
+
 ## `ToolDefinition`
 
 ```ts
@@ -86,6 +131,7 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
+  denoModules?: readonly DenoModuleDefinition[];
 };
 ```
 
@@ -98,7 +144,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` 必須 string，`tools` 必須 array。
+`guidance` 必須 string，`tools` 必須 array。`denoModules` 是 Vite-prepared Deno modules 的預定 authoring list；此階段不會 transport 或執行它們。
 
 ## `ToolNameOf`
 

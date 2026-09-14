@@ -16,6 +16,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js"
     }
   },
   "repository": {
@@ -32,8 +36,20 @@
     "type-test": "tsc -p tsconfig.type-test.json",
     "prepublishOnly": "npm run test && npm run type-test && npm run build"
   },
+  "dependencies": {
+    "typescript": "^5.8.3"
+  },
+  "peerDependencies": {
+    "vite": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "typescript": "^5.8.3",
+    "@types/node": "^24.0.0",
+    "vite": "^8.0.0",
     "vitest": "^4.1.8"
   }
 }

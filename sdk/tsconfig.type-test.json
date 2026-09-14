@@ -3,5 +3,5 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["src/index.ts", "src/index.type-test.ts"]
+  "include": ["src/index.ts", "src/index.type-test.ts", "src/vite.type-test.ts"]
 }

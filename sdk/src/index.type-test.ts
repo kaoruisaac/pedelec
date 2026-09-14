@@ -1,6 +1,8 @@
 import {
   Pedelec,
   defineTool,
+  defineDenoModule,
+  type DenoModuleDefinition,
   type ChatEventContext,
   type ChatDeltaEventContext,
   type EndedEventContext,
@@ -16,6 +18,18 @@ import {
   type CreateSessionWorkspaceInput,
   type WorkspaceFolderPickerResult,
 } from "./index";
+
+const spriteTools = defineDenoModule({
+  name: "sprite-tools",
+  description: "Sprite authoring utilities.",
+  entry: "./agent/sprite-tools.ts",
+  usage: `import { previewActorSource } from "sprite-tools";`,
+});
+
+const spriteName: "sprite-tools" = spriteTools.name;
+const spriteDefinition: DenoModuleDefinition<"sprite-tools"> = spriteTools;
+void spriteName;
+void spriteDefinition;
 
 function workspaceInputHasPublicType(): CreateSessionWorkspaceInput {
   return { path: "C:\\workspace\\project" };
@@ -39,6 +53,7 @@ async function typedOnToolNameFromCreateSession() {
           argsSchema: { type: "object", properties: {}, required: [] },
         }),
       ],
+      denoModules: [spriteTools],
     },
   });
 

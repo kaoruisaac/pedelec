@@ -28,6 +28,13 @@ export type Asset = {
   modifiedAt: number;
 };
 
+export type DenoModuleDefinition<TName extends string = string> = {
+  name: TName;
+  description: string;
+  entry: string;
+  usage: string;
+};
+
 function normalizeListAssetsResponse(response: unknown): Asset[] {
   if (!response || typeof response !== "object" || Array.isArray(response)) return invalidListAssetsResponse(response);
   const assets = (response as { assets?: unknown }).assets;
@@ -138,6 +145,7 @@ export type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
+  denoModules?: readonly DenoModuleDefinition[];
 };
 
 export type ToolNameOf<TTools extends readonly ToolDefinition[]> = Extract<
@@ -485,6 +493,12 @@ export function defineTool<
   tool: ToolDefinition<TArgs, TResult, TName>
 ): ToolDefinition<TArgs, TResult, TName> {
   return tool;
+}
+
+export function defineDenoModule<const TName extends string>(
+  module: DenoModuleDefinition<TName>,
+): DenoModuleDefinition<TName> {
+  return module;
 }
 
 type NormalizedSkillsInput = {

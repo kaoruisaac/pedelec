@@ -39,6 +39,51 @@ const updateCounter = defineTool<
 
 `defineTool()` itself does not perform validation. Session creation normalizes and validates the tool list.
 
+## `defineDenoModule()`
+
+Vite applications can describe a local or package-backed Deno module using the intended `skills.denoModules` authoring shape:
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const spriteTools = defineDenoModule({
+  name: "sprite-tools",
+  description: "Sprite authoring and preview utilities.",
+  entry: "./agent/sprite-tools.ts",
+  usage: `import { previewActorSource } from "sprite-tools";`,
+});
+
+const skills = {
+  guidance: "Use the module when sprite preview is needed.",
+  tools: [],
+  denoModules: [spriteTools],
+};
+```
+
+This phase is build-time authoring only. `defineDenoModule()` preserves the static description; `pedelecVitePlugin()` resolves the `entry`, bundles a self-contained ESM runtime, and rolls up a standalone public declaration artifact during `vite build` and `vite dev`. Session transport, Core materialization, Deno import mapping, and execution are not implemented yet. Passing `denoModules` into `createSession()` does not load or run the module.
+
+Root SDK consumers that never import `@kaoruisaac/pedelec/vite` do not need Vite. The Vite peer is optional. Applications that use the plugin must install a supported Vite 8 release:
+
+```bash
+npm install @kaoruisaac/pedelec vite
+```
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { pedelecVitePlugin } from "@kaoruisaac/pedelec/vite";
+
+export default defineConfig({
+  plugins: [pedelecVitePlugin()],
+});
+```
+
+The `entry` must be a static string. Relative entries resolve from the source file containing the declaration. Vite string aliases and installed package specifiers, including `package.json` `exports` subpaths, use the application's Vite resolver for runtime bundling and TypeScript bundler resolution for public types. Remote URLs, computed values, inline source, and imported module objects are not supported. Regex-only Vite aliases that TypeScript `paths` cannot express are resolved through the Vite resolver for runtime code; declaration generation follows the same resolved files when Vite can locate them.
+
+The plugin attaches a private, non-enumerable runtime/types artifact on the transformed module object and removes the original authoring `entry` path. It does not write into the application's Pedelec workspace and does not mutate an already-created session.
+
+Keep `usage` concise: it is the common-case agent hint, while the generated declaration bundle is the authoritative surface when an enum or option shape needs inspection.
+
 ## `ToolDefinition`
 
 ```ts
@@ -86,6 +131,7 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
+  denoModules?: readonly DenoModuleDefinition[];
 };
 ```
 
@@ -98,7 +144,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` must be a string. `tools` must be an array.
+`guidance` must be a string. `tools` must be an array. `denoModules` is the intended authoring list for Vite-prepared Deno modules; this phase does not transport or execute them.
 
 ## `ToolNameOf`
 
