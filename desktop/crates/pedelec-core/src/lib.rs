@@ -3,7 +3,7 @@ use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -74,6 +74,54 @@ pub fn workspace_logs_root(workspace_path: &Path) -> PathBuf {
 /// Returns the physical root used for upload temporary files.
 pub fn workspace_tmp_root(workspace_path: &Path) -> PathBuf {
     workspace_runtime_data_root(workspace_path).join("tmp")
+}
+
+/// Returns the private root used for thread-scoped Deno module snapshots.
+pub fn workspace_deno_root(workspace_path: &Path) -> PathBuf {
+    workspace_runtime_data_root(workspace_path).join("deno")
+}
+
+/// Returns the private root used for thread-scoped Deno module snapshots.
+pub fn workspace_deno_threads_root(workspace_path: &Path) -> PathBuf {
+    workspace_deno_root(workspace_path).join("threads")
+}
+
+/// Returns the private Deno state root for one thread.
+pub fn workspace_deno_thread_root(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_deno_threads_root(workspace_path).join(thread_id)
+}
+
+/// Alias using the shorter helper naming used by the Deno runtime contract.
+pub fn thread_deno_root(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_deno_thread_root(workspace_path, thread_id)
+}
+
+/// Returns the package root containing the materialized Deno modules for one
+/// thread.  The package names below this directory are validated before use.
+pub fn workspace_deno_modules_root(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_deno_thread_root(workspace_path, thread_id).join("modules")
+}
+
+/// Alias using the shorter helper naming used by the Deno runtime contract.
+pub fn thread_deno_modules_root(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_deno_modules_root(workspace_path, thread_id)
+}
+
+/// Returns the Pedelec-owned import map path for one thread.
+pub fn workspace_deno_import_map_path(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_deno_thread_root(workspace_path, thread_id).join("import-map.json")
+}
+
+/// Returns whether a custom workspace already has a Pedelec-owned Deno
+/// thread-runtime root for `thread_id`.  Arbitrary user files are not part of
+/// thread-ID reservation; only this private runtime path is.
+pub fn workspace_deno_thread_root_occupied(workspace_path: &Path, thread_id: &str) -> bool {
+    fs::symlink_metadata(workspace_deno_thread_root(workspace_path, thread_id)).is_ok()
+}
+
+/// Alias using the shorter helper naming used by the Deno runtime contract.
+pub fn thread_deno_import_map_path(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_deno_import_map_path(workspace_path, thread_id)
 }
 
 /// Returns the workspace marker path.
@@ -187,6 +235,96 @@ pub struct AssetDownloadTicket {
     pub token_hash: String,
     pub expires_at: DateTime<Utc>,
     pub state: AssetDownloadState,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDenoModuleUploadInput {
+    pub thread_id: String,
+    pub module_name: String,
+    pub expected_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDenoModuleUploadOutput {
+    pub upload_id: String,
+    pub upload_url: String,
+    pub token: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DenoModuleUploadCompletion {
+    pub module_name: String,
+    pub ready: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DenoModuleUploadTicket {
+    pub thread_id: String,
+    pub workspace_path: PathBuf,
+    pub module_name: String,
+    pub expected_size_bytes: u64,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub state: DenoModuleUploadState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenoModuleUploadState {
+    Pending,
+    Uploading,
+    Completed,
+    Failed,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateThreadDenoModuleInput {
+    pub name: String,
+    pub description: String,
+    pub usage: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DenoModuleSetupState {
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DenoModuleState {
+    pub name: String,
+    pub description: String,
+    pub usage: String,
+    pub state: DenoModuleSetupState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AbortSessionSetupInput {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DenoModuleArtifactEnvelope {
+    version: u8,
+    format: String,
+    runtime_source: String,
+    types_source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DenoModuleImportMap {
+    imports: BTreeMap<String, String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetDownloadState {
@@ -793,6 +931,8 @@ pub struct CreateThreadWorkspaceInput {
 pub struct CreateThreadSkillsInput {
     pub guidance: String,
     pub tools: Vec<CreateThreadToolInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deno_modules: Vec<CreateThreadDenoModuleInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -866,6 +1006,11 @@ pub struct DenoExecutionIntent {
     pub workspace_path: PathBuf,
     pub entrypoint: PathBuf,
     pub args: Vec<String>,
+    /// Core-owned import map for a ready Deno Module snapshot.  This is never
+    /// sourced from the Agent CLI request; threads without registered modules
+    /// keep the existing `None` behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_map_path: Option<PathBuf>,
 }
 
 /// Runtime seam used by Core IPC.  The default lifecycle methods keep test
@@ -1436,6 +1581,11 @@ pub struct CoreRuntime {
     pub asset_upload_port: Option<u16>,
     pub asset_upload_tickets: HashMap<String, AssetUploadTicket>,
     pub asset_download_tickets: HashMap<String, AssetDownloadTicket>,
+    /// Authoritative metadata and setup state for the modules declared by
+    /// each thread.  This intentionally remains separate from ThreadState so
+    /// older diagnostic/test thread constructors remain source-compatible.
+    pub deno_modules: HashMap<String, Vec<DenoModuleState>>,
+    pub deno_module_upload_tickets: HashMap<String, DenoModuleUploadTicket>,
     pub provider_path_value_override: Option<OsString>,
     pub pending_provider_operations: HashMap<String, PendingProviderOperation>,
     pub last_completed_operations: HashMap<String, CompletedOperationSnapshot>,
@@ -1480,6 +1630,323 @@ impl CoreRuntime {
 
     pub fn set_asset_upload_port(&mut self, port: u16) {
         self.asset_upload_port = Some(port);
+    }
+
+    pub fn create_deno_module_upload(
+        &mut self,
+        input: CreateDenoModuleUploadInput,
+    ) -> Result<CreateDenoModuleUploadOutput, PedelecError> {
+        validate_deno_module_name(&input.module_name)?;
+        if input.expected_size_bytes == 0 {
+            return Err(PedelecError::new(
+                error_codes::DENO_MODULE_UPLOAD_SIZE_MISMATCH,
+                "Deno Module artifact size must be positive",
+            ));
+        }
+        if input.expected_size_bytes > MAX_ASSET_UPLOAD_BYTES {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_MODULE_ARTIFACT_TOO_LARGE,
+                "Deno Module artifact exceeds the 100 MiB limit",
+                serde_json::json!({
+                    "moduleName": input.module_name,
+                    "expectedSizeBytes": input.expected_size_bytes,
+                    "maxSizeBytes": MAX_ASSET_UPLOAD_BYTES,
+                }),
+            ));
+        }
+
+        let port = self.asset_upload_port.ok_or_else(|| {
+            PedelecError::new(
+                error_codes::DENO_MODULE_UPLOAD_SERVER_UNAVAILABLE,
+                "Deno Module upload server is unavailable",
+            )
+        })?;
+        let thread = self.thread_manager.thread(&input.thread_id)?.clone();
+        match thread.status {
+            ThreadStatus::Idle => {}
+            ThreadStatus::Ended | ThreadStatus::Stopping => {
+                return Err(PedelecError::with_details(
+                    error_codes::THREAD_ENDED,
+                    "thread has ended",
+                    serde_json::json!({ "threadId": input.thread_id }),
+                ));
+            }
+            _ => {
+                return Err(PedelecError::with_details(
+                    error_codes::THREAD_BUSY,
+                    "thread is not available for Deno Module setup",
+                    serde_json::json!({ "threadId": input.thread_id }),
+                ));
+            }
+        }
+
+        let module = self
+            .deno_modules
+            .get(&input.thread_id)
+            .and_then(|modules| {
+                modules
+                    .iter()
+                    .find(|module| module.name == input.module_name)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                PedelecError::with_details(
+                    error_codes::DENO_MODULE_NOT_FOUND,
+                    "Deno Module was not declared for this thread",
+                    serde_json::json!({
+                        "threadId": input.thread_id,
+                        "moduleName": input.module_name,
+                    }),
+                )
+            })?;
+        self.expire_deno_module_uploads();
+        if module.state == DenoModuleSetupState::Ready {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_MODULE_ALREADY_READY,
+                "Deno Module is already ready and cannot be replaced",
+                serde_json::json!({ "moduleName": input.module_name }),
+            ));
+        }
+        if self.deno_module_upload_tickets.values().any(|ticket| {
+            ticket.thread_id == input.thread_id
+                && ticket.module_name == input.module_name
+                && matches!(
+                    ticket.state,
+                    DenoModuleUploadState::Pending | DenoModuleUploadState::Uploading
+                )
+        }) {
+            return Err(PedelecError::with_details(
+                error_codes::THREAD_BUSY,
+                "a Deno Module upload is already in progress",
+                serde_json::json!({ "moduleName": input.module_name }),
+            ));
+        }
+
+        let upload_id = loop {
+            let candidate = format!("dmp_{}", &Uuid::new_v4().simple().to_string()[..8]);
+            if !self.deno_module_upload_tickets.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let token = (0..8)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect::<String>();
+        let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
+        self.deno_module_upload_tickets.insert(
+            upload_id.clone(),
+            DenoModuleUploadTicket {
+                thread_id: input.thread_id,
+                workspace_path: thread.workspace_path,
+                module_name: input.module_name,
+                expected_size_bytes: input.expected_size_bytes,
+                token_hash: format!("{:x}", Sha256::digest(token.as_bytes())),
+                expires_at,
+                state: DenoModuleUploadState::Pending,
+            },
+        );
+
+        Ok(CreateDenoModuleUploadOutput {
+            upload_id: upload_id.clone(),
+            upload_url: format!("http://127.0.0.1:{port}/deno-modules/{upload_id}"),
+            token,
+            expires_at: expires_at.timestamp_millis(),
+        })
+    }
+
+    pub fn expire_deno_module_uploads(&mut self) {
+        let now = Utc::now();
+        for ticket in self.deno_module_upload_tickets.values_mut() {
+            if ticket.state == DenoModuleUploadState::Pending && ticket.expires_at <= now {
+                ticket.state = DenoModuleUploadState::Expired;
+            }
+        }
+    }
+
+    pub fn mark_deno_module_upload_failed(&mut self, upload_id: &str) {
+        let Some(ticket) = self.deno_module_upload_tickets.get_mut(upload_id) else {
+            return;
+        };
+        let thread_id = ticket.thread_id.clone();
+        let module_name = ticket.module_name.clone();
+        ticket.state = DenoModuleUploadState::Failed;
+        if let Some(modules) = self.deno_modules.get_mut(&thread_id) {
+            if let Some(module) = modules.iter_mut().find(|module| module.name == module_name) {
+                module.state = DenoModuleSetupState::Failed;
+            }
+        }
+    }
+
+    /// Validates and atomically commits one uploaded envelope.  The transfer
+    /// server owns the bounded byte stream; Core owns the envelope validation,
+    /// package shape, and authoritative ready transition.
+    pub fn complete_deno_module_upload(
+        &mut self,
+        upload_id: &str,
+        temporary_path: &Path,
+    ) -> Result<DenoModuleUploadCompletion, PedelecError> {
+        let ticket = self
+            .deno_module_upload_tickets
+            .get(upload_id)
+            .cloned()
+            .ok_or_else(|| {
+                PedelecError::new(
+                    error_codes::DENO_MODULE_UPLOAD_UNAUTHORIZED,
+                    "Deno Module upload ticket is invalid",
+                )
+            })?;
+        if ticket.state != DenoModuleUploadState::Uploading {
+            return Err(PedelecError::new(
+                error_codes::DENO_MODULE_UPLOAD_UNAUTHORIZED,
+                "Deno Module upload ticket is not active",
+            ));
+        }
+        if !self
+            .deno_modules
+            .get(&ticket.thread_id)
+            .is_some_and(|modules| {
+                modules.iter().any(|module| {
+                    module.name == ticket.module_name && module.state != DenoModuleSetupState::Ready
+                })
+            })
+        {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_MODULE_NOT_FOUND,
+                "Deno Module setup state was not found",
+                serde_json::json!({
+                    "threadId": ticket.thread_id,
+                    "moduleName": ticket.module_name,
+                }),
+            ));
+        }
+
+        let mut package_committed = false;
+        let result = (|| {
+            let metadata = fs::metadata(temporary_path).map_err(|err| {
+                PedelecError::with_details(
+                    error_codes::DENO_MODULE_UPLOAD_FAILED,
+                    "cannot read uploaded Deno Module artifact",
+                    serde_json::json!({ "error": err.to_string() }),
+                )
+            })?;
+            if !metadata.is_file() || metadata.len() != ticket.expected_size_bytes {
+                return Err(PedelecError::with_details(
+                    error_codes::DENO_MODULE_UPLOAD_SIZE_MISMATCH,
+                    "Deno Module upload size does not match its ticket",
+                    serde_json::json!({
+                        "expectedSizeBytes": ticket.expected_size_bytes,
+                        "actualSizeBytes": metadata.len(),
+                    }),
+                ));
+            }
+            let bytes = fs::read(temporary_path).map_err(|err| {
+                PedelecError::with_details(
+                    error_codes::DENO_MODULE_UPLOAD_FAILED,
+                    "cannot read uploaded Deno Module artifact",
+                    serde_json::json!({ "error": err.to_string() }),
+                )
+            })?;
+            let envelope: DenoModuleArtifactEnvelope =
+                serde_json::from_slice(&bytes).map_err(|err| {
+                    PedelecError::with_details(
+                        error_codes::DENO_MODULE_ARTIFACT_INVALID,
+                        "Deno Module artifact envelope is invalid JSON",
+                        serde_json::json!({ "error": err.to_string() }),
+                    )
+                })?;
+            validate_deno_module_artifact_envelope(&envelope)?;
+            materialize_deno_module_package(
+                &ticket.workspace_path,
+                &ticket.thread_id,
+                &ticket.module_name,
+                &envelope,
+                upload_id,
+            )?;
+            package_committed = true;
+
+            // The final upload owns the import-map commit.  Build the
+            // candidate snapshot with this module already marked ready, but
+            // do not publish that state to Core until the import map and all
+            // package files have been validated successfully.
+            let modules_after_upload = self
+                .deno_modules
+                .get(&ticket.thread_id)
+                .cloned()
+                .ok_or_else(|| {
+                    PedelecError::with_details(
+                        error_codes::DENO_MODULE_NOT_FOUND,
+                        "Deno Module setup state was not found",
+                        serde_json::json!({ "threadId": ticket.thread_id }),
+                    )
+                })?;
+            let mut modules_after_upload = modules_after_upload;
+            let module = modules_after_upload
+                .iter_mut()
+                .find(|module| module.name == ticket.module_name)
+                .ok_or_else(|| {
+                    PedelecError::with_details(
+                        error_codes::DENO_MODULE_NOT_FOUND,
+                        "Deno Module was not declared for this thread",
+                        serde_json::json!({ "moduleName": ticket.module_name }),
+                    )
+                })?;
+            module.state = DenoModuleSetupState::Ready;
+            if modules_after_upload
+                .iter()
+                .all(|module| module.state == DenoModuleSetupState::Ready)
+            {
+                materialize_deno_module_import_map(
+                    &ticket.workspace_path,
+                    &ticket.thread_id,
+                    &modules_after_upload,
+                    upload_id,
+                )?;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                let modules = self
+                    .deno_modules
+                    .get_mut(&ticket.thread_id)
+                    .ok_or_else(|| {
+                        PedelecError::with_details(
+                            error_codes::DENO_MODULE_NOT_FOUND,
+                            "Deno Module setup state was not found",
+                            serde_json::json!({ "threadId": ticket.thread_id }),
+                        )
+                    })?;
+                let module = modules
+                    .iter_mut()
+                    .find(|module| module.name == ticket.module_name)
+                    .ok_or_else(|| {
+                        PedelecError::with_details(
+                            error_codes::DENO_MODULE_NOT_FOUND,
+                            "Deno Module was not declared for this thread",
+                            serde_json::json!({ "moduleName": ticket.module_name }),
+                        )
+                    })?;
+                module.state = DenoModuleSetupState::Ready;
+                if let Some(upload_ticket) = self.deno_module_upload_tickets.get_mut(upload_id) {
+                    upload_ticket.state = DenoModuleUploadState::Completed;
+                }
+                Ok(DenoModuleUploadCompletion {
+                    module_name: ticket.module_name,
+                    ready: true,
+                })
+            }
+            Err(error) => {
+                if package_committed {
+                    let _ = remove_materialized_deno_module_package(
+                        &ticket.workspace_path,
+                        &ticket.thread_id,
+                        &ticket.module_name,
+                    );
+                }
+                self.mark_deno_module_upload_failed(upload_id);
+                Err(error)
+            }
+        }
     }
 
     pub fn create_asset_upload(
@@ -1727,17 +2194,25 @@ impl CoreRuntime {
         sdk_origin: Option<String>,
         sdk_version: Option<String>,
     ) -> Result<CreateThreadOutput, PedelecError> {
+        let deno_modules = normalize_deno_module_inputs(input.skills.as_ref())?;
         let settings = self.get_settings()?;
         let effort_level = input.effort_level.unwrap_or_default();
         let effort_args = resolve_thread_effort_args(&settings, &input.provider, effort_level)?;
-        let thread_id = self.next_available_thread_id()?;
         let initialize =
             |workspace: &Path| initialize_generated_skills(workspace, input.skills.as_ref());
-        let (workspace_path, (skills, registry)) = match input.workspace.as_ref() {
-            Some(custom_workspace) => {
-                let workspace_path = self
-                    .workspace_manager
-                    .prepare_custom_workspace(&custom_workspace.path)?;
+        // Custom workspaces persist across Desktop/Core restarts, so allocate
+        // the short thread ID only after the selected workspace is known and
+        // can be checked for a leftover Deno thread root.
+        let prepared_custom_workspace = match input.workspace.as_ref() {
+            Some(custom_workspace) => Some(
+                self.workspace_manager
+                    .prepare_custom_workspace(&custom_workspace.path)?,
+            ),
+            None => None,
+        };
+        let thread_id = self.next_available_thread_id(prepared_custom_workspace.as_deref())?;
+        let (workspace_path, (skills, registry)) = match prepared_custom_workspace {
+            Some(workspace_path) => {
                 let initialized = initialize(&workspace_path)?;
                 if let Some(origin) = sdk_origin.as_deref() {
                     let sdk_version = sdk_version.as_deref().ok_or_else(|| {
@@ -1781,6 +2256,7 @@ impl CoreRuntime {
             },
         );
         self.tool_registry.insert(thread_id.clone(), registry);
+        self.deno_modules.insert(thread_id.clone(), deno_modules);
         self.event_bus.register_thread_log(
             &thread_id,
             thread_event_log_path(&workspace_path, &thread_id),
@@ -1811,6 +2287,147 @@ impl CoreRuntime {
                 serde_json::json!({ "threadId": thread_id }),
             ))
         }
+    }
+
+    pub fn deno_module_setup_ready(&self, thread_id: &str) -> Result<bool, PedelecError> {
+        self.thread_manager.thread(thread_id)?;
+        Ok(self.deno_modules.get(thread_id).map_or(true, |modules| {
+            modules
+                .iter()
+                .all(|module| module.state == DenoModuleSetupState::Ready)
+        }))
+    }
+
+    pub fn ensure_deno_module_setup_ready(&self, thread_id: &str) -> Result<(), PedelecError> {
+        if self.deno_module_setup_ready(thread_id)? {
+            return Ok(());
+        }
+        let pending = self
+            .deno_modules
+            .get(thread_id)
+            .into_iter()
+            .flatten()
+            .filter(|module| module.state != DenoModuleSetupState::Ready)
+            .map(|module| module.name.clone())
+            .collect::<Vec<_>>();
+        Err(PedelecError::with_details(
+            error_codes::DENO_MODULE_SETUP_INCOMPLETE,
+            "Deno Module setup is incomplete",
+            serde_json::json!({ "threadId": thread_id, "modules": pending }),
+        ))
+    }
+
+    /// Validates the immutable private Deno snapshot owned by a thread and
+    /// returns its canonical import-map path when modules are registered.
+    /// This deliberately only inspects existing files: resume and execution
+    /// admission must never recreate a missing snapshot from current app
+    /// state.
+    pub fn validate_deno_module_runtime_snapshot(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<PathBuf>, PedelecError> {
+        self.ensure_deno_module_setup_ready(thread_id)?;
+        let modules = self
+            .deno_modules
+            .get(thread_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if modules.is_empty() {
+            return Ok(None);
+        }
+
+        let workspace_path = self
+            .thread_manager
+            .thread(thread_id)?
+            .workspace_path
+            .clone();
+        validate_deno_module_runtime_snapshot_files(&workspace_path, thread_id, modules)
+    }
+
+    /// Aborts only the SDK initialization phase.  This deliberately does not
+    /// use normal end-thread semantics: an aborted setup must not leave a
+    /// resumable ended thread behind.
+    pub fn abort_session_setup(
+        &mut self,
+        input: AbortSessionSetupInput,
+    ) -> Result<(), PedelecError> {
+        let Some(thread) = self.thread_manager.threads.get(&input.thread_id).cloned() else {
+            return Ok(());
+        };
+        if thread.sdk_origin.is_none() {
+            return Err(PedelecError::with_details(
+                error_codes::THREAD_ACCESS_DENIED,
+                "session setup abort is only valid for SDK-created threads",
+                serde_json::json!({ "threadId": input.thread_id }),
+            ));
+        }
+        if thread.status != ThreadStatus::Idle
+            || self
+                .pending_provider_operations
+                .contains_key(&input.thread_id)
+            || self
+                .thread_manager
+                .provider_state(&input.thread_id)
+                .and_then(|state| state.active_provider_turn_id.as_ref())
+                .is_some()
+        {
+            return Err(PedelecError::with_details(
+                error_codes::THREAD_BUSY,
+                "session setup cannot be aborted after provider work has started",
+                serde_json::json!({ "threadId": input.thread_id }),
+            ));
+        }
+
+        let event_log_path = self.event_bus.event_log_path(&input.thread_id);
+        let module_temp_paths = self
+            .deno_module_upload_tickets
+            .iter()
+            .filter(|(_, ticket)| ticket.thread_id == input.thread_id)
+            .map(|(upload_id, ticket)| {
+                workspace_tmp_root(&ticket.workspace_path)
+                    .join(format!("{upload_id}.deno-module.upload"))
+            })
+            .collect::<Vec<_>>();
+
+        self.pending_provider_operations.remove(&input.thread_id);
+        self.last_completed_operations.remove(&input.thread_id);
+        self.clear_active_provider_turn(&input.thread_id);
+        self.tool_request_broker.clear_thread(&input.thread_id);
+        self.tool_registry.remove(&input.thread_id);
+        self.provider_usage.remove(&input.thread_id);
+        self.session_usage.remove(&input.thread_id);
+        self.session_usage_turn_baselines
+            .retain(|(thread_id, _), _| thread_id != &input.thread_id);
+        self.session_usage_operations
+            .retain(|(thread_id, _)| thread_id != &input.thread_id);
+        self.debug_reactivating_threads.remove(&input.thread_id);
+        self.asset_upload_tickets
+            .retain(|_, ticket| ticket.thread_id != input.thread_id);
+        self.asset_download_tickets
+            .retain(|_, ticket| ticket.thread_id != input.thread_id);
+        self.deno_module_upload_tickets
+            .retain(|_, ticket| ticket.thread_id != input.thread_id);
+        self.deno_modules.remove(&input.thread_id);
+        self.event_bus.remove_thread(&input.thread_id);
+        self.thread_manager.remove_thread(&input.thread_id);
+
+        for path in module_temp_paths {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(path) = event_log_path {
+            let _ = fs::remove_file(path);
+        }
+
+        let cleanup_result = if self
+            .workspace_manager
+            .is_managed_workspace(&thread.workspace_path)
+        {
+            self.workspace_manager
+                .remove_thread_workspace_with_retry(&thread.workspace_path)
+        } else {
+            cleanup_aborted_custom_workspace(&thread.workspace_path, &thread.thread_id)
+        };
+        cleanup_result
     }
 
     pub fn list_providers(&self) -> Vec<ProviderInfo> {
@@ -1982,7 +2599,10 @@ impl CoreRuntime {
         default_settings_file_path()
     }
 
-    fn next_available_thread_id(&mut self) -> Result<String, PedelecError> {
+    fn next_available_thread_id(
+        &mut self,
+        custom_workspace: Option<&Path>,
+    ) -> Result<String, PedelecError> {
         loop {
             let thread_id = self.thread_manager.next_thread_id()?;
             if self.thread_manager.contains_thread(&thread_id) {
@@ -1990,6 +2610,11 @@ impl CoreRuntime {
             }
             if self.workspace_manager.thread_workspace_exists(&thread_id)? {
                 continue;
+            }
+            if let Some(workspace) = custom_workspace {
+                if workspace_deno_thread_root_occupied(workspace, &thread_id) {
+                    continue;
+                }
             }
             return Ok(thread_id);
         }
@@ -2028,6 +2653,7 @@ impl CoreRuntime {
     }
 
     fn validate_normal_send_text_status(&self, thread_id: &str) -> Result<(), PedelecError> {
+        self.ensure_deno_module_setup_ready(thread_id)?;
         let thread = self.thread_manager.thread(thread_id)?;
         match thread.status {
             ThreadStatus::Running | ThreadStatus::WaitingToolResult => {
@@ -2057,6 +2683,7 @@ impl CoreRuntime {
     }
 
     fn validate_debug_send_text_status(&self, thread_id: &str) -> Result<bool, PedelecError> {
+        self.ensure_deno_module_setup_ready(thread_id)?;
         let thread = self.thread_manager.thread(thread_id)?;
         match thread.status {
             ThreadStatus::Idle => Ok(false),
@@ -2213,6 +2840,7 @@ impl CoreRuntime {
         &mut self,
         input: PrepareThreadInput,
     ) -> Result<PrepareExecutionStart, PedelecError> {
+        self.ensure_deno_module_setup_ready(&input.thread_id)?;
         {
             let thread = self.thread_manager.thread(&input.thread_id)?;
             match thread.status {
@@ -2274,6 +2902,10 @@ impl CoreRuntime {
         &self,
         thread_id: &str,
     ) -> Result<PersistentProviderSessionIntent, PedelecError> {
+        // Provider startup/reconnect must observe the same immutable module
+        // snapshot as `pedelec-deno`; a Ready state alone is not sufficient if
+        // the package or import map was removed or corrupted meanwhile.
+        self.validate_deno_module_runtime_snapshot(thread_id)?;
         let thread = self.thread_manager.thread(thread_id)?.clone();
         let provider_state = self
             .thread_manager
@@ -2318,7 +2950,14 @@ impl CoreRuntime {
                     None,
                 ),
             };
-        let host_instructions = build_persistent_host_instructions(&thread, registry);
+        let host_instructions = build_persistent_host_instructions_with_modules(
+            &thread,
+            registry,
+            self.deno_modules
+                .get(thread_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+        );
         let core_ipc_runtime_file_path = self
             .core_ipc_runtime_file_path
             .clone()
@@ -3126,9 +3765,11 @@ impl CoreRuntime {
         &mut self,
         input: ResumeThreadInput,
     ) -> Result<ResumeThreadOutput, PedelecError> {
+        self.ensure_deno_module_setup_ready(&input.thread_id)?;
         let status = self.thread_manager.thread(&input.thread_id)?.status.clone();
         match status {
             ThreadStatus::Idle => {
+                self.validate_deno_module_runtime_snapshot(&input.thread_id)?;
                 return Ok(ResumeThreadOutput {
                     snapshot: self.build_thread_snapshot(&input.thread_id)?,
                 });
@@ -3154,6 +3795,11 @@ impl CoreRuntime {
         }
 
         let (registry, event_log_path) = self.load_thread_runtime(&input.thread_id, true)?;
+        // Validate the private module snapshot only after the existing
+        // workspace/tool restoration checks, and before mutating the ended
+        // lifecycle.  A missing or corrupt snapshot therefore leaves the
+        // authoritative thread ended and is never silently replaced.
+        self.validate_deno_module_runtime_snapshot(&input.thread_id)?;
 
         // An ended thread should already have these cleared. Keep the resume
         // boundary defensive so stale transient state cannot leak into the
@@ -3231,6 +3877,7 @@ impl CoreRuntime {
         &self,
         input: DenoRunInput,
     ) -> Result<DenoExecutionIntent, PedelecError> {
+        self.ensure_deno_module_setup_ready(&input.thread_id)?;
         let thread = self.thread_manager.thread(&input.thread_id)?;
         match thread.status {
             ThreadStatus::Running | ThreadStatus::WaitingToolResult => {}
@@ -3272,12 +3919,14 @@ impl CoreRuntime {
         let workspace_path = thread.workspace_path.clone();
         let (workspace_path, entrypoint) =
             resolve_deno_entrypoint(&input.thread_id, &workspace_path, &input.entrypoint)?;
+        let import_map_path = self.validate_deno_module_runtime_snapshot(&input.thread_id)?;
 
         Ok(DenoExecutionIntent {
             thread_id: input.thread_id,
             workspace_path,
             entrypoint,
             args: input.args,
+            import_map_path,
         })
     }
 
@@ -3799,6 +4448,21 @@ impl ThreadManager {
         self.provider_sessions.insert(thread_id, provider_session);
     }
 
+    pub fn remove_thread(
+        &mut self,
+        thread_id: &str,
+    ) -> Option<(ThreadState, ProviderSessionState)> {
+        let state = self.threads.remove(thread_id)?;
+        let provider_session =
+            self.provider_sessions
+                .remove(thread_id)
+                .unwrap_or(ProviderSessionState {
+                    provider_session_id: None,
+                    active_provider_turn_id: None,
+                });
+        Some((state, provider_session))
+    }
+
     pub fn thread(&self, thread_id: &str) -> Result<&ThreadState, PedelecError> {
         self.threads.get(thread_id).ok_or_else(|| {
             PedelecError::with_details(
@@ -3856,6 +4520,18 @@ impl WorkspaceManager {
     pub fn thread_workspace_exists(&self, thread_id: &str) -> Result<bool, PedelecError> {
         let safe_thread_id = sanitize_thread_id(thread_id)?;
         Ok(self.workspace_root()?.join(safe_thread_id).exists())
+    }
+
+    pub fn is_managed_workspace(&self, workspace_path: &Path) -> bool {
+        let Ok(root) = self.workspace_root() else {
+            return false;
+        };
+        let root = resolve_path_for_overlap(&root).ok();
+        let workspace = resolve_path_for_overlap(workspace_path).ok();
+        match (root, workspace) {
+            (Some(root), Some(workspace)) => workspace.starts_with(root),
+            _ => false,
+        }
     }
 
     pub fn create_thread_workspace(&self, thread_id: &str) -> Result<PathBuf, PedelecError> {
@@ -4239,6 +4915,917 @@ impl WorkspaceManager {
 
         Ok(())
     }
+}
+
+pub fn is_valid_deno_module_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.trim() != name
+        || name == "."
+        || name == ".."
+        || name.contains('\\')
+        || name.contains('\0')
+        || name.contains(':')
+        || name.starts_with('/')
+        || name.ends_with('/')
+    {
+        return false;
+    }
+
+    let parts = name.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [segment] => is_valid_deno_module_segment(segment),
+        [scope, package] if scope.starts_with('@') && scope.len() > 1 => {
+            is_valid_deno_module_segment(&scope[1..]) && is_valid_deno_module_segment(package)
+        }
+        _ => false,
+    }
+}
+
+pub fn validate_deno_module_name(name: &str) -> Result<(), PedelecError> {
+    if is_valid_deno_module_name(name) {
+        Ok(())
+    } else {
+        Err(PedelecError::with_details(
+            error_codes::DENO_MODULE_NAME_INVALID,
+            "Deno Module name is invalid",
+            serde_json::json!({ "moduleName": name }),
+        ))
+    }
+}
+
+fn is_valid_deno_module_segment(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphanumeric()
+        && chars.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+}
+
+fn normalize_deno_module_inputs(
+    skills: Option<&CreateThreadSkillsInput>,
+) -> Result<Vec<DenoModuleState>, PedelecError> {
+    let Some(skills) = skills else {
+        return Ok(Vec::new());
+    };
+    let mut seen = HashSet::new();
+    let mut modules = Vec::with_capacity(skills.deno_modules.len());
+    for module in &skills.deno_modules {
+        validate_deno_module_name(&module.name)?;
+        if !seen.insert(module.name.clone()) {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_MODULE_NAME_INVALID,
+                "duplicate Deno Module name",
+                serde_json::json!({ "moduleName": module.name }),
+            ));
+        }
+        if module.description.trim().is_empty() {
+            return Err(PedelecError::with_details(
+                error_codes::INVALID_INPUT,
+                "Deno Module description must be a non-empty string",
+                serde_json::json!({ "moduleName": module.name }),
+            ));
+        }
+        if module.usage.trim().is_empty() {
+            return Err(PedelecError::with_details(
+                error_codes::INVALID_INPUT,
+                "Deno Module usage must be a non-empty string",
+                serde_json::json!({ "moduleName": module.name }),
+            ));
+        }
+        modules.push(DenoModuleState {
+            name: module.name.clone(),
+            description: module.description.clone(),
+            usage: module.usage.clone(),
+            state: DenoModuleSetupState::Pending,
+        });
+    }
+    Ok(modules)
+}
+
+fn validate_deno_module_artifact_envelope(
+    envelope: &DenoModuleArtifactEnvelope,
+) -> Result<(), PedelecError> {
+    if envelope.version != 1 || envelope.format != "esm" {
+        return Err(PedelecError::with_details(
+            error_codes::DENO_MODULE_ARTIFACT_INVALID,
+            "Deno Module artifact envelope has an unsupported version or format",
+            serde_json::json!({ "version": envelope.version, "format": envelope.format }),
+        ));
+    }
+    if envelope.runtime_source.trim().is_empty() || envelope.types_source.trim().is_empty() {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_ARTIFACT_INVALID,
+            "Deno Module artifact must contain runtime and declaration sources",
+        ));
+    }
+    Ok(())
+}
+
+fn materialize_deno_module_package(
+    workspace_path: &Path,
+    thread_id: &str,
+    module_name: &str,
+    envelope: &DenoModuleArtifactEnvelope,
+    upload_id: &str,
+) -> Result<(), PedelecError> {
+    validate_deno_module_name(module_name)?;
+    let (_modules_root, canonical_root) =
+        ensure_deno_module_storage_root(workspace_path, thread_id).map_err(|err| {
+            deno_module_materialization_error(
+                "cannot create Deno Module package root",
+                &workspace_deno_modules_root(workspace_path, thread_id),
+                err,
+            )
+        })?;
+
+    let package_path = module_name
+        .split('/')
+        .fold(canonical_root.clone(), |path, part| path.join(part));
+    let package_parent = package_path.parent().ok_or_else(|| {
+        PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Deno Module package path is invalid",
+        )
+    })?;
+    ensure_deno_module_package_parent(package_parent, &canonical_root).map_err(|err| {
+        deno_module_materialization_error("Deno Module package path is unsafe", package_parent, err)
+    })?;
+    if fs::symlink_metadata(&package_path).is_ok() {
+        return Err(PedelecError::with_details(
+            error_codes::DENO_MODULE_ALREADY_READY,
+            "Deno Module package already exists",
+            serde_json::json!({ "moduleName": module_name }),
+        ));
+    }
+
+    let temporary_package = package_parent.join(format!(".pedelec-{upload_id}-module"));
+    if let Ok(metadata) = fs::symlink_metadata(&temporary_package) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            let _ = fs::remove_file(&temporary_package);
+        } else {
+            let _ = fs::remove_dir_all(&temporary_package);
+        }
+    }
+    fs::create_dir(&temporary_package).map_err(|err| {
+        deno_module_materialization_error(
+            "cannot create temporary Deno Module package",
+            &temporary_package,
+            err,
+        )
+    })?;
+
+    let result = (|| -> Result<(), PedelecError> {
+        let package_json = serde_json::json!({
+            "name": module_name,
+            "type": "module",
+            "types": "./index.d.ts",
+            "exports": {
+                ".": {
+                    "types": "./index.d.ts",
+                    "import": "./index.mjs"
+                }
+            }
+        });
+        write_deno_module_file(
+            &temporary_package.join("package.json"),
+            serde_json::to_vec_pretty(&package_json)
+                .expect("Deno Module package metadata serialization should not fail"),
+        )?;
+        write_deno_module_file(
+            &temporary_package.join("index.mjs"),
+            envelope.runtime_source.as_bytes().to_vec(),
+        )?;
+        write_deno_module_file(
+            &temporary_package.join("index.d.ts"),
+            envelope.types_source.as_bytes().to_vec(),
+        )?;
+        fs::rename(&temporary_package, &package_path).map_err(|err| {
+            deno_module_materialization_error(
+                "cannot commit Deno Module package atomically",
+                &package_path,
+                err,
+            )
+        })?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary_package);
+    }
+    result
+}
+
+/// Builds and atomically commits the one import map for a complete thread
+/// snapshot.  The package files are checked before the map becomes visible so
+/// Deno can never observe an import target that is only partially installed.
+fn materialize_deno_module_import_map(
+    workspace_path: &Path,
+    thread_id: &str,
+    modules: &[DenoModuleState],
+    upload_id: &str,
+) -> Result<(), PedelecError> {
+    let (canonical_thread_root, canonical_modules_root) =
+        canonical_existing_deno_module_storage_root(workspace_path, thread_id).map_err(|err| {
+            deno_module_materialization_error(
+                "cannot inspect Deno Module storage before import-map commit",
+                &workspace_deno_thread_root(workspace_path, thread_id),
+                err,
+            )
+        })?;
+    let imports = deno_module_import_map_entries(modules)?;
+    for module in modules {
+        validate_deno_module_package(&canonical_modules_root, thread_id, &module.name)?;
+    }
+
+    let import_map = DenoModuleImportMap { imports };
+    let bytes = serde_json::to_vec_pretty(&import_map)
+        .expect("Deno Module import map serialization should not fail");
+    let import_map_path = canonical_thread_root.join("import-map.json");
+
+    // A repeated completion attempt must not replace an immutable snapshot.
+    // Accept the exact same committed map, but reject an occupied path with a
+    // different value or an unsafe filesystem entry.
+    match fs::symlink_metadata(&import_map_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(PedelecError::new(
+                error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+                "Deno Module import map is not a regular file",
+            ));
+        }
+        Ok(_) => {
+            let existing = fs::read(&import_map_path).map_err(|err| {
+                deno_module_materialization_error(
+                    "cannot read the existing Deno Module import map",
+                    &import_map_path,
+                    err,
+                )
+            })?;
+            if existing == bytes {
+                return Ok(());
+            }
+            return Err(PedelecError::new(
+                error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+                "Deno Module import map is already committed with different contents",
+            ));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(deno_module_materialization_error(
+                "cannot inspect Deno Module import map",
+                &import_map_path,
+                err,
+            ));
+        }
+    }
+
+    let temporary_path = canonical_thread_root.join(format!(".pedelec-{upload_id}-import-map"));
+    if fs::symlink_metadata(&temporary_path).is_ok() {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Deno Module import-map staging path is already occupied",
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+        .map_err(|err| {
+            deno_module_materialization_error(
+                "cannot create Deno Module import-map staging file",
+                &temporary_path,
+                err,
+            )
+        })?;
+    let write_result = file.write_all(&bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let write_result = write_result.and_then(|_| fs::rename(&temporary_path, &import_map_path));
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(deno_module_materialization_error(
+            "cannot commit Deno Module import map atomically",
+            &import_map_path,
+            err,
+        ));
+    }
+    Ok(())
+}
+
+fn deno_module_import_map_entries(
+    modules: &[DenoModuleState],
+) -> Result<BTreeMap<String, String>, PedelecError> {
+    let mut imports = BTreeMap::new();
+    for module in modules {
+        validate_deno_module_name(&module.name)?;
+        if module.state != DenoModuleSetupState::Ready {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_MODULE_SETUP_INCOMPLETE,
+                "Deno Module import map requires every module to be ready",
+                serde_json::json!({ "moduleName": module.name }),
+            ));
+        }
+        let target = format!("./modules/{}/index.mjs", module.name);
+        if imports.insert(module.name.clone(), target).is_some() {
+            return Err(PedelecError::with_details(
+                error_codes::DENO_MODULE_NAME_INVALID,
+                "duplicate Deno Module name",
+                serde_json::json!({ "moduleName": module.name }),
+            ));
+        }
+    }
+    Ok(imports)
+}
+
+/// Validates the exact package and import-map snapshot expected by Core.  No
+/// directory or file is created here; this is used by execution and resume
+/// admission to detect private-runtime loss or tampering.
+fn validate_deno_module_runtime_snapshot_files(
+    workspace_path: &Path,
+    thread_id: &str,
+    modules: &[DenoModuleState],
+) -> Result<Option<PathBuf>, PedelecError> {
+    if modules.is_empty() {
+        return Ok(None);
+    }
+    if modules
+        .iter()
+        .any(|module| module.state != DenoModuleSetupState::Ready)
+    {
+        let pending = modules
+            .iter()
+            .filter(|module| module.state != DenoModuleSetupState::Ready)
+            .map(|module| module.name.clone())
+            .collect::<Vec<_>>();
+        return Err(PedelecError::with_details(
+            error_codes::DENO_MODULE_SETUP_INCOMPLETE,
+            "Deno Module setup is incomplete",
+            serde_json::json!({ "threadId": thread_id, "modules": pending }),
+        ));
+    }
+
+    let (canonical_thread_root, canonical_modules_root) =
+        canonical_existing_deno_module_storage_root(workspace_path, thread_id).map_err(|err| {
+            deno_module_runtime_error(
+                thread_id,
+                None,
+                "Deno Module private runtime storage is unavailable",
+                err,
+            )
+        })?;
+    let expected_imports = deno_module_import_map_entries(modules)?;
+    for module in modules {
+        validate_deno_module_package(&canonical_modules_root, thread_id, &module.name)?;
+    }
+
+    let import_map_path = canonical_thread_root.join("import-map.json");
+    let metadata = fs::symlink_metadata(&import_map_path).map_err(|err| {
+        deno_module_runtime_error(thread_id, None, "Deno Module import map is missing", err)
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(deno_module_runtime_error(
+            thread_id,
+            None,
+            "Deno Module import map is not a regular file",
+            io::Error::new(io::ErrorKind::InvalidInput, "unsafe import map entry"),
+        ));
+    }
+    let canonical_import_map = import_map_path.canonicalize().map_err(|err| {
+        deno_module_runtime_error(
+            thread_id,
+            None,
+            "Deno Module import map could not be canonicalized",
+            err,
+        )
+    })?;
+    let canonical_workspace = workspace_path.canonicalize().map_err(|err| {
+        deno_module_runtime_error(
+            thread_id,
+            None,
+            "Deno Module workspace could not be canonicalized",
+            err,
+        )
+    })?;
+    if !canonical_import_map.starts_with(&canonical_workspace)
+        || !canonical_import_map.starts_with(&canonical_thread_root)
+    {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Deno Module import map resolves outside its private runtime root",
+        ));
+    }
+
+    let map_bytes = fs::read(&import_map_path).map_err(|err| {
+        deno_module_runtime_error(
+            thread_id,
+            None,
+            "Deno Module import map could not be read",
+            err,
+        )
+    })?;
+    let actual: DenoModuleImportMap = serde_json::from_slice(&map_bytes).map_err(|err| {
+        deno_module_runtime_error(
+            thread_id,
+            None,
+            "Deno Module import map is invalid JSON",
+            io::Error::new(io::ErrorKind::InvalidData, err.to_string()),
+        )
+    })?;
+    let expected_bytes = serde_json::to_vec_pretty(&DenoModuleImportMap {
+        imports: expected_imports.clone(),
+    })
+    .expect("Deno Module import map serialization should not fail");
+    if map_bytes != expected_bytes || actual.imports != expected_imports {
+        return Err(PedelecError::with_details(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Deno Module import map does not match the declared module snapshot",
+            serde_json::json!({ "threadId": thread_id }),
+        ));
+    }
+
+    Ok(Some(PathBuf::from(path_for_external_use(
+        &canonical_import_map,
+    ))))
+}
+
+fn validate_deno_module_package(
+    canonical_modules_root: &Path,
+    thread_id: &str,
+    module_name: &str,
+) -> Result<(), PedelecError> {
+    validate_deno_module_name(module_name)?;
+    let mut package_path = canonical_modules_root.to_path_buf();
+    for part in module_name.split('/') {
+        package_path.push(part);
+        let package_component = fs::symlink_metadata(&package_path).map_err(|err| {
+            deno_module_runtime_error(
+                thread_id,
+                Some(module_name),
+                "Deno Module package directory is missing",
+                err,
+            )
+        })?;
+        if package_component.file_type().is_symlink() || !package_component.is_dir() {
+            return Err(deno_module_runtime_error(
+                thread_id,
+                Some(module_name),
+                "Deno Module package directory is unsafe",
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "package path contains a non-directory component",
+                ),
+            ));
+        }
+        let canonical_component = package_path.canonicalize().map_err(|err| {
+            deno_module_runtime_error(
+                thread_id,
+                Some(module_name),
+                "Deno Module package directory could not be canonicalized",
+                err,
+            )
+        })?;
+        if !canonical_component.starts_with(canonical_modules_root) {
+            return Err(PedelecError::new(
+                error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+                "Deno Module package path resolves outside its private module root",
+            ));
+        }
+    }
+    let canonical_package = package_path.canonicalize().map_err(|err| {
+        deno_module_runtime_error(
+            thread_id,
+            Some(module_name),
+            "Deno Module package directory could not be canonicalized",
+            err,
+        )
+    })?;
+    if !canonical_package.starts_with(canonical_modules_root) {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Deno Module package resolves outside its private module root",
+        ));
+    }
+
+    for filename in ["package.json", "index.mjs", "index.d.ts"] {
+        let path = package_path.join(filename);
+        let metadata = fs::symlink_metadata(&path).map_err(|err| {
+            deno_module_runtime_error(
+                thread_id,
+                Some(module_name),
+                "Deno Module package file is missing",
+                err,
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(deno_module_runtime_error(
+                thread_id,
+                Some(module_name),
+                "Deno Module package file is not a regular file",
+                io::Error::new(io::ErrorKind::InvalidInput, "unsafe package file"),
+            ));
+        }
+        let canonical_file = path.canonicalize().map_err(|err| {
+            deno_module_runtime_error(
+                thread_id,
+                Some(module_name),
+                "Deno Module package file could not be canonicalized",
+                err,
+            )
+        })?;
+        if !canonical_file.starts_with(&canonical_package)
+            || !canonical_file.starts_with(canonical_modules_root)
+        {
+            return Err(PedelecError::new(
+                error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+                "Deno Module package file resolves outside its private module root",
+            ));
+        }
+    }
+
+    let package_json = serde_json::from_slice::<Value>(
+        &fs::read(package_path.join("package.json")).map_err(|err| {
+            deno_module_runtime_error(
+                thread_id,
+                Some(module_name),
+                "Deno Module package manifest could not be read",
+                err,
+            )
+        })?,
+    )
+    .map_err(|err| {
+        deno_module_runtime_error(
+            thread_id,
+            Some(module_name),
+            "Deno Module package manifest is invalid JSON",
+            io::Error::new(io::ErrorKind::InvalidData, err.to_string()),
+        )
+    })?;
+    let manifest_is_expected = package_json.get("name") == Some(&Value::String(module_name.into()))
+        && package_json.get("type") == Some(&Value::String("module".into()))
+        && package_json.get("types") == Some(&Value::String("./index.d.ts".into()))
+        && package_json
+            .get("exports")
+            .and_then(Value::as_object)
+            .and_then(|exports| exports.get("."))
+            .and_then(Value::as_object)
+            .and_then(|root| root.get("import"))
+            == Some(&Value::String("./index.mjs".into()))
+        && package_json
+            .get("exports")
+            .and_then(Value::as_object)
+            .and_then(|exports| exports.get("."))
+            .and_then(Value::as_object)
+            .and_then(|root| root.get("types"))
+            == Some(&Value::String("./index.d.ts".into()));
+    if !manifest_is_expected {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Deno Module package manifest does not expose the expected runtime and types files",
+        ));
+    }
+    Ok(())
+}
+
+fn deno_module_runtime_error(
+    thread_id: &str,
+    module_name: Option<&str>,
+    message: &'static str,
+    error: io::Error,
+) -> PedelecError {
+    let mut details = serde_json::Map::new();
+    details.insert("threadId".into(), serde_json::json!(thread_id));
+    if let Some(module_name) = module_name {
+        details.insert("moduleName".into(), serde_json::json!(module_name));
+    }
+    details.insert("error".into(), serde_json::json!(error.to_string()));
+    PedelecError::with_details(
+        error_codes::DENO_MODULE_SETUP_FAILED,
+        message,
+        Value::Object(details),
+    )
+}
+
+fn remove_materialized_deno_module_package(
+    workspace_path: &Path,
+    thread_id: &str,
+    module_name: &str,
+) -> Result<(), PedelecError> {
+    validate_deno_module_name(module_name)?;
+    let Ok((_thread_root, canonical_modules_root)) =
+        canonical_existing_deno_module_storage_root(workspace_path, thread_id)
+    else {
+        return Ok(());
+    };
+    let mut package_path = canonical_modules_root.clone();
+    for part in module_name.split('/') {
+        package_path.push(part);
+        let metadata = match fs::symlink_metadata(&package_path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => {
+                return Err(PedelecError::new(
+                    error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+                    "Deno Module package cleanup failed",
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || !package_path
+                .canonicalize()
+                .map(|path| path.starts_with(&canonical_modules_root))
+                .unwrap_or(false)
+        {
+            return Err(PedelecError::new(
+                error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+                "Deno Module package cleanup path is unsafe",
+            ));
+        }
+    }
+    fs::remove_dir_all(package_path).map_err(|_| {
+        PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Deno Module package cleanup failed",
+        )
+    })
+}
+
+/// Resolves the already-materialized Deno storage without creating any
+/// missing component. Every private directory is checked with
+/// `symlink_metadata` before canonicalization so a resume/execution check
+/// cannot accidentally follow an attacker-controlled replacement.
+fn canonical_existing_deno_module_storage_root(
+    workspace_path: &Path,
+    thread_id: &str,
+) -> io::Result<(PathBuf, PathBuf)> {
+    validate_deno_module_thread_id(thread_id)?;
+    let workspace_metadata = fs::symlink_metadata(workspace_path)?;
+    if workspace_metadata.file_type().is_symlink() || !workspace_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Deno Module workspace is not a regular directory",
+        ));
+    }
+    let canonical_workspace = workspace_path.canonicalize()?;
+    let mut current = workspace_path.to_path_buf();
+    for component in [
+        PEDELEC_RUNTIME_DATA_DIR,
+        "deno",
+        "threads",
+        thread_id,
+        "modules",
+    ] {
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Deno Module storage path is not a regular directory",
+            ));
+        }
+        if !current.canonicalize()?.starts_with(&canonical_workspace) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Deno Module storage path escapes the workspace",
+            ));
+        }
+    }
+    let canonical_modules_root = current.canonicalize()?;
+    let canonical_thread_root = canonical_modules_root
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing Deno thread root"))?
+        .to_path_buf();
+    Ok((canonical_thread_root, canonical_modules_root))
+}
+
+fn validate_deno_module_thread_id(thread_id: &str) -> io::Result<()> {
+    if thread_id.is_empty()
+        || thread_id == "."
+        || thread_id == ".."
+        || thread_id.contains('/')
+        || thread_id.contains('\\')
+        || thread_id.contains('\0')
+        || thread_id.contains(':')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Deno Module thread path is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_deno_module_storage_root(
+    workspace_path: &Path,
+    thread_id: &str,
+) -> io::Result<(PathBuf, PathBuf)> {
+    if thread_id.is_empty()
+        || thread_id == "."
+        || thread_id == ".."
+        || thread_id.contains('/')
+        || thread_id.contains('\\')
+        || thread_id.contains('\0')
+        || thread_id.contains(':')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Deno Module thread path is invalid",
+        ));
+    }
+
+    let workspace_metadata = fs::symlink_metadata(workspace_path)?;
+    if workspace_metadata.file_type().is_symlink() || !workspace_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Deno Module workspace is not a regular directory",
+        ));
+    }
+    let canonical_workspace = workspace_path.canonicalize()?;
+    let mut current = workspace_path.to_path_buf();
+    for component in [
+        PEDELEC_RUNTIME_DATA_DIR,
+        "deno",
+        "threads",
+        thread_id,
+        "modules",
+    ] {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Deno Module storage path is not a regular directory",
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)?,
+            Err(err) => return Err(err),
+        }
+        if !current.canonicalize()?.starts_with(&canonical_workspace) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Deno Module storage path escapes the workspace",
+            ));
+        }
+    }
+
+    let canonical_root = current.canonicalize()?;
+    Ok((current, canonical_root))
+}
+
+fn ensure_deno_module_package_parent(
+    package_parent: &Path,
+    canonical_root: &Path,
+) -> io::Result<()> {
+    let mut current = canonical_root.to_path_buf();
+    let relative = package_parent.strip_prefix(canonical_root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Deno Module package parent is outside its root",
+        )
+    })?;
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Deno Module package path contains an invalid component",
+            ));
+        };
+        current.push(part);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Deno Module package parent is not a regular directory",
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)?,
+            Err(err) => return Err(err),
+        }
+        if !current.canonicalize()?.starts_with(canonical_root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Deno Module package path escapes its root",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_deno_module_file(path: &Path, bytes: Vec<u8>) -> Result<(), PedelecError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|err| {
+            deno_module_materialization_error("cannot create Deno Module file", path, err)
+        })?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|err| {
+            deno_module_materialization_error("cannot write Deno Module file", path, err)
+        })
+}
+
+fn deno_module_materialization_error(
+    message: &'static str,
+    _path: &Path,
+    _err: io::Error,
+) -> PedelecError {
+    // Module materialization errors can cross the browser-facing upload
+    // response.  Keep Core-owned workspace paths out of that response.
+    PedelecError::new(error_codes::DENO_MODULE_MATERIALIZATION_FAILED, message)
+}
+
+fn cleanup_aborted_custom_workspace(
+    workspace_path: &Path,
+    thread_id: &str,
+) -> Result<(), PedelecError> {
+    let deno_thread_root = workspace_deno_thread_root(workspace_path, thread_id);
+    ensure_deno_module_thread_root_is_safe(workspace_path, thread_id).map_err(|err| {
+        deno_module_materialization_error(
+            "cannot inspect aborted Deno Module state",
+            &deno_thread_root,
+            err,
+        )
+    })?;
+    match fs::symlink_metadata(&deno_thread_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(&deno_thread_root).map_err(|err| {
+                deno_module_materialization_error(
+                    "cannot remove aborted Deno Module state",
+                    &deno_thread_root,
+                    err,
+                )
+            })?;
+        }
+        Ok(_) => {
+            return Err(PedelecError::new(
+                error_codes::WORKSPACE_REMOVE_FAILED,
+                "aborted Deno Module state path is not a regular directory",
+            ));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(deno_module_materialization_error(
+                "cannot inspect aborted Deno Module state",
+                &deno_thread_root,
+                err,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_deno_module_thread_root_is_safe(
+    workspace_path: &Path,
+    thread_id: &str,
+) -> io::Result<()> {
+    if thread_id.is_empty()
+        || thread_id == "."
+        || thread_id == ".."
+        || thread_id.contains('/')
+        || thread_id.contains('\\')
+        || thread_id.contains('\0')
+        || thread_id.contains(':')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Deno Module thread path is invalid",
+        ));
+    }
+    let workspace_metadata = fs::symlink_metadata(workspace_path)?;
+    if workspace_metadata.file_type().is_symlink() || !workspace_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Deno Module workspace is not a regular directory",
+        ));
+    }
+    let canonical_workspace = workspace_path.canonicalize()?;
+    let mut current = workspace_path.to_path_buf();
+    for component in [PEDELEC_RUNTIME_DATA_DIR, "deno", "threads", thread_id] {
+        current.push(component);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Deno Module thread path is not a regular directory",
+            ));
+        }
+        if !current.canonicalize()?.starts_with(&canonical_workspace) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Deno Module thread path escapes the workspace",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn initialize_generated_skills(
@@ -5510,6 +7097,12 @@ impl EventBus {
         self.event_log_paths_by_thread.remove(thread_id);
     }
 
+    pub fn remove_thread(&mut self, thread_id: &str) {
+        self.next_seq_by_thread.remove(thread_id);
+        self.subscribers_by_thread.remove(thread_id);
+        self.event_log_paths_by_thread.remove(thread_id);
+    }
+
     pub fn event_log_path(&self, thread_id: &str) -> Option<PathBuf> {
         self.event_log_paths_by_thread.get(thread_id).cloned()
     }
@@ -6105,6 +7698,7 @@ pub mod error_codes {
     pub const THREAD_ENDED: &str = "THREAD_ENDED";
     pub const DENO_ARGS_INVALID: &str = "DENO_ARGS_INVALID";
     pub const DENO_ENTRYPOINT_INVALID: &str = "DENO_ENTRYPOINT_INVALID";
+    pub const DENO_IMPORT_MAP_INVALID: &str = "DENO_IMPORT_MAP_INVALID";
     pub const DENO_THREAD_NOT_ACTIVE: &str = "DENO_THREAD_NOT_ACTIVE";
     pub const DENO_RUNTIME_UNAVAILABLE: &str = "DENO_RUNTIME_UNAVAILABLE";
     pub const DENO_EXECUTION_BUSY: &str = "DENO_EXECUTION_BUSY";
@@ -6186,6 +7780,19 @@ pub mod error_codes {
     pub const ASSET_READ_FAILED: &str = "ASSET_READ_FAILED";
     pub const ASSET_DOWNLOAD_TICKET_EXPIRED: &str = "ASSET_DOWNLOAD_TICKET_EXPIRED";
     pub const ASSET_DOWNLOAD_UNAUTHORIZED: &str = "ASSET_DOWNLOAD_UNAUTHORIZED";
+    pub const DENO_MODULE_NAME_INVALID: &str = "DENO_MODULE_NAME_INVALID";
+    pub const DENO_MODULE_SETUP_INCOMPLETE: &str = "DENO_MODULE_SETUP_INCOMPLETE";
+    pub const DENO_MODULE_NOT_FOUND: &str = "DENO_MODULE_NOT_FOUND";
+    pub const DENO_MODULE_ALREADY_READY: &str = "DENO_MODULE_ALREADY_READY";
+    pub const DENO_MODULE_ARTIFACT_TOO_LARGE: &str = "DENO_MODULE_ARTIFACT_TOO_LARGE";
+    pub const DENO_MODULE_ARTIFACT_INVALID: &str = "DENO_MODULE_ARTIFACT_INVALID";
+    pub const DENO_MODULE_MATERIALIZATION_FAILED: &str = "DENO_MODULE_MATERIALIZATION_FAILED";
+    pub const DENO_MODULE_UPLOAD_SERVER_UNAVAILABLE: &str = "DENO_MODULE_UPLOAD_SERVER_UNAVAILABLE";
+    pub const DENO_MODULE_UPLOAD_TICKET_EXPIRED: &str = "DENO_MODULE_UPLOAD_TICKET_EXPIRED";
+    pub const DENO_MODULE_UPLOAD_UNAUTHORIZED: &str = "DENO_MODULE_UPLOAD_UNAUTHORIZED";
+    pub const DENO_MODULE_UPLOAD_SIZE_MISMATCH: &str = "DENO_MODULE_UPLOAD_SIZE_MISMATCH";
+    pub const DENO_MODULE_UPLOAD_FAILED: &str = "DENO_MODULE_UPLOAD_FAILED";
+    pub const DENO_MODULE_SETUP_FAILED: &str = "DENO_MODULE_SETUP_FAILED";
 }
 
 fn provider_code_as_str(provider: &ProviderCode) -> &'static str {
@@ -7843,18 +9450,24 @@ fn required_ollama_model_from_args(args: &[String]) -> Result<String, PedelecErr
         })
 }
 
+fn deno_module_types_path(thread_id: &str, module_name: &str) -> String {
+    format!(".pedelec-runtime/deno/threads/{thread_id}/modules/{module_name}/index.d.ts")
+}
+
 fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) -> String {
-    build_provider_host_context_with_configuration(
+    build_provider_host_context_with_configuration_and_modules(
         thread,
         registry,
         registry.has_skills_configuration(),
+        &[],
     )
 }
 
-fn build_provider_host_context_with_configuration(
+fn build_provider_host_context_with_configuration_and_modules(
     thread: &ThreadState,
     registry: &ToolRegistry,
     include_configuration: bool,
+    deno_modules: &[DenoModuleState],
 ) -> String {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -7868,6 +9481,18 @@ fn build_provider_host_context_with_configuration(
     struct AppToolConfiguration<'a> {
         guidance: &'a str,
         tools: Vec<AppTool<'a>>,
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DenoModule<'a> {
+        name: &'a str,
+        description: &'a str,
+        usage: &'a str,
+        types: String,
+    }
+    #[derive(Serialize)]
+    struct DenoModuleConfiguration<'a> {
+        modules: Vec<DenoModule<'a>>,
     }
 
     let mut tools: Vec<&ToolDefinition> = registry.tools().collect();
@@ -7901,6 +9526,25 @@ fn build_provider_host_context_with_configuration(
         &thread.thread_id,
     )));
     context.push('\n');
+    if !deno_modules.is_empty() {
+        let mut modules = deno_modules.iter().collect::<Vec<_>>();
+        modules.sort_by(|left, right| left.name.cmp(&right.name));
+        let configuration = serde_json::to_string_pretty(&DenoModuleConfiguration {
+            modules: modules
+                .into_iter()
+                .map(|module| DenoModule {
+                    name: &module.name,
+                    description: &module.description,
+                    usage: &module.usage,
+                    types: deno_module_types_path(&thread.thread_id, &module.name),
+                })
+                .collect(),
+        })
+        .expect("Deno Module configuration is always serializable");
+        context.push_str(&format!(
+            "\n[Pedelec Deno Modules]\n{configuration}\n[/Pedelec Deno Modules]\n"
+        ));
+    }
     if include_configuration {
         context.push_str(&format!(
             "\n[Pedelec App Tool Configuration]\n{configuration}\n[/Pedelec App Tool Configuration]\n"
@@ -7962,9 +9606,13 @@ fn build_pedelec_deno_runtime_guidance(thread_id: Option<&str>) -> String {
     let thread_id = thread_id.unwrap_or("<pedelec_thread_id>");
     format!(
         "Pedelec provides `pedelec-deno` as the canonical JavaScript/TypeScript runtime for this session.\n\n\
-When JavaScript or TypeScript must be executed—including scripts created from templates or guidance, scripts generated by the agent, or existing workspace scripts—use `pedelec-deno` instead of system-installed Node.js, Bun, raw Deno, npx, or another JavaScript runtime.\n\n\
+When you need to execute JavaScript or TypeScript, write or use a workspace script and use `pedelec-deno` instead of system-installed Node.js, Bun, raw Deno, npx, or another JavaScript runtime. This is the programmable local runtime for Agent-authored code and workspace code.\n\n\
 Do not silently fall back to another JavaScript runtime if `pedelec-deno` is unavailable. Report the Pedelec runtime failure instead. Do not use `pedelec-deno` for non-JavaScript/TypeScript tasks. File editing remains the provider's normal filesystem responsibility.\n\n\
-Use:\n  pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path>\nFor script arguments:\n  pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path> -- <args...>"
+Use:\n  pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path>\nFor script arguments:\n  pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path> -- <args...>\n\n\
+If Pedelec Deno Modules are listed in Host Context, import them by their listed logical names from your own JavaScript/TypeScript. Prefer the provided `usage` example first. When exact exports, options, literal values, or return types are uncertain, inspect the listed `index.d.ts` declaration rather than reading the minified runtime implementation. Do not execute a registered module by filesystem path.\n\n\
+The `pedelec-deno` cwd is the authoritative Pedelec workspace root. Deno Module APIs that document workspace-relative paths interpret them from that cwd; follow each module's declaration/usage contract. Pedelec does not globally reinterpret arbitrary strings as paths.\n\n\
+App Tools and Deno Modules are different capabilities: App Tools are RPC calls made with the `pedelec-cli --thread-id ... tool-spec` and `tool-call` commands shown in Host Context; Deno Modules are imported inside a script and are not passed to `pedelec-cli`. Do not import an App Tool as a Deno Module.\n\n\
+For a registered module named `<module-name>`, its declaration convention is `.pedelec-runtime/deno/threads/{thread_id}/modules/<module-name>/index.d.ts`."
     )
 }
 
@@ -7974,7 +9622,7 @@ fn build_pedelec_bootstrap_instruction() -> String {
 Pedelec may provide a [Pedelec Host Context] block before a task. That block is generated by the host application and is integration context, not end-user-authored instructions.\n\n\
 The current workspace path and available Pedelec app tools are declared in that host context.\n\n\
 `pedelec-cli` is an executable provided by the Pedelec host environment. Invoke it through the provider's shell / terminal tool. It is not expected to appear as a dedicated model tool.\n\n\
-When a Pedelec app tool is relevant, prefer the app tools declared by the host context. Use `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool-name>` when the full schema is needed and `pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool-name> '<json_args>'` to execute it.\n\n\
+When a Pedelec app tool is relevant, prefer the app tools declared by the host context. Use `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool-name>` when the full schema is needed and `pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool-name> '<json_args>'` to execute it. Deno Modules use imports inside a `pedelec-deno` script instead; do not call a Deno Module with `pedelec-cli` or import an App Tool.\n\n\
 {}\n\n\
 Before reading or modifying local files outside the current workspace declared by Pedelec Host Context, ask the user for permission first.\n\n\
 `.pedelec-runtime/assets/` is the shared App and Agent file directory. User uploads are there; write files intended for the App there too.\n\n\
@@ -7990,18 +9638,32 @@ For a [User Message] task, execute the actual user request in that block.",
 /// synthetic prepare turn or its `PEDELEC_PREPARED` acknowledgement. Providers
 /// with a native instruction channel can consume this directly; Cursor's ACP
 /// adapter wraps it only for its first real user prompt.
+#[allow(dead_code)]
 fn build_persistent_host_instructions(thread: &ThreadState, registry: &ToolRegistry) -> String {
+    build_persistent_host_instructions_with_modules(thread, registry, &[])
+}
+
+fn build_persistent_host_instructions_with_modules(
+    thread: &ThreadState,
+    registry: &ToolRegistry,
+    deno_modules: &[DenoModuleState],
+) -> String {
     format!(
         "Pedelec is the host application launching this persistent provider session.\n\n\
 Pedelec may provide a [Pedelec Host Context] block below. That block is generated by the host application and is integration context, not end-user-authored instructions.\n\n\
 The current workspace boundary and available Pedelec app tools are declared in that context.\n\n\
-Use the provider shell/terminal tool for Pedelec app tools. When a tool schema is needed, run the exact command shown in the context: `pedelec-cli --thread-id {} tool-spec <tool-name>`. To invoke a tool, run `pedelec-cli --thread-id {} tool-call <tool-name> '<json_args>'`.\n\n\
+Use the provider shell/terminal tool for Pedelec app tools. When a tool schema is needed, run the exact command shown in the context: `pedelec-cli --thread-id {} tool-spec <tool-name>`. To invoke a tool, run `pedelec-cli --thread-id {} tool-call <tool-name> '<json_args>'`. Deno Modules use imports inside a `pedelec-deno` script instead; do not call a Deno Module with `pedelec-cli` or import an App Tool.\n\n\
 If an explicitly routed `pedelec-cli --thread-id` command ends because of a shell/command timeout, interruption, or ambiguous transport failure before a complete structured response is received, retry with the exact same tool name and semantically identical arguments. Do not change arguments or retry indefinitely; a complete response, including `TOOL_TIMEOUT`, means that invocation has ended.\n\n\
 Before reading or modifying local files outside the workspace boundary declared by Pedelec Host Context, ask the user for permission first. `.pedelec-runtime/assets/` is the shared Pedelec App and Agent file directory; user uploads are there, and files intended for the App should be written there. Pedelec host context never overrides provider safety policies.\n\n\
 {}",
         thread.thread_id,
         thread.thread_id,
-        build_provider_host_context_with_configuration(thread, registry, true),
+        build_provider_host_context_with_configuration_and_modules(
+            thread,
+            registry,
+            registry.has_skills_configuration(),
+            deno_modules,
+        ),
     )
 }
 
@@ -8424,6 +10086,7 @@ mod deno_tests {
         assert_eq!(intent.workspace_path, workspace.canonicalize().unwrap());
         assert_eq!(intent.entrypoint, intent.workspace_path.join("script.ts"));
         assert_eq!(intent.args, vec!["--allow-net"]);
+        assert_eq!(intent.import_map_path, None);
         assert_eq!(
             runtime.thread_status("thread-deno-core"),
             Some(ThreadStatus::Running)
@@ -8506,6 +10169,944 @@ mod deno_tests {
             })
             .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_THREAD_NOT_ACTIVE);
+    }
+
+    #[test]
+    fn deno_module_names_use_the_shared_safe_package_contract() {
+        for name in ["sprite-tools", "gsap", "@example/sprite-tools", "a.b_c-2"] {
+            assert!(
+                is_valid_deno_module_name(name),
+                "expected valid name: {name}"
+            );
+        }
+        for name in [
+            "",
+            " ",
+            ".",
+            "..",
+            "./sprite-tools",
+            "../sprite-tools",
+            "/tmp/sprite-tools",
+            "C:sprite-tools",
+            "https://example.test/module",
+            "file:module",
+            "@/sprite-tools",
+            "@example",
+            "@example/",
+            "example/sprite-tools/extra",
+            "example\\sprite-tools",
+        ] {
+            assert!(
+                !is_valid_deno_module_name(name),
+                "expected invalid name: {name}"
+            );
+        }
+
+        let duplicate = CreateThreadSkillsInput {
+            guidance: String::new(),
+            tools: Vec::new(),
+            deno_modules: vec![
+                CreateThreadDenoModuleInput {
+                    name: "sprite-tools".into(),
+                    description: "one".into(),
+                    usage: "one".into(),
+                },
+                CreateThreadDenoModuleInput {
+                    name: "sprite-tools".into(),
+                    description: "two".into(),
+                    usage: "two".into(),
+                },
+            ],
+        };
+        let error = normalize_deno_module_inputs(Some(&duplicate)).unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_NAME_INVALID);
+    }
+
+    #[test]
+    fn persistent_host_context_describes_modules_without_authoring_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread = ThreadState {
+            thread_id: "thread-deno-context".into(),
+            provider: ProviderCode::Codex,
+            effort_level: EffortLevel::Default,
+            effort_args: Vec::new(),
+            workspace_path: temp.path().to_path_buf(),
+            skills: Vec::new(),
+            status: ThreadStatus::Idle,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            sdk_origin: None,
+        };
+        let modules = vec![DenoModuleState {
+            name: "sprite-tools".into(),
+            description: "Sprite authoring utilities".into(),
+            usage: "import { preview } from \"sprite-tools\";".into(),
+            state: DenoModuleSetupState::Ready,
+        }];
+        let context = build_provider_host_context_with_configuration_and_modules(
+            &thread,
+            &ToolRegistry::default(),
+            false,
+            &modules,
+        );
+        assert!(context.contains("[Pedelec Deno Modules]"));
+        assert!(context.contains("sprite-tools"));
+        assert!(context.contains("Sprite authoring utilities"));
+        assert!(context.contains("import { preview } from \\\"sprite-tools\\\";"));
+        assert!(context.contains(
+            ".pedelec-runtime/deno/threads/thread-deno-context/modules/sprite-tools/index.d.ts"
+        ));
+        assert!(context.contains("index.d.ts"));
+        assert!(context.contains("pedelec-deno"));
+        assert!(!context.contains("entry"));
+        assert!(!context.contains("runtimeSource"));
+        assert!(!context.contains("contentHash"));
+        assert!(!context.contains("index.mjs"));
+    }
+
+    #[test]
+    fn host_context_omits_empty_module_block_and_sorts_module_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread = ThreadState {
+            thread_id: "thread-deno-order".into(),
+            provider: ProviderCode::Codex,
+            effort_level: EffortLevel::Default,
+            effort_args: Vec::new(),
+            workspace_path: temp.path().to_path_buf(),
+            skills: Vec::new(),
+            status: ThreadStatus::Idle,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            sdk_origin: None,
+        };
+
+        let empty = build_provider_host_context_with_configuration_and_modules(
+            &thread,
+            &ToolRegistry::default(),
+            false,
+            &[],
+        );
+        assert!(!empty.contains("[Pedelec Deno Modules]"));
+
+        let modules = vec![
+            DenoModuleState {
+                name: "zeta-tools".into(),
+                description: "Zeta".into(),
+                usage: "import \\\"zeta-tools\\\";".into(),
+                state: DenoModuleSetupState::Ready,
+            },
+            DenoModuleState {
+                name: "alpha-tools".into(),
+                description: "Alpha".into(),
+                usage: "import \\\"alpha-tools\\\";".into(),
+                state: DenoModuleSetupState::Ready,
+            },
+        ];
+        let context = build_provider_host_context_with_configuration_and_modules(
+            &thread,
+            &ToolRegistry::default(),
+            false,
+            &modules,
+        );
+        assert!(context.find("alpha-tools").unwrap() < context.find("zeta-tools").unwrap());
+        assert!(context.contains(
+            ".pedelec-runtime/deno/threads/thread-deno-order/modules/alpha-tools/index.d.ts"
+        ));
+        assert!(!context.contains("[Pedelec App Tool Configuration]"));
+    }
+
+    #[test]
+    fn module_only_host_context_keeps_shared_guidance_without_app_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread = ThreadState {
+            thread_id: "thread-deno-guidance".into(),
+            provider: ProviderCode::Codex,
+            effort_level: EffortLevel::Default,
+            effort_args: Vec::new(),
+            workspace_path: temp.path().to_path_buf(),
+            skills: Vec::new(),
+            status: ThreadStatus::Idle,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            sdk_origin: None,
+        };
+        let registry = ToolRegistry::from_skills_input(Some(&CreateThreadSkillsInput {
+            guidance: "Use sprite-tools for sprite authoring tasks.".into(),
+            tools: Vec::new(),
+            deno_modules: vec![],
+        }))
+        .unwrap();
+        let modules = vec![DenoModuleState {
+            name: "sprite-tools".into(),
+            description: "Sprite utilities".into(),
+            usage: "import { preview } from \\\"sprite-tools\\\";".into(),
+            state: DenoModuleSetupState::Ready,
+        }];
+        let context = build_provider_host_context_with_configuration_and_modules(
+            &thread,
+            &registry,
+            registry.has_skills_configuration(),
+            &modules,
+        );
+        assert!(context.contains("Use sprite-tools for sprite authoring tasks."));
+        assert!(context.contains("[Pedelec Deno Modules]"));
+        assert!(context.contains("\"tools\": []"));
+    }
+
+    #[test]
+    fn bootstrap_explains_import_based_modules_and_cli_app_tools_separately() {
+        let instruction = build_pedelec_bootstrap_instruction();
+        assert!(instruction.contains("Deno Modules are imported inside a script"));
+        assert!(instruction.contains("do not call a Deno Module with `pedelec-cli`"));
+        assert!(instruction.contains("or import an App Tool"));
+        assert!(instruction.contains("authoritative Pedelec workspace root"));
+        assert!(instruction.contains("index.d.ts"));
+        assert!(!instruction.contains("pedelec-deno module-spec"));
+    }
+
+    #[test]
+    fn deno_module_upload_materializes_a_ready_thread_scoped_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut runtime = runtime_with_thread(&workspace, "thread-deno-upload", ThreadStatus::Idle);
+        runtime
+            .thread_manager
+            .provider_state_mut("thread-deno-upload")
+            .unwrap()
+            .active_provider_turn_id = None;
+        runtime.asset_upload_port = Some(43123);
+        runtime.deno_modules.insert(
+            "thread-deno-upload".into(),
+            vec![DenoModuleState {
+                name: "@example/sprite-tools".into(),
+                description: "Sprite helpers".into(),
+                usage: "import { preview } from \"@example/sprite-tools\";".into(),
+                state: DenoModuleSetupState::Pending,
+            }],
+        );
+
+        let envelope = serde_json::json!({
+            "version": 1,
+            "format": "esm",
+            "runtimeSource": "export const preview = () => 'ok';",
+            "typesSource": "export declare const preview: () => string;",
+        });
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let ticket = runtime
+            .create_deno_module_upload(CreateDenoModuleUploadInput {
+                thread_id: "thread-deno-upload".into(),
+                module_name: "@example/sprite-tools".into(),
+                expected_size_bytes: bytes.len() as u64,
+            })
+            .unwrap();
+        runtime
+            .deno_module_upload_tickets
+            .get_mut(&ticket.upload_id)
+            .unwrap()
+            .state = DenoModuleUploadState::Uploading;
+        let temporary_path = workspace_tmp_root(&workspace).join("module-envelope.json");
+        fs::create_dir_all(temporary_path.parent().unwrap()).unwrap();
+        fs::write(&temporary_path, bytes).unwrap();
+
+        let completion = runtime
+            .complete_deno_module_upload(&ticket.upload_id, &temporary_path)
+            .unwrap();
+        assert_eq!(completion.module_name, "@example/sprite-tools");
+        assert!(completion.ready);
+        assert!(runtime
+            .deno_module_setup_ready("thread-deno-upload")
+            .unwrap());
+        let package = workspace_deno_modules_root(&workspace, "thread-deno-upload")
+            .join("@example/sprite-tools");
+        assert_eq!(
+            fs::read_to_string(package.join("index.mjs")).unwrap(),
+            "export const preview = () => 'ok';"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(package.join("package.json")).unwrap())
+                .unwrap()["exports"]["."]["import"],
+            "./index.mjs"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace_deno_import_map_path(
+                &workspace,
+                "thread-deno-upload"
+            ))
+            .unwrap(),
+            format!(
+                "{{\n  \"imports\": {{\n    \"@example/sprite-tools\": \"./modules/@example/sprite-tools/index.mjs\"\n  }}\n}}"
+            )
+        );
+        let import_map = runtime
+            .validate_deno_module_runtime_snapshot("thread-deno-upload")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            import_map,
+            PathBuf::from(path_for_external_use(
+                &workspace_deno_import_map_path(&workspace, "thread-deno-upload")
+                    .canonicalize()
+                    .unwrap(),
+            ))
+        );
+        assert!(!import_map.to_string_lossy().contains("entry"));
+        let module_entries = fs::read_dir(workspace_deno_modules_root(
+            &workspace,
+            "thread-deno-upload",
+        ))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+        assert_eq!(module_entries, vec![std::ffi::OsString::from("@example")]);
+        fs::write(workspace.join("script.ts"), "console.log('ok')").unwrap();
+        runtime
+            .thread_manager
+            .thread_mut("thread-deno-upload")
+            .unwrap()
+            .status = ThreadStatus::Running;
+        runtime
+            .thread_manager
+            .provider_state_mut("thread-deno-upload")
+            .unwrap()
+            .active_provider_turn_id = Some("turn-ready".into());
+        let intent = runtime
+            .prepare_deno_run_intent(DenoRunInput {
+                thread_id: "thread-deno-upload".into(),
+                entrypoint: "script.ts".into(),
+                args: vec!["--allow-net".into()],
+            })
+            .unwrap();
+        assert_eq!(intent.import_map_path, Some(import_map));
+        runtime
+            .thread_manager
+            .thread_mut("thread-deno-upload")
+            .unwrap()
+            .status = ThreadStatus::Idle;
+        runtime
+            .thread_manager
+            .provider_state_mut("thread-deno-upload")
+            .unwrap()
+            .active_provider_turn_id = None;
+        assert_eq!(
+            runtime
+                .deno_module_upload_tickets
+                .get(&ticket.upload_id)
+                .unwrap()
+                .state,
+            DenoModuleUploadState::Completed
+        );
+        let error = runtime
+            .create_deno_module_upload(CreateDenoModuleUploadInput {
+                thread_id: "thread-deno-upload".into(),
+                module_name: "@example/sprite-tools".into(),
+                expected_size_bytes: 1,
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_ALREADY_READY);
+    }
+
+    #[test]
+    fn final_module_upload_fails_when_import_map_cannot_be_committed() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut runtime =
+            runtime_with_thread(&workspace, "thread-deno-map-failure", ThreadStatus::Idle);
+        runtime.asset_upload_port = Some(43125);
+        runtime.deno_modules.insert(
+            "thread-deno-map-failure".into(),
+            vec![DenoModuleState {
+                name: "sprite-tools".into(),
+                description: "Sprite helpers".into(),
+                usage: "import \"sprite-tools\";".into(),
+                state: DenoModuleSetupState::Pending,
+            }],
+        );
+        let import_map_path = workspace_deno_import_map_path(&workspace, "thread-deno-map-failure");
+        fs::create_dir_all(&import_map_path).unwrap();
+
+        let envelope = DenoModuleArtifactEnvelope {
+            version: 1,
+            format: "esm".into(),
+            runtime_source: "export const ready = true;".into(),
+            types_source: "export declare const ready: boolean;".into(),
+        };
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let ticket = runtime
+            .create_deno_module_upload(CreateDenoModuleUploadInput {
+                thread_id: "thread-deno-map-failure".into(),
+                module_name: "sprite-tools".into(),
+                expected_size_bytes: bytes.len() as u64,
+            })
+            .unwrap();
+        runtime
+            .deno_module_upload_tickets
+            .get_mut(&ticket.upload_id)
+            .unwrap()
+            .state = DenoModuleUploadState::Uploading;
+        let temporary_path = workspace_tmp_root(&workspace).join("map-failure-envelope.json");
+        fs::create_dir_all(temporary_path.parent().unwrap()).unwrap();
+        fs::write(&temporary_path, bytes).unwrap();
+
+        let error = runtime
+            .complete_deno_module_upload(&ticket.upload_id, &temporary_path)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_MATERIALIZATION_FAILED);
+        assert_eq!(
+            runtime.deno_modules["thread-deno-map-failure"][0].state,
+            DenoModuleSetupState::Failed
+        );
+        assert_eq!(
+            runtime.deno_module_upload_tickets[&ticket.upload_id].state,
+            DenoModuleUploadState::Failed
+        );
+        assert!(
+            !workspace_deno_modules_root(&workspace, "thread-deno-map-failure")
+                .join("sprite-tools/index.mjs")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn missing_module_runtime_snapshot_blocks_execution_and_resume_without_mutating_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("script.ts"), "console.log('ok')").unwrap();
+        let mut runtime = runtime_with_thread(
+            &workspace,
+            "thread-deno-runtime-integrity",
+            ThreadStatus::Running,
+        );
+        runtime.deno_modules.insert(
+            "thread-deno-runtime-integrity".into(),
+            vec![DenoModuleState {
+                name: "sprite-tools".into(),
+                description: "Sprite helpers".into(),
+                usage: "import \"sprite-tools\";".into(),
+                state: DenoModuleSetupState::Ready,
+            }],
+        );
+        let import_map_path =
+            workspace_deno_import_map_path(&workspace, "thread-deno-runtime-integrity");
+        let package = workspace_deno_modules_root(&workspace, "thread-deno-runtime-integrity")
+            .join("sprite-tools");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(&package.join("index.mjs"), "export const ready = true;").unwrap();
+        fs::write(
+            &package.join("index.d.ts"),
+            "export declare const ready: boolean;",
+        )
+        .unwrap();
+        fs::write(
+            package.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "sprite-tools",
+                "type": "module",
+                "types": "./index.d.ts",
+                "exports": {
+                    ".": {
+                        "types": "./index.d.ts",
+                        "import": "./index.mjs"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::create_dir_all(import_map_path.parent().unwrap()).unwrap();
+        fs::write(
+            &import_map_path,
+            serde_json::to_vec_pretty(&DenoModuleImportMap {
+                imports: BTreeMap::from([(
+                    "sprite-tools".into(),
+                    "./modules/sprite-tools/index.mjs".into(),
+                )]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let intent = runtime
+            .prepare_deno_run_intent(DenoRunInput {
+                thread_id: "thread-deno-runtime-integrity".into(),
+                entrypoint: "script.ts".into(),
+                args: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            intent.import_map_path,
+            Some(PathBuf::from(path_for_external_use(
+                &import_map_path.canonicalize().unwrap(),
+            )))
+        );
+
+        fs::remove_file(&import_map_path).unwrap();
+        let error = runtime
+            .prepare_deno_run_intent(DenoRunInput {
+                thread_id: "thread-deno-runtime-integrity".into(),
+                entrypoint: "script.ts".into(),
+                args: Vec::new(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_SETUP_FAILED);
+        let error = runtime
+            .build_persistent_session_intent("thread-deno-runtime-integrity")
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_SETUP_FAILED);
+
+        runtime
+            .thread_manager
+            .thread_mut("thread-deno-runtime-integrity")
+            .unwrap()
+            .status = ThreadStatus::Ended;
+        let error = runtime
+            .resume_thread(ResumeThreadInput {
+                thread_id: "thread-deno-runtime-integrity".into(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_SETUP_FAILED);
+        assert_eq!(
+            runtime.thread_status("thread-deno-runtime-integrity"),
+            Some(ThreadStatus::Ended)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn module_snapshot_rejects_symlinked_scoped_package_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut runtime = runtime_with_thread(
+            &workspace,
+            "thread-deno-symlinked-module",
+            ThreadStatus::Running,
+        );
+        runtime.deno_modules.insert(
+            "thread-deno-symlinked-module".into(),
+            vec![DenoModuleState {
+                name: "@example/sprite-tools".into(),
+                description: "Sprite helpers".into(),
+                usage: "import \"@example/sprite-tools\";".into(),
+                state: DenoModuleSetupState::Ready,
+            }],
+        );
+
+        let modules_root = workspace_deno_modules_root(&workspace, "thread-deno-symlinked-module");
+        fs::create_dir_all(&modules_root).unwrap();
+        let outside_scope = temp.path().join("outside-scope");
+        fs::create_dir_all(&outside_scope).unwrap();
+        symlink(&outside_scope, modules_root.join("@example")).unwrap();
+        let import_map_path =
+            workspace_deno_import_map_path(&workspace, "thread-deno-symlinked-module");
+        fs::create_dir_all(import_map_path.parent().unwrap()).unwrap();
+        fs::write(
+            import_map_path,
+            serde_json::to_vec_pretty(&DenoModuleImportMap {
+                imports: BTreeMap::from([(
+                    "@example/sprite-tools".into(),
+                    "./modules/@example/sprite-tools/index.mjs".into(),
+                )]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = runtime
+            .validate_deno_module_runtime_snapshot("thread-deno-symlinked-module")
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_SETUP_FAILED);
+    }
+
+    #[test]
+    fn module_snapshots_are_isolated_for_threads_sharing_one_custom_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed_root = temp.path().join("managed");
+        let workspace = temp.path().join("shared-workspace");
+        let mut runtime = CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
+            settings_file_path: Some(temp.path().join("settings.json")),
+            asset_upload_port: Some(43124),
+            ..CoreRuntime::default()
+        };
+        let input = |workspace: &Path| CreateThreadInput {
+            provider: ProviderCode::Codex,
+            effort_level: Some(EffortLevel::Default),
+            skills: Some(CreateThreadSkillsInput {
+                guidance: String::new(),
+                tools: Vec::new(),
+                deno_modules: vec![CreateThreadDenoModuleInput {
+                    name: "sprite-tools".into(),
+                    description: "Sprite helpers".into(),
+                    usage: "import { preview } from \"sprite-tools\";".into(),
+                }],
+            }),
+            workspace: Some(CreateThreadWorkspaceInput {
+                path: workspace.to_path_buf(),
+            }),
+        };
+        let thread_a = runtime
+            .create_sdk_thread(input(&workspace), "https://app.example.test", Some("0.3.3"))
+            .unwrap()
+            .thread_id;
+        let thread_b = runtime
+            .create_sdk_thread(input(&workspace), "https://app.example.test", Some("0.3.3"))
+            .unwrap()
+            .thread_id;
+        assert_ne!(thread_a, thread_b);
+
+        for (thread_id, source) in [
+            (&thread_a, "export const preview = () => 'A';"),
+            (&thread_b, "export const preview = () => 'B';"),
+        ] {
+            runtime.deno_modules.get_mut(thread_id).unwrap()[0].state =
+                DenoModuleSetupState::Pending;
+            let envelope = serde_json::json!({
+                "version": 1,
+                "format": "esm",
+                "runtimeSource": source,
+                "typesSource": "export declare const preview: () => string;",
+            });
+            let bytes = serde_json::to_vec(&envelope).unwrap();
+            let ticket = runtime
+                .create_deno_module_upload(CreateDenoModuleUploadInput {
+                    thread_id: thread_id.clone(),
+                    module_name: "sprite-tools".into(),
+                    expected_size_bytes: bytes.len() as u64,
+                })
+                .unwrap();
+            runtime
+                .deno_module_upload_tickets
+                .get_mut(&ticket.upload_id)
+                .unwrap()
+                .state = DenoModuleUploadState::Uploading;
+            let temporary_path =
+                workspace_tmp_root(&workspace).join(format!("{thread_id}-envelope.json"));
+            fs::create_dir_all(temporary_path.parent().unwrap()).unwrap();
+            fs::write(&temporary_path, bytes).unwrap();
+            runtime
+                .complete_deno_module_upload(&ticket.upload_id, &temporary_path)
+                .unwrap();
+        }
+
+        let package_a = workspace_deno_modules_root(&workspace, &thread_a).join("sprite-tools");
+        let package_b = workspace_deno_modules_root(&workspace, &thread_b).join("sprite-tools");
+        assert_eq!(
+            fs::read_to_string(package_a.join("index.mjs")).unwrap(),
+            "export const preview = () => 'A';"
+        );
+        assert_eq!(
+            fs::read_to_string(package_b.join("index.mjs")).unwrap(),
+            "export const preview = () => 'B';"
+        );
+        assert_ne!(
+            workspace_deno_import_map_path(&workspace, &thread_a),
+            workspace_deno_import_map_path(&workspace, &thread_b)
+        );
+        assert!(workspace_deno_import_map_path(&workspace, &thread_a).is_file());
+        assert!(workspace_deno_import_map_path(&workspace, &thread_b).is_file());
+    }
+
+    fn custom_workspace_runtime(temp: &tempfile::TempDir) -> CoreRuntime {
+        CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
+            settings_file_path: Some(temp.path().join("settings.json")),
+            asset_upload_port: Some(43124),
+            ..CoreRuntime::default()
+        }
+    }
+
+    fn sprite_tools_thread_input(workspace: &Path) -> CreateThreadInput {
+        CreateThreadInput {
+            provider: ProviderCode::Codex,
+            effort_level: Some(EffortLevel::Default),
+            skills: Some(CreateThreadSkillsInput {
+                guidance: String::new(),
+                tools: Vec::new(),
+                deno_modules: vec![CreateThreadDenoModuleInput {
+                    name: "sprite-tools".into(),
+                    description: "Sprite helpers".into(),
+                    usage: "import { preview } from \"sprite-tools\";".into(),
+                }],
+            }),
+            workspace: Some(CreateThreadWorkspaceInput {
+                path: workspace.to_path_buf(),
+            }),
+        }
+    }
+
+    fn materialize_sprite_tools(
+        runtime: &mut CoreRuntime,
+        workspace: &Path,
+        thread_id: &str,
+        runtime_source: &str,
+    ) {
+        let envelope = serde_json::json!({
+            "version": 1,
+            "format": "esm",
+            "runtimeSource": runtime_source,
+            "typesSource": "export declare const preview: () => string;",
+        });
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let ticket = runtime
+            .create_deno_module_upload(CreateDenoModuleUploadInput {
+                thread_id: thread_id.to_string(),
+                module_name: "sprite-tools".into(),
+                expected_size_bytes: bytes.len() as u64,
+            })
+            .unwrap();
+        runtime
+            .deno_module_upload_tickets
+            .get_mut(&ticket.upload_id)
+            .unwrap()
+            .state = DenoModuleUploadState::Uploading;
+        let temporary_path =
+            workspace_tmp_root(workspace).join(format!("{thread_id}-envelope.json"));
+        fs::create_dir_all(temporary_path.parent().unwrap()).unwrap();
+        fs::write(&temporary_path, bytes).unwrap();
+        runtime
+            .complete_deno_module_upload(&ticket.upload_id, &temporary_path)
+            .unwrap();
+    }
+
+    #[test]
+    fn custom_workspace_without_deno_thread_root_keeps_the_first_short_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("custom-workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("t000001"), "user file, not a Deno root").unwrap();
+        let mut runtime = custom_workspace_runtime(&temp);
+        let thread_id = runtime
+            .create_sdk_thread(
+                sprite_tools_thread_input(&workspace),
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
+            .unwrap()
+            .thread_id;
+        assert_eq!(thread_id, "t000001");
+        assert!(!workspace_deno_thread_root_occupied(&workspace, "t000001"));
+    }
+
+    #[test]
+    fn restarted_core_skips_stale_custom_workspace_deno_thread_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("custom-workspace");
+        let stale_source = "export const preview = () => 'stale-process';";
+        let first_thread_id = {
+            let mut runtime = custom_workspace_runtime(&temp);
+            let thread_id = runtime
+                .create_sdk_thread(
+                    sprite_tools_thread_input(&workspace),
+                    "https://app.example.test",
+                    Some("0.3.3"),
+                )
+                .unwrap()
+                .thread_id;
+            assert_eq!(thread_id, "t000001");
+            materialize_sprite_tools(&mut runtime, &workspace, &thread_id, stale_source);
+            thread_id
+        };
+
+        let stale_package =
+            workspace_deno_modules_root(&workspace, &first_thread_id).join("sprite-tools");
+        let stale_runtime = fs::read_to_string(stale_package.join("index.mjs")).unwrap();
+        let stale_types = fs::read_to_string(stale_package.join("index.d.ts")).unwrap();
+        let stale_import_map =
+            fs::read(workspace_deno_import_map_path(&workspace, &first_thread_id)).unwrap();
+        assert_eq!(stale_runtime, stale_source);
+        assert!(workspace_deno_thread_root_occupied(
+            &workspace,
+            &first_thread_id
+        ));
+
+        let mut restarted = custom_workspace_runtime(&temp);
+        let second_thread_id = restarted
+            .create_sdk_thread(
+                sprite_tools_thread_input(&workspace),
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
+            .unwrap()
+            .thread_id;
+        assert_ne!(second_thread_id, first_thread_id);
+        assert_eq!(second_thread_id, "t000002");
+
+        materialize_sprite_tools(
+            &mut restarted,
+            &workspace,
+            &second_thread_id,
+            "export const preview = () => 'fresh-process';",
+        );
+
+        assert_eq!(
+            fs::read_to_string(stale_package.join("index.mjs")).unwrap(),
+            stale_runtime
+        );
+        assert_eq!(
+            fs::read_to_string(stale_package.join("index.d.ts")).unwrap(),
+            stale_types
+        );
+        assert_eq!(
+            fs::read(workspace_deno_import_map_path(&workspace, &first_thread_id)).unwrap(),
+            stale_import_map
+        );
+        assert!(workspace_deno_thread_root(&workspace, &first_thread_id).is_dir());
+        assert_eq!(
+            fs::read_to_string(
+                workspace_deno_modules_root(&workspace, &second_thread_id)
+                    .join("sprite-tools")
+                    .join("index.mjs")
+            )
+            .unwrap(),
+            "export const preview = () => 'fresh-process';"
+        );
+    }
+
+    #[test]
+    fn deno_module_setup_blocks_admission_until_every_module_is_ready() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut runtime =
+            runtime_with_thread(&workspace, "thread-deno-pending", ThreadStatus::Running);
+        runtime.deno_modules.insert(
+            "thread-deno-pending".into(),
+            vec![DenoModuleState {
+                name: "pending-module".into(),
+                description: "Pending".into(),
+                usage: "import \"pending-module\";".into(),
+                state: DenoModuleSetupState::Pending,
+            }],
+        );
+        fs::write(workspace.join("script.ts"), "console.log('ok')").unwrap();
+
+        let send_error = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: "thread-deno-pending".into(),
+                message: "hello".into(),
+                operation_id: Some("op-pending".into()),
+            })
+            .unwrap_err();
+        assert_eq!(send_error.code, error_codes::DENO_MODULE_SETUP_INCOMPLETE);
+        let prepare_error = runtime
+            .begin_prepare_thread_intent(PrepareThreadInput {
+                thread_id: "thread-deno-pending".into(),
+                operation_id: Some("op-prepare-pending".into()),
+            })
+            .unwrap_err();
+        assert_eq!(
+            prepare_error.code,
+            error_codes::DENO_MODULE_SETUP_INCOMPLETE
+        );
+        let deno_error = runtime
+            .prepare_deno_run_intent(DenoRunInput {
+                thread_id: "thread-deno-pending".into(),
+                entrypoint: "script.ts".into(),
+                args: Vec::new(),
+            })
+            .unwrap_err();
+        assert_eq!(deno_error.code, error_codes::DENO_MODULE_SETUP_INCOMPLETE);
+    }
+
+    #[test]
+    fn abort_session_setup_removes_managed_thread_and_preserves_custom_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed_root = temp.path().join("managed");
+        fs::create_dir_all(&managed_root).unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let mut managed_runtime = CoreRuntime {
+            settings_file_path: Some(settings_path),
+            workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
+            ..CoreRuntime::default()
+        };
+        let input = CreateThreadInput {
+            provider: ProviderCode::Codex,
+            effort_level: Some(EffortLevel::Default),
+            skills: Some(CreateThreadSkillsInput {
+                guidance: String::new(),
+                tools: Vec::new(),
+                deno_modules: vec![CreateThreadDenoModuleInput {
+                    name: "managed-module".into(),
+                    description: "Managed".into(),
+                    usage: "import \"managed-module\";".into(),
+                }],
+            }),
+            workspace: None,
+        };
+        let managed_thread = managed_runtime
+            .create_sdk_thread(input, "https://app.example.test", Some("0.3.3"))
+            .unwrap()
+            .thread_id;
+        let managed_workspace = managed_runtime
+            .thread_workspace_path(&managed_thread)
+            .unwrap();
+        managed_runtime
+            .abort_session_setup(AbortSessionSetupInput {
+                thread_id: managed_thread.clone(),
+            })
+            .unwrap();
+        assert!(!managed_workspace.exists());
+        assert!(managed_runtime
+            .thread_manager
+            .thread(&managed_thread)
+            .is_err());
+        assert!(!managed_runtime.deno_modules.contains_key(&managed_thread));
+        managed_runtime
+            .abort_session_setup(AbortSessionSetupInput {
+                thread_id: managed_thread,
+            })
+            .unwrap();
+
+        let custom_root = temp.path().join("custom");
+        let mut custom_runtime = CoreRuntime {
+            settings_file_path: Some(temp.path().join("custom-settings.json")),
+            workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
+            ..CoreRuntime::default()
+        };
+        let custom_thread = custom_runtime
+            .create_sdk_thread(
+                CreateThreadInput {
+                    provider: ProviderCode::Codex,
+                    effort_level: Some(EffortLevel::Default),
+                    skills: Some(CreateThreadSkillsInput {
+                        guidance: String::new(),
+                        tools: Vec::new(),
+                        deno_modules: vec![CreateThreadDenoModuleInput {
+                            name: "custom-module".into(),
+                            description: "Custom".into(),
+                            usage: "import \"custom-module\";".into(),
+                        }],
+                    }),
+                    workspace: Some(CreateThreadWorkspaceInput {
+                        path: custom_root.clone(),
+                    }),
+                },
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
+            .unwrap()
+            .thread_id;
+        let custom_sentinel = custom_root.join("keep-me.txt");
+        fs::write(&custom_sentinel, "application data").unwrap();
+        let custom_deno_root = workspace_deno_thread_root(&custom_root, &custom_thread);
+        fs::create_dir_all(custom_deno_root.join("modules")).unwrap();
+        custom_runtime
+            .abort_session_setup(AbortSessionSetupInput {
+                thread_id: custom_thread.clone(),
+            })
+            .unwrap();
+        assert!(custom_root.exists());
+        assert!(custom_sentinel.exists());
+        assert!(!custom_deno_root.exists());
+        assert!(custom_runtime
+            .thread_manager
+            .thread(&custom_thread)
+            .is_err());
     }
 
     #[cfg(unix)]

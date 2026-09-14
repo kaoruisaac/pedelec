@@ -55,6 +55,41 @@ Explicit provider 的 SDK 路徑不會為了解析 model args 讀取 Desktop set
 
 Effort 可和 `skills`、`workspace` 一起使用。SDK 不接受 provider model field，請在 Desktop Settings 設定 model。Ollama 選中的 profile 必須有 model；空 profile 回傳 `MODEL_REQUIRED`，Low/High 不會 fallback。
 
+## Deno Modules
+
+先在 Vite 設定 plugin，再在 `skills.denoModules` 宣告 prepared modules：
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { pedelecVitePlugin } from "@kaoruisaac/pedelec/vite";
+
+export default defineConfig({
+  plugins: [pedelecVitePlugin()],
+});
+```
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const spriteTools = defineDenoModule({
+  name: "sprite-tools",
+  description: "Sprite authoring and preview utilities.",
+  entry: "./agent/sprite-tools.ts",
+  usage: `import { previewActorSource } from "sprite-tools";`,
+});
+
+const session = await pedelec.createSession({
+  skills: {
+    guidance: "Use sprite-tools for sprite authoring tasks.",
+    tools: [],
+    denoModules: [spriteTools],
+  },
+});
+```
+
+`entry` 只在 Vite build/dev 階段解析，不會送到 Desktop。Plugin 會 bundle local/package dependencies 並產生 public declarations。Agent 會在 `pedelec-deno` script 內 import `sprite-tools`；需要精確 API 時，Host Context 會指向 `index.d.ts`。Module code 共用受限制的 runtime，執行時不能 fetch package 或 network。Deno Modules 和 `skills.tools` 的 browser/App Tools 不同，後者走 `pedelec-cli` RPC commands。只要 Core 仍知道 thread，session end/resume 會保留同一 immutable snapshot；要使用重建 artifact 請建立新 session。
+
 ## Metadata 與 resume
 
 新 session 與 event context 會提供 normalized `effortLevel`。新建立的 `resumeSession(sessionId)` handle 可能無法恢復 provider 或 effort metadata，但 Core 仍使用已儲存的 command snapshot。

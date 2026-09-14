@@ -60,7 +60,7 @@ const skills = {
 };
 ```
 
-This phase is build-time authoring only. `defineDenoModule()` preserves the static description; `pedelecVitePlugin()` resolves the `entry`, bundles a self-contained ESM runtime, and rolls up a standalone public declaration artifact during `vite build` and `vite dev`. Session transport, Core materialization, Deno import mapping, and execution are not implemented yet. Passing `denoModules` into `createSession()` does not load or run the module.
+`defineDenoModule()` preserves the authoring description while `pedelecVitePlugin()` resolves the `entry`, bundles a self-contained ESM runtime, and rolls up a standalone public declaration artifact during `vite build` and `vite dev`. `createSession()` transfers each prepared artifact and Core materializes an immutable, thread-scoped package plus import map before the session is returned.
 
 Root SDK consumers that never import `@kaoruisaac/pedelec/vite` do not need Vite. The Vite peer is optional. Applications that use the plugin must install a supported Vite 8 release:
 
@@ -83,6 +83,12 @@ The `entry` must be a static string. Relative entries resolve from the source fi
 The plugin attaches a private, non-enumerable runtime/types artifact on the transformed module object and removes the original authoring `entry` path. It does not write into the application's Pedelec workspace and does not mutate an already-created session.
 
 Keep `usage` concise: it is the common-case agent hint, while the generated declaration bundle is the authoritative surface when an enum or option shape needs inspection.
+
+The Agent imports the logical `name` from a JavaScript/TypeScript script run with `pedelec-deno`. It does not execute the module by its private filesystem path. Host Context lists the name, description, usage example, and a workspace-relative `index.d.ts` pointer for exact API discovery. The generated `index.mjs` is an implementation fallback, not the normal API reference.
+
+`entry` supports local relative files, Vite aliases, and installed bare/package `exports` specifiers. It is build-time only; Desktop does not resolve it and runtime npm, JSR, and network fetching are unavailable. Imported modules run with the same restricted Pedelec Deno permissions as the Agent script.
+
+Ending and resuming a session keeps the same module snapshot while Core still knows the thread. `pedelec.resumeSession(sessionId)` reattaches to that snapshot; create a new session to use a rebuilt artifact. `skills.tools` remains a separate App Tool capability: its calls use `pedelec-cli --thread-id ... tool-spec` and `tool-call`, while Deno Modules stay inside the `pedelec-deno` script.
 
 ## `ToolDefinition`
 
@@ -144,7 +150,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` must be a string. `tools` must be an array. `denoModules` is the intended authoring list for Vite-prepared Deno modules; this phase does not transport or execute them.
+`guidance` must be a string and `tools` must be an array. `denoModules` is optional; each module requires `name`, `description`, `entry`, and `usage`. It is populated with Vite-prepared definitions and is transported automatically during `createSession()`.
 
 ## `ToolNameOf`
 
@@ -184,10 +190,15 @@ This is the tool shape sent to Core. It deliberately excludes `handler`.
 type SerializableSkillsManifest = {
   guidance: string;
   tools: SerializableToolManifest[];
+  denoModules?: Array<{
+    name: string;
+    description: string;
+    usage: string;
+  }>;
 };
 ```
 
-This is the normalized skills payload sent through the bridge.
+This is the normalized skills metadata sent through the bridge. Prepared runtime and declaration sources are transferred through the internal session setup path; `entry` is not sent to Core.
 
 ## Inline handler normalization
 

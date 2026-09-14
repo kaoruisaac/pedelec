@@ -1,13 +1,13 @@
 pub use pedelec_core::DenoRuntimeDispatcher;
 use pedelec_core::{
-    error_codes, inspect_workspace_folder, wait_for_provider_readiness, CreateAssetDownloadInput,
-    CreateAssetUploadInput, CreateThreadInput, DenoExecutionIntent, DenoRunInput, DenoRunOutput,
-    EndThreadInput, ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation,
-    PrepareThreadInput, PrepareThreadOutput, ProviderCode, ProviderProtocolTraffic,
-    ProviderRuntimeDiagnostic, ResumeThreadInput, SendTextInput, SharedCoreRuntime,
-    SubmitToolResultInput, SubscribeThreadInput, ThreadEvent, ThreadSubscription, ToolCallInput,
-    ToolInvocationOutcome, ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput,
-    UpdateSettingsInput,
+    error_codes, inspect_workspace_folder, wait_for_provider_readiness, AbortSessionSetupInput,
+    CreateAssetDownloadInput, CreateAssetUploadInput, CreateDenoModuleUploadInput,
+    CreateThreadInput, DenoExecutionIntent, DenoRunInput, DenoRunOutput, EndThreadInput,
+    ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation, PrepareThreadInput,
+    PrepareThreadOutput, ProviderCode, ProviderProtocolTraffic, ProviderRuntimeDiagnostic,
+    ResumeThreadInput, SendTextInput, SharedCoreRuntime, SubmitToolResultInput,
+    SubscribeThreadInput, ThreadEvent, ThreadSubscription, ToolCallInput, ToolInvocationOutcome,
+    ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput, UpdateSettingsInput,
 };
 use pedelec_runtime::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
@@ -1915,6 +1915,17 @@ fn handle_core_ipc_request_with_services(
             },
             Err(err) => error_response(&request.request_id, err),
         },
+        "create_deno_module_upload" => {
+            match decode_payload::<CreateDenoModuleUploadInput>(&request) {
+                Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
+                    .and_then(|_| runtime.lock().unwrap().create_deno_module_upload(input))
+                {
+                    Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                    Err(err) => error_response(&request.request_id, err),
+                },
+                Err(err) => error_response(&request.request_id, err),
+            }
+        }
         "create_asset_download" => match decode_payload::<CreateAssetDownloadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| runtime.lock().unwrap().create_asset_download(input))
@@ -1943,6 +1954,15 @@ fn handle_core_ipc_request_with_services(
                         input,
                     )
                 }) {
+                Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
+                Err(err) => error_response(&request.request_id, err),
+            },
+            Err(err) => error_response(&request.request_id, err),
+        },
+        "abort_session_setup" => match decode_payload::<AbortSessionSetupInput>(&request) {
+            Ok(input) => match authorize_abort_session_setup(&runtime, &request, &input.thread_id)
+                .and_then(|_| runtime.lock().unwrap().abort_session_setup(input))
+            {
                 Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
                 Err(err) => error_response(&request.request_id, err),
             },
@@ -2139,6 +2159,17 @@ fn authorize_thread_request(
         .lock()
         .unwrap()
         .authorize_thread_access(thread_id, request.caller_origin.as_deref())
+}
+
+fn authorize_abort_session_setup(
+    runtime: &SharedCoreRuntime,
+    request: &CoreIpcRequest,
+    thread_id: &str,
+) -> Result<(), PedelecError> {
+    match authorize_thread_request(runtime, request, thread_id) {
+        Err(error) if error.code == error_codes::THREAD_NOT_FOUND => Ok(()),
+        result => result,
+    }
 }
 
 fn handle_tool_call_request(
@@ -3993,6 +4024,112 @@ mod deno_ipc_tests {
         let error = response.error.unwrap();
         assert_eq!(error.code, error_codes::DENO_EXECUTION_TIMEOUT);
         assert_eq!(error.details.unwrap()["threadId"], "thread-deno-error");
+    }
+
+    #[test]
+    fn deno_module_setup_routes_authorize_origin_and_abort_transient_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime {
+            asset_upload_port: Some(43123),
+            ..CoreRuntime::default()
+        }));
+        let now = chrono::Utc::now();
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            ThreadState {
+                thread_id: "thread-module-ipc".into(),
+                provider: ProviderCode::Codex,
+                effort_level: EffortLevel::Default,
+                effort_args: Vec::new(),
+                workspace_path: workspace,
+                skills: Vec::new(),
+                status: ThreadStatus::Idle,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: Some("https://app.example.test".into()),
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+        runtime.lock().unwrap().deno_modules.insert(
+            "thread-module-ipc".into(),
+            vec![pedelec_core::DenoModuleState {
+                name: "sprite-tools".into(),
+                description: "Sprite helpers".into(),
+                usage: "import \"sprite-tools\";".into(),
+                state: pedelec_core::DenoModuleSetupState::Pending,
+            }],
+        );
+
+        let request = |request_id: &str, request_type: &str, origin: &str, payload: Value| {
+            handle_core_ipc_request(
+                CoreIpcRequest {
+                    request_id: request_id.into(),
+                    r#type: request_type.into(),
+                    caller_origin: Some(origin.into()),
+                    caller_sdk_version: Some("0.3.3".into()),
+                    payload: Some(payload),
+                },
+                Arc::clone(&runtime),
+            )
+        };
+
+        let ticket = request(
+            "module-ticket",
+            "create_deno_module_upload",
+            "https://app.example.test",
+            serde_json::json!({
+                "threadId": "thread-module-ipc",
+                "moduleName": "sprite-tools",
+                "expectedSizeBytes": 42,
+            }),
+        );
+        assert!(ticket.ok, "ticket request failed: {:?}", ticket.error);
+        assert_eq!(
+            ticket.result.unwrap()["uploadId"].as_str().unwrap().len(),
+            12
+        );
+
+        let denied = request(
+            "module-ticket-denied",
+            "create_deno_module_upload",
+            "https://other.example.test",
+            serde_json::json!({
+                "threadId": "thread-module-ipc",
+                "moduleName": "sprite-tools",
+                "expectedSizeBytes": 42,
+            }),
+        );
+        assert_eq!(
+            denied.error.unwrap().code,
+            error_codes::THREAD_ACCESS_DENIED
+        );
+
+        let aborted = request(
+            "module-abort",
+            "abort_session_setup",
+            "https://app.example.test",
+            serde_json::json!({ "threadId": "thread-module-ipc" }),
+        );
+        assert!(aborted.ok, "abort request failed: {:?}", aborted.error);
+        assert!(runtime
+            .lock()
+            .unwrap()
+            .thread_manager
+            .thread("thread-module-ipc")
+            .is_err());
+        assert!(
+            request(
+                "module-abort-again",
+                "abort_session_setup",
+                "https://app.example.test",
+                serde_json::json!({ "threadId": "thread-module-ipc" }),
+            )
+            .ok
+        );
     }
 }
 

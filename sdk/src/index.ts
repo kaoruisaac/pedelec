@@ -1,5 +1,10 @@
 import { PEDELEC_EXTENSION_ID } from "./extension-id.js";
 
+import {
+  getPreparedDenoModuleArtifact,
+  isValidDenoModuleName,
+} from "./deno-module-internal.js";
+
 import { SDK_VERSION } from "./version.generated.js";
 
 const SDK_EXTERNAL_PORT_NAME = "pedelec-sdk-external";
@@ -160,9 +165,16 @@ export type SerializableToolManifest = {
   timeoutMs?: number;
 };
 
+type SerializableDenoModuleManifest = {
+  name: string;
+  description: string;
+  usage: string;
+};
+
 export type SerializableSkillsManifest = {
   guidance: string;
   tools: SerializableToolManifest[];
+  denoModules?: SerializableDenoModuleManifest[];
 };
 
 export type CreateSessionWorkspaceInput = {
@@ -504,11 +516,18 @@ export function defineDenoModule<const TName extends string>(
 type NormalizedSkillsInput = {
   manifest?: SerializableSkillsManifest;
   handlers: Map<string, ToolSpecificHandler>;
+  denoModules: PreparedDenoModuleForSession[];
+};
+
+type PreparedDenoModuleForSession = {
+  name: string;
+  runtimeSource: string;
+  typesSource: string;
 };
 
 function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
   const handlers = new Map<string, ToolSpecificHandler>();
-  if (value === undefined) return { handlers };
+  if (value === undefined) return { handlers, denoModules: [] };
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw makeError("INVALID_INPUT", "skills must be an object");
   }
@@ -521,7 +540,12 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
     throw makeError("INVALID_INPUT", "skills.tools must be an array");
   }
 
+  if (skills.denoModules !== undefined && !Array.isArray(skills.denoModules)) {
+    throw makeError("INVALID_INPUT", "skills.denoModules must be an array");
+  }
+
   const seen = new Set<string>();
+  const seenDenoModuleNames = new Set<string>();
   const tools = skills.tools.map((tool, index) => {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
       throw makeError("INVALID_INPUT", "skills.tools entries must be objects", { index });
@@ -566,12 +590,73 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
     };
   });
 
+  const denoModules = (skills.denoModules ?? []).map((module, index) => {
+    if (!module || typeof module !== "object" || Array.isArray(module)) {
+      throw makeError("INVALID_INPUT", "skills.denoModules entries must be objects", { index });
+    }
+
+    const rawModule = module as Partial<DenoModuleDefinition>;
+    if (!isValidDenoModuleName(rawModule.name)) {
+      throw makeError("INVALID_INPUT", "Deno Module name is invalid", {
+        index,
+        moduleName: rawModule.name,
+      });
+    }
+    if (seenDenoModuleNames.has(rawModule.name)) {
+      throw makeError("INVALID_INPUT", "duplicate Deno Module name", {
+        moduleName: rawModule.name,
+      });
+    }
+    seenDenoModuleNames.add(rawModule.name);
+
+    if (typeof rawModule.description !== "string" || rawModule.description.trim().length === 0) {
+      throw makeError("INVALID_INPUT", "Deno Module description must be a non-empty string", {
+        moduleName: rawModule.name,
+      });
+    }
+    if (typeof rawModule.usage !== "string" || rawModule.usage.trim().length === 0) {
+      throw makeError("INVALID_INPUT", "Deno Module usage must be a non-empty string", {
+        moduleName: rawModule.name,
+      });
+    }
+    if (rawModule.entry !== undefined &&
+        (typeof rawModule.entry !== "string" || rawModule.entry.trim().length === 0)) {
+      throw makeError("INVALID_INPUT", "Deno Module entry must be a non-empty string", {
+        moduleName: rawModule.name,
+      });
+    }
+
+    const artifact = getPreparedDenoModuleArtifact(module);
+    if (!artifact) {
+      throw makeError(
+        "INVALID_INPUT",
+        `Deno module "${rawModule.name}" was not prepared. Configure pedelecVitePlugin() in the Vite project.`,
+        { moduleName: rawModule.name },
+      );
+    }
+
+    return {
+      name: rawModule.name,
+      description: rawModule.description,
+      usage: rawModule.usage,
+      artifact,
+    };
+  });
+
   return {
     manifest: {
       guidance: skills.guidance,
       tools,
+      ...(denoModules.length > 0
+        ? { denoModules: denoModules.map(({ name, description, usage }) => ({ name, description, usage })) }
+        : {}),
     },
     handlers,
+    denoModules: denoModules.map(({ name, artifact }) => ({
+      name,
+      runtimeSource: artifact.runtimeSource,
+      typesSource: artifact.typesSource,
+    })),
   };
 }
 
@@ -643,6 +728,21 @@ export class Pedelec {
       throw makeError("SDK_PROTOCOL_ERROR", "create_session response did not include sessionId");
     }
 
+    try {
+      for (const module of resolvedInput.denoModules) {
+        await this.uploadDenoModuleArtifact(result.sessionId, module);
+      }
+      if (resolvedInput.denoModules.length > 0) {
+        await this.completeSessionSetup(result.sessionId);
+      }
+    } catch (error) {
+      // The thread exists at this point but is not exposed through the SDK
+      // session registry yet.  Keep the setup failure as the caller-visible
+      // error even if the best-effort cleanup transport also fails.
+      await this.abortSessionSetup(result.sessionId);
+      throw normalizeError(error, "DENO_MODULE_UPLOAD_FAILED", "Deno Module setup failed");
+    }
+
     return this.registerSession(
       result.sessionId,
       resolvedInput.provider,
@@ -650,6 +750,90 @@ export class Pedelec {
       resolvedInput.inlineToolHandlers,
       resolvedInput.autoEndOnDisconnect,
     );
+  }
+
+  private async uploadDenoModuleArtifact(
+    sessionId: string,
+    module: PreparedDenoModuleForSession,
+  ): Promise<void> {
+    const envelope = JSON.stringify({
+      version: 1,
+      format: "esm",
+      runtimeSource: module.runtimeSource,
+      typesSource: module.typesSource,
+    });
+    const body = new Blob([envelope], { type: "application/json" });
+    const expectedSizeBytes = body.size;
+    if (expectedSizeBytes <= 0 || expectedSizeBytes > MAX_ASSET_UPLOAD_BYTES) {
+      throw makeError(
+        "DENO_MODULE_ARTIFACT_TOO_LARGE",
+        `Deno Module "${module.name}" artifact exceeds the 100 MiB limit`,
+        { moduleName: module.name, expectedSizeBytes, maxSizeBytes: MAX_ASSET_UPLOAD_BYTES },
+      );
+    }
+
+    const ticket = await this.request<unknown>("create_deno_module_upload", {
+      sessionId,
+      moduleName: module.name,
+      expectedSizeBytes,
+    });
+    if (!isPlainObject(ticket) || typeof ticket.uploadUrl !== "string" || ticket.uploadUrl.length === 0 ||
+        typeof ticket.token !== "string" || ticket.token.length === 0) {
+      throw makeError("SDK_PROTOCOL_ERROR", "Deno Module upload ticket was invalid", {
+        moduleName: module.name,
+      });
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(ticket.uploadUrl, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${ticket.token}`,
+          "Content-Type": "application/json",
+        },
+        body,
+        credentials: "omit",
+      });
+    } catch (error) {
+      throw normalizeError(error, "DENO_MODULE_UPLOAD_FAILED", `Deno Module "${module.name}" upload failed`);
+    }
+
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      // The status below remains authoritative for a successful response;
+      // failed responses without JSON receive the private fallback error.
+    }
+    if (!response.ok) {
+      const errorValue = isPlainObject(payload) ? payload.error : undefined;
+      throw normalizeError(
+        errorValue,
+        "DENO_MODULE_UPLOAD_FAILED",
+        `Deno Module "${module.name}" upload failed`,
+      );
+    }
+    if (!isPlainObject(payload) || payload.ready !== true) {
+      throw makeError(
+        "DENO_MODULE_SETUP_FAILED",
+        `Deno Module "${module.name}" was not materialized`,
+        { moduleName: module.name },
+      );
+    }
+  }
+
+  private async abortSessionSetup(sessionId: string): Promise<void> {
+    try {
+      await this.request("abort_session_setup", { sessionId });
+    } catch {
+      // Rollback is deliberately best effort.  The original setup/upload
+      // error is the only error exposed by createSession().
+    }
+  }
+
+  private async completeSessionSetup(sessionId: string): Promise<void> {
+    await this.request("complete_session_setup", { sessionId });
   }
 
   async workspaceFolderPicker(): Promise<WorkspaceFolderPickerResult | null> {
@@ -864,6 +1048,7 @@ export class Pedelec {
         skills?: SerializableSkillsManifest;
         workspace?: CreateSessionWorkspaceInput;
         inlineToolHandlers: Map<string, ToolSpecificHandler>;
+        denoModules: PreparedDenoModuleForSession[];
         autoEndOnDisconnect: boolean;
       }
     | Promise<{
@@ -872,6 +1057,7 @@ export class Pedelec {
     skills?: SerializableSkillsManifest;
     workspace?: CreateSessionWorkspaceInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
+    denoModules: PreparedDenoModuleForSession[];
     autoEndOnDisconnect: boolean;
   }> {
     const raw = (input ?? {}) as {
@@ -905,6 +1091,7 @@ export class Pedelec {
       skills: normalizedSkills.manifest,
       workspace,
       inlineToolHandlers: normalizedSkills.handlers,
+      denoModules: normalizedSkills.denoModules,
       autoEndOnDisconnect,
     };
   }
@@ -975,6 +1162,7 @@ export class Pedelec {
     skills?: SerializableSkillsManifest;
     workspace?: CreateSessionWorkspaceInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
+    denoModules: PreparedDenoModuleForSession[];
     autoEndOnDisconnect: boolean;
   }> {
     const settings = await this.getSettings();
@@ -991,6 +1179,7 @@ export class Pedelec {
       skills: normalizedSkills.manifest,
       workspace,
       inlineToolHandlers: normalizedSkills.handlers,
+      denoModules: normalizedSkills.denoModules,
       autoEndOnDisconnect,
     };
   }
@@ -2176,6 +2365,10 @@ function isDeterministicResumeError(error: PedelecError): boolean {
     error.code === "THREAD_NOT_FOUND" ||
     error.code === "WORKSPACE_OPEN_FAILED" ||
     error.code === "PROVIDER_COMMAND_FAILED" ||
+    error.code === "DENO_MODULE_SETUP_INCOMPLETE" ||
+    error.code === "DENO_MODULE_SETUP_FAILED" ||
+    error.code === "DENO_MODULE_MATERIALIZATION_FAILED" ||
+    error.code === "DENO_IMPORT_MAP_INVALID" ||
     error.code === "INVALID_INPUT";
 }
 

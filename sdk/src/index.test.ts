@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PEDELEC_EXTENSION_ID } from "./extension-id";
-import { Pedelec, defineTool, type PedelecAvailability, type ToolCallContext } from "./index";
+import {
+  Pedelec,
+  defineDenoModule,
+  defineTool,
+  type PedelecAvailability,
+  type ToolCallContext,
+} from "./index";
 import { SDK_VERSION } from "./version.generated";
 
 class MockDocument {
@@ -226,6 +232,29 @@ async function createProviderSession(
   return { session: await create, createRequest };
 }
 
+function preparedDenoModule(name = "sprite-tools"): any {
+  const module = defineDenoModule({
+    name,
+    description: "Sprite authoring utilities.",
+    entry: "./agent/sprite-tools.ts",
+    usage: `import { preview } from "${name}";`,
+  }) as any;
+  Object.defineProperty(module, "__pedelecArtifact", {
+    value: Object.freeze({
+      format: "esm",
+      runtimeSource: "export const preview = () => 'ok';",
+      typesSource: "export declare const preview: () => string;",
+      contentHash: "ignored-by-session-transport",
+    }),
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  // This is the shape emitted by pedelecVitePlugin() in the browser bundle.
+  module.entry = undefined;
+  return module;
+}
+
 async function startTurn(session: { sendText: (text: string) => Promise<void> }, pageWindow: MockWindow) {
   const send = session.sendText("hello");
   const request = pageWindow.lastSent();
@@ -437,6 +466,148 @@ describe("Pedelec SDK", () => {
     expect(session.sessionId).toBe("thread_1");
     expect(session.provider).toBe("codex");
     expect(session.effortLevel).toBe("high");
+  });
+
+  it("keeps prepared Deno sources private and uploads them before returning a session", async () => {
+    const previousFetch = globalThis.fetch;
+    const fetchCalls: Array<{ url: string; body: string; size: number }> = [];
+    globalThis.fetch = async (input, init) => {
+      const body = init?.body;
+      if (!(body instanceof Blob)) throw new Error("module upload body was not a Blob");
+      fetchCalls.push({
+        url: String(input),
+        body: await body.text(),
+        size: body.size,
+      });
+      return new Response(JSON.stringify({ moduleName: "sprite-tools", ready: true }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    try {
+      const pedelec = new Pedelec();
+      const module = preparedDenoModule();
+      const promise = pedelec.createSession({
+        provider: "codex",
+        skills: {
+          guidance: "Use sprite-tools.",
+          tools: [],
+          denoModules: [module],
+        },
+      });
+      const createRequest = pageWindow.lastSent();
+      expect(createRequest.input.skills).toEqual({
+        guidance: "Use sprite-tools.",
+        tools: [],
+        denoModules: [{
+          name: "sprite-tools",
+          description: "Sprite authoring utilities.",
+          usage: 'import { preview } from "sprite-tools";',
+        }],
+      });
+      expect(JSON.stringify(createRequest.input.skills)).not.toContain("sprite-tools.ts");
+      expect(JSON.stringify(createRequest.input.skills)).not.toContain("runtimeSource");
+      expect(JSON.stringify(createRequest.input.skills)).not.toContain("typesSource");
+
+      respondOk(pageWindow, createRequest, { sessionId: "thread_deno_sdk" });
+      await nextTick();
+      const uploadRequest = pageWindow.lastSent();
+      expect(uploadRequest).toMatchObject({
+        type: "create_deno_module_upload",
+        sessionId: "thread_deno_sdk",
+        moduleName: "sprite-tools",
+      });
+      respondOk(pageWindow, uploadRequest, {
+        uploadId: "dmp_test",
+        uploadUrl: "http://127.0.0.1:43123/deno-modules/dmp_test",
+        token: "test-token",
+        expiresAt: Date.now() + 60_000,
+      });
+      await nextTick();
+      const completeRequest = pageWindow.lastSent();
+      expect(completeRequest).toMatchObject({
+        type: "complete_session_setup",
+        sessionId: "thread_deno_sdk",
+      });
+      respondOk(pageWindow, completeRequest, {});
+
+      const session = await promise;
+      expect(session.sessionId).toBe("thread_deno_sdk");
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0].url).toBe("http://127.0.0.1:43123/deno-modules/dmp_test");
+      expect(fetchCalls[0].size).toBe(new Blob([fetchCalls[0].body]).size);
+      expect(JSON.parse(fetchCalls[0].body)).toEqual({
+        version: 1,
+        format: "esm",
+        runtimeSource: "export const preview = () => 'ok';",
+        typesSource: "export declare const preview: () => string;",
+      });
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  it("aborts setup on module upload failure without registering a session", async () => {
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      error: { code: "DENO_MODULE_ARTIFACT_INVALID", message: "bad artifact" },
+    }), {
+      status: 422,
+      headers: { "Content-Type": "application/json" },
+    });
+
+    try {
+      const pedelec = new Pedelec();
+      const promise = pedelec.createSession({
+        provider: "codex",
+        skills: { guidance: "Use module.", tools: [], denoModules: [preparedDenoModule()] },
+      });
+      const createRequest = pageWindow.lastSent();
+      respondOk(pageWindow, createRequest, { sessionId: "thread_deno_failed" });
+      await nextTick();
+      const uploadRequest = pageWindow.lastSent();
+      respondOk(pageWindow, uploadRequest, {
+        uploadId: "dmp_failed",
+        uploadUrl: "http://127.0.0.1:43123/deno-modules/dmp_failed",
+        token: "test-token",
+        expiresAt: Date.now() + 60_000,
+      });
+      await nextTick();
+      const abortRequest = pageWindow.lastSent();
+      expect(abortRequest).toMatchObject({
+        type: "abort_session_setup",
+        sessionId: "thread_deno_failed",
+      });
+      respondOk(pageWindow, abortRequest, {});
+
+      await expect(promise).rejects.toMatchObject({
+        code: "DENO_MODULE_ARTIFACT_INVALID",
+        message: "bad artifact",
+      });
+      expect((pedelec as any).sessions.size).toBe(0);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  it("rejects an unprepared Deno Module locally before create_session", async () => {
+    const pedelec = new Pedelec();
+    const module = defineDenoModule({
+      name: "unprepared-module",
+      description: "Missing build artifact.",
+      entry: "./agent/unprepared.ts",
+      usage: 'import "unprepared-module";',
+    });
+
+    await expect(pedelec.createSession({
+      provider: "codex",
+      skills: { guidance: "Use module.", tools: [], denoModules: [module] },
+    })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: 'Deno module "unprepared-module" was not prepared. Configure pedelecVitePlugin() in the Vite project.',
+    });
+    expect(requestMessages(pageWindow.port)).toEqual([]);
   });
 
   it("forwards an explicit workspace path with an explicit provider and effort level", async () => {

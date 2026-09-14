@@ -25,6 +25,10 @@ class MockPort {
   }
 
   postMessage(message) {
+    if (typeof this.postMessageError === "function") {
+      const error = this.postMessageError(message);
+      if (error) throw error;
+    }
     this.sent.push(message);
   }
 
@@ -710,6 +714,112 @@ test("reactivate_session subscribes before Core resume and dispatches idle befor
   assert.equal(sdk.sent.filter((message) => message.type === "session_snapshot").at(-1).snapshot.status, "idle");
   assert.equal(resume.threadId, "thread_reactivate_order");
   assert.equal(background.getSdkRouteCount(), 1);
+  assert.equal(background.getActiveThreadCount(), 1);
+});
+
+async function createSdkSessionWithDenoModules(background, sdkPort, nativePort, sessionId, autoEndOnDisconnect = true) {
+  const requestId = `create_${sessionId}`;
+  const minimumMessageCount = nativePort.sent.length + 1;
+  sdkPort.emit({
+    channelId: "channel_a",
+    requestId,
+    type: "create_session",
+    input: {
+      provider: "codex",
+      autoEndOnDisconnect,
+      skills: {
+        guidance: "",
+        tools: [],
+        denoModules: [{
+          name: "sprite-tools",
+          description: "Sprite helpers",
+          usage: 'import { preview } from "sprite-tools";',
+        }],
+      },
+    },
+  });
+  await respondToNative(background, nativePort, { threadId: sessionId }, minimumMessageCount);
+  await respondToNative(background, nativePort, {
+    snapshot: { threadId: sessionId, status: "idle", latestSeq: 0 },
+  }, minimumMessageCount + 1);
+  await waitFor(() => sdkPort.sent.some((message) => message.requestId === requestId));
+  return sdkPort.sent.find((message) => message.requestId === requestId);
+}
+
+test("complete_session_setup posts before leaving setup-pending so disconnect uses end_thread", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  await createSdkSessionWithDenoModules(background, sdk, native, "thread_setup_complete");
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "complete_setup",
+    type: "complete_session_setup",
+    sessionId: "thread_setup_complete",
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "complete_setup"));
+  assert.equal(sdk.sent.find((message) => message.requestId === "complete_setup").ok, true);
+
+  sdk.disconnect();
+  await waitFor(() => native.sent.some((message) => message.type === "end_thread"));
+  assert.equal(native.sent.some((message) => message.type === "abort_session_setup"), false);
+  await respondToNativeType(background, native, "end_thread", {});
+  await waitFor(() => background.getSdkRouteCount() === 0 && background.getActiveThreadCount() === 0);
+});
+
+test("complete_session_setup keeps setup-pending when posting the success response throws", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  await createSdkSessionWithDenoModules(background, sdk, native, "thread_setup_post_fail");
+  sdk.postMessageError = (message) => {
+    if (message.requestId === "complete_setup") {
+      return new Error("sdk port closed");
+    }
+    return null;
+  };
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "complete_setup",
+    type: "complete_session_setup",
+    sessionId: "thread_setup_post_fail",
+  });
+  await waitFor(() => native.sent.some((message) => message.type === "abort_session_setup"));
+  assert.equal(native.sent.some((message) => message.type === "end_thread"), false);
+  await respondToNativeType(background, native, "abort_session_setup", {});
+  await waitFor(() => background.getSdkRouteCount() === 0 && background.getActiveThreadCount() === 0);
+});
+
+test("completed sessions still honor autoEndOnDisconnect false after setup finishes", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  await createSdkSessionWithDenoModules(background, sdk, native, "thread_setup_keep", false);
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "complete_keep",
+    type: "complete_session_setup",
+    sessionId: "thread_setup_keep",
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "complete_keep"));
+
+  sdk.disconnect();
+  await flush();
+  assert.equal(native.sent.some((message) => message.type === "end_thread"), false);
+  assert.equal(native.sent.some((message) => message.type === "abort_session_setup"), false);
+  assert.equal(background.getSdkRouteCount(), 0);
   assert.equal(background.getActiveThreadCount(), 1);
 });
 

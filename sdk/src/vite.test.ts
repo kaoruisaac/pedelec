@@ -138,7 +138,8 @@ function standaloneDeclarationDiagnostics(source: string): string[] {
   const options: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.ESNext,
-    skipLibCheck: true,
+    // The artifact is itself a .d.ts file; skipLibCheck would skip its semantic check.
+    skipLibCheck: false,
     noEmit: true,
     noResolve: true,
     types: [],
@@ -447,6 +448,27 @@ describe("pedelecVitePlugin", () => {
     await withServer(directory, async (server) => {
       const artifact = extractArtifact(await transformFile(server, join(directory, "main.ts")));
       expect(artifact.runtimeSource.startsWith('// @ts-self-types="./index.d.ts"')).toBe(true);
+    });
+  });
+
+  it("semantically rejects a standalone declaration with an unresolved public type", () => {
+    const diagnostics = standaloneDeclarationDiagnostics(
+      "export declare function preview(value: MissingType): MissingType;\n",
+    );
+    expect(diagnostics.some((item) => /Cannot find name 'MissingType'/.test(item))).toBe(true);
+  });
+
+  it("rejects artifact preparation when the rolled-up declaration contains an unresolved public type", async () => {
+    const directory = await createFixture();
+    await writeFile(join(directory, "agent", "ambient.d.ts"), `type AmbientName = string;\n`);
+    await writeFile(
+      join(directory, "agent", "module.ts"),
+      `/// <reference path="./ambient.d.ts" />\nexport function preview(value: AmbientName): AmbientName { return value; }\n`,
+    );
+    await withServer(directory, async (server) => {
+      await expect(server.transformRequest(join(directory, "main.ts"))).rejects.toThrow(
+        /rolled-up declaration is not a valid standalone public declaration/,
+      );
     });
   });
 

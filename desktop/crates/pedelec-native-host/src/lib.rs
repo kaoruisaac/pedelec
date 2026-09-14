@@ -233,6 +233,11 @@ fn native_message_to_core_request(
         | "create_asset_upload"
         | "create_asset_download"
         | "list_assets" => Some(Value::Object(object)),
+        "create_deno_module_upload" => Some(Value::Object(select_fields(
+            &object,
+            &["threadId", "moduleName", "expectedSizeBytes"],
+        ))),
+        "abort_session_setup" => Some(Value::Object(select_fields(&object, &["threadId"]))),
         "list_providers" | "get_settings" => Some(Value::Object(object)),
         // The directory picker deliberately has no caller-controlled payload.
         "pick_workspace_folder" => Some(serde_json::json!({})),
@@ -269,6 +274,18 @@ fn take_string_field(object: &mut Map<String, Value>, field: &str) -> Option<Str
     object
         .remove(field)
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
+}
+
+fn select_fields(object: &Map<String, Value>, fields: &[&str]) -> Map<String, Value> {
+    fields
+        .iter()
+        .filter_map(|field| {
+            object
+                .get(*field)
+                .cloned()
+                .map(|value| ((*field).to_string(), value))
+        })
+        .collect()
 }
 
 fn subscription_thread_id(request: &CoreIpcRequest) -> Option<String> {
@@ -648,6 +665,50 @@ mod tests {
             request.payload,
             Some(json!({ "threadId": "thread_assets" }))
         );
+    }
+
+    #[test]
+    fn native_deno_module_setup_requests_keep_origin_but_strip_artifact_payload() {
+        let request = native_message_to_core_request(json!({
+            "type": "create_deno_module_upload",
+            "requestId": "req_deno_upload",
+            "callerOrigin": "https://app.example.test",
+            "callerSdkVersion": "0.3.3",
+            "threadId": "thread_deno",
+            "moduleName": "sprite-tools",
+            "expectedSizeBytes": 123,
+            "runtimeSource": "must-not-cross-ipc",
+            "typesSource": "must-not-cross-ipc",
+            "workspacePath": "C:\\must-not-cross-ipc",
+        }))
+        .unwrap();
+        assert_eq!(
+            request.caller_origin.as_deref(),
+            Some("https://app.example.test")
+        );
+        assert_eq!(request.caller_sdk_version.as_deref(), Some("0.3.3"));
+        assert_eq!(
+            request.payload.unwrap(),
+            json!({
+                "threadId": "thread_deno",
+                "moduleName": "sprite-tools",
+                "expectedSizeBytes": 123,
+            })
+        );
+
+        let abort = native_message_to_core_request(json!({
+            "type": "abort_session_setup",
+            "requestId": "req_abort_deno",
+            "callerOrigin": "https://app.example.test",
+            "threadId": "thread_deno",
+            "workspacePath": "C:\\must-not-cross-ipc",
+        }))
+        .unwrap();
+        assert_eq!(
+            abort.caller_origin.as_deref(),
+            Some("https://app.example.test")
+        );
+        assert_eq!(abort.payload.unwrap(), json!({ "threadId": "thread_deno" }));
     }
 
     #[test]

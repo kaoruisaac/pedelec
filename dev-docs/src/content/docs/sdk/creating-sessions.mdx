@@ -69,6 +69,41 @@ const session = await pedelec.createSession({
 
 The SDK does not accept a provider model field. Configure model selection in Desktop Settings.
 
+## Deno Modules
+
+Configure the Vite plugin once, then declare prepared modules in `skills.denoModules`:
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { pedelecVitePlugin } from "@kaoruisaac/pedelec/vite";
+
+export default defineConfig({
+  plugins: [pedelecVitePlugin()],
+});
+```
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const spriteTools = defineDenoModule({
+  name: "sprite-tools",
+  description: "Sprite authoring and preview utilities.",
+  entry: "./agent/sprite-tools.ts",
+  usage: `import { previewActorSource } from "sprite-tools";`,
+});
+
+const session = await pedelec.createSession({
+  skills: {
+    guidance: "Use sprite-tools for sprite authoring tasks.",
+    tools: [],
+    denoModules: [spriteTools],
+  },
+});
+```
+
+`entry` is resolved by Vite at build/dev time; it is not sent to Desktop. The plugin bundles local/package dependencies and generates public declarations. The Agent imports `sprite-tools` from a script run with `pedelec-deno`; Host Context points exact API questions to `index.d.ts`. Module code shares the restricted runtime and cannot fetch packages or network resources at execution time. Deno Modules are distinct from browser/App Tools in `skills.tools`, which use `pedelec-cli` RPC commands. Session end/resume keeps the same immutable snapshot while Core still knows the thread; create a new session to use a rebuilt artifact.
+
 ## Ollama
 
 The selected Ollama profile must contain a model. An empty selected profile returns `MODEL_REQUIRED`; low and high do not fall back to default.

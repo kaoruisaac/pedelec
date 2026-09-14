@@ -1459,8 +1459,10 @@ function createBackground(runtimeChrome, options = {}) {
     if (!ok) message.error = normalizeError(error, "SDK_TRANSPORT_ERROR", "SDK transport request failed");
     try {
       port.postMessage(message);
+      return true;
     } catch (_err) {
       disconnectSdkPort(port);
+      return false;
     }
   }
 
@@ -1838,11 +1840,28 @@ function createBackground(runtimeChrome, options = {}) {
 
   function shouldAutoEndSdkSession(sessionId) {
     const lifecycle = sdkLifecycleBySession.get(sessionId);
-    return lifecycle?.autoEndOnDisconnect === true && !sdkRoutesBySession.has(sessionId);
+    return (lifecycle?.setupPending === true || lifecycle?.autoEndOnDisconnect === true) &&
+      !sdkRoutesBySession.has(sessionId);
   }
 
   async function autoEndSdkSession(sessionId) {
     const lifecycle = sdkLifecycleBySession.get(sessionId);
+    if (lifecycle?.setupPending) {
+      try {
+        await withNativeOperation(async () => {
+          await sendSdkNativeRequest({ origin: lifecycle.origin }, "abort_session_setup", {
+            threadId: sessionId,
+          });
+        });
+      } catch (_) {
+        // The SDK setup path is already disconnected; the Core operation is
+        // best effort and must not be replaced by normal end-thread semantics.
+      } finally {
+        removeActiveThread(sessionId);
+        forgetSdkSession(sessionId);
+      }
+      return;
+    }
     try {
       await withNativeOperation(async () => {
         await sendSdkNativeRequest({ origin: lifecycle.origin }, "end_thread", { threadId: sessionId });
@@ -2076,11 +2095,12 @@ function createBackground(runtimeChrome, options = {}) {
           sdkLifecycleBySession.set(sessionId, {
             autoEndOnDisconnect: input.autoEndOnDisconnect !== false,
             origin: context.origin,
+            setupPending: Array.isArray(input.skills?.denoModules) && input.skills.denoModules.length > 0,
           });
           try {
             await subscribeThreadForContext(sessionId, context);
           } catch (err) {
-            await sendSdkNativeRequest(context, "end_thread", { threadId: sessionId }).catch(() => {});
+            await sendSdkNativeRequest(context, "abort_session_setup", { threadId: sessionId }).catch(() => {});
             removeSdkSession(port, channelId, sessionId);
             removeActiveThread(sessionId);
             forgetSdkSession(sessionId);
@@ -2226,6 +2246,10 @@ function createBackground(runtimeChrome, options = {}) {
               "WORKSPACE_OPEN_FAILED",
               "PROVIDER_COMMAND_FAILED",
               "INVALID_INPUT",
+              "DENO_MODULE_SETUP_INCOMPLETE",
+              "DENO_MODULE_SETUP_FAILED",
+              "DENO_MODULE_MATERIALIZATION_FAILED",
+              "DENO_IMPORT_MAP_INVALID",
             ]).has(normalized.code);
             if (deterministic) cleanupTemporaryState();
             throw err;
@@ -2258,6 +2282,48 @@ function createBackground(runtimeChrome, options = {}) {
           ...(message.targetPath === undefined ? {} : { targetPath: message.targetPath }),
         });
         postSdkResponse(port, channelId, requestId, true, result || {});
+        return;
+      }
+
+      if (message.type === "create_deno_module_upload") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        await ensureThreadSubscriptionHealthy(message.sessionId, context);
+        const result = await sendSdkNativeRequest(context, "create_deno_module_upload", {
+          threadId: message.sessionId,
+          moduleName: message.moduleName,
+          expectedSizeBytes: message.expectedSizeBytes,
+        });
+        postSdkResponse(port, channelId, requestId, true, result || {});
+        return;
+      }
+
+      if (message.type === "complete_session_setup") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        const sessionId = message.sessionId;
+        if (!sessionId || !hasSdkSessionRoute(port, channelId, sessionId)) {
+          throw {
+            code: "THREAD_ACCESS_DENIED",
+            message: "The session is not accessible to this SDK channel.",
+          };
+        }
+        await ensureThreadSubscriptionHealthy(sessionId, context);
+        const lifecycle = sdkLifecycleBySession.get(sessionId);
+        if (!lifecycle || lifecycle.origin !== context.origin) {
+          throw {
+            code: "THREAD_ACCESS_DENIED",
+            message: "The session belongs to a different SDK origin.",
+          };
+        }
+        if (!postSdkResponse(port, channelId, requestId, true, {})) {
+          return;
+        }
+        lifecycle.setupPending = false;
         return;
       }
 
@@ -2316,6 +2382,35 @@ function createBackground(runtimeChrome, options = {}) {
           removeActiveThread(message.sessionId);
         });
         postSdkResponse(port, channelId, requestId, true, {});
+        return;
+      }
+
+      if (message.type === "abort_session_setup") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        const sessionId = message.sessionId;
+        if (!sessionId) {
+          throw { code: "SDK_PROTOCOL_ERROR", message: "sessionId is required" };
+        }
+        let result;
+        try {
+          result = await sendSdkNativeRequest(context, "abort_session_setup", {
+            threadId: sessionId,
+          });
+        } finally {
+          // The SDK never receives a session handle for an aborted setup.  Do
+          // not leave the temporary subscription/route in the extension even
+          // when the Core response is lost after committing the rollback.
+          removeSdkSession(port, channelId, sessionId);
+          if (!sdkRoutesBySession.has(sessionId)) {
+            removeActiveThread(sessionId);
+            sdkLifecycleBySession.delete(sessionId);
+            threadSubscriptions.delete(sessionId);
+          }
+        }
+        postSdkResponse(port, channelId, requestId, true, result || {});
         return;
       }
 

@@ -1741,6 +1741,7 @@ mod tests {
                     args_schema: json!({ "type": "object" }),
                     timeout_ms: None,
                 }],
+                deno_modules: vec![],
             }),
             workspace: None,
         });

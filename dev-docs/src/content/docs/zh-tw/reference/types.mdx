@@ -252,6 +252,19 @@ type ToolDefinition<
 };
 ```
 
+### `DenoModuleDefinition`
+
+```ts
+type DenoModuleDefinition<TName extends string = string> = {
+  name: TName;
+  description: string;
+  entry: string;
+  usage: string;
+};
+```
+
+`entry` 是 Vite build/dev authoring string。`name` 會成為 Agent 的 import specifier，`usage` 是必要的常見 import guidance。請使用 `pedelecVitePlugin()` 準備 runtime 與 declaration artifact。
+
 ### `SkillsInput`
 
 ```ts
@@ -260,6 +273,7 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
+  denoModules?: readonly DenoModuleDefinition[];
 };
 ```
 
@@ -285,10 +299,15 @@ type SerializableToolManifest = {
 type SerializableSkillsManifest = {
   guidance: string;
   tools: SerializableToolManifest[];
+  denoModules?: Array<{
+    name: string;
+    description: string;
+    usage: string;
+  }>;
 };
 ```
 
-Inline handler 不在 serialized manifest。
+Inline handler 與 build-time `entry` 不在 serialized manifest。
 
 ## Tool schema metadata
 

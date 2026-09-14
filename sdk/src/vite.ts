@@ -4,21 +4,17 @@ import { dirname, extname, isAbsolute, normalize, resolve as resolvePath } from 
 
 import * as ts from "typescript";
 import { build, type HmrContext, type Plugin, type ResolvedConfig } from "vite";
+import {
+  PREPARED_DENO_MODULE_ARTIFACT_PROPERTY,
+  type PreparedDenoModuleArtifact,
+} from "./deno-module-internal.js";
 
 const PACKAGE_NAME = "@kaoruisaac/pedelec";
 const DEFINE_DENO_MODULE_NAME = "defineDenoModule";
-const PREPARED_ARTIFACT_PROPERTY = "__pedelecArtifact";
 const ARTIFACT_HASH_VERSION = "pedelec-deno-module-artifact-v1";
 const SCRIPT_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 const DECLARATION_LIKE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".d.ts", ".json"]);
 const nodeRequire = createRequire(import.meta.url);
-
-type PreparedDenoModuleArtifact = {
-  format: "esm";
-  runtimeSource: string;
-  typesSource: string;
-  contentHash: string;
-};
 
 type Declaration = {
   name: string;
@@ -114,7 +110,7 @@ export function pedelecVitePlugin(): Plugin {
           // The authoring entry is a source-tree path. It is intentionally
           // removed before the object can reach any SDK transport code.
           "__pedelecModule.entry = undefined;",
-          `Object.defineProperty(__pedelecModule, ${JSON.stringify(PREPARED_ARTIFACT_PROPERTY)}, {`,
+          `Object.defineProperty(__pedelecModule, ${JSON.stringify(PREPARED_DENO_MODULE_ARTIFACT_PROPERTY)}, {`,
           `value: Object.freeze(${artifactSource}), enumerable: false, writable: false, configurable: false`,
           "});",
           "return __pedelecModule;",
@@ -1067,7 +1063,8 @@ function validateRolledUpDeclaration(source: string, diagnosticPrefix: string): 
   const options: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.ESNext,
-    skipLibCheck: true,
+    // The artifact is itself a .d.ts file; skipLibCheck would skip its semantic check.
+    skipLibCheck: false,
     noEmit: true,
     noResolve: true,
     types: [],

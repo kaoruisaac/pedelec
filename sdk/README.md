@@ -90,6 +90,61 @@ npm install ../path/to/pedelec/sdk
 
 ---
 
+## Deno Modules
+
+Vite applications can package local or installed JavaScript/TypeScript libraries for Agent-authored `pedelec-deno` scripts.
+
+### Setup
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { pedelecVitePlugin } from "@kaoruisaac/pedelec/vite";
+
+export default defineConfig({
+  plugins: [pedelecVitePlugin()],
+});
+```
+
+### Authoring
+
+```ts
+import { Pedelec, defineDenoModule } from "@kaoruisaac/pedelec";
+
+const pedelec = new Pedelec();
+const session = await pedelec.createSession({
+  skills: {
+    guidance: "Use sprite-tools for sprite authoring tasks.",
+    tools: [],
+    denoModules: [
+      defineDenoModule({
+        name: "sprite-tools",
+        description: "Sprite authoring and preview utilities.",
+        entry: "./agent/sprite-tools.ts",
+        usage: `import { previewActorSource } from "sprite-tools";`,
+      }),
+    ],
+  },
+});
+```
+
+For an installed package, use its package specifier as the build-time entry:
+
+```ts
+defineDenoModule({
+  name: "gsap",
+  description: "Animation utilities.",
+  entry: "gsap",
+  usage: `import { gsap } from "gsap";`,
+});
+```
+
+`entry` is resolved by Vite during build/dev and is never a Desktop filesystem instruction. The plugin bundles runtime dependencies locally and generates the public `index.d.ts` declarations automatically. `name` is the Agent import specifier, and `usage` is required common-case guidance. `createSession()` transfers the prepared artifact automatically; a session keeps an immutable module snapshot, and `session.end()`/`session.resume()` reuse it while Core still knows the thread. Module code runs inside the same restricted Pedelec Deno execution as Agent code: runtime npm, JSR, and network fetching are unavailable.
+
+Deno Modules are imported inside JavaScript/TypeScript run with `pedelec-deno`. They are different from `skills.tools`, whose browser/App RPC capabilities use `pedelec-cli` tool-spec and tool-call commands.
+
+---
+
 ## Minimal Example
 
 ```ts

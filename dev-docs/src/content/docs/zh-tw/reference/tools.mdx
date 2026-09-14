@@ -60,7 +60,7 @@ const skills = {
 };
 ```
 
-此階段只涵蓋 build-time authoring。`defineDenoModule()` 保留靜態描述；`pedelecVitePlugin()` 會在 `vite build` 與 `vite dev` 解析 `entry`、打包 self-contained ESM runtime，並 roll-up 獨立的 public declaration artifact。Session transport、Core materialization、Deno import mapping 與 execution 都尚未實作。把 `denoModules` 傳進 `createSession()` 不會載入或執行該 module。
+`defineDenoModule()` 保留 authoring description；`pedelecVitePlugin()` 會在 `vite build` 與 `vite dev` 解析 `entry`、打包 self-contained ESM runtime，並 roll-up 獨立的 public declaration artifact。`createSession()` 會自動傳送 prepared artifact，Core 在 session 回傳前建立 immutable、thread-scoped package 與 import map。
 
 只使用 root SDK、從不 import `@kaoruisaac/pedelec/vite` 的應用不需要 Vite；Vite peer 是 optional。使用 plugin 的應用必須安裝支援的 Vite 8：
 
@@ -83,6 +83,12 @@ export default defineConfig({
 Plugin 會在轉換後的 module object 上附加 private、non-enumerable 的 runtime/types artifact，並移除原始 authoring `entry` path。它不會寫入應用程式的 Pedelec workspace，也不會 mutate 既有 session。
 
 `usage` 請保持精簡：它是常見情境的 agent hint；需要檢查 enum 或 option shape 時，以 generated declaration bundle 為準。
+
+Agent 會在以 `pedelec-deno` 執行的 JavaScript/TypeScript script 中，以 logical `name` import module，不會以 private filesystem path 執行 module。Host Context 會列出 name、description、usage，以及 workspace-relative 的 `index.d.ts` pointer，供精確 API discovery；generated `index.mjs` 是 implementation fallback，不是一般 API reference。
+
+`entry` 支援 local relative file、Vite alias，以及已安裝的 bare/package `exports` specifier。它只在 build-time 使用；Desktop 不會解析它，runtime 也不能 fetch npm、JSR 或 network。Imported module 和 Agent script 共用相同受限制的 Pedelec Deno permissions。
+
+只要 Core 仍知道該 thread，end/resume 會保留同一份 module snapshot。`pedelec.resumeSession(sessionId)` 會重新 attach 到既有 snapshot；要使用重建後的 artifact，請建立新 session。`skills.tools` 是分開的 App Tool capability：呼叫走 `pedelec-cli --thread-id ... tool-spec` 與 `tool-call`，Deno Modules 則留在 `pedelec-deno` script 內。
 
 ## `ToolDefinition`
 
@@ -144,7 +150,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` 必須 string，`tools` 必須 array。`denoModules` 是 Vite-prepared Deno modules 的預定 authoring list；此階段不會 transport 或執行它們。
+`guidance` 必須是 string，`tools` 必須是 array。`denoModules` 是 optional；每個 module 都需要 `name`、`description`、`entry`、`usage`。它應包含 Vite-prepared definitions，`createSession()` 會自動完成 transport。
 
 ## `ToolNameOf`
 
@@ -184,10 +190,15 @@ type SerializableToolManifest = {
 type SerializableSkillsManifest = {
   guidance: string;
   tools: SerializableToolManifest[];
+  denoModules?: Array<{
+    name: string;
+    description: string;
+    usage: string;
+  }>;
 };
 ```
 
-經 normalize 後送進 bridge 的 skills payload。
+經 normalize 後送進 bridge 的 skills metadata。Prepared runtime 與 declaration source 會走內部 session setup path 傳送；`entry` 不會送到 Core。
 
 ## Inline handler normalization
 

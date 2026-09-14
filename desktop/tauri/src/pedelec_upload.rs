@@ -1,7 +1,7 @@
 //! Loopback-only binary asset data plane.  The control plane only creates tickets.
 use pedelec_core::{
     error_codes, workspace_assets_root, workspace_tmp_root, AssetDownloadState, AssetUploadState,
-    PedelecError, SharedCoreRuntime, MAX_ASSET_UPLOAD_BYTES,
+    DenoModuleUploadState, PedelecError, SharedCoreRuntime, MAX_ASSET_UPLOAD_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -74,6 +74,20 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
     }
     if first.starts_with("GET ") {
         return handle_download(&mut stream, runtime, &first, &headers);
+    }
+    let deno_module_upload_id = first
+        .split_whitespace()
+        .nth(1)
+        .and_then(|path| path.strip_prefix("/deno-modules/"))
+        .unwrap_or("");
+    if first.starts_with("PUT ") && !deno_module_upload_id.is_empty() {
+        return handle_deno_module_upload(
+            &mut stream,
+            runtime,
+            deno_module_upload_id,
+            &headers,
+            &mut reader,
+        );
     }
     let upload_id = first
         .split_whitespace()
@@ -194,6 +208,127 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
         error_codes::ASSET_UPLOAD_FAILED,
         "asset upload failed",
     )
+}
+
+fn handle_deno_module_upload(
+    stream: &mut TcpStream,
+    runtime: SharedCoreRuntime,
+    upload_id: &str,
+    headers: &std::collections::HashMap<String, String>,
+    reader: &mut BufReader<TcpStream>,
+) -> std::io::Result<()> {
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<u64>().ok());
+    let (temporary_path, expected_size) = {
+        let mut core = runtime.lock().unwrap();
+        core.expire_deno_module_uploads();
+        let ticket = match core.deno_module_upload_tickets.get_mut(upload_id) {
+            Some(ticket) => ticket,
+            None => {
+                return respond_error(
+                    stream,
+                    401,
+                    error_codes::DENO_MODULE_UPLOAD_UNAUTHORIZED,
+                    "Deno Module upload ticket is invalid",
+                )
+            }
+        };
+        if ticket.state == DenoModuleUploadState::Expired {
+            return respond_error(
+                stream,
+                410,
+                error_codes::DENO_MODULE_UPLOAD_TICKET_EXPIRED,
+                "Deno Module upload ticket has expired",
+            );
+        }
+        if ticket.state != DenoModuleUploadState::Pending
+            || format!("{:x}", Sha256::digest(token.as_bytes())) != ticket.token_hash
+        {
+            ticket.state = DenoModuleUploadState::Failed;
+            return respond_error(
+                stream,
+                401,
+                error_codes::DENO_MODULE_UPLOAD_UNAUTHORIZED,
+                "Deno Module upload token is invalid",
+            );
+        }
+        if length != Some(ticket.expected_size_bytes)
+            || ticket.expected_size_bytes > MAX_ASSET_UPLOAD_BYTES
+        {
+            ticket.state = DenoModuleUploadState::Failed;
+            return respond_error(
+                stream,
+                413,
+                error_codes::DENO_MODULE_UPLOAD_SIZE_MISMATCH,
+                "Deno Module upload size does not match its ticket",
+            );
+        }
+        ticket.state = DenoModuleUploadState::Uploading;
+        (
+            workspace_tmp_root(&ticket.workspace_path)
+                .join(format!("{upload_id}.deno-module.upload")),
+            ticket.expected_size_bytes,
+        )
+    };
+
+    let result = (|| -> std::io::Result<u64> {
+        fs::create_dir_all(temporary_path.parent().unwrap())?;
+        let mut file = File::create(&temporary_path)?;
+        let mut total = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        while total < expected_size {
+            let want = ((expected_size - total) as usize).min(buffer.len());
+            let count = reader.read(&mut buffer[..want])?;
+            if count == 0 {
+                break;
+            }
+            file.write_all(&buffer[..count])?;
+            total += count as u64;
+        }
+        file.flush()?;
+        Ok(total)
+    })();
+
+    if !matches!(result, Ok(size) if size == expected_size) {
+        let _ = fs::remove_file(&temporary_path);
+        runtime
+            .lock()
+            .unwrap()
+            .mark_deno_module_upload_failed(upload_id);
+        return respond_error(
+            stream,
+            400,
+            error_codes::DENO_MODULE_UPLOAD_SIZE_MISMATCH,
+            "Deno Module upload body was truncated",
+        );
+    }
+
+    let completion = runtime
+        .lock()
+        .unwrap()
+        .complete_deno_module_upload(upload_id, &temporary_path);
+    let _ = fs::remove_file(&temporary_path);
+    match completion {
+        Ok(completion) => respond(
+            stream,
+            201,
+            Some(&serde_json::to_string(&completion).unwrap_or_else(|_| "{}".to_string())),
+        ),
+        Err(error) => {
+            let status = if error.code == error_codes::DENO_MODULE_ARTIFACT_TOO_LARGE {
+                413
+            } else {
+                422
+            };
+            let body = serde_json::json!({ "error": error });
+            respond(stream, status, Some(&body.to_string()))
+        }
+    }
 }
 
 fn handle_download(
@@ -419,7 +554,19 @@ fn finalize_upload(
 
 fn respond(stream: &mut TcpStream, status: u16, body: Option<&str>) -> std::io::Result<()> {
     let body = body.unwrap_or("");
-    write!(stream, "HTTP/1.1 {status} OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, PUT, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body)
+    let reason = match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        410 => "Gone",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
+        _ => "OK",
+    };
+    write!(stream, "HTTP/1.1 {status} {reason}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, PUT, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body)
 }
 fn respond_error(
     stream: &mut TcpStream,
@@ -441,9 +588,10 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use pedelec_core::{
-        workspace_assets_root, workspace_tmp_root, AssetUploadState, CoreRuntime,
-        CreateAssetUploadInput, EffortLevel, ProviderCode, ProviderSessionState, ThreadState,
-        ThreadStatus,
+        workspace_assets_root, workspace_deno_modules_root, workspace_tmp_root, AssetUploadState,
+        CoreRuntime, CreateAssetUploadInput, CreateDenoModuleUploadInput, DenoModuleSetupState,
+        DenoModuleState, DenoModuleUploadState, EffortLevel, ProviderCode, ProviderSessionState,
+        ThreadState, ThreadStatus,
     };
     use std::io::{Read, Write};
     use std::net::Shutdown;
@@ -528,6 +676,141 @@ mod tests {
                 .unwrap()
                 .state,
             AssetUploadState::Completed
+        );
+    }
+
+    #[test]
+    fn deno_module_upload_route_commits_and_rejects_malformed_artifacts() {
+        let temp = tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        let thread_id = "thread_deno_transfer".to_string();
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            ThreadState {
+                thread_id: thread_id.clone(),
+                provider: ProviderCode::Codex,
+                effort_level: EffortLevel::Default,
+                effort_args: vec![],
+                workspace_path: workspace_path.clone(),
+                skills: vec![],
+                status: ThreadStatus::Idle,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                sdk_origin: Some("https://app.example.test".into()),
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+        runtime.lock().unwrap().deno_modules.insert(
+            thread_id.clone(),
+            vec![DenoModuleState {
+                name: "sprite-tools".into(),
+                description: "Sprite helpers".into(),
+                usage: "import \"sprite-tools\";".into(),
+                state: DenoModuleSetupState::Pending,
+            }],
+        );
+
+        let port = start_asset_upload_server(runtime.clone()).unwrap();
+        let envelope = serde_json::json!({
+            "version": 1,
+            "format": "esm",
+            "runtimeSource": "export const ready = true;",
+            "typesSource": "export declare const ready: boolean;",
+        });
+        let payload = serde_json::to_vec(&envelope).unwrap();
+        let ticket = runtime
+            .lock()
+            .unwrap()
+            .create_deno_module_upload(CreateDenoModuleUploadInput {
+                thread_id: thread_id.clone(),
+                module_name: "sprite-tools".into(),
+                expected_size_bytes: payload.len() as u64,
+            })
+            .unwrap();
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            stream,
+            "PUT /deno-modules/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
+            ticket.upload_id,
+            ticket.token,
+            payload.len()
+        )
+        .unwrap();
+        stream.write_all(&payload).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 201"), "response: {response}");
+        assert!(response.contains(r#""ready":true"#));
+        let package = workspace_deno_modules_root(&workspace_path, &thread_id).join("sprite-tools");
+        assert_eq!(
+            std::fs::read_to_string(package.join("index.d.ts")).unwrap(),
+            "export declare const ready: boolean;"
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .deno_module_upload_tickets
+                .get(&ticket.upload_id)
+                .unwrap()
+                .state,
+            DenoModuleUploadState::Completed
+        );
+
+        let malformed = b"not-json";
+        runtime
+            .lock()
+            .unwrap()
+            .deno_modules
+            .get_mut(&thread_id)
+            .unwrap()[0]
+            .state = DenoModuleSetupState::Pending;
+        let malformed_ticket = runtime
+            .lock()
+            .unwrap()
+            .create_deno_module_upload(CreateDenoModuleUploadInput {
+                thread_id: thread_id.clone(),
+                module_name: "sprite-tools".into(),
+                expected_size_bytes: malformed.len() as u64,
+            })
+            .unwrap();
+        let mut malformed_stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            malformed_stream,
+            "PUT /deno-modules/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
+            malformed_ticket.upload_id,
+            malformed_ticket.token,
+            malformed.len()
+        )
+        .unwrap();
+        malformed_stream.write_all(malformed).unwrap();
+        malformed_stream.shutdown(Shutdown::Write).unwrap();
+        let mut malformed_response = Vec::new();
+        malformed_stream
+            .read_to_end(&mut malformed_response)
+            .unwrap();
+        let malformed_response = String::from_utf8(malformed_response).unwrap();
+        assert!(
+            malformed_response.starts_with("HTTP/1.1 422"),
+            "response: {malformed_response}"
+        );
+        assert!(malformed_response.contains("DENO_MODULE_ARTIFACT_INVALID"));
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .deno_module_upload_tickets
+                .get(&malformed_ticket.upload_id)
+                .unwrap()
+                .state,
+            DenoModuleUploadState::Failed
         );
     }
 }

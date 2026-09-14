@@ -2195,6 +2195,7 @@ mod tests {
         let registry = ToolRegistry::from_skills_input(Some(&CreateThreadSkillsInput {
             guidance: guidance.into(),
             tools: vec![],
+            deno_modules: vec![],
         }))
         .unwrap();
 
@@ -2732,6 +2733,7 @@ mod tests {
                     args_schema: json!({ "type": "object" }),
                     timeout_ms: None,
                 }],
+                deno_modules: vec![],
             }),
             workspace: Some(CreateThreadWorkspaceInput {
                 path: custom.clone(),
@@ -2847,6 +2849,7 @@ mod tests {
                     args_schema: json!({ "type": "object" }),
                     timeout_ms: None,
                 }],
+                deno_modules: vec![],
             }),
             workspace: Some(CreateThreadWorkspaceInput {
                 path: custom.clone(),
@@ -5163,6 +5166,7 @@ mod tests {
                 }),
                 timeout_ms: None,
             }],
+            deno_modules: vec![],
         }
     }
 

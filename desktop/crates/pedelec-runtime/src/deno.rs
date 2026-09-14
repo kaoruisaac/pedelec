@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -384,6 +384,7 @@ pub struct PreparedDenoExecution {
     workspace: PathBuf,
     entrypoint: PathBuf,
     cache_dir: PathBuf,
+    import_map_path: Option<PathBuf>,
     args: Vec<String>,
 }
 
@@ -424,11 +425,17 @@ impl PreparedDenoExecution {
             ));
         }
 
+        let import_map_path = intent
+            .import_map_path
+            .as_deref()
+            .map(|path| prepare_import_map_path(path, &workspace, &intent.thread_id))
+            .transpose()?;
         let cache_dir = prepare_deno_cache_dir(&workspace)?;
         Ok(Self {
             workspace,
             entrypoint,
             cache_dir,
+            import_map_path,
             args: intent.args.clone(),
         })
     }
@@ -447,6 +454,12 @@ impl PreparedDenoExecution {
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }
+
+    /// The canonical Core-owned import map, when this execution belongs to a
+    /// thread with registered Deno Modules.
+    pub fn import_map_path(&self) -> Option<&Path> {
+        self.import_map_path.as_deref()
+    }
 }
 
 /// Builds the only raw-Deno argv accepted by the Desktop owner.  The first
@@ -462,6 +475,14 @@ pub fn build_deno_command_args(prepared: &PreparedDenoExecution) -> Vec<OsString
         OsString::from("--no-remote"),
         OsString::from("--cached-only"),
         OsString::from("--no-npm"),
+    ];
+    if let Some(import_map_path) = prepared.import_map_path() {
+        args.push(OsString::from(format!(
+            "--import-map={}",
+            path_for_external_use(import_map_path)
+        )));
+    }
+    args.extend([
         OsString::from(format!("--allow-read={workspace}")),
         OsString::from(format!("--allow-write={workspace}")),
         OsString::from("--deny-net"),
@@ -471,9 +492,85 @@ pub fn build_deno_command_args(prepared: &PreparedDenoExecution) -> Vec<OsString
         OsString::from("--deny-sys"),
         OsString::from("--"),
         prepared.entrypoint().as_os_str().to_os_string(),
-    ];
+    ]);
     args.extend(prepared.args.iter().cloned().map(OsString::from));
     args
+}
+
+fn prepare_import_map_path(
+    path: &Path,
+    workspace: &Path,
+    thread_id: &str,
+) -> Result<PathBuf, PedelecError> {
+    let invalid = |message: &'static str, detail: Option<String>| {
+        let mut details = serde_json::Map::new();
+        details.insert("threadId".into(), serde_json::json!(thread_id));
+        if let Some(detail) = detail {
+            details.insert("error".into(), serde_json::json!(detail));
+        }
+        PedelecError::with_details(
+            error_codes::DENO_IMPORT_MAP_INVALID,
+            message,
+            serde_json::Value::Object(details),
+        )
+    };
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        invalid(
+            "Deno import map does not exist or could not be inspected",
+            Some(error.to_string()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(invalid(
+            "Deno import map must be a regular file",
+            Some("symbolic links and non-file entries are not accepted".into()),
+        ));
+    }
+    if path_has_symlink_component(path, workspace) {
+        return Err(invalid(
+            "Deno import map path contains a symbolic-link component",
+            None,
+        ));
+    }
+
+    let canonical = path.canonicalize().map_err(|error| {
+        invalid(
+            "Deno import map could not be canonicalized",
+            Some(error.to_string()),
+        )
+    })?;
+    let canonical = PathBuf::from(path_for_external_use(&canonical));
+    if !canonical.starts_with(workspace) {
+        return Err(invalid(
+            "Deno import map resolves outside the canonical workspace",
+            None,
+        ));
+    }
+    Ok(PathBuf::from(path_for_external_use(&canonical)))
+}
+
+/// Checks the original path spelling for symlinked components.  The Core
+/// path is already authoritative, but this second runtime-owned check keeps a
+/// directly constructed `DenoExecutionIntent` from widening the trust root.
+fn path_has_symlink_component(path: &Path, workspace: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(workspace) else {
+        return false;
+    };
+    let mut current = workspace.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return true;
+        };
+        current.push(part);
+        let Ok(metadata) = fs::symlink_metadata(&current) else {
+            return true;
+        };
+        if metadata.file_type().is_symlink() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Canonicalizes one execution path and returns it in the form Deno itself
@@ -726,6 +823,7 @@ mod tests {
             workspace_path: workspace.to_path_buf(),
             entrypoint: entrypoint_path,
             args,
+            import_map_path: None,
         }
     }
 
@@ -779,6 +877,87 @@ mod tests {
                 "missing fixed flag: {fixed_flag}"
             );
         }
+        assert!(args
+            .iter()
+            .all(|arg| !arg.to_string_lossy().starts_with("--import-map=")));
+    }
+
+    #[test]
+    fn module_execution_adds_only_the_core_owned_import_map_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let map_path = temp
+            .path()
+            .join(".pedelec-runtime/deno/threads/thread-deno-test/import-map.json");
+        fs::create_dir_all(map_path.parent().unwrap()).unwrap();
+        fs::write(&map_path, "{\"imports\":{}}").unwrap();
+        let mut run_intent = intent(temp.path(), "script.ts", vec!["--allow-net".into()]);
+        run_intent.import_map_path = Some(map_path.clone());
+
+        let prepared = PreparedDenoExecution::prepare(&run_intent).unwrap();
+        assert_eq!(
+            prepared.import_map_path(),
+            Some(canonical(&map_path).as_path())
+        );
+        let args = build_deno_command_args(&prepared);
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        let import_map_flag = format!(
+            "--import-map={}",
+            path_for_external_use(&map_path.canonicalize().unwrap())
+        );
+        assert_eq!(
+            args[..separator]
+                .iter()
+                .filter(|arg| arg.to_string_lossy().starts_with("--import-map="))
+                .count(),
+            1
+        );
+        assert!(args[..separator]
+            .iter()
+            .any(|arg| arg.to_string_lossy() == import_map_flag));
+        assert!(
+            args[..separator]
+                .iter()
+                .position(|arg| arg.to_string_lossy().starts_with("--import-map="))
+                .unwrap()
+                < args[..separator]
+                    .iter()
+                    .position(|arg| arg.to_string_lossy().starts_with("--allow-read="))
+                    .unwrap()
+        );
+        assert_eq!(args[separator + 2], "--allow-net");
+    }
+
+    #[test]
+    fn import_map_outside_workspace_is_rejected_before_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let outside = temp.path().join("outside-import-map.json");
+        fs::write(&outside, "{\"imports\":{}}").unwrap();
+        let mut run_intent = intent(&workspace, "script.ts", Vec::new());
+        run_intent.import_map_path = Some(outside);
+
+        let error = PreparedDenoExecution::prepare(&run_intent).unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_IMPORT_MAP_INVALID);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_map_symlink_is_rejected_before_execution() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let target = workspace.join("real-import-map.json");
+        fs::write(&target, "{\"imports\":{}}").unwrap();
+        let link = workspace.join("import-map.json");
+        symlink(&target, &link).unwrap();
+        let mut run_intent = intent(&workspace, "script.ts", Vec::new());
+        run_intent.import_map_path = Some(link);
+
+        let error = PreparedDenoExecution::prepare(&run_intent).unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_IMPORT_MAP_INVALID);
     }
 
     #[test]
@@ -1049,6 +1228,7 @@ mod tests {
             workspace_path: workspace,
             entrypoint: outside,
             args: Vec::new(),
+            import_map_path: None,
         })
         .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_ENTRYPOINT_INVALID);
@@ -1066,6 +1246,7 @@ mod tests {
             workspace_path: workspace.clone(),
             entrypoint: workspace.join("..").join("outside.ts"),
             args: Vec::new(),
+            import_map_path: None,
         })
         .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_ENTRYPOINT_INVALID);
@@ -1089,6 +1270,7 @@ mod tests {
             workspace_path: alias.clone(),
             entrypoint: alias.join("script.ts"),
             args: Vec::new(),
+            import_map_path: None,
         })
         .unwrap();
 
@@ -1127,6 +1309,7 @@ mod tests {
             workspace_path: workspace.clone(),
             entrypoint: escape,
             args: Vec::new(),
+            import_map_path: None,
         })
         .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_ENTRYPOINT_INVALID);
@@ -1158,3 +1341,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "deno_execution_fixture.rs"]
+mod deno_execution_fixture;

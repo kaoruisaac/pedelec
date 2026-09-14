@@ -252,6 +252,19 @@ type ToolDefinition<
 };
 ```
 
+### `DenoModuleDefinition`
+
+```ts
+type DenoModuleDefinition<TName extends string = string> = {
+  name: TName;
+  description: string;
+  entry: string;
+  usage: string;
+};
+```
+
+`entry` is a Vite build/dev authoring string. `name` becomes the Agent import specifier and `usage` is required guidance for the common import. Use `pedelecVitePlugin()` to prepare the runtime and declaration artifact.
+
 ### `SkillsInput`
 
 ```ts
@@ -260,6 +273,7 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
+  denoModules?: readonly DenoModuleDefinition[];
 };
 ```
 
@@ -285,10 +299,15 @@ type SerializableToolManifest = {
 type SerializableSkillsManifest = {
   guidance: string;
   tools: SerializableToolManifest[];
+  denoModules?: Array<{
+    name: string;
+    description: string;
+    usage: string;
+  }>;
 };
 ```
 
-Inline handlers are not part of the serialized manifest.
+Inline handlers and the build-time `entry` field are not part of the serialized manifest.
 
 ## Tool schema metadata
 

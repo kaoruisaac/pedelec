@@ -2128,6 +2128,7 @@ mod tests {
                 skills: Some(CreateThreadSkillsInput {
                     guidance: guidance.to_string(),
                     tools: vec![],
+                    deno_modules: vec![],
                 }),
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: workspace.to_path_buf(),

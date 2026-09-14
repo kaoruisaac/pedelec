@@ -31,6 +31,28 @@ const spriteDefinition: DenoModuleDefinition<"sprite-tools"> = spriteTools;
 void spriteName;
 void spriteDefinition;
 
+// @ts-expect-error Deno Module usage is required by the public authoring API
+defineDenoModule({
+  name: "missing-usage",
+  description: "Missing usage.",
+  entry: "./agent/missing-usage.ts",
+});
+
+// @ts-expect-error Deno Module entry remains required at authoring time
+defineDenoModule({
+  name: "missing-entry",
+  description: "Missing entry.",
+  usage: 'import "missing-entry";',
+});
+
+defineDenoModule({
+  name: "non-string-entry",
+  description: "Invalid entry.",
+  // @ts-expect-error Deno Module entry is a build-time string authoring field
+  entry: 42,
+  usage: 'import "non-string-entry";',
+});
+
 function workspaceInputHasPublicType(): CreateSessionWorkspaceInput {
   return { path: "C:\\workspace\\project" };
 }
