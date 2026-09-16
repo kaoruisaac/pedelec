@@ -1,6 +1,7 @@
 use crate::{record_protocol_traffic, PersistentRuntimeDispatcher};
 use pedelec_core::{
     build_persistent_prepare_prompt, build_persistent_user_prompt_with_bootstrap, error_codes,
+    pedelec_host_context_from_persistent_instructions,
     AntigravityReasoningEffort as CoreAntigravityReasoningEffort, PedelecError,
     PersistentProviderEndIntent, PersistentProviderSessionIntent, PersistentRuntimeOperation,
     ProviderCode, ProviderRuntimeDiagnostic, ProviderRuntimeEvent, SharedCoreRuntime,
@@ -347,9 +348,11 @@ impl PersistentRuntimeDispatcher for AntigravityRuntimeDispatcher {
         match operation {
             PersistentRuntimeOperation::EnsureSession { session } => {
                 let use_bootstrap = controller.needs_bootstrap();
-                let prompt = build_persistent_prepare_prompt(
-                    use_bootstrap.then_some(session.host_instructions.as_str()),
-                );
+                let prompt = build_persistent_prepare_prompt(use_bootstrap.then_some(
+                    pedelec_host_context_from_persistent_instructions(
+                        session.host_instructions.as_str(),
+                    ),
+                ));
                 controller.start_prepare(&prompt).map_err(|error| {
                     controller_error(
                         error,
@@ -368,7 +371,9 @@ impl PersistentRuntimeDispatcher for AntigravityRuntimeDispatcher {
                 let use_bootstrap = controller.needs_bootstrap();
                 let prompt = if use_bootstrap {
                     build_persistent_user_prompt_with_bootstrap(
-                        &turn.session.host_instructions,
+                        pedelec_host_context_from_persistent_instructions(
+                            &turn.session.host_instructions,
+                        ),
                         &turn.message,
                     )
                 } else {
@@ -848,10 +853,14 @@ mod tests {
         );
         let frames = stdin_frames(&stdin_log);
         assert_eq!(frames.len(), 3);
-        assert!(frames[0]["message"]["content"]
-            .as_str()
-            .unwrap()
-            .contains("[Session Preparation]"));
+        let preparation = frames[0]["message"]["content"].as_str().unwrap();
+        assert!(preparation.contains("[Session Preparation]"));
+        assert!(preparation.contains("[Pedelec Host Context]"));
+        assert!(preparation.contains(&format!(
+            "runFileCommand: pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path>"
+        )));
+        assert!(!preparation.contains("For JavaScript or TypeScript execution"));
+        assert!(!preparation.contains("readSpecCommand` / `callCommand"));
         assert_eq!(frames[1]["message"]["content"], "first actual task");
         assert_eq!(frames[2]["message"]["content"], "second actual task");
 

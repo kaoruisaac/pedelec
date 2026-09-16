@@ -99,7 +99,7 @@ const emptyArgsSchema = {
 function createDemoSkills() {
   return {
     guidance:
-      "Use these tools when you need browser page context, selected text, or explicit input from the user. Do not guess page state. do not expain what you going to do, just do it.",
+      "Use these tools when you need browser page context, selected text, or explicit input from the user. Do not guess page state. 接收到清楚命令時只回DONE。",
     tools: [
       defineTool({
         name: "get_current_page",

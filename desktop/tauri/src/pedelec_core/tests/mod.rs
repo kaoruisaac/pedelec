@@ -11,37 +11,29 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn bootstrap_instruction_explains_exact_retry_and_formal_timeout() {
+    fn bootstrap_instruction_keeps_the_compact_invariant_contract() {
         let instruction = build_pedelec_bootstrap_instruction();
-        assert!(instruction.contains("ambiguous transport failure"));
-        assert!(instruction.contains("exact same tool name"));
-        assert!(
-            instruction.contains("complete structured Pedelec response, including `TOOL_TIMEOUT`")
-        );
-        assert!(instruction.contains("do not retry indefinitely"));
+        assert!(instruction.contains("Pedelec Host Context is generated integration context"));
+        assert!(instruction.contains("Use Pedelec App Tools through their listed"));
+        assert!(instruction.contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
+        assert!(instruction.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
+        assert!(instruction.contains("Deno Modules are imported from `pedelec-deno` scripts"));
+        assert!(instruction.contains("readSpecCommand` / `callCommand"));
+        assert!(instruction.contains("a received structured `TOOL_TIMEOUT` is final"));
         assert!(instruction
-            .contains("`.pedelec-runtime/assets/` is the shared App and Agent file directory"));
+            .contains("`.pedelec-runtime/assets/` is the shared App/Agent file directory"));
         assert!(!instruction.contains("`assets/` is the shared App and Agent file directory"));
-        assert!(instruction
-            .contains("pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool-name>"));
-        assert!(instruction.contains(
-            "pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool-name> '<json_args>'"
-        ));
-        assert!(instruction.contains("pedelec-deno"));
-        assert!(instruction.contains("canonical JavaScript/TypeScript runtime"));
-        assert!(instruction.contains("Do not silently fall back to another JavaScript runtime"));
-
-        assert!(instruction.contains(
-            "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path>"
-        ));
-        assert!(instruction.contains(
-            "Use `pedelec-deno` instead of system-installed Node.js, Bun, raw Deno, npx"
-        ));
-        assert!(instruction.contains("pedelec-deno --thread-id <pedelec_thread_id> run -"));
+        assert!(!instruction.contains("ambiguous transport failure"));
+        assert!(!instruction.contains("join an invocation"));
+        assert!(!instruction.contains("PEDELEC_PREPARED"));
+        assert!(!instruction.contains("tool-spec <tool-name>"));
+        assert!(!instruction.contains("tool-call <tool-name> '<json_args>'"));
+        assert!(!instruction.contains("run <workspace-relative-script-path>"));
+        assert!(!instruction.contains("run -"));
     }
 
     #[test]
-    fn antigravity_custom_agent_materializes_the_shared_deno_bootstrap() {
+    fn antigravity_custom_agent_materializes_the_compact_shared_contract() {
         let temp = tempfile::tempdir().unwrap();
         ensure_antigravity_custom_agent(temp.path()).unwrap();
 
@@ -53,13 +45,14 @@ mod tests {
                 .join("agent.md"),
         )
         .unwrap();
-        assert!(agent.contains("pedelec-deno"));
-        assert!(agent.contains("canonical JavaScript/TypeScript runtime"));
-        assert!(agent.contains("Do not silently fall back to another JavaScript runtime"));
-        assert!(agent.contains(
-            "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path>"
-        ));
-        assert!(agent.contains("pedelec-deno --thread-id <pedelec_thread_id> run -"));
+        assert!(agent.contains("name: pedelec-runtime"));
+        assert!(agent.contains("mainAgent: true"));
+        assert!(agent.contains("Pedelec Host Context is generated integration context"));
+        assert!(agent.contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
+        assert!(agent.contains("a received structured `TOOL_TIMEOUT` is final"));
+        assert!(!agent.contains("thread-"));
+        assert!(!agent.contains("run <workspace-relative-script-path>"));
+        assert!(!agent.contains("ambiguous transport failure"));
     }
 
     #[test]
@@ -2124,8 +2117,8 @@ mod tests {
             "pedelec-deno --thread-id thread_no_tools_md run <workspace-relative-script-path>"
         ));
         assert!(instruction.contains("pedelec-deno --thread-id thread_no_tools_md run -"));
-        assert!(instruction.contains("canonical JavaScript/TypeScript runtime"));
-        assert!(instruction.contains("Do not silently fall back to another JavaScript runtime"));
+        assert!(!instruction.contains("canonical JavaScript/TypeScript runtime"));
+        assert!(!instruction.contains("Do not silently fall back to another JavaScript runtime"));
     }
 
     #[test]
@@ -2159,21 +2152,20 @@ mod tests {
             "pedelec-deno --thread-id thread_with_tools_md run <workspace-relative-script-path>"
         ));
         assert!(instruction.contains("pedelec-deno --thread-id thread_with_tools_md run -"));
-        assert!(instruction.contains("For script arguments, append `-- <args...>`"));
-        assert!(instruction.contains("Do not silently fall back to another JavaScript runtime"));
+        assert!(!instruction.contains("For script arguments, append `-- <args...>`"));
+        assert!(!instruction.contains("Do not silently fall back to another JavaScript runtime"));
         assert!(persistent.contains(
             "pedelec-deno --thread-id thread_with_tools_md run <workspace-relative-script-path>"
         ));
         assert!(persistent.contains("pedelec-deno --thread-id thread_with_tools_md run -"));
-        assert!(persistent.contains("canonical JavaScript/TypeScript runtime"));
+        assert!(persistent.contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
         assert!(persistent.contains("pedelec-cli --thread-id thread_with_tools_md tool-call"));
         let cursor_first_prompt =
             build_persistent_user_prompt_with_bootstrap(&persistent, "first task");
         assert!(cursor_first_prompt.contains("pedelec-deno"));
-        assert!(cursor_first_prompt.contains("canonical JavaScript/TypeScript runtime"));
-        assert!(
-            cursor_first_prompt.contains("Do not silently fall back to another JavaScript runtime")
-        );
+        assert!(cursor_first_prompt
+            .contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
+        assert!(cursor_first_prompt.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
         assert!(!instruction.contains("[Pedelec Runtime Rules]"));
         assert!(!instruction
             .contains("All of the following content is executed under the Pedelec Runtime"));

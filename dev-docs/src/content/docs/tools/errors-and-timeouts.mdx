@@ -114,6 +114,8 @@ Design handlers to settle before the deadline and implement application-side can
 
 A provider shell or terminal can stop waiting for `pedelec-cli --thread-id <pedelec_thread_id> tool-call` before Core's `timeoutMs` deadline. That provider command timeout is an ambiguous transport failure; it does not prove that the App Tool failed. If the agent did not receive a complete structured Pedelec response, it may retry with the exact same tool name and semantically identical arguments. Core can join the still-running invocation or replay a recently completed result whose delivery was not confirmed. Do not change the arguments or retry indefinitely.
 
+When `pedelec-cli` detects an IPC/transport failure for a `tool-call`, its structured error includes concise guidance to exact-retry the same listed call command with semantically identical arguments. Successful calls, normal structured App Tool errors, and formal `TOOL_TIMEOUT` responses do not receive this transport-retry guidance.
+
 When Core reaches the App Tool's `timeoutMs`, it returns the formal `TOOL_TIMEOUT` structured error. A received `TOOL_TIMEOUT` means the original invocation has ended; it is not an instruction to continue the same invocation. A result whose IPC delivery was not confirmed may be replayed briefly, but a successfully delivered result is not retained as a general deduplication cache.
 
 ## Serialization failures
