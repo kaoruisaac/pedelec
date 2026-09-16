@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
@@ -8,6 +9,7 @@ import { inflateRawSync } from "node:zlib";
 import {
   assertSha256,
   denoArtifactForTarget,
+  DENO_VERSION,
   platformExecutableName,
   publicHelperBinaryNames,
   resolveDenoTarget,
@@ -44,34 +46,88 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function userCacheDir() {
+  if (process.platform === "win32") {
+    return process.env.LOCALAPPDATA
+      ? join(process.env.LOCALAPPDATA, "pedelec", "cache")
+      : join(homedir(), "AppData", "Local", "pedelec", "cache");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Caches", "pedelec");
+  }
+  return join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "pedelec");
+}
+
+function denoArchiveCachePath(metadata) {
+  return join(
+    userCacheDir(),
+    "deno",
+    `v${DENO_VERSION}`,
+    metadata.target,
+    metadata.artifact,
+  );
+}
+
+function verifyArchive(metadata, bytes) {
+  assertSha256(metadata.archiveSha256, sha256(bytes));
+  return bytes;
+}
+
 async function acquireVerifiedArchive(metadata) {
-  let bytes;
   const localArchive = process.env.PEDELEC_DENO_ARCHIVE;
   if (localArchive) {
     console.log(`Using PEDELEC_DENO_ARCHIVE: ${localArchive}`);
-    bytes = await readFile(localArchive);
-  } else {
-    console.log(`Downloading pinned Deno ${metadata.target} artifact.`);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000);
-    try {
-      const response = await fetch(metadata.url, {
-        signal: controller.signal,
-        headers: { "user-agent": "pedelec-tauri-stager" },
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    return verifyArchive(metadata, await readFile(localArchive));
+  }
+
+  const cachePath = denoArchiveCachePath(metadata);
+  try {
+    const cached = await readFile(cachePath);
+    verifyArchive(metadata, cached);
+    console.log(`Using cached pinned Deno ${metadata.target} artifact: ${cachePath}`);
+    return cached;
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.warn(
+        `Ignoring invalid cached Deno artifact ${cachePath}: ${error instanceof Error ? error.message : error}`,
+      );
+      try {
+        await rm(cachePath, { force: true });
+      } catch {
+        // A read-only/busy cache must not prevent a fresh download.
       }
-      bytes = Buffer.from(await response.arrayBuffer());
-    } catch (error) {
-      throw new Error(`Could not acquire Deno artifact ${metadata.url}: ${error}`);
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
-  const actualSha256 = sha256(bytes);
-  assertSha256(metadata.archiveSha256, actualSha256);
+  console.log(`Downloading pinned Deno ${metadata.target} artifact.`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120_000);
+  let bytes;
+  try {
+    const response = await fetch(metadata.url, {
+      signal: controller.signal,
+      headers: { "user-agent": "pedelec-tauri-stager" },
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+    bytes = Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    throw new Error(`Could not acquire Deno artifact ${metadata.url}: ${error}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  verifyArchive(metadata, bytes);
+  try {
+    await mkdir(dirname(cachePath), { recursive: true });
+    await writeFile(cachePath, bytes);
+    console.log(`Cached pinned Deno ${metadata.target} artifact: ${cachePath}`);
+  } catch (error) {
+    console.warn(
+      `Could not cache Deno artifact ${cachePath}; continuing without cache: ${error instanceof Error ? error.message : error}`,
+    );
+  }
   return bytes;
 }
 

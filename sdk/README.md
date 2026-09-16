@@ -146,7 +146,7 @@ The generated declaration describes the module's Agent-facing API, so implementa
 
 Deno Modules are imported inside JavaScript/TypeScript run with `pedelec-deno`. They are different from `skills.tools`, whose browser/App RPC capabilities use `pedelec-cli` tool-spec and tool-call commands.
 
-Set the optional `preferStdinExecution: true` when short scripts primarily use a module and should be steered toward stdin execution. Host Context then adds that module's concrete `runCommand` (`pedelec-deno --thread-id <thread-id> run -`). This is a preference, not a restriction: file-backed execution remains valid, and omitting the field or setting it to `false` preserves the default behavior. It does not change bundling, artifact contents, or runtime permissions.
+Set the optional `preferStdinExecution: true` when short scripts primarily use a module and should be steered toward stdin execution. Host Context then adds that module's concrete `runCommandTemplate` (`@'\n<typescript-source>\n'@ | pedelec-deno --thread-id <thread-id> run -`), so the Agent only needs to replace the TypeScript source placeholder instead of deciding how to serialize stdin. This is a preference, not a restriction: file-backed execution remains valid, and omitting the field or setting it to `false` preserves the default behavior. It does not change bundling, artifact contents, or runtime permissions.
 
 ---
 

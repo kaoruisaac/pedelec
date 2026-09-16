@@ -9540,7 +9540,7 @@ fn build_provider_host_context_with_configuration_and_modules(
         usage: &'a str,
         types: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        run_command: Option<String>,
+        run_command_template: Option<String>,
     }
     #[derive(Serialize)]
     struct DenoModuleConfiguration<'a> {
@@ -9588,9 +9588,12 @@ fn build_provider_host_context_with_configuration_and_modules(
                     description: &module.description,
                     usage: &module.usage,
                     types: deno_module_types_path(&thread.thread_id, &module.name),
-                    run_command: module
-                        .prefer_stdin_execution
-                        .then(|| format!("pedelec-deno --thread-id {} run -", thread.thread_id)),
+                    run_command_template: module.prefer_stdin_execution.then(|| {
+                        format!(
+                            "@'\n<typescript-source>\n'@ | pedelec-deno --thread-id {} run -",
+                            thread.thread_id
+                        )
+                    }),
                 })
                 .collect(),
         })
@@ -10333,8 +10336,9 @@ mod deno_tests {
             context.contains("runStdinCommand: pedelec-deno --thread-id thread-deno-context run -")
         );
         assert!(context.contains("index.d.ts"));
-        assert!(context
-            .contains("\"runCommand\": \"pedelec-deno --thread-id thread-deno-context run -\""));
+        assert!(context.contains(
+            "\"runCommandTemplate\": \"@'\\n<typescript-source>\\n'@ | pedelec-deno --thread-id thread-deno-context run -\""
+        ));
         assert!(!context.contains("preferStdinExecution"));
         assert!(context.contains("pedelec-deno"));
         assert!(!context.contains("canonical JavaScript/TypeScript runtime"));
@@ -10398,9 +10402,10 @@ mod deno_tests {
             &modules,
         );
         assert!(context.find("alpha-tools").unwrap() < context.find("zeta-tools").unwrap());
-        assert_eq!(context.matches("\"runCommand\"").count(), 1);
-        assert!(context
-            .contains("\"runCommand\": \"pedelec-deno --thread-id thread-deno-order run -\""));
+        assert_eq!(context.matches("\"runCommandTemplate\"").count(), 1);
+        assert!(context.contains(
+            "\"runCommandTemplate\": \"@'\\n<typescript-source>\\n'@ | pedelec-deno --thread-id thread-deno-order run -\""
+        ));
         assert!(context.contains(
             ".pedelec-runtime/deno/threads/thread-deno-order/modules/alpha-tools/index.d.ts"
         ));

@@ -264,7 +264,7 @@ type DenoModuleDefinition<TName extends string = string> = {
 };
 ```
 
-`entry` 是 Vite build/dev authoring string。`name` 會成為 Agent 的 import specifier，`usage` 是必要的常見 import guidance。`preferStdinExecution` 是 optional 的 Agent execution preference；設為 `true` 時，Host Context 會提供具體的 module-specific stdin `runCommand`。File-backed execution 仍然有效，且此 preference 不會改變 bundling 或 artifact contents。請使用 `pedelecVitePlugin()` 準備 runtime 與 declaration artifact。
+`entry` 是 Vite build/dev authoring string。`name` 會成為 Agent 的 import specifier，`usage` 是必要的常見 import guidance。`preferStdinExecution` 是 optional 的 Agent execution preference；設為 `true` 時，Host Context 會提供帶有 `<typescript-source>` placeholder 的 module-specific stdin `runCommandTemplate`。File-backed execution 仍然有效，且此 preference 不會改變 bundling 或 artifact contents。請使用 `pedelecVitePlugin()` 準備 runtime 與 declaration artifact。
 
 ### `SkillsInput`
 

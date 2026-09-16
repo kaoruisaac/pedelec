@@ -107,7 +107,7 @@ const session = await pedelec.createSession({
 
 The generated `index.d.ts` describes the Agent-facing public API and omits implementation-only dependency types. Module-owned exported types are supported; packages that directly expose dependency-owned or Node-specific external types are not guaranteed to produce a standalone declaration in V1. The Agent imports `sprite-tools` from a script run with `pedelec-deno`; Host Context points exact API questions to `index.d.ts`. Deno Modules are distinct from browser/App Tools in `skills.tools`, which use `pedelec-cli` RPC commands. Session end/resume keeps the same immutable snapshot while Core still knows the thread; create a new session to use a rebuilt artifact.
 
-`preferStdinExecution` is optional. Set it to `true` when a module is primarily used by short scripts; Host Context then supplies that module's concrete stdin `runCommand`, such as `pedelec-deno --thread-id <thread-id> run -`. It is an execution preference, not a restriction, so file-backed scripts remain valid. Omit it or set it to `false` for the default behavior. It does not change module bundling or artifact contents.
+`preferStdinExecution` is optional. Set it to `true` when a module is primarily used by short scripts; Host Context then supplies that module's stdin `runCommandTemplate`, such as `@'\n<typescript-source>\n'@ | pedelec-deno --thread-id <thread-id> run -`, so the Agent can replace the TypeScript source placeholder and execute the complete stdin command directly. It is an execution preference, not a restriction, so file-backed scripts remain valid. Omit it or set it to `false` for the default behavior. It does not change module bundling or artifact contents.
 
 ## Ollama
 
