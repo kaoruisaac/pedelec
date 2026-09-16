@@ -306,7 +306,7 @@ if (availability.available) startUi();
 
 An unavailable extension may be disconnected rather than absent. `desktop.launchAttempted` means the settings probe was sent, not that Desktop was confirmed to have launched. Invalid settings responses also count as Desktop unavailable in this probe.
 
-### Selecting Provider and Effort
+### Selecting Provider, Model, and Effort
 
 ```ts
 const session = await pedelec.createSession({
@@ -318,7 +318,19 @@ const session = await pedelec.createSession({
 const defaultSession = await pedelec.createSession({ effortLevel: "low" });
 ```
 
-The SDK uses the provider-independent effort levels `default`, `low`, and `high`. An omitted level means `default`. Desktop users map each provider's profiles to concrete model and native effort arguments; that mapping is not exposed through the SDK.
+The SDK uses the provider-independent effort levels `default`, `low`, and `high`. An omitted level means `default`. Desktop users map each provider's profiles to concrete model and native effort arguments. That profile remains the default source of both values, but an application may optionally override only the model for one session:
+
+```ts
+const specializedSession = await pedelec.createSession({
+  provider: "codex",
+  effortLevel: "high",
+  model: "gpt-x",
+});
+```
+
+`model` is an optional provider-native identifier. Omitting it preserves the existing Desktop-profile behavior; providing it does not disable `effortLevel`, replaces only the selected profile's model, and leaves its native effort arguments intact. The SDK does not expose or maintain a model catalog, and it does not translate the identifier into provider CLI flags. Model validity and account entitlement remain provider-dependent, so an invalid or unavailable model may fail when the provider starts.
+
+For an explicit model, the SDK requires an acknowledgment from Core that the override was applied before it exposes the session or starts Deno Module setup. If the connected Extension/Desktop is too old to provide that acknowledgment, the SDK aborts the newly created setup and reports a compatibility error instead of silently ignoring the model.
 
 Currently supported provider codes in the SDK:
 
@@ -331,6 +343,6 @@ Currently supported provider codes in the SDK:
 | Claude Code | `claude` |
 | Ollama | `ollama` |
 
-Ollama sessions are executed by the bundled `pedelec-agent`. The selected Ollama effort profile must contain a model in Desktop Settings; otherwise Core returns `MODEL_REQUIRED`. Low and high profiles are optional, but there is no fallback between profiles.
+Ollama sessions are executed by the bundled `pedelec-agent`. The selected Ollama effort profile must contain a model unless `createSession({ model })` supplies the explicit model override; otherwise Core returns `MODEL_REQUIRED`. Low and high profiles are optional, but there is no fallback between profiles.
 
 `getSettings()` returns only `{ defaultProvider }`. It never exposes provider settings, effort arguments, credentials, or model names.

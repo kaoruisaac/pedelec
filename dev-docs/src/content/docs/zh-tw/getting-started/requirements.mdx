@@ -108,7 +108,7 @@ Runtime module 通常也能被匯入，但 server render 期間呼叫 `new Pedel
 
 Desktop Settings 將每個 provider 的 `default`、`low`、`high` profile 對應到 provider 支援的 model/effort argv。Pedelec 會驗證 provider 支援的參數名稱與 native effort 值，但不維護統一的 model catalog。
 
-Ollama 必須在選中的 Desktop effort profile 中有 model。若 profile 為空會收到 `MODEL_REQUIRED`，不會 fallback 到其他 tier。
+Ollama 必須在選中的 Desktop effort profile 中有 model，除非 `createSession({ model })` 提供 explicit override。兩者皆沒有時才會收到 `MODEL_REQUIRED`，且不會 fallback 到其他 tier。
 
 ## Preflight checklist
 

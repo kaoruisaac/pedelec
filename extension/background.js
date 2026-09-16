@@ -2080,6 +2080,7 @@ function createBackground(runtimeChrome, options = {}) {
           const result = await sendSdkNativeRequest(context, "create_thread", {
             provider: input.provider,
             effortLevel: input.effortLevel,
+            model: input.model,
             skills: input.skills,
             workspace: input.workspace,
           }, message.callerSdkVersion === undefined
@@ -2106,7 +2107,10 @@ function createBackground(runtimeChrome, options = {}) {
             forgetSdkSession(sessionId);
             throw err;
           }
-          postSdkResponse(port, channelId, requestId, true, { sessionId });
+          postSdkResponse(port, channelId, requestId, true, {
+            sessionId,
+            modelOverrideApplied: result?.modelOverrideApplied === true,
+          });
         });
         return;
       }

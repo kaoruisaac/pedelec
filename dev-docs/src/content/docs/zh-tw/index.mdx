@@ -174,7 +174,7 @@ const session = await pedelec.createSession({
 | Claude Code | `claude` |
 | Ollama | `ollama` |
 
-Ollama session 使用 Desktop 設定的 endpoint 與內附 `pedelec-agent`。選中的 effort profile 必須有 model；空 profile 會回傳 `MODEL_REQUIRED`，不會 fallback 到 `default`。
+Ollama session 使用 Desktop 設定的 endpoint 與內附 `pedelec-agent`。選中的 effort profile 必須有 model，除非 `createSession({ model })` 提供 explicit override；兩者皆沒有時空 profile 會回傳 `MODEL_REQUIRED`，不會 fallback 到 `default`。
 
 Desktop Settings 也可替 Ollama session 設定 optional Tavily API key。設定後，內附 agent 可自行判斷是否使用 Tavily web search；目前固定使用 `basic` search depth，每次最多回傳五筆結果。未設定 key 時，不會向 Ollama model 提供 web-search tool。
 
@@ -206,7 +206,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-這會只讀取 Desktop App 的 `defaultProvider`。如果沒有設定 default provider，SDK 會拋出 `DEFAULT_PROVIDER_NOT_SET`；具體 effort argv 由 Core 解析 Desktop 設定。
+這會只讀取 Desktop App 的 `defaultProvider`。如果沒有設定 default provider，SDK 會拋出 `DEFAULT_PROVIDER_NOT_SET`；具體 model 與 effort argv 由 Core 解析 Desktop 設定。若傳入 `model`，Core 只取代該 profile 的 model，仍保留 native effort 設定。
 
 ### 只指定 provider
 
@@ -216,7 +216,21 @@ const session = await pedelec.createSession({
 });
 ```
 
-只傳 `provider` 時，SDK 使用 `effortLevel: "default"`。非 Ollama provider 可使用空 profile；Ollama 的選中 profile 沒有 model 時會回傳 `MODEL_REQUIRED`。
+只傳 `provider` 時，SDK 使用 `effortLevel: "default"`。非 Ollama provider 可使用空 profile；Ollama 的選中 profile 沒有 model 時會回傳 `MODEL_REQUIRED`，除非同時傳入 explicit `model`。
+
+### 指定 model override
+
+`model` 是 optional provider-native identifier，可以和 `provider`、`effortLevel` 一起傳入：
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  effortLevel: "high",
+  model: "gpt-x",
+});
+```
+
+省略 `model` 時行為不變；提供時只取代選中 Desktop profile 的 model，其他 native effort 設定保持不變。Core 會在建立時將結果 snapshot 到 thread 的 `effort_args`，之後修改 Desktop Settings 或 resume 都不會改變這份 session 設定。SDK 不維護 model catalog，identifier 是否有效仍由 provider/account 決定。
 
 ### Session 生命週期
 
@@ -354,7 +368,7 @@ session.onError((error, ctx) => {
 
 目前公開 callback context 不會另外提供 provider responsibility 欄位。不要判斷 `ctx.source === "provider"`，也不要預期存在 `ctx.provider`。
 
-`getSettings()` 與 `listProviders()` 需要 origin approval 且可能開啟 popup。Settings 絕不公開 provider credentials，而 provider entry 僅含上述欄位；SDK 會忽略 Extension response 中新增的未知欄位，以保持 forward compatibility。請以 `getApprovalStatus().appConnected` 做非敏感 Desktop connectivity probe。
+`getSettings()` 與 `listProviders()` 需要 origin approval 且可能開啟 popup。Settings 絕不公開 provider credentials，而 provider entry 僅含上述欄位；SDK 會忽略 Extension response 中新增的未知欄位，以保持 forward compatibility。請以 `getApprovalStatus().appConnected` 做非敏感 Desktop connectivity probe。明確傳入 `model` 時，SDK 會要求 Core 回傳已套用 override 的 acknowledgment；舊版元件會被辨識為不相容，不會靜默忽略 model。
 
 ---
 

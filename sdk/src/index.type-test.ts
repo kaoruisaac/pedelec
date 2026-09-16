@@ -192,8 +192,8 @@ async function effortLevelPublicTypeContract() {
   // @ts-expect-error the removed sandbox picker is not part of the public contract
   pedelec.sandboxFolderPicker();
 
-  // @ts-expect-error model is no longer a createSession option
-  pedelec.createSession({ provider: "codex", model: "gpt-5" });
+  await pedelec.createSession({ model: "gpt-5" });
+  await pedelec.createSession({ provider: "codex", model: "gpt-5", effortLevel: "high" });
   // @ts-expect-error session no longer exposes provider model
   session.model;
   // @ts-expect-error unsupported effort level

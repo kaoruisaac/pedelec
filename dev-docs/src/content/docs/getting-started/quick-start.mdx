@@ -50,7 +50,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-When only `provider` is supplied, the SDK uses effort level `default`; Core resolves that profile from Desktop Settings. You can pass `effortLevel: "low"` or `"high"` with or without an explicit provider. Ollama requires a model in the selected profile.
+When only `provider` is supplied, the SDK uses effort level `default`; Core resolves that profile from Desktop Settings. You can pass `effortLevel: "low"` or `"high"` with or without an explicit provider. Optionally pass a provider-native `model` identifier to replace only the selected profile's model; it can be combined with `effortLevel`. Ollama requires a model in the selected profile unless this explicit override is supplied.
 
 ## 4. Register callbacks before sending
 

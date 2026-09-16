@@ -1,6 +1,6 @@
 # Provider and Effort Level
 
-The current Web SDK contract is **Provider + provider-independent Effort Level**, not arbitrary Web-side model selection.
+The current Web SDK contract is **Provider + provider-independent Effort Level**, with an optional caller-supplied provider-native model override for a session. It does not expose arbitrary Desktop model selection or a model catalog.
 
 ## Session semantics
 
@@ -9,6 +9,7 @@ Session input may use:
 ```text
 provider: an installed Provider code, or omitted to inherit Desktop defaultProvider
 effortLevel: default | low | high
+model: an optional provider-native identifier that overrides only the selected Desktop profile's model
 ```
 
 If effort is omitted, use the SDK's documented default behavior, currently `default` in the supported contract. The three levels are product-facing profiles; they do not promise a universal native provider argument or model.
@@ -35,5 +36,5 @@ Use a Provider picker or Provider list as the baseline site-local Provider Setti
 
 Effort Level is separate from the Provider Setting and is optional unless the product policy requires it. When included, use `default`, `low`, and `high`. Do not create an arbitrary Model input, Model combobox, or full Desktop settings editor.
 
-Actual model selection and provider-native effort configuration are **Pedelec Desktop-owned configuration**. If a product has a provider-specific requirement, express it as compatibility guidance, a readiness check, or a Desktop Settings action. Do not claim the Web SDK can read or edit the model profile.
+Actual profile model selection and provider-native effort configuration remain **Pedelec Desktop-owned configuration**. The Web SDK may optionally accept a caller-supplied provider-native `model` identifier for a single session; Core replaces only the selected profile's model and preserves native effort settings. If a product has a provider-specific requirement, express it as compatibility guidance, a readiness check, or a Desktop Settings action. Do not claim the Web SDK can read or edit the Desktop model profile or maintain a model catalog.
 

@@ -53,6 +53,7 @@ type CreateSessionInput<
 > =
   | {
       provider: ProviderCode;
+      model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
@@ -60,6 +61,7 @@ type CreateSessionInput<
     }
   | {
       provider?: undefined;
+      model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
@@ -67,7 +69,7 @@ type CreateSessionInput<
     };
 ```
 
-`effortLevel` is provider-independent and may be used with or without `provider`.
+`effortLevel` is provider-independent and may be used with or without `provider`. `model` is an optional provider-native identifier that overrides only the selected Desktop profile's model; it can be used with or without `provider` and `effortLevel`.
 
 ### `CreateSessionWorkspaceInput`
 

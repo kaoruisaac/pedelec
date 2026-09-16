@@ -1,11 +1,11 @@
 ---
 title: Creating sessions
-description: Create Pedelec sessions with provider-independent effort levels.
+description: Create Pedelec sessions with provider-independent effort levels and optional model overrides.
 ---
 
 # Creating sessions
 
-The SDK creates a session handle and Core resolves the provider's Desktop-configured effort profile.
+The SDK creates a session handle. Core resolves the selected provider and Desktop-configured effort profile, then optionally applies a caller-supplied model override before snapshotting the final provider arguments.
 
 ## Choose a workspace first
 
@@ -40,7 +40,7 @@ const session = await pedelec.createSession({ effortLevel: "high" });
 
 This provider-independent form is useful when the application describes intent while the Desktop user owns provider configuration.
 
-## Choose provider and effort
+## Choose provider, model, and effort
 
 ```ts
 const session = await pedelec.createSession({
@@ -49,7 +49,19 @@ const session = await pedelec.createSession({
 });
 ```
 
-Explicit provider creation does not read Desktop settings to resolve model arguments. Core resolves the current provider profile after the request arrives.
+`provider` and `effortLevel` are independent of the optional `model` field:
+
+```ts
+const session = await pedelec.createSession({
+  provider: "codex",
+  effortLevel: "high",
+  model: "gpt-x",
+});
+```
+
+An omitted `model` preserves the current behavior. When provided, it is trimmed and replaces only the selected Desktop profile's model; the profile's provider-native effort arguments remain in effect. The SDK and Extension pass the declarative identifier through, while Core performs the provider-specific merge and stores the final immutable snapshot. The SDK does not maintain a model catalog; availability and entitlement remain provider-dependent.
+
+For an explicit model, Core returns an applied acknowledgment. The SDK requires that acknowledgment before uploading Deno Modules or exposing the session; an older Extension/Desktop combination is aborted and reported as incompatible instead of silently dropping the override.
 
 ## Skills and workspace
 
@@ -67,7 +79,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-The SDK does not accept a provider model field. Configure model selection in Desktop Settings.
+Desktop Settings remains the default source of model selection. Applications may use `model` for a per-session override without replacing the rest of the selected effort profile.
 
 ## Deno Modules
 
@@ -111,7 +123,7 @@ The generated `index.d.ts` describes the Agent-facing public API and omits imple
 
 ## Ollama
 
-The selected Ollama profile must contain a model. An empty selected profile returns `MODEL_REQUIRED`; low and high do not fall back to default.
+The selected Ollama profile must contain a model unless an explicit `model` override is supplied. An empty selected profile therefore returns `MODEL_REQUIRED` without an override, while `createSession({ provider: "ollama", effortLevel: "low", model: "qwen3:30b" })` is valid. Low and high do not fall back to default.
 
 ## Metadata and resume
 

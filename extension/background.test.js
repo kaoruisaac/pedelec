@@ -328,12 +328,13 @@ test("create_session forwards an explicit workspace without inventing a path", a
   });
   const nativeDefault = await respondToNative(background, native, { threadId: "thread_default" }, 3);
   assert.equal(nativeDefault.workspace, undefined);
+  assert.equal(nativeDefault.model, undefined);
   await respondToNative(background, native, {
     snapshot: { threadId: "thread_default", status: "idle", latestSeq: 0 },
   }, 4);
 });
 
-test("create_session forwards effortLevel and never forwards model", async () => {
+test("create_session forwards effortLevel and optional model", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -347,9 +348,18 @@ test("create_session forwards effortLevel and never forwards model", async () =>
     type: "create_session",
     input: { provider: "codex", effortLevel: "high", model: "should-not-forward" },
   });
-  const nativeCreate = await respondToNative(background, native, { threadId: "thread_effort" });
+  const nativeCreate = await respondToNative(background, native, {
+    threadId: "thread_effort",
+    modelOverrideApplied: true,
+  });
   assert.equal(nativeCreate.effortLevel, "high");
-  assert.equal(nativeCreate.model, undefined);
+  assert.equal(nativeCreate.model, "should-not-forward");
+  await respondToNative(background, native, {
+    snapshot: { threadId: "thread_effort", status: "idle", latestSeq: 0 },
+  }, 2);
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "create_effort"));
+  const response = sdk.sent.find((message) => message.requestId === "create_effort");
+  assert.equal(response.result.modelOverrideApplied, true);
 });
 
 test("SDK settings projection strips provider settings and effort args", async () => {

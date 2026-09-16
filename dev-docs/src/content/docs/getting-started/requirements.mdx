@@ -110,7 +110,7 @@ Importing the runtime module is also generally possible, but calling `new Pedele
 
 Desktop Settings maps each provider's `default`, `low`, and `high` effort profile to provider-supported model/effort arguments. Pedelec validates provider-supported argument names and native effort values, but does not maintain a universal model catalog.
 
-Ollama requires a model in the selected Desktop effort profile. If the selected profile is empty, session creation fails with `MODEL_REQUIRED`; it does not fall back to another tier.
+Ollama requires a model in the selected Desktop effort profile unless `createSession({ model })` supplies an explicit override. If both are absent, session creation fails with `MODEL_REQUIRED`; it does not fall back to another tier.
 
 ## Preflight checklist
 

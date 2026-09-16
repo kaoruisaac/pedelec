@@ -193,6 +193,7 @@ type CreateSessionInputWithProvider<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
   provider: ProviderCode;
+  model?: string;
   effortLevel?: EffortLevel;
   skills?: SkillsInput<TTools>;
   workspace?: CreateSessionWorkspaceInput;
@@ -203,6 +204,7 @@ type CreateSessionInputWithDefaults<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
   provider?: undefined;
+  model?: string;
   effortLevel?: EffortLevel;
   skills?: SkillsInput<TTools>;
   workspace?: CreateSessionWorkspaceInput;
@@ -729,9 +731,10 @@ export class Pedelec {
     const resolvedInput =
       resolvedOrPromise instanceof Promise ? await resolvedOrPromise : resolvedOrPromise;
 
-    const result = await this.request<{ sessionId: string }>("create_session", {
+    const result = await this.request<{ sessionId: string; modelOverrideApplied?: boolean }>("create_session", {
       input: {
         provider: resolvedInput.provider,
+        model: resolvedInput.model,
         effortLevel: resolvedInput.effortLevel,
         skills: resolvedInput.skills,
         workspace: resolvedInput.workspace,
@@ -741,6 +744,16 @@ export class Pedelec {
 
     if (!result.sessionId) {
       throw makeError("SDK_PROTOCOL_ERROR", "create_session response did not include sessionId");
+    }
+
+    if (resolvedInput.model !== undefined && result.modelOverrideApplied !== true) {
+      const error = makeError(
+        "SDK_PROTOCOL_ERROR",
+        "The connected Pedelec Extension/Desktop does not support createSession model override. Update Pedelec components and try again.",
+        { feature: "modelOverride" },
+      );
+      await this.abortSessionSetup(result.sessionId);
+      throw error;
     }
 
     try {
@@ -1059,6 +1072,7 @@ export class Pedelec {
   private resolveCreateSessionInput(input: CreateSessionInput):
     | {
         provider: ProviderCode;
+        model?: string;
         effortLevel: EffortLevel;
         skills?: SerializableSkillsManifest;
         workspace?: CreateSessionWorkspaceInput;
@@ -1068,6 +1082,7 @@ export class Pedelec {
       }
     | Promise<{
     provider: ProviderCode;
+    model?: string;
     effortLevel: EffortLevel;
     skills?: SerializableSkillsManifest;
     workspace?: CreateSessionWorkspaceInput;
@@ -1085,9 +1100,7 @@ export class Pedelec {
     };
     const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
     const hasProvider = provider.length > 0;
-    if (raw.model !== undefined) {
-      throw makeError("INVALID_INPUT", "model is no longer supported; configure provider effort profiles in Desktop Settings");
-    }
+    const model = normalizeCreateSessionModelInput(raw.model);
     const effortLevel = raw.effortLevel === undefined ? "default" : raw.effortLevel;
     if (!isEffortLevel(effortLevel)) {
       throw makeError("INVALID_INPUT", "effortLevel must be one of default, low, or high");
@@ -1097,11 +1110,18 @@ export class Pedelec {
     const workspace = normalizeCreateSessionWorkspaceInput(raw.workspace);
 
     if (!hasProvider) {
-      return this.resolveDefaultCreateSessionInput(effortLevel, normalizedSkills, workspace, autoEndOnDisconnect);
+      return this.resolveDefaultCreateSessionInput(
+        model,
+        effortLevel,
+        normalizedSkills,
+        workspace,
+        autoEndOnDisconnect,
+      );
     }
 
     return {
       provider: provider as ProviderCode,
+      model,
       effortLevel,
       skills: normalizedSkills.manifest,
       workspace,
@@ -1167,12 +1187,14 @@ export class Pedelec {
   }
 
   private async resolveDefaultCreateSessionInput(
+    model: string | undefined,
     effortLevel: EffortLevel,
     normalizedSkills: NormalizedSkillsInput,
     workspace: CreateSessionWorkspaceInput | undefined,
     autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
+    model?: string;
     effortLevel: EffortLevel;
     skills?: SerializableSkillsManifest;
     workspace?: CreateSessionWorkspaceInput;
@@ -1190,6 +1212,7 @@ export class Pedelec {
     await this.assertDefaultProviderAvailable(settings.defaultProvider);
     return {
       provider: settings.defaultProvider,
+      model,
       effortLevel,
       skills: normalizedSkills.manifest,
       workspace,
@@ -1386,6 +1409,14 @@ function normalizeCreateSessionWorkspaceInput(value: unknown): CreateSessionWork
   }
 
   return { path };
+}
+
+function normalizeCreateSessionModelInput(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw makeError("INVALID_INPUT", "model must be a non-empty string when provided");
+  }
+  return value.trim();
 }
 
 export class PedelecSession<TToolName extends string = string> {

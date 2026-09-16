@@ -1387,11 +1387,96 @@ describe("Pedelec SDK", () => {
     await expect(unavailable).rejects.toMatchObject({ code: "DEFAULT_PROVIDER_UNAVAILABLE" });
   });
 
-  it("rejects runtime model-only createSession input", async () => {
+  it("accepts an explicit model with the default provider", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.createSession({ model: "  gpt-5  " } as any);
+
+    const settingsRequest = pageWindow.lastSent();
+    expect(settingsRequest).toMatchObject({ type: "get_settings" });
+    respondOk(pageWindow, settingsRequest, { defaultProvider: "codex" });
+    await nextTick();
+
+    const providersRequest = pageWindow.lastSent();
+    respondOk(pageWindow, providersRequest, [
+      { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
+    ]);
+    await nextTick();
+
+    const createRequest = pageWindow.lastSent();
+    expect(createRequest).toMatchObject({
+      type: "create_session",
+      input: { provider: "codex", effortLevel: "default", model: "gpt-5" },
+    });
+    respondOk(pageWindow, createRequest, {
+      sessionId: "thread_model_default",
+      modelOverrideApplied: true,
+    });
+
+    await expect(promise).resolves.toMatchObject({
+      sessionId: "thread_model_default",
+      provider: "codex",
+      effortLevel: "default",
+    });
+  });
+
+  it("forwards provider, effort level, and normalized model together", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.createSession({
+      provider: "codex",
+      effortLevel: "high",
+      model: "  gpt-5  ",
+    });
+    const request = pageWindow.lastSent();
+
+    expect(request).toMatchObject({
+      type: "create_session",
+      input: { provider: "codex", effortLevel: "high", model: "gpt-5" },
+    });
+    respondOk(pageWindow, request, { sessionId: "thread_model", modelOverrideApplied: true });
+    await expect(promise).resolves.toMatchObject({
+      sessionId: "thread_model",
+      provider: "codex",
+      effortLevel: "high",
+    });
+  });
+
+  it.each([
+    ["", "empty"],
+    ["   ", "whitespace-only"],
+    [null, "null"],
+    [42, "non-string"],
+  ])("rejects %s model input (%s)", async (model) => {
     const pedelec = new Pedelec();
 
-    await expect(pedelec.createSession({ model: "gpt-5" } as any)).rejects.toMatchObject({
+    await expect(pedelec.createSession({ model } as any)).rejects.toMatchObject({
       code: "INVALID_INPUT",
+    });
+    expect(requestMessages(pageWindow.port)).toEqual([]);
+  });
+
+  it.each([
+    [undefined, "missing acknowledgment"],
+    [false, "false acknowledgment"],
+  ])("rejects explicit model when the Core acknowledgment is %s", async (acknowledgment) => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.createSession({ provider: "codex", model: "gpt-5" });
+    const createRequest = pageWindow.lastSent();
+    respondOk(pageWindow, createRequest, {
+      sessionId: "thread_model_compatibility",
+      ...(acknowledgment === undefined ? {} : { modelOverrideApplied: acknowledgment }),
+    });
+    await nextTick();
+
+    const abortRequest = pageWindow.lastSent();
+    expect(abortRequest).toMatchObject({
+      type: "abort_session_setup",
+      sessionId: "thread_model_compatibility",
+    });
+    respondOk(pageWindow, abortRequest, {});
+
+    await expect(promise).rejects.toMatchObject({
+      code: "SDK_PROTOCOL_ERROR",
+      details: { feature: "modelOverride" },
     });
   });
 

@@ -55,6 +55,7 @@ Creates a new Core session and subscribes the current SDK channel to it.
 type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
   | {
       provider: ProviderCode;
+      model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
@@ -62,6 +63,7 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
     }
   | {
       provider?: undefined;
+      model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
@@ -73,6 +75,7 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 
 - No `provider`: use Desktop `defaultProvider`; verify it is available.
 - `provider` may be combined with provider-independent `effortLevel`.
+- `model` is optional and may be combined with `provider` and `effortLevel`; Core replaces only the selected Desktop profile's model and preserves native effort arguments.
 - Omitted `effortLevel` is normalized to `default`.
 - `workspace.path`: optionally use an absolute application-managed workspace instead of a temporary managed workspace.
 - `autoEndOnDisconnect`: defaults to `true`.
@@ -89,7 +92,7 @@ A `PedelecSession` registered in this client.
 - `DEFAULT_PROVIDER_NOT_SET`;
 - `DEFAULT_PROVIDER_UNAVAILABLE`;
 - `INVALID_INPUT`;
-- `MODEL_REQUIRED` when the selected Ollama effort profile has no model;
+- `MODEL_REQUIRED` when the selected Ollama effort profile has no model and no explicit override was supplied;
 - provider/Core creation errors.
 
 ### Example

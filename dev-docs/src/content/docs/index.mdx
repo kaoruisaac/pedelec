@@ -149,14 +149,17 @@ const status = await pedelec.getApprovalStatus();
 console.log(status.installed, status.approved, status.origin);
 ```
 
-### Specifying Provider and Effort
+### Specifying Provider, Model, and Effort
 
 ```ts
 const session = await pedelec.createSession({
   provider: "opencode",
   effortLevel: "high",
+  model: "provider-native-model",
 });
 ```
+
+`model` is optional. If omitted, Desktop's selected effort profile supplies the model and native effort arguments. If provided, Core replaces only that profile's model and keeps the selected native effort settings. Pedelec does not maintain a model catalog; model validity and account entitlement remain provider-dependent.
 
 Currently supported provider codes in the SDK:
 
@@ -169,7 +172,7 @@ Currently supported provider codes in the SDK:
 | Claude Code | `claude` |
 | Ollama | `ollama` |
 
-Ollama sessions use the bundled `pedelec-agent` and the endpoint configured in Desktop Settings. The selected profile must contain a model; an empty selected profile returns `MODEL_REQUIRED` and does not fall back to `default`.
+Ollama sessions use the bundled `pedelec-agent` and the endpoint configured in Desktop Settings. The selected profile must contain a model unless `createSession({ model })` supplies one; an empty selected profile otherwise returns `MODEL_REQUIRED` and does not fall back to `default`.
 
 Desktop Settings also accepts an optional Tavily API key for Ollama sessions. When configured, the bundled agent can decide to use Tavily web search with `basic` search depth and up to five results per call. Without the key, the web-search tool is not exposed to the Ollama model.
 
@@ -211,7 +214,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-When only `provider` is passed, the SDK sends that provider with `effortLevel: "default"`. Non-Ollama providers may have an empty profile; Ollama requires a model in its selected profile and returns `MODEL_REQUIRED` otherwise.
+When only `provider` is passed, the SDK sends that provider with `effortLevel: "default"`. Non-Ollama providers may have an empty profile; Ollama requires a model in its selected profile and returns `MODEL_REQUIRED` otherwise, unless an explicit model override is supplied.
 
 ### Session Lifecycle
 

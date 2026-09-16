@@ -55,6 +55,7 @@ createSession<const TTools extends readonly ToolDefinition[]>(
 type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
   | {
       provider: ProviderCode;
+      model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
@@ -62,6 +63,7 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
     }
   | {
       provider?: undefined;
+      model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
@@ -73,9 +75,8 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 
 - 無 `provider`：使用 Desktop `defaultProvider` 並確認 available。
 - `provider` 可搭配 provider-independent `effortLevel`；省略時使用 `default`。
-- `provider` + `model`：使用 explicit values。
+- `model` 是 optional，可和 `provider`、`effortLevel` 共存；Core 只取代選中 Desktop profile 的 model，保留 native effort args。
 - `workspace.path`：可選擇使用 absolute、由 application 管理的 workspace，取代 temporary managed workspace。
-- 只有 `model`：invalid。
 - `autoEndOnDisconnect`：預設 `true`。
 
 Explicit `workspace.path` 可以是新目錄或既有目錄。Core 會建立 Pedelec 擁有的 `.pedelec-runtime/{skills,assets,logs,tmp}/` runtime 結構，但不清空既有 project 內容。Pedelec 永遠不會刪除 explicit workspace，多個 active session 也可以共用它。Path 不得與 Pedelec managed workspace root overlap；無效 path 回傳 `WORKSPACE_PATH_INVALID`。
@@ -90,7 +91,7 @@ Explicit `workspace.path` 可以是新目錄或既有目錄。Core 會建立 Ped
 - `DEFAULT_PROVIDER_NOT_SET`；
 - `DEFAULT_PROVIDER_UNAVAILABLE`；
 - `INVALID_INPUT`；
-- Ollama 無 model 的 `MODEL_REQUIRED`；
+- Ollama 沒有 profile model 且未提供 explicit override 時的 `MODEL_REQUIRED`；
 - provider/Core creation errors。
 
 ```ts

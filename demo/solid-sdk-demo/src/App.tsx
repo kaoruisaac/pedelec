@@ -157,6 +157,7 @@ export default function App() {
   const [provider, setProvider] = createSignal("");
   const [providers, setProviders] = createSignal<ProviderInfo[]>([]);
   const [providersLoading, setProvidersLoading] = createSignal(false);
+  const [model, setModel] = createSignal("");
   const [effortLevel, setEffortLevel] = createSignal<"default" | "low" | "high">("default");
   const [workspacePath, setWorkspacePath] = createSignal("");
   const [workspacePicking, setWorkspacePicking] = createSignal(false);
@@ -267,16 +268,19 @@ export default function App() {
     if (!sdk || workspacePicking()) return;
 
     const selectedWorkspacePath = workspacePath();
+    const selectedModel = model().trim();
     const workspace = selectedWorkspacePath ? { path: selectedWorkspacePath } : undefined;
 
     try {
       appendGlobalEvent("create_session_requested", {
         provider: provider(),
+        model: selectedModel || undefined,
         effortLevel: effortLevel(),
         workspacePath: selectedWorkspacePath || undefined,
       });
       const session = await sdk.createSession({
         provider: provider() as ProviderCode,
+        ...(selectedModel ? { model: selectedModel } : {}),
         effortLevel: effortLevel(),
         skills: createDemoSkills(),
         ...(workspace ? { workspace } : {}),
@@ -816,6 +820,14 @@ export default function App() {
                     </select>
                   </Show>
                 </Show>
+              </label>
+              <label>
+                Model (optional)
+                <input
+                  value={model()}
+                  placeholder="Use effort/default model"
+                  onInput={(event) => setModel(event.currentTarget.value)}
+                />
               </label>
               <label>
                 Effort level
