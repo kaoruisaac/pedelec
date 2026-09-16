@@ -1567,10 +1567,12 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: None,
             })
             .unwrap();
+        assert!(!default_thread.model_override_applied);
         let default_state = runtime
             .thread_manager
             .thread(&default_thread.thread_id)
@@ -1582,6 +1584,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Low),
+                model: None,
                 skills: None,
                 workspace: None,
             })
@@ -1614,11 +1617,152 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Ollama,
                 effort_level: Some(EffortLevel::Low),
+                model: None,
                 skills: None,
                 workspace: None,
             })
             .unwrap_err();
         assert_eq!(error.code, error_codes::MODEL_REQUIRED);
+    }
+
+    #[test]
+    fn create_thread_model_override_replaces_only_the_profile_model_and_is_acknowledged() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let mut settings = PedelecSettings::default();
+        settings.provider_settings.codex.efforts_args.high = vec![
+            "-m".into(),
+            "profile-model".into(),
+            "-c".into(),
+            "model_reasoning_effort=\"xhigh\"".into(),
+        ];
+        write_settings_file(&settings_path, &settings).unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(settings_path.clone()),
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: Some(EffortLevel::High),
+                model: Some("  explicit-model  ".into()),
+                skills: None,
+                workspace: None,
+            })
+            .unwrap();
+        assert!(output.model_override_applied);
+        let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
+        assert_eq!(
+            thread.effort_args,
+            vec![
+                "-m",
+                "explicit-model",
+                "-c",
+                "model_reasoning_effort=\"xhigh\"",
+            ]
+        );
+
+        settings.provider_settings.codex.efforts_args.high =
+            vec!["-m".into(), "changed-after-create".into()];
+        write_settings_file(&settings_path, &settings).unwrap();
+        assert_eq!(thread.effort_args[1], "explicit-model");
+    }
+
+    #[test]
+    fn create_thread_model_override_appends_to_empty_non_ollama_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        write_settings_file(&settings_path, &PedelecSettings::default()).unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(settings_path),
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Antigravity,
+                effort_level: Some(EffortLevel::Low),
+                model: Some("explicit-model".into()),
+                skills: None,
+                workspace: None,
+            })
+            .unwrap();
+        assert!(output.model_override_applied);
+        assert_eq!(
+            runtime
+                .thread_manager
+                .thread(&output.thread_id)
+                .unwrap()
+                .effort_args,
+            vec!["--model", "explicit-model"]
+        );
+    }
+
+    #[test]
+    fn create_thread_model_override_satisfies_empty_selected_ollama_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let mut settings = PedelecSettings::default();
+        settings.provider_settings.ollama.efforts_args.low = Vec::new();
+        write_settings_file(&settings_path, &settings).unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(settings_path),
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Ollama,
+                effort_level: Some(EffortLevel::Low),
+                model: Some("qwen3:30b".into()),
+                skills: None,
+                workspace: None,
+            })
+            .unwrap();
+        assert!(output.model_override_applied);
+        assert_eq!(
+            runtime
+                .thread_manager
+                .thread(&output.thread_id)
+                .unwrap()
+                .effort_args,
+            vec!["--model", "qwen3:30b"]
+        );
+    }
+
+    #[test]
+    fn create_thread_rejects_whitespace_only_model_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        write_settings_file(&settings_path, &PedelecSettings::default()).unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(settings_path),
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
+            ..CoreRuntime::default()
+        };
+
+        let error = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: None,
+                model: Some("  \n".into()),
+                skills: None,
+                workspace: None,
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::INVALID_INPUT);
     }
 
     #[test]
@@ -1640,6 +1784,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::High),
+                model: None,
                 skills: None,
                 workspace: None,
             })
@@ -1673,6 +1818,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: None,
             })
@@ -2649,6 +2795,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: Some(sample_skills_input()),
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -2684,6 +2831,7 @@ mod tests {
         let input = || CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: None,
+            model: None,
             skills: None,
             workspace: Some(CreateThreadWorkspaceInput {
                 path: custom.clone(),
@@ -2722,6 +2870,7 @@ mod tests {
         let invalid_skills = CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: None,
+            model: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: "bad".into(),
                 tools: vec![CreateThreadToolInput {
@@ -2755,6 +2904,7 @@ mod tests {
             CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -2784,6 +2934,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -2794,6 +2945,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Claude,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -2838,6 +2990,7 @@ mod tests {
         let result = runtime.create_thread(CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: None,
+            model: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: "bad".into(),
                 tools: vec![CreateThreadToolInput {
@@ -2877,6 +3030,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -4447,6 +4601,7 @@ mod tests {
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: None,
+            model: None,
             skills: None,
             workspace: None,
         };
@@ -4476,6 +4631,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: None,
             })
@@ -4518,6 +4674,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: None,
             })
@@ -4539,6 +4696,7 @@ mod tests {
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: None,
+            model: None,
             skills: None,
             workspace: None,
         };
@@ -4581,6 +4739,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: None,
             })
@@ -4975,6 +5134,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: Some(sample_skills_input()),
                 workspace: None,
             })
@@ -5015,6 +5175,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: Some(sample_skills_input()),
                 workspace: None,
             })
@@ -5051,6 +5212,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: Some(sample_skills_input()),
                 workspace: None,
             })
@@ -5084,6 +5246,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
                 effort_level: None,
+                model: None,
                 skills: None,
                 workspace: None,
             })

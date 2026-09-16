@@ -2125,6 +2125,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Ollama,
                 effort_level: Some(EffortLevel::Default),
+                model: None,
                 skills: Some(CreateThreadSkillsInput {
                     guidance: guidance.to_string(),
                     tools: vec![],

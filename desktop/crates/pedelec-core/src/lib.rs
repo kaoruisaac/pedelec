@@ -920,6 +920,8 @@ pub struct CreateThreadInput {
     pub provider: ProviderCode,
     #[serde(default)]
     pub effort_level: Option<EffortLevel>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub skills: Option<CreateThreadSkillsInput>,
     pub workspace: Option<CreateThreadWorkspaceInput>,
 }
@@ -952,6 +954,7 @@ pub struct CreateThreadToolInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadOutput {
     pub thread_id: String,
+    pub model_override_applied: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -2212,10 +2215,16 @@ impl CoreRuntime {
         sdk_origin: Option<String>,
         sdk_version: Option<String>,
     ) -> Result<CreateThreadOutput, PedelecError> {
+        let model_override = normalize_model_override(input.model)?;
         let deno_modules = normalize_deno_module_inputs(input.skills.as_ref())?;
         let settings = self.get_settings()?;
         let effort_level = input.effort_level.unwrap_or_default();
-        let effort_args = resolve_thread_effort_args(&settings, &input.provider, effort_level)?;
+        let effort_args = resolve_thread_effort_args(
+            &settings,
+            &input.provider,
+            effort_level,
+            model_override.as_deref(),
+        )?;
         let initialize =
             |workspace: &Path| initialize_generated_skills(workspace, input.skills.as_ref());
         // Custom workspaces persist across Desktop/Core restarts, so allocate
@@ -2283,7 +2292,10 @@ impl CoreRuntime {
         self.event_bus
             .emit_status_changed(&thread_id, ThreadStatus::Idle);
 
-        Ok(CreateThreadOutput { thread_id })
+        Ok(CreateThreadOutput {
+            thread_id,
+            model_override_applied: model_override.is_some(),
+        })
     }
 
     pub fn authorize_thread_access(
@@ -7877,15 +7889,19 @@ fn runtime_protocol_error(thread_id: &str, message: &str) -> PedelecError {
 }
 
 fn provider_model_from_effort_args(provider: &ProviderCode, args: &[String]) -> Option<String> {
-    let model_flag = if *provider == ProviderCode::Codex {
-        "-m"
-    } else {
-        "--model"
-    };
+    let model_flag = provider_model_arg_key(provider);
     args.windows(2)
         .find(|pair| pair[0] == model_flag)
         .map(|pair| pair[1].clone())
         .filter(|model| !model.trim().is_empty())
+}
+
+fn provider_model_arg_key(provider: &ProviderCode) -> &'static str {
+    if *provider == ProviderCode::Codex {
+        "-m"
+    } else {
+        "--model"
+    }
 }
 
 fn parse_codex_session_settings(
@@ -9008,14 +9024,42 @@ fn resolve_thread_effort_args(
     settings: &PedelecSettings,
     provider: &ProviderCode,
     level: EffortLevel,
+    model_override: Option<&str>,
 ) -> Result<Vec<String>, PedelecError> {
     let efforts = provider_efforts_args(&settings.provider_settings, provider);
     validate_effort_tier(provider, level, efforts.get(level))?;
-    let args = efforts.get(level).to_vec();
+    let mut args = efforts.get(level).to_vec();
+    if let Some(model) = model_override {
+        apply_model_override(provider, &mut args, model);
+    }
+    validate_effort_tier(provider, level, &args)?;
     if *provider == ProviderCode::Ollama {
         required_ollama_model_from_args(&args)?;
     }
     Ok(args)
+}
+
+fn normalize_model_override(value: Option<String>) -> Result<Option<String>, PedelecError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let model = value.trim();
+    if model.is_empty() {
+        return Err(PedelecError::new(
+            error_codes::INVALID_INPUT,
+            "model must be a non-empty string when provided",
+        ));
+    }
+    Ok(Some(model.to_string()))
+}
+
+fn apply_model_override(provider: &ProviderCode, args: &mut Vec<String>, model: &str) {
+    let model_key = provider_model_arg_key(provider);
+    if let Some(index) = args.iter().position(|arg| arg == model_key) {
+        args[index + 1] = model.to_string();
+    } else {
+        args.extend([model_key.to_string(), model.to_string()]);
+    }
 }
 
 fn provider_efforts_args<'a>(
@@ -9075,11 +9119,7 @@ fn validate_effort_tier(
         }
         seen.push(key);
 
-        let model_key = if *provider == ProviderCode::Codex {
-            "-m"
-        } else {
-            "--model"
-        };
+        let model_key = provider_model_arg_key(provider);
         let allowed = if key == model_key {
             true
         } else {
@@ -9477,7 +9517,7 @@ fn required_ollama_model(thread: &ThreadState) -> Result<String, PedelecError> {
 
 fn required_ollama_model_from_args(args: &[String]) -> Result<String, PedelecError> {
     args.windows(2)
-        .find(|pair| pair[0] == "--model")
+        .find(|pair| pair[0] == provider_model_arg_key(&ProviderCode::Ollama))
         .map(|pair| pair[1].trim())
         .filter(|model| !model.is_empty())
         .map(ToOwned::to_owned)
@@ -10898,6 +10938,7 @@ mod deno_tests {
         let input = |workspace: &Path| CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
+            model: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: String::new(),
                 tools: Vec::new(),
@@ -10987,6 +11028,7 @@ mod deno_tests {
         CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
+            model: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: String::new(),
                 tools: Vec::new(),
@@ -11188,6 +11230,7 @@ mod deno_tests {
         let input = CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
+            model: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: String::new(),
                 tools: Vec::new(),
@@ -11235,6 +11278,7 @@ mod deno_tests {
                 CreateThreadInput {
                     provider: ProviderCode::Codex,
                     effort_level: Some(EffortLevel::Default),
+                    model: None,
                     skills: Some(CreateThreadSkillsInput {
                         guidance: String::new(),
                         tools: Vec::new(),

@@ -1733,6 +1733,7 @@ mod tests {
         let result = runtime.create_thread(CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
+            model: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: "bad".into(),
                 tools: vec![CreateThreadToolInput {

@@ -1378,6 +1378,7 @@ mod tests {
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Claude,
                 effort_level: Some(EffortLevel::Default),
+                model: None,
                 skills: Some(CreateThreadSkillsInput {
                     guidance: guidance.to_string(),
                     tools: vec![],

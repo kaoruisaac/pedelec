@@ -1227,7 +1227,7 @@ mod tests {
         ] {
             for level in [EffortLevel::Low, EffortLevel::Default, EffortLevel::High] {
                 assert_eq!(
-                    crate::resolve_thread_effort_args(&settings, &provider, level).unwrap(),
+                    crate::resolve_thread_effort_args(&settings, &provider, level, None).unwrap(),
                     Vec::<String>::new()
                 );
             }
