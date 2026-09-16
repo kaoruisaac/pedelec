@@ -102,7 +102,9 @@ const session = await pedelec.createSession({
 });
 ```
 
-`entry` is resolved by Vite at build/dev time; it is not sent to Desktop. The plugin bundles local/package dependencies and generates public declarations. The Agent imports `sprite-tools` from a script run with `pedelec-deno`; Host Context points exact API questions to `index.d.ts`. Module code shares the restricted runtime and cannot fetch packages or network resources at execution time. Deno Modules are distinct from browser/App Tools in `skills.tools`, which use `pedelec-cli` RPC commands. Session end/resume keeps the same immutable snapshot while Core still knows the thread; create a new session to use a rebuilt artifact.
+`entry` is resolved by Vite at build/dev time; it is not sent to Desktop. The plugin bundles normal third-party dependencies and generates public declarations. Node built-ins are runtime-provided through Deno's Node compatibility layer: both `node:fs/promises` and legacy bare forms such as `fs/promises` are accepted, and prepared runtime imports use the canonical `node:` form. This does not enable runtime npm, network resolution, or broader filesystem permissions.
+
+The generated `index.d.ts` describes the Agent-facing public API and omits implementation-only dependency types. Module-owned exported types are supported; packages that directly expose dependency-owned or Node-specific external types are not guaranteed to produce a standalone declaration in V1. The Agent imports `sprite-tools` from a script run with `pedelec-deno`; Host Context points exact API questions to `index.d.ts`. Deno Modules are distinct from browser/App Tools in `skills.tools`, which use `pedelec-cli` RPC commands. Session end/resume keeps the same immutable snapshot while Core still knows the thread; create a new session to use a rebuilt artifact.
 
 ## Ollama
 

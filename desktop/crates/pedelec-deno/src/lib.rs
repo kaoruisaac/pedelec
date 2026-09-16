@@ -1,6 +1,10 @@
-use pedelec_core::{error_codes, DenoRunInput, DenoRunOutput, PedelecError};
-use pedelec_ipc::{send_core_ipc_request, send_core_ipc_request_with_runtime_path, CoreIpcRequest};
+use pedelec_core::{error_codes, DenoRunInput, DenoRunOutput, DenoRunTarget, PedelecError};
+use pedelec_ipc::{
+    send_core_ipc_request, send_core_ipc_request_with_runtime_path, CoreIpcRequest,
+    MAX_CORE_IPC_MESSAGE_BYTES,
+};
 use serde::Serialize;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Serialize)]
@@ -23,46 +27,68 @@ pub enum DenoCliCommand {
 }
 
 pub fn run() {
-    let response = run_deno_cli(std::env::args().collect());
+    let mut stdin = io::stdin().lock();
+    let response = run_deno_cli_with_reader(
+        std::env::args().collect(),
+        runtime_file_path_from_env().as_deref(),
+        &mut stdin,
+    );
     match serde_json::to_string(&response) {
         Ok(payload) => println!("{payload}"),
         Err(err) => eprintln!("cannot serialize pedelec-deno response: {err}"),
     }
 }
 
-fn run_deno_cli(args: Vec<String>) -> DenoCliResponse {
-    run_deno_cli_with_runtime_file_path(args, runtime_file_path_from_env().as_deref())
-}
-
 pub fn run_deno_cli_with_runtime_file_path(
     args: Vec<String>,
     runtime_file_path: Option<&Path>,
 ) -> DenoCliResponse {
-    match parse_deno_cli_args(&args) {
-        Ok(DenoCliCommand::Run {
-            thread_id,
-            entrypoint,
-            args,
-        }) => {
-            let request = CoreIpcRequest {
-                request_id: next_deno_request_id(),
-                r#type: "deno_run".to_string(),
-                caller_origin: None,
-                caller_sdk_version: None,
-                payload: Some(serde_json::json!(DenoRunInput {
-                    thread_id,
-                    entrypoint,
-                    args,
-                })),
-            };
-            send_deno_request(request, runtime_file_path)
-        }
+    let mut stdin = io::stdin().lock();
+    run_deno_cli_with_reader(args, runtime_file_path, &mut stdin)
+}
+
+fn run_deno_cli_with_reader<R: Read>(
+    args: Vec<String>,
+    runtime_file_path: Option<&Path>,
+    stdin: &mut R,
+) -> DenoCliResponse {
+    match parse_deno_cli_args(&args).and_then(|command| build_deno_request(command, stdin)) {
+        Ok(request) => send_deno_request(request, runtime_file_path),
         Err(err) => DenoCliResponse {
             ok: false,
             result: None,
             error: Some(err),
         },
     }
+}
+
+fn build_deno_request(
+    command: DenoCliCommand,
+    stdin: &mut impl Read,
+) -> Result<CoreIpcRequest, PedelecError> {
+    let DenoCliCommand::Run {
+        thread_id,
+        entrypoint,
+        args,
+    } = command;
+    let target = if entrypoint == "-" {
+        DenoRunTarget::StdinSource {
+            source: read_stdin_source(stdin)?,
+        }
+    } else {
+        DenoRunTarget::WorkspaceFile { entrypoint }
+    };
+    Ok(CoreIpcRequest {
+        request_id: next_deno_request_id(),
+        r#type: "deno_run".to_string(),
+        caller_origin: None,
+        caller_sdk_version: None,
+        payload: Some(serde_json::json!(DenoRunInput {
+            thread_id,
+            target,
+            args,
+        })),
+    })
 }
 
 fn send_deno_request(request: CoreIpcRequest, runtime_file_path: Option<&Path>) -> DenoCliResponse {
@@ -122,7 +148,7 @@ fn send_deno_request(request: CoreIpcRequest, runtime_file_path: Option<&Path>) 
 }
 
 const DENO_CLI_USAGE: &str =
-    "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script> [-- <script-args...>]";
+    "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script|-> [-- <script-args...>]";
 
 pub fn parse_deno_cli_args(args: &[String]) -> Result<DenoCliCommand, PedelecError> {
     let thread_id = parse_thread_id_arg(args)?;
@@ -165,6 +191,9 @@ fn parse_thread_id_arg(args: &[String]) -> Result<String, PedelecError> {
 }
 
 fn validate_entrypoint(entrypoint: &str) -> Result<(), PedelecError> {
+    if entrypoint == "-" {
+        return Ok(());
+    }
     if entrypoint.trim().is_empty()
         || entrypoint.starts_with('-')
         || entrypoint.chars().any(char::is_control)
@@ -188,6 +217,33 @@ fn validate_entrypoint(entrypoint: &str) -> Result<(), PedelecError> {
         ));
     }
     Ok(())
+}
+
+fn read_stdin_source(reader: &mut impl Read) -> Result<String, PedelecError> {
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_CORE_IPC_MESSAGE_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            PedelecError::with_details(
+                error_codes::DENO_PROCESS_IO_FAILED,
+                "could not read Deno source from stdin",
+                serde_json::json!({ "error": error.to_string() }),
+            )
+        })?;
+    if bytes.len() > MAX_CORE_IPC_MESSAGE_BYTES {
+        return Err(PedelecError::new(
+            error_codes::DENO_ARGS_INVALID,
+            "Deno stdin source exceeds the Core IPC transport limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        PedelecError::with_details(
+            error_codes::DENO_ARGS_INVALID,
+            "Deno stdin source must be valid UTF-8",
+            serde_json::json!({ "error": error.to_string() }),
+        )
+    })
 }
 
 fn deno_args_error(message: impl Into<String>) -> PedelecError {
@@ -235,6 +291,104 @@ mod tests {
                 args: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn parses_stdin_run_and_preserves_script_args() {
+        let command = parse_deno_cli_args(&argv(&[
+            "pedelec-deno",
+            "--thread-id",
+            "thread_1",
+            "run",
+            "-",
+            "--",
+            "arg1",
+            "--allow-net",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            command,
+            DenoCliCommand::Run {
+                thread_id: "thread_1".into(),
+                entrypoint: "-".into(),
+                args: vec!["arg1".into(), "--allow-net".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn stdin_source_is_encoded_in_the_ipc_payload() {
+        let command = parse_deno_cli_args(&argv(&[
+            "pedelec-deno",
+            "--thread-id",
+            "thread_1",
+            "run",
+            "-",
+            "--",
+            "arg1",
+        ]))
+        .unwrap();
+        let mut reader = std::io::Cursor::new(b"console.log('stdin');".to_vec());
+        let request = build_deno_request(command, &mut reader).unwrap();
+        let input: DenoRunInput = serde_json::from_value(request.payload.unwrap()).unwrap();
+
+        assert_eq!(input.thread_id, "thread_1");
+        assert_eq!(input.args, vec!["arg1"]);
+        assert_eq!(
+            input.target,
+            DenoRunTarget::StdinSource {
+                source: "console.log('stdin');".into()
+            }
+        );
+    }
+
+    #[test]
+    fn path_mode_does_not_read_stdin() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::Other, "must not be read"))
+            }
+        }
+
+        let command = parse_deno_cli_args(&argv(&[
+            "pedelec-deno",
+            "--thread-id",
+            "thread_1",
+            "run",
+            "scripts/analyze.ts",
+        ]))
+        .unwrap();
+        let request = build_deno_request(command, &mut FailingReader).unwrap();
+        let input: DenoRunInput = serde_json::from_value(request.payload.unwrap()).unwrap();
+        assert_eq!(
+            input.target,
+            DenoRunTarget::WorkspaceFile {
+                entrypoint: "scripts/analyze.ts".into()
+            }
+        );
+    }
+
+    #[test]
+    fn stdin_read_failure_returns_structured_error() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::Other, "read failed"))
+            }
+        }
+
+        let error = read_stdin_source(&mut FailingReader).unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_PROCESS_IO_FAILED);
+        assert!(error.message.contains("stdin"));
+    }
+
+    #[test]
+    fn invalid_utf8_stdin_is_rejected() {
+        let error = read_stdin_source(&mut std::io::Cursor::new(vec![0xff])).unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_ARGS_INVALID);
+        assert!(error.message.contains("UTF-8"));
     }
 
     #[test]

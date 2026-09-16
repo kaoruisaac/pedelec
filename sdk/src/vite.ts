@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
+import { builtinModules, createRequire } from "node:module";
 import { dirname, extname, isAbsolute, normalize, resolve as resolvePath } from "node:path";
 
 import * as ts from "typescript";
@@ -14,6 +14,8 @@ const DEFINE_DENO_MODULE_NAME = "defineDenoModule";
 const ARTIFACT_HASH_VERSION = "pedelec-deno-module-artifact-v1";
 const SCRIPT_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 const DECLARATION_LIKE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".d.ts", ".json"]);
+const LEGACY_NODE_BUILTIN_MODULES = new Set(builtinModules.filter((specifier) => !specifier.startsWith("node:")));
+const NODE_BUILTIN_MODULES = new Set(builtinModules.map((specifier) => specifier.replace(/^node:/, "")));
 const nodeRequire = createRequire(import.meta.url);
 
 type Declaration = {
@@ -37,6 +39,11 @@ type PreparedDeclaration = {
 type DeclarationBundle = {
   source: string;
   files: Set<string>;
+};
+
+type DeclarationQueueItem = {
+  fileName: string;
+  packageBoundary: string | null;
 };
 
 type RuntimeBundle = {
@@ -231,6 +238,8 @@ async function bundleRuntime(
     name: "pedelec-deno-module-host-resolver",
     enforce: "pre",
     async resolveId(source, importer) {
+      const builtin = canonicalBuiltinSpecifier(source);
+      if (builtin) return { id: builtin, external: true };
       if (!importer || source.startsWith("\0")) return null;
       const resolved = await resolveHostModule(source, importer, resolveModule);
       if (!resolved) {
@@ -305,17 +314,21 @@ async function bundleRuntime(
   if (!entryChunk.isEntry) {
     throw new Error("bundler did not produce an ESM entry chunk");
   }
-  if (entryChunk.imports.length > 0) {
+  const invalidImports = entryChunk.imports.filter((specifier) => !isCanonicalBuiltinSpecifier(specifier));
+  if (invalidImports.length > 0) {
     throw new Error(
-      `runtime bundle left unresolved external dependencies: ${entryChunk.imports.join(", ")}`,
+      `runtime bundle left unresolved external dependencies: ${invalidImports.join(", ")}`,
     );
   }
-  if (entryChunk.dynamicImports.length > 0) {
+  const invalidDynamicImports = entryChunk.dynamicImports.filter((specifier) => !isCanonicalBuiltinSpecifier(specifier));
+  if (invalidDynamicImports.length > 0) {
     throw new Error(
-      `runtime bundle left unresolved dynamic imports: ${entryChunk.dynamicImports.join(", ")}`,
+      `runtime bundle left unresolved dynamic imports: ${invalidDynamicImports.join(", ")}`,
     );
   }
-  const leftoverModules = leftoverRuntimeModuleSpecifiers(entryChunk.code);
+  const leftoverModules = leftoverRuntimeModuleSpecifiers(entryChunk.code).filter(
+    (specifier) => !isCanonicalBuiltinSpecifier(specifier),
+  );
   if (leftoverModules.length > 0) {
     throw new Error(
       `runtime bundle left unresolved module specifiers: ${leftoverModules.join(", ")}`,
@@ -393,21 +406,24 @@ async function bundleDeclarations(
   const typesEntry = resolveTypesEntry(runtimeEntry, specifier, importer, options, host);
   const resolutionCache = new Map<string, string>();
   const sourceFiles = new Set<string>([normalizeFile(typesEntry)]);
-  const queue = [normalizeFile(typesEntry)];
+  // Local/module-owned declarations may reference more module-owned files. Once
+  // traversal enters a package, keep it inside that package instead of crawling
+  // the declarations of that package's own dependencies.
+  const queue: DeclarationQueueItem[] = [{
+    fileName: normalizeFile(typesEntry),
+    packageBoundary: nodeModulesPackageRoot(typesEntry),
+  }];
 
   while (queue.length > 0) {
-    const fileName = queue.pop()!;
+    const { fileName, packageBoundary } = queue.pop()!;
     const source = readFileIfAvailable(fileName);
     if (source === null) {
       throw new Error(`${diagnosticPrefix}: could not read declaration source "${fileName}"`);
     }
     const sourceFile = parseSourceFile(source, fileName);
     for (const moduleSpecifier of collectModuleSpecifiers(sourceFile)) {
-      if (isBuiltinSpecifier(moduleSpecifier)) {
-        throw new Error(
-          `${diagnosticPrefix}: public declaration still depends on unresolved module "${moduleSpecifier}"`,
-        );
-      }
+      if (isBuiltinSpecifier(moduleSpecifier)) continue;
+      if (!canResolveDeclarationDependency(moduleSpecifier, packageBoundary)) continue;
       const resolved = await resolveDeclarationDependency(
         moduleSpecifier,
         fileName,
@@ -420,10 +436,17 @@ async function bundleDeclarations(
           `${diagnosticPrefix}: public declaration still depends on unresolved module "${moduleSpecifier}"`,
         );
       }
+      const resolvedPackageBoundary = nodeModulesPackageRoot(resolved);
+      if (packageBoundary !== null && resolvedPackageBoundary !== packageBoundary) continue;
       resolutionCache.set(resolutionKey(fileName, moduleSpecifier), resolved);
       if (!sourceFiles.has(resolved)) {
         sourceFiles.add(resolved);
-        queue.push(resolved);
+        if (packageBoundary === null || resolvedPackageBoundary === packageBoundary) {
+          queue.push({
+            fileName: resolved,
+            packageBoundary: resolvedPackageBoundary,
+          });
+        }
       }
     }
   }
@@ -432,12 +455,29 @@ async function bundleDeclarations(
     return moduleLiterals.map((literal) => {
       const cached = resolutionCache.get(resolutionKey(containingFile, literal.text));
       if (cached) return { resolvedModule: toResolvedModule(cached) };
-      return ts.resolveModuleName(literal.text, containingFile, compilerOptions, host, undefined, redirectedReference);
+      const packageBoundary = nodeModulesPackageRoot(containingFile);
+      if (isBuiltinSpecifier(literal.text) || !canResolveDeclarationDependency(literal.text, packageBoundary)) {
+        return { resolvedModule: undefined };
+      }
+      const resolved = ts.resolveModuleName(literal.text, containingFile, compilerOptions, host, undefined, redirectedReference);
+      if (
+        packageBoundary !== null &&
+        resolved.resolvedModule &&
+        nodeModulesPackageRoot(resolved.resolvedModule.resolvedFileName) !== packageBoundary
+      ) {
+        return { resolvedModule: undefined };
+      }
+      return resolved;
     });
   };
 
   const program = ts.createProgram([typesEntry], options, host);
-  const diagnostics = ts.getPreEmitDiagnostics(program).filter((item) => item.category === ts.DiagnosticCategory.Error);
+  const diagnostics = ts
+    .getPreEmitDiagnostics(program)
+    .filter((item) => item.category === ts.DiagnosticCategory.Error)
+    // Node types are not required when an implementation-only import disappears
+    // from declaration emit. If it survives, roll-up validation below rejects it.
+    .filter((item) => !isDeferredBuiltinResolutionDiagnostic(item));
   if (diagnostics.length > 0) {
     throw new Error(formatDiagnostics(diagnostics));
   }
@@ -688,9 +728,15 @@ function collectDeclarationGraph(
       throw new Error(`${diagnosticPrefix}: missing declaration source for "${fileName}"`);
     }
     const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const packageBoundary = nodeModulesPackageRoot(fileName);
     for (const specifier of collectModuleSpecifiers(sourceFile)) {
+      if (!canResolveDeclarationDependency(specifier, packageBoundary)) {
+        throw new Error(
+          `${diagnosticPrefix}: public declaration still depends on unresolved module "${specifier}"`,
+        );
+      }
       const resolved = resolveExistingDeclaration(specifier, fileName, sources, options, host);
-      if (!resolved) {
+      if (!resolved || packageBoundary !== null && nodeModulesPackageRoot(resolved) !== packageBoundary) {
         throw new Error(
           `${diagnosticPrefix}: public declaration still depends on unresolved module "${specifier}"`,
         );
@@ -1349,8 +1395,49 @@ function isOptimizedDependencyPath(fileName: string): boolean {
   return /[\\/]\.vite[\\/]deps[\\/]/.test(fileName);
 }
 
+function nodeModulesPackageRoot(fileName: string): string | null {
+  const normalized = normalizeFile(fileName);
+  const segments = normalized.split(/[\\/]/);
+  const nodeModulesIndex = segments.lastIndexOf("node_modules");
+  if (nodeModulesIndex < 0 || nodeModulesIndex + 1 >= segments.length) return null;
+  const packageEnd = segments[nodeModulesIndex + 1].startsWith("@") ? nodeModulesIndex + 3 : nodeModulesIndex + 2;
+  if (packageEnd > segments.length) return null;
+  return normalizeFile(segments.slice(0, packageEnd).join("/"));
+}
+
+function canResolveDeclarationDependency(specifier: string, packageBoundary: string | null): boolean {
+  if (packageBoundary === null || isRelativeSpecifier(specifier) || specifier.startsWith("#")) return true;
+  const packageJson = readFileIfAvailable(resolvePath(packageBoundary, "package.json"));
+  if (!packageJson) return false;
+  try {
+    const packageName = (JSON.parse(packageJson) as { name?: unknown }).name;
+    return typeof packageName === "string" && (specifier === packageName || specifier.startsWith(`${packageName}/`));
+  } catch {
+    return false;
+  }
+}
+
 function isBuiltinSpecifier(specifier: string): boolean {
-  return specifier.startsWith("node:") || ["fs", "path", "url", "crypto", "util", "events", "buffer", "stream", "assert", "module", "os", "http", "https", "zlib"].includes(specifier);
+  return canonicalBuiltinSpecifier(specifier) !== null;
+}
+
+function isDeferredBuiltinResolutionDiagnostic(diagnostic: ts.Diagnostic): boolean {
+  if (diagnostic.code !== 2307) return false;
+  const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
+  const match = /Cannot find module ['"]([^'"]+)['"]/.exec(message);
+  return Boolean(match && isBuiltinSpecifier(match[1]));
+}
+
+function canonicalBuiltinSpecifier(specifier: string): string | null {
+  if (specifier.startsWith("node:")) {
+    const bareSpecifier = specifier.slice("node:".length);
+    return NODE_BUILTIN_MODULES.has(bareSpecifier) ? specifier : null;
+  }
+  return LEGACY_NODE_BUILTIN_MODULES.has(specifier) ? `node:${specifier}` : null;
+}
+
+function isCanonicalBuiltinSpecifier(specifier: string): boolean {
+  return specifier.startsWith("node:") && canonicalBuiltinSpecifier(specifier) === specifier;
 }
 
 function resolutionKey(importer: string, specifier: string): string {

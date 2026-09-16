@@ -977,10 +977,17 @@ pub struct SendTextOutput {
 /// deliberately kept in Core rather than the browser SDK: a Deno run is an
 /// internal provider/runtime operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DenoRunTarget {
+    WorkspaceFile { entrypoint: String },
+    StdinSource { source: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DenoRunInput {
     pub thread_id: String,
-    pub entrypoint: String,
+    pub target: DenoRunTarget,
     #[serde(default)]
     pub args: Vec<String>,
 }
@@ -996,15 +1003,22 @@ pub struct DenoRunOutput {
     pub stderr_truncated: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DenoExecutionTarget {
+    WorkspaceFile { entrypoint: PathBuf },
+    StdinSource { source: String },
+}
+
 /// The validated, authoritative execution intent passed from Core to the
-/// Desktop-owned runtime.  `workspace_path` and `entrypoint` are resolved by
-/// Core; callers cannot provide either as an execution root.
+/// Desktop-owned runtime. `workspace_path` always comes from the thread, while
+/// file entrypoints are resolved by Core before dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DenoExecutionIntent {
     pub thread_id: String,
     pub workspace_path: PathBuf,
-    pub entrypoint: PathBuf,
+    pub target: DenoExecutionTarget,
     pub args: Vec<String>,
     /// Core-owned import map for a ready Deno Module snapshot.  This is never
     /// sourced from the Agent CLI request; threads without registered modules
@@ -3917,14 +3931,26 @@ impl CoreRuntime {
         }
 
         let workspace_path = thread.workspace_path.clone();
-        let (workspace_path, entrypoint) =
-            resolve_deno_entrypoint(&input.thread_id, &workspace_path, &input.entrypoint)?;
+        let (workspace_path, target) = match input.target {
+            DenoRunTarget::WorkspaceFile { entrypoint } => {
+                let (workspace_path, entrypoint) =
+                    resolve_deno_entrypoint(&input.thread_id, &workspace_path, &entrypoint)?;
+                (
+                    workspace_path,
+                    DenoExecutionTarget::WorkspaceFile { entrypoint },
+                )
+            }
+            DenoRunTarget::StdinSource { source } => (
+                resolve_deno_workspace(&input.thread_id, &workspace_path)?,
+                DenoExecutionTarget::StdinSource { source },
+            ),
+        };
         let import_map_path = self.validate_deno_module_runtime_snapshot(&input.thread_id)?;
 
         Ok(DenoExecutionIntent {
             thread_id: input.thread_id,
             workspace_path,
-            entrypoint,
+            target,
             args: input.args,
             import_map_path,
         })
@@ -6023,6 +6049,42 @@ fn normalize_absolute_path(path: &Path) -> Result<PathBuf, PedelecError> {
     Ok(normalized)
 }
 
+fn resolve_deno_workspace(thread_id: &str, workspace_path: &Path) -> Result<PathBuf, PedelecError> {
+    let canonical_workspace = workspace_path.canonicalize().map_err(|err| {
+        PedelecError::with_details(
+            error_codes::DENO_ENTRYPOINT_INVALID,
+            "authoritative thread workspace could not be opened",
+            serde_json::json!({
+                "threadId": thread_id,
+                "workspacePath": path_for_external_use(workspace_path),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let workspace_metadata = fs::metadata(&canonical_workspace).map_err(|err| {
+        PedelecError::with_details(
+            error_codes::DENO_ENTRYPOINT_INVALID,
+            "authoritative thread workspace could not be inspected",
+            serde_json::json!({
+                "threadId": thread_id,
+                "workspacePath": path_for_external_use(&canonical_workspace),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    if !workspace_metadata.is_dir() {
+        return Err(PedelecError::with_details(
+            error_codes::DENO_ENTRYPOINT_INVALID,
+            "authoritative thread workspace is not a directory",
+            serde_json::json!({
+                "threadId": thread_id,
+                "workspacePath": path_for_external_use(&canonical_workspace),
+            }),
+        ));
+    }
+    Ok(canonical_workspace)
+}
+
 fn resolve_deno_entrypoint(
     thread_id: &str,
     workspace_path: &Path,
@@ -6067,34 +6129,7 @@ fn resolve_deno_entrypoint(
         ));
     }
 
-    let canonical_workspace = workspace_path.canonicalize().map_err(|err| {
-        PedelecError::with_details(
-            error_codes::DENO_ENTRYPOINT_INVALID,
-            "authoritative thread workspace could not be opened",
-            serde_json::json!({
-                "threadId": thread_id,
-                "workspacePath": path_for_external_use(workspace_path),
-                "error": err.to_string(),
-            }),
-        )
-    })?;
-    let workspace_metadata = fs::metadata(&canonical_workspace).map_err(|err| {
-        PedelecError::with_details(
-            error_codes::DENO_ENTRYPOINT_INVALID,
-            "authoritative thread workspace could not be inspected",
-            serde_json::json!({
-                "threadId": thread_id,
-                "workspacePath": path_for_external_use(&canonical_workspace),
-                "error": err.to_string(),
-            }),
-        )
-    })?;
-    if !workspace_metadata.is_dir() {
-        return Err(invalid(
-            "authoritative thread workspace is not a directory",
-            Some(&canonical_workspace),
-        ));
-    }
+    let canonical_workspace = resolve_deno_workspace(thread_id, workspace_path)?;
 
     let candidate = canonical_workspace.join(relative);
     let canonical_entrypoint = candidate.canonicalize().map_err(|err| {
@@ -9606,9 +9641,9 @@ fn build_pedelec_deno_runtime_guidance(thread_id: Option<&str>) -> String {
     let thread_id = thread_id.unwrap_or("<pedelec_thread_id>");
     format!(
         "Pedelec provides `pedelec-deno` as the canonical JavaScript/TypeScript runtime for this session.\n\n\
-When you need to execute JavaScript or TypeScript, write or use a workspace script and use `pedelec-deno` instead of system-installed Node.js, Bun, raw Deno, npx, or another JavaScript runtime. This is the programmable local runtime for Agent-authored code and workspace code.\n\n\
+Use `pedelec-deno` instead of system-installed Node.js, Bun, raw Deno, npx, or another JavaScript runtime for JavaScript/TypeScript execution. It supports both workspace-file execution and source supplied through process stdin.\n\n\
 Do not silently fall back to another JavaScript runtime if `pedelec-deno` is unavailable. Report the Pedelec runtime failure instead. Do not use `pedelec-deno` for non-JavaScript/TypeScript tasks. File editing remains the provider's normal filesystem responsibility.\n\n\
-Use:\n  pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path>\nFor script arguments:\n  pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path> -- <args...>\n\n\
+Workspace-file form:\n  pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path>\nStdin-source form:\n  pedelec-deno --thread-id {thread_id} run -\nFor script arguments, append `-- <args...>` after either execution target.\n\n\
 If Pedelec Deno Modules are listed in Host Context, import them by their listed logical names from your own JavaScript/TypeScript. Prefer the provided `usage` example first. When exact exports, options, literal values, or return types are uncertain, inspect the listed `index.d.ts` declaration rather than reading the minified runtime implementation. Do not execute a registered module by filesystem path.\n\n\
 The `pedelec-deno` cwd is the authoritative Pedelec workspace root. Deno Module APIs that document workspace-relative paths interpret them from that cwd; follow each module's declaration/usage contract. Pedelec does not globally reinterpret arbitrary strings as paths.\n\n\
 App Tools and Deno Modules are different capabilities: App Tools are RPC calls made with the `pedelec-cli --thread-id ... tool-spec` and `tool-call` commands shown in Host Context; Deno Modules are imported inside a script and are not passed to `pedelec-cli`. Do not import an App Tool as a Deno Module.\n\n\
@@ -10042,6 +10077,26 @@ fn skill_download_error(
 mod deno_tests {
     use super::*;
 
+    fn file_input(thread_id: &str, entrypoint: &str, args: Vec<String>) -> DenoRunInput {
+        DenoRunInput {
+            thread_id: thread_id.into(),
+            target: DenoRunTarget::WorkspaceFile {
+                entrypoint: entrypoint.into(),
+            },
+            args,
+        }
+    }
+
+    fn stdin_input(thread_id: &str, source: &str, args: Vec<String>) -> DenoRunInput {
+        DenoRunInput {
+            thread_id: thread_id.into(),
+            target: DenoRunTarget::StdinSource {
+                source: source.into(),
+            },
+            args,
+        }
+    }
+
     fn runtime_with_thread(workspace: &Path, thread_id: &str, status: ThreadStatus) -> CoreRuntime {
         let now = Utc::now();
         let mut runtime = CoreRuntime::new();
@@ -10075,16 +10130,21 @@ mod deno_tests {
         let runtime = runtime_with_thread(&workspace, "thread-deno-core", ThreadStatus::Running);
 
         let intent = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-core".into(),
-                entrypoint: "script.ts".into(),
-                args: vec!["--allow-net".into()],
-            })
+            .prepare_deno_run_intent(file_input(
+                "thread-deno-core",
+                "script.ts",
+                vec!["--allow-net".into()],
+            ))
             .unwrap();
 
         assert_eq!(intent.thread_id, "thread-deno-core");
         assert_eq!(intent.workspace_path, workspace.canonicalize().unwrap());
-        assert_eq!(intent.entrypoint, intent.workspace_path.join("script.ts"));
+        assert_eq!(
+            intent.target,
+            DenoExecutionTarget::WorkspaceFile {
+                entrypoint: intent.workspace_path.join("script.ts")
+            }
+        );
         assert_eq!(intent.args, vec!["--allow-net"]);
         assert_eq!(intent.import_map_path, None);
         assert_eq!(
@@ -10109,24 +10169,32 @@ mod deno_tests {
         ] {
             let runtime = runtime_with_thread(&workspace, "thread-deno-status", status);
             let error = runtime
-                .prepare_deno_run_intent(DenoRunInput {
-                    thread_id: "thread-deno-status".into(),
-                    entrypoint: "script.ts".into(),
-                    args: Vec::new(),
-                })
+                .prepare_deno_run_intent(file_input("thread-deno-status", "script.ts", Vec::new()))
                 .unwrap_err();
             assert_eq!(error.code, error_codes::DENO_THREAD_NOT_ACTIVE);
+            let stdin_error = runtime
+                .prepare_deno_run_intent(stdin_input(
+                    "thread-deno-status",
+                    "console.log('stdin')",
+                    Vec::new(),
+                ))
+                .unwrap_err();
+            assert_eq!(stdin_error.code, error_codes::DENO_THREAD_NOT_ACTIVE);
         }
 
         let runtime = runtime_with_thread(&workspace, "thread-deno-ended", ThreadStatus::Ended);
         let error = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-ended".into(),
-                entrypoint: "script.ts".into(),
-                args: Vec::new(),
-            })
+            .prepare_deno_run_intent(file_input("thread-deno-ended", "script.ts", Vec::new()))
             .unwrap_err();
         assert_eq!(error.code, error_codes::THREAD_ENDED);
+        let stdin_error = runtime
+            .prepare_deno_run_intent(stdin_input(
+                "thread-deno-ended",
+                "console.log('stdin')",
+                Vec::new(),
+            ))
+            .unwrap_err();
+        assert_eq!(stdin_error.code, error_codes::THREAD_ENDED);
         assert_eq!(
             runtime.thread_status("thread-deno-ended"),
             Some(ThreadStatus::Ended)
@@ -10134,11 +10202,7 @@ mod deno_tests {
 
         let runtime = runtime_with_thread(&workspace, "thread-deno-missing", ThreadStatus::Running);
         let error = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-missing".into(),
-                entrypoint: "missing.ts".into(),
-                args: Vec::new(),
-            })
+            .prepare_deno_run_intent(file_input("thread-deno-missing", "missing.ts", Vec::new()))
             .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_ENTRYPOINT_INVALID);
         assert_eq!(
@@ -10162,13 +10226,17 @@ mod deno_tests {
             .active_provider_turn_id = None;
 
         let error = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-no-turn".into(),
-                entrypoint: "script.ts".into(),
-                args: Vec::new(),
-            })
+            .prepare_deno_run_intent(file_input("thread-deno-no-turn", "script.ts", Vec::new()))
             .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_THREAD_NOT_ACTIVE);
+        let stdin_error = runtime
+            .prepare_deno_run_intent(stdin_input(
+                "thread-deno-no-turn",
+                "console.log('stdin')",
+                Vec::new(),
+            ))
+            .unwrap_err();
+        assert_eq!(stdin_error.code, error_codes::DENO_THREAD_NOT_ACTIVE);
     }
 
     #[test]
@@ -10361,6 +10429,10 @@ mod deno_tests {
         assert!(instruction.contains("or import an App Tool"));
         assert!(instruction.contains("authoritative Pedelec workspace root"));
         assert!(instruction.contains("index.d.ts"));
+        assert!(instruction.contains("run <workspace-relative-script-path>"));
+        assert!(instruction.contains("run -"));
+        assert!(!instruction.contains("prefer stdin"));
+        assert!(!instruction.contains("always write a script first"));
         assert!(!instruction.contains("pedelec-deno module-spec"));
     }
 
@@ -10471,13 +10543,21 @@ mod deno_tests {
             .unwrap()
             .active_provider_turn_id = Some("turn-ready".into());
         let intent = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-upload".into(),
-                entrypoint: "script.ts".into(),
-                args: vec!["--allow-net".into()],
-            })
+            .prepare_deno_run_intent(file_input(
+                "thread-deno-upload",
+                "script.ts",
+                vec!["--allow-net".into()],
+            ))
             .unwrap();
-        assert_eq!(intent.import_map_path, Some(import_map));
+        assert_eq!(intent.import_map_path, Some(import_map.clone()));
+        let stdin_intent = runtime
+            .prepare_deno_run_intent(stdin_input(
+                "thread-deno-upload",
+                "import \"@example/sprite-tools\";",
+                Vec::new(),
+            ))
+            .unwrap();
+        assert_eq!(stdin_intent.import_map_path, Some(import_map));
         runtime
             .thread_manager
             .thread_mut("thread-deno-upload")
@@ -10629,11 +10709,11 @@ mod deno_tests {
         .unwrap();
 
         let intent = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-runtime-integrity".into(),
-                entrypoint: "script.ts".into(),
-                args: Vec::new(),
-            })
+            .prepare_deno_run_intent(file_input(
+                "thread-deno-runtime-integrity",
+                "script.ts",
+                Vec::new(),
+            ))
             .unwrap();
         assert_eq!(
             intent.import_map_path,
@@ -10644,11 +10724,11 @@ mod deno_tests {
 
         fs::remove_file(&import_map_path).unwrap();
         let error = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-runtime-integrity".into(),
-                entrypoint: "script.ts".into(),
-                args: Vec::new(),
-            })
+            .prepare_deno_run_intent(file_input(
+                "thread-deno-runtime-integrity",
+                "script.ts",
+                Vec::new(),
+            ))
             .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_MODULE_SETUP_FAILED);
         let error = runtime
@@ -11004,11 +11084,7 @@ mod deno_tests {
             error_codes::DENO_MODULE_SETUP_INCOMPLETE
         );
         let deno_error = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-pending".into(),
-                entrypoint: "script.ts".into(),
-                args: Vec::new(),
-            })
+            .prepare_deno_run_intent(file_input("thread-deno-pending", "script.ts", Vec::new()))
             .unwrap_err();
         assert_eq!(deno_error.code, error_codes::DENO_MODULE_SETUP_INCOMPLETE);
     }
@@ -11123,13 +11199,34 @@ mod deno_tests {
         let runtime = runtime_with_thread(&workspace, "thread-deno-symlink", ThreadStatus::Running);
 
         let error = runtime
-            .prepare_deno_run_intent(DenoRunInput {
-                thread_id: "thread-deno-symlink".into(),
-                entrypoint: "escape.ts".into(),
-                args: Vec::new(),
-            })
+            .prepare_deno_run_intent(file_input("thread-deno-symlink", "escape.ts", Vec::new()))
             .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_ENTRYPOINT_INVALID);
+    }
+
+    #[test]
+    fn stdin_admission_uses_thread_workspace_without_resolving_an_entrypoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("authoritative");
+        fs::create_dir_all(&workspace).unwrap();
+        let runtime = runtime_with_thread(&workspace, "thread-deno-stdin", ThreadStatus::Running);
+
+        let intent = runtime
+            .prepare_deno_run_intent(stdin_input(
+                "thread-deno-stdin",
+                "console.log('stdin')",
+                vec!["arg1".into()],
+            ))
+            .unwrap();
+
+        assert_eq!(intent.workspace_path, workspace.canonicalize().unwrap());
+        assert_eq!(
+            intent.target,
+            DenoExecutionTarget::StdinSource {
+                source: "console.log('stdin')".into()
+            }
+        );
+        assert_eq!(intent.args, vec!["arg1"]);
     }
 }
 

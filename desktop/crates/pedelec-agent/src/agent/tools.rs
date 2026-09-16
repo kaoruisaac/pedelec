@@ -6,9 +6,10 @@ use super::tavily::TavilyRoundWrapper;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::thread;
+use std::process::{Child, Command, Output, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,12 +44,13 @@ pub fn agent_tool_definitions(vision: bool, web_search_enabled: bool) -> Vec<Age
         ),
         tool_def(
             "bash",
-            "Run a restricted Pedelec helper command. This is not a full shell. It permits Pedelec App Tool commands through `pedelec-cli` and JavaScript/TypeScript script execution through `pedelec-deno`. Allowed forms are `pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>`, `pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ...`, `pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path>`, or that `pedelec-deno` form followed by `-- <script-args...>`.",
+            "Run a restricted Pedelec helper command. This is not a full shell. It permits Pedelec App Tool commands through `pedelec-cli` and JavaScript/TypeScript execution through `pedelec-deno`. Deno may run a workspace-relative script path or `-` for source supplied through the optional stdin field; either form may be followed by `-- <script-args...>`.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeoutMs": { "type": "integer" }
+                    "timeoutMs": { "type": "integer" },
+                    "stdin": { "type": "string" }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -221,9 +223,25 @@ fn bash_tool(args: &Value, config: &ToolHostConfig) -> Result<Value, AgentError>
         .and_then(Value::as_str)
         .ok_or_else(|| AgentError::new("INVALID_ARGUMENT", "bash requires command"))?;
     let requested_timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
+    let stdin = match args.get("stdin") {
+        None => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(AgentError::new(
+                "INVALID_ARGUMENT",
+                "bash stdin must be a string when provided.",
+            ));
+        }
+    };
     let argv = parse_restricted_bash_command(command)?;
     match validate_restricted_command(&argv)? {
         RestrictedCommand::PedelecCli => {
+            if stdin.is_some() {
+                return Err(AgentError::new(
+                    "INVALID_ARGUMENT",
+                    "stdin is only supported for `pedelec-deno ... run -`.",
+                ));
+            }
             let timeout_ms = requested_timeout_ms.unwrap_or(config.pedelec_cli_timeout_ms);
             let cli_path = resolve_pedelec_cli(config)?;
             let mut process = Command::new(cli_path);
@@ -237,7 +255,13 @@ fn bash_tool(args: &Value, config: &ToolHostConfig) -> Result<Value, AgentError>
             }
             run_pedelec_cli_command(process, timeout_ms)
         }
-        RestrictedCommand::PedelecDeno => {
+        RestrictedCommand::PedelecDeno { stdin_mode } => {
+            if stdin.is_some() && !stdin_mode {
+                return Err(AgentError::new(
+                    "INVALID_ARGUMENT",
+                    "stdin is only supported for `pedelec-deno ... run -`.",
+                ));
+            }
             let timeout_ms = requested_timeout_ms
                 .unwrap_or(config.pedelec_deno_timeout_ms)
                 .max(config.pedelec_deno_timeout_ms);
@@ -245,13 +269,17 @@ fn bash_tool(args: &Value, config: &ToolHostConfig) -> Result<Value, AgentError>
             let mut process = Command::new(deno_path);
             process
                 .args(&argv[1..])
-                .stdin(Stdio::null())
+                .stdin(if stdin.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             if let Some(runtime_file) = &config.core_runtime_file {
                 process.env("PEDELEC_CORE_IPC_RUNTIME_FILE", runtime_file);
             }
-            run_pedelec_deno_command(process, timeout_ms)
+            run_pedelec_deno_command(process, timeout_ms, stdin)
         }
     }
 }
@@ -259,7 +287,7 @@ fn bash_tool(args: &Value, config: &ToolHostConfig) -> Result<Value, AgentError>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestrictedCommand {
     PedelecCli,
-    PedelecDeno,
+    PedelecDeno { stdin_mode: bool },
 }
 
 fn parse_restricted_bash_command(command: &str) -> Result<Vec<String>, AgentError> {
@@ -345,7 +373,7 @@ fn unsupported_shell_syntax(message: &str) -> AgentError {
     AgentError::new(
         "UNSUPPORTED_SHELL_SYNTAX",
         format!(
-            "{message} Use only restricted Pedelec helpers: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>, pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ..., or pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]."
+            "{message} Use only restricted Pedelec helpers: pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>, pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ..., or pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path|-> [-- <script-args...>]."
         ),
     )
 }
@@ -357,8 +385,8 @@ fn validate_restricted_command(argv: &[String]) -> Result<RestrictedCommand, Age
             Ok(RestrictedCommand::PedelecCli)
         }
         Some("pedelec-deno") => {
-            validate_pedelec_deno_command(argv)?;
-            Ok(RestrictedCommand::PedelecDeno)
+            let stdin_mode = validate_pedelec_deno_command(argv)?;
+            Ok(RestrictedCommand::PedelecDeno { stdin_mode })
         }
         _ => Err(AgentError::with_details(
             "COMMAND_NOT_ALLOWED",
@@ -372,7 +400,7 @@ fn restricted_command_usage() -> [&'static str; 3] {
     [
         "pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>",
         "pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ...",
-        "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]",
+        "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path|-> [-- <script-args...>]",
     ]
 }
 
@@ -384,7 +412,7 @@ fn validate_pedelec_cli_command(argv: &[String]) -> Result<(), AgentError> {
             serde_json::json!({ "allowed": [
                 "pedelec-cli --thread-id <pedelec_thread_id> tool-spec <tool_name>",
                 "pedelec-cli --thread-id <pedelec_thread_id> tool-call <tool_name> ...",
-                "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]"
+                "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path|-> [-- <script-args...>]"
             ] }),
         ));
     }
@@ -425,11 +453,11 @@ fn validate_pedelec_cli_command(argv: &[String]) -> Result<(), AgentError> {
     }
 }
 
-fn validate_pedelec_deno_command(argv: &[String]) -> Result<(), AgentError> {
+fn validate_pedelec_deno_command(argv: &[String]) -> Result<bool, AgentError> {
     if argv.get(1).map(String::as_str) != Some("--thread-id") {
         return Err(AgentError::new(
             "INVALID_ARGUMENT",
-            "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]",
+            "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path|-> [-- <script-args...>]",
         ));
     }
     if argv
@@ -453,14 +481,17 @@ fn validate_pedelec_deno_command(argv: &[String]) -> Result<(), AgentError> {
     let entrypoint = argv.get(4).ok_or_else(|| {
         AgentError::new(
             "INVALID_ARGUMENT",
-            "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]",
+            "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path|-> [-- <script-args...>]",
         )
     })?;
-    validate_workspace_relative_entrypoint(entrypoint)?;
+    let stdin_mode = entrypoint == "-";
+    if !stdin_mode {
+        validate_workspace_relative_entrypoint(entrypoint)?;
+    }
 
     match argv.get(5) {
-        None => Ok(()),
-        Some(separator) if separator == "--" => Ok(()),
+        None => Ok(stdin_mode),
+        Some(separator) if separator == "--" => Ok(stdin_mode),
         Some(_) => Err(AgentError::new(
             "COMMAND_NOT_ALLOWED",
             "Raw Deno options are not allowed; put script arguments after `--`.",
@@ -497,7 +528,7 @@ fn validate_workspace_relative_entrypoint(entrypoint: &str) -> Result<(), AgentE
 }
 
 fn run_pedelec_cli_command(mut command: Command, timeout_ms: u64) -> Result<Value, AgentError> {
-    let timed_output = run_command_with_timeout(&mut command, timeout_ms).map_err(|err| {
+    let timed_output = run_command_with_timeout(&mut command, timeout_ms, None).map_err(|err| {
         AgentError::with_details(
             "PEDELEC_CLI_FAILED",
             "Failed to execute pedelec-cli",
@@ -538,14 +569,19 @@ fn run_pedelec_cli_command(mut command: Command, timeout_ms: u64) -> Result<Valu
     })
 }
 
-fn run_pedelec_deno_command(mut command: Command, timeout_ms: u64) -> Result<Value, AgentError> {
-    let timed_output = run_command_with_timeout(&mut command, timeout_ms).map_err(|err| {
-        AgentError::with_details(
-            "PEDELEC_DENO_FAILED",
-            "Failed to execute pedelec-deno",
-            serde_json::json!({ "error": err.to_string() }),
-        )
-    })?;
+fn run_pedelec_deno_command(
+    mut command: Command,
+    timeout_ms: u64,
+    stdin: Option<&str>,
+) -> Result<Value, AgentError> {
+    let timed_output =
+        run_command_with_timeout(&mut command, timeout_ms, stdin).map_err(|err| {
+            AgentError::with_details(
+                "PEDELEC_DENO_FAILED",
+                "Failed to execute pedelec-deno",
+                serde_json::json!({ "error": err.to_string() }),
+            )
+        })?;
     let output = timed_output.output;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -588,24 +624,104 @@ struct TimedOutput {
 fn run_command_with_timeout(
     command: &mut Command,
     timeout_ms: u64,
-) -> Result<TimedOutput, std::io::Error> {
+    stdin: Option<&str>,
+) -> Result<TimedOutput, io::Error> {
     let mut child = command.spawn()?;
+    let stdin_writer = match spawn_stdin_writer(&mut child, stdin) {
+        Ok(writer) => writer,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+
+    let wait_result = wait_spawned_child_with_timeout(child, timeout_ms);
+    match wait_result {
+        Ok(timed) if timed.timed_out => {
+            let _ = join_stdin_writer(stdin_writer);
+            Ok(timed)
+        }
+        Ok(timed) => match join_stdin_writer(stdin_writer) {
+            Ok(()) => Ok(timed),
+            Err(error) => Err(error),
+        },
+        Err(error) => {
+            let _ = join_stdin_writer(stdin_writer);
+            Err(error)
+        }
+    }
+}
+
+fn spawn_stdin_writer(
+    child: &mut Child,
+    stdin: Option<&str>,
+) -> Result<Option<JoinHandle<io::Result<()>>>, io::Error> {
+    let Some(input) = stdin else {
+        return Ok(None);
+    };
+    let mut child_stdin = child.stdin.take().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "restricted helper stdin was not piped",
+        )
+    })?;
+    let input = input.to_owned();
+    Ok(Some(thread::spawn(move || {
+        let result = child_stdin
+            .write_all(input.as_bytes())
+            .and_then(|_| child_stdin.flush())
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("could not write restricted helper stdin: {error}"),
+                )
+            });
+        drop(child_stdin);
+        result
+    })))
+}
+
+fn join_stdin_writer(stdin_writer: Option<JoinHandle<io::Result<()>>>) -> io::Result<()> {
+    let Some(handle) = stdin_writer else {
+        return Ok(());
+    };
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::Other,
+            "restricted helper stdin writer panicked",
+        )),
+    }
+}
+
+fn wait_spawned_child_with_timeout(
+    mut child: Child,
+    timeout_ms: u64,
+) -> Result<TimedOutput, io::Error> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1));
     loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output().map(|output| TimedOutput {
-                output,
-                timed_out: false,
-            });
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child.wait_with_output().map(|output| TimedOutput {
+                    output,
+                    timed_out: false,
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                return child.wait_with_output().map(|output| TimedOutput {
+                    output,
+                    timed_out: true,
+                });
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            return child.wait_with_output().map(|output| TimedOutput {
-                output,
-                timed_out: true,
-            });
-        }
-        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -660,6 +776,8 @@ fn candidates(dir: &Path, program: &str) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    const PIPE_OVERFLOW_STDIN_LEN: usize = 256 * 1024;
+
     fn config() -> ToolHostConfig {
         ToolHostConfig {
             pedelec_cli_path: None,
@@ -710,6 +828,11 @@ mod tests {
         assert!(bash.description.contains("pedelec-cli"));
         assert!(bash.description.contains("pedelec-deno"));
         assert!(bash.description.contains("not a full shell"));
+        assert_eq!(bash.input_schema["properties"]["stdin"]["type"], "string");
+        assert_eq!(
+            bash.input_schema["required"],
+            serde_json::json!(["command"])
+        );
         assert!(tools.iter().all(|tool| tool.input_schema.is_object()));
     }
 
@@ -789,6 +912,219 @@ mod tests {
     }
 
     #[test]
+    fn bash_tool_supplies_stdin_only_to_pedelec_deno_stdin_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let capture = temp.path().join("args.txt");
+        let stdin_capture = capture.with_extension("stdin");
+        let deno = fake_pedelec_deno(temp.path(), &capture);
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
+        let mut cfg = config();
+        cfg.pedelec_deno_path = Some(deno);
+
+        let result = execute_tool(
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-deno --thread-id thread_explicit run - -- foo bar",
+                "stdin": "console.log('from-agent-stdin');"
+            }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap();
+
+        assert_eq!(result.content["ok"], true);
+        let args = std::fs::read_to_string(capture).unwrap();
+        assert!(args.contains("run"));
+        assert!(args.contains("-"));
+        assert!(args.contains("foo"));
+        assert!(args.contains("bar"));
+        let stdin = std::fs::read_to_string(stdin_capture).unwrap();
+        assert!(stdin.contains("console.log('from-agent-stdin');"));
+    }
+
+    #[test]
+    fn bash_tool_delivers_complete_stdin_source_to_pedelec_deno() {
+        let temp = tempfile::tempdir().unwrap();
+        let capture = temp.path().join("args.txt");
+        let stdin_capture = capture.with_extension("stdin");
+        let deno = fake_pedelec_deno(temp.path(), &capture);
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
+        let mut cfg = config();
+        cfg.pedelec_deno_path = Some(deno);
+        let source = "console.log('complete-stdin-source');\n// marker\n".repeat(8);
+
+        let result = execute_tool(
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-deno --thread-id thread_explicit run -",
+                "stdin": source
+            }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap();
+
+        assert_eq!(result.content["ok"], true);
+        let stdin = std::fs::read_to_string(stdin_capture)
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert!(
+            stdin.contains(&source.replace("\r\n", "\n")),
+            "helper did not receive the complete stdin source: {stdin:?}"
+        );
+    }
+
+    #[test]
+    fn bash_tool_stdin_write_does_not_bypass_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let deno = fake_sleeping_pedelec_deno(temp.path());
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
+        let mut cfg = config();
+        cfg.pedelec_deno_path = Some(deno);
+        cfg.pedelec_deno_timeout_ms = 300;
+        let started = Instant::now();
+
+        let error = execute_tool(
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-deno --thread-id thread_explicit run -",
+                "timeoutMs": 300,
+                "stdin": "X".repeat(PIPE_OVERFLOW_STDIN_LEN)
+            }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "blocked stdin write bypassed the helper timeout: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(error.code, "PEDELEC_DENO_TIMEOUT");
+        assert!(error.message.contains("timed out"));
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("timeoutMs")),
+            Some(&serde_json::json!(300))
+        );
+    }
+
+    #[test]
+    fn bash_tool_without_stdin_still_times_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let deno = fake_sleeping_pedelec_deno(temp.path());
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
+        let mut cfg = config();
+        cfg.pedelec_deno_path = Some(deno);
+        cfg.pedelec_deno_timeout_ms = 300;
+        let started = Instant::now();
+
+        let error = execute_tool(
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-deno --thread-id thread_explicit run scripts/test.ts",
+                "timeoutMs": 300
+            }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "command without stdin bypassed the helper timeout: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(error.code, "PEDELEC_DENO_TIMEOUT");
+        assert!(error.message.contains("timed out"));
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("timeoutMs")),
+            Some(&serde_json::json!(300))
+        );
+    }
+
+    #[test]
+    fn bash_tool_surfaces_stdin_write_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let deno = fake_closed_stdin_pedelec_deno(temp.path());
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
+        let mut cfg = config();
+        cfg.pedelec_deno_path = Some(deno);
+
+        let error = execute_tool(
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-deno --thread-id thread_explicit run -",
+                "stdin": "X".repeat(PIPE_OVERFLOW_STDIN_LEN)
+            }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "PEDELEC_DENO_FAILED");
+        let details = error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            details.contains("could not write restricted helper stdin"),
+            "write failure was not surfaced with useful context: {error:?}"
+        );
+    }
+
+    #[test]
+    fn bash_tool_rejects_stdin_for_unsupported_restricted_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
+        let mut cfg = config();
+        cfg.pedelec_cli_path = Some(fake_pedelec_cli(temp.path(), &temp.path().join("cli.txt")));
+        cfg.pedelec_deno_path = Some(fake_pedelec_deno(
+            temp.path(),
+            &temp.path().join("deno.txt"),
+        ));
+
+        let cli_error = execute_tool(
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-cli --thread-id thread_1 tool-spec get_page",
+                "stdin": "nope"
+            }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap_err();
+        assert_eq!(cli_error.code, "INVALID_ARGUMENT");
+
+        let path_error = execute_tool(
+            "bash",
+            &serde_json::json!({
+                "command": "pedelec-deno --thread-id thread_1 run scripts/test.ts",
+                "stdin": "nope"
+            }),
+            "session_inner",
+            &sandbox,
+            &cfg,
+        )
+        .unwrap_err();
+        assert_eq!(path_error.code, "INVALID_ARGUMENT");
+    }
+
+    #[test]
     fn bash_tool_rejects_non_pedelec_helper_commands() {
         let temp = tempfile::tempdir().unwrap();
         let sandbox = Sandbox::new(temp.path(), 1024, 20 * 1024 * 1024, 200).unwrap();
@@ -841,6 +1177,26 @@ mod tests {
                 "--",
                 "foo",
                 "bar"
+            ]
+        );
+        assert_eq!(
+            parse_restricted_bash_command("pedelec-deno --thread-id thread_1 run - -- foo")
+                .and_then(|argv| {
+                    assert_eq!(
+                        validate_restricted_command(&argv)?,
+                        RestrictedCommand::PedelecDeno { stdin_mode: true }
+                    );
+                    Ok(argv)
+                })
+                .unwrap(),
+            vec![
+                "pedelec-deno",
+                "--thread-id",
+                "thread_1",
+                "run",
+                "-",
+                "--",
+                "foo"
             ]
         );
     }
@@ -1032,10 +1388,12 @@ mod tests {
     #[cfg(windows)]
     fn fake_pedelec_deno(dir: &Path, capture: &Path) -> PathBuf {
         let path = dir.join("pedelec-deno.cmd");
+        let stdin_capture = capture.with_extension("stdin");
         std::fs::write(
             &path,
             format!(
-                "@echo off\r\necho %* > \"{}\"\r\necho {{\"ok\":true,\"result\":{{\"exitCode\":0,\"stdout\":\"script output\",\"stderr\":\"\",\"stdoutTruncated\":false,\"stderrTruncated\":false}}}}\r\n",
+                "@echo off\r\nmore > \"{}\"\r\necho %* > \"{}\"\r\necho {{\"ok\":true,\"result\":{{\"exitCode\":0,\"stdout\":\"script output\",\"stderr\":\"\",\"stdoutTruncated\":false,\"stderrTruncated\":false}}}}\r\n",
+                stdin_capture.to_string_lossy(),
                 capture.to_string_lossy()
             ),
         )
@@ -1048,14 +1406,56 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let path = dir.join("pedelec-deno");
+        let stdin_capture = capture.with_extension("stdin");
         std::fs::write(
             &path,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"ok\":true,\"result\":{{\"exitCode\":0,\"stdout\":\"script output\",\"stderr\":\"\",\"stdoutTruncated\":false,\"stderrTruncated\":false}}}}'\n",
+                "#!/bin/sh\ncat > '{}'\nprintf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"ok\":true,\"result\":{{\"exitCode\":0,\"stdout\":\"script output\",\"stderr\":\"\",\"stdoutTruncated\":false,\"stderrTruncated\":false}}}}'\n",
+                stdin_capture.to_string_lossy(),
                 capture.to_string_lossy()
             ),
         )
         .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(windows)]
+    fn fake_sleeping_pedelec_deno(dir: &Path) -> PathBuf {
+        let path = dir.join("pedelec-deno.cmd");
+        // Stay inside cmd.exe so child.kill() closes the pipes wait_with_output
+        // is reading. A grandchild like ping would keep those handles open.
+        std::fs::write(&path, "@echo off\r\n:wait\r\ngoto wait\r\n").unwrap();
+        path
+    }
+
+    #[cfg(not(windows))]
+    fn fake_sleeping_pedelec_deno(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("pedelec-deno");
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(windows)]
+    fn fake_closed_stdin_pedelec_deno(dir: &Path) -> PathBuf {
+        let path = dir.join("pedelec-deno.cmd");
+        std::fs::write(&path, "@echo off\r\nexit /b 0\r\n").unwrap();
+        path
+    }
+
+    #[cfg(not(windows))]
+    fn fake_closed_stdin_pedelec_deno(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("pedelec-deno");
+        std::fs::write(&path, "#!/bin/sh\nexec <&-\nexit 0\n").unwrap();
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).unwrap();

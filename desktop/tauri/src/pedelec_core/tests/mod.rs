@@ -35,8 +35,9 @@ mod tests {
             "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path>"
         ));
         assert!(instruction.contains(
-            "use `pedelec-deno` instead of system-installed Node.js, Bun, raw Deno, npx"
+            "Use `pedelec-deno` instead of system-installed Node.js, Bun, raw Deno, npx"
         ));
+        assert!(instruction.contains("pedelec-deno --thread-id <pedelec_thread_id> run -"));
     }
 
     #[test]
@@ -58,6 +59,7 @@ mod tests {
         assert!(agent.contains(
             "pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path>"
         ));
+        assert!(agent.contains("pedelec-deno --thread-id <pedelec_thread_id> run -"));
     }
 
     #[test]
@@ -2121,6 +2123,7 @@ mod tests {
         assert!(instruction.contains(
             "pedelec-deno --thread-id thread_no_tools_md run <workspace-relative-script-path>"
         ));
+        assert!(instruction.contains("pedelec-deno --thread-id thread_no_tools_md run -"));
         assert!(instruction.contains("canonical JavaScript/TypeScript runtime"));
         assert!(instruction.contains("Do not silently fall back to another JavaScript runtime"));
     }
@@ -2155,11 +2158,13 @@ mod tests {
         assert!(instruction.contains(
             "pedelec-deno --thread-id thread_with_tools_md run <workspace-relative-script-path>"
         ));
-        assert!(instruction.contains("pedelec-deno --thread-id thread_with_tools_md run <workspace-relative-script-path> -- <args...>"));
+        assert!(instruction.contains("pedelec-deno --thread-id thread_with_tools_md run -"));
+        assert!(instruction.contains("For script arguments, append `-- <args...>`"));
         assert!(instruction.contains("Do not silently fall back to another JavaScript runtime"));
         assert!(persistent.contains(
             "pedelec-deno --thread-id thread_with_tools_md run <workspace-relative-script-path>"
         ));
+        assert!(persistent.contains("pedelec-deno --thread-id thread_with_tools_md run -"));
         assert!(persistent.contains("canonical JavaScript/TypeScript runtime"));
         assert!(persistent.contains("pedelec-cli --thread-id thread_with_tools_md tool-call"));
         let cursor_first_prompt =

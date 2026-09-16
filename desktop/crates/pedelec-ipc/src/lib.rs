@@ -1275,7 +1275,7 @@ impl DenoRuntimeDispatcher for RejectDenoRuntimeDispatcher {
             "Deno runtime dispatcher is unavailable",
             serde_json::json!({
                 "threadId": intent.thread_id,
-                "entrypoint": intent.entrypoint,
+                "target": intent.target,
             }),
         ))
     }
@@ -3670,8 +3670,8 @@ done
 mod deno_ipc_tests {
     use super::*;
     use pedelec_core::{
-        CoreRuntime, DenoExecutionIntent, DenoRunOutput, EffortLevel, ProviderSessionState,
-        ThreadState, ThreadStatus, WorkspaceManager,
+        CoreRuntime, DenoExecutionIntent, DenoExecutionTarget, DenoRunOutput, EffortLevel,
+        ProviderSessionState, ThreadState, ThreadStatus, WorkspaceManager,
     };
     use std::sync::Mutex;
 
@@ -3758,7 +3758,7 @@ mod deno_ipc_tests {
                 caller_sdk_version: None,
                 payload: Some(serde_json::json!({
                     "threadId": "thread-deno-ipc",
-                    "entrypoint": "script.ts",
+                    "target": { "kind": "workspaceFile", "entrypoint": "script.ts" },
                     "args": ["--allow-net", "value"],
                 })),
             },
@@ -3774,7 +3774,12 @@ mod deno_ipc_tests {
             intent.workspace_path,
             temp.path().join("workspace").canonicalize().unwrap()
         );
-        assert_eq!(intent.entrypoint, intent.workspace_path.join("script.ts"));
+        assert_eq!(
+            intent.target,
+            DenoExecutionTarget::WorkspaceFile {
+                entrypoint: intent.workspace_path.join("script.ts")
+            }
+        );
         assert_eq!(intent.args, vec!["--allow-net", "value"]);
 
         let runtime = runtime.lock().unwrap();
@@ -3785,6 +3790,59 @@ mod deno_ipc_tests {
         assert!(!runtime
             .tool_request_broker
             .has_pending_for_thread("thread-deno-ipc"));
+    }
+
+    #[test]
+    fn deno_ipc_carries_stdin_source_to_the_runtime_dispatcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = active_runtime(temp.path(), "thread-deno-stdin-ipc");
+        let dispatcher = Arc::new(RecordingDenoDispatcher::default());
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path_services_dispatchers(
+            Arc::clone(&runtime),
+            &runtime_path,
+            Arc::new(NoopCoreIpcPlatformServices),
+            Arc::new(RejectPersistentRuntimeDispatcher),
+            dispatcher.clone(),
+        )
+        .unwrap();
+
+        let response = send_core_ipc_request_with_runtime_path(
+            &CoreIpcRequest {
+                request_id: "deno-ipc-stdin".into(),
+                r#type: "deno_run".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(serde_json::json!({
+                    "threadId": "thread-deno-stdin-ipc",
+                    "target": {
+                        "kind": "stdinSource",
+                        "source": "console.log('ipc-stdin')"
+                    },
+                    "args": ["arg1"],
+                })),
+            },
+            &runtime_path,
+        )
+        .unwrap();
+
+        assert!(
+            response.ok,
+            "stdin IPC request failed: {:?}",
+            response.error
+        );
+        let intent = dispatcher.intents.lock().unwrap().pop().unwrap();
+        assert_eq!(
+            intent.target,
+            DenoExecutionTarget::StdinSource {
+                source: "console.log('ipc-stdin')".into()
+            }
+        );
+        assert_eq!(intent.args, vec!["arg1"]);
+        assert_eq!(
+            intent.workspace_path,
+            temp.path().join("workspace").canonicalize().unwrap()
+        );
     }
 
     /// `pedelec-deno` is a trusted local helper, not a Web SDK caller: it sends
@@ -3818,7 +3876,7 @@ mod deno_ipc_tests {
                 caller_sdk_version: None,
                 payload: Some(serde_json::json!({
                     "threadId": "thread-deno-sdk-owned",
-                    "entrypoint": "script.ts",
+                    "target": { "kind": "workspaceFile", "entrypoint": "script.ts" },
                 })),
             },
             &runtime_path,
@@ -3837,7 +3895,12 @@ mod deno_ipc_tests {
             intent.workspace_path,
             temp.path().join("workspace").canonicalize().unwrap()
         );
-        assert_eq!(intent.entrypoint, intent.workspace_path.join("script.ts"));
+        assert_eq!(
+            intent.target,
+            DenoExecutionTarget::WorkspaceFile {
+                entrypoint: intent.workspace_path.join("script.ts")
+            }
+        );
 
         // Ordinary SDK-facing operations still require a matching origin.
         let snapshot = send_core_ipc_request_with_runtime_path(
@@ -3893,7 +3956,7 @@ mod deno_ipc_tests {
                 caller_sdk_version: None,
                 payload: Some(serde_json::json!({
                     "threadId": "thread-deno-inactive",
-                    "entrypoint": "script.ts",
+                    "target": { "kind": "workspaceFile", "entrypoint": "script.ts" },
                 })),
             },
             &runtime_path,
@@ -3919,7 +3982,7 @@ mod deno_ipc_tests {
                 caller_sdk_version: None,
                 payload: Some(serde_json::json!({
                     "threadId": "thread-deno-inactive",
-                    "entrypoint": "../outside.ts",
+                    "target": { "kind": "workspaceFile", "entrypoint": "../outside.ts" },
                 })),
             },
             &runtime_path,
@@ -3974,7 +4037,7 @@ mod deno_ipc_tests {
                     caller_sdk_version: None,
                     payload: Some(serde_json::json!({
                         "threadId": thread_id,
-                        "entrypoint": "script.ts",
+                        "target": { "kind": "workspaceFile", "entrypoint": "script.ts" },
                     })),
                 },
                 &runtime_path,
@@ -4015,7 +4078,7 @@ mod deno_ipc_tests {
                 caller_sdk_version: None,
                 payload: Some(serde_json::json!({
                     "threadId": "thread-deno-error",
-                    "entrypoint": "script.ts",
+                    "target": { "kind": "workspaceFile", "entrypoint": "script.ts" },
                 })),
             },
             &runtime_path,

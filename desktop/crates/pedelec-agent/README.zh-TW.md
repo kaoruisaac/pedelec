@@ -154,5 +154,5 @@ PEDELEC_AGENT_PEDELEC_DENO_TIMEOUT_MS=75000
 - stdout 只輸出 JSON-RPC；不要把 diagnostics 寫進 stdout。
 - 不會修改檔案。
 - 不會讀取 sandbox 以外的路徑。
-- `bash` 是受限 command runner，只允許精確的 `pedelec-cli --thread-id <pedelec_thread_id> tool-spec`、`pedelec-cli --thread-id <pedelec_thread_id> tool-call`，以及 `pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> [-- <script-args...>]`；不開放任意 shell、raw Deno、Node.js、Bun 或其他 executable。
+- `bash` 是受限 command runner，只允許精確的 `pedelec-cli --thread-id <pedelec_thread_id> tool-spec`、`pedelec-cli --thread-id <pedelec_thread_id> tool-call`，以及 `pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path|-> [-- <script-args...>]`；`run -` 的 source 由 `bash.stdin` 提供，且 `stdin` 不開放給其他 restricted command；不開放任意 shell、raw Deno、Node.js、Bun 或其他 executable。
 - `pedelec-deno` 是 JavaScript/TypeScript 的 canonical runtime。若 helper 不可用，不會 fallback 到其他 runtime；檔案編輯仍由 provider 的一般 filesystem 能力負責。

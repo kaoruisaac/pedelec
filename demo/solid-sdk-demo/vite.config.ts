@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pedelecVitePlugin } from "@kaoruisaac/pedelec/vite";
 import { defineConfig, normalizePath } from "vite";
 import solid from "vite-plugin-solid";
 
@@ -11,13 +12,14 @@ const devExtensionIdEnv = "PEDELEC_DEV_CHROME_EXTENSION_ID";
 
 export default defineConfig(({ command }) => ({
   plugins: [
+    pedelecVitePlugin(),
     solid(),
     command === "serve" ? pedelecDevExtensionIdPlugin() : null,
   ].filter(Boolean),
   publicDir: resolve(rootDir, "public"),
   resolve: {
     alias: {
-      pedelec: resolve(sdkSourceDir, "index.ts"),
+      "@kaoruisaac/pedelec": resolve(sdkSourceDir, "index.ts"),
     },
   },
 }));

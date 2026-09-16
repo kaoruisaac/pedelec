@@ -9,7 +9,7 @@ use pedelec_core::{
     workspace_deno_import_map_path, workspace_deno_modules_root, workspace_tmp_root, CoreRuntime,
     CreateDenoModuleUploadInput, CreateThreadDenoModuleInput, CreateThreadInput,
     CreateThreadSkillsInput, CreateThreadWorkspaceInput, DenoModuleUploadState, DenoRunInput,
-    EffortLevel, ProviderCode, ThreadStatus, WorkspaceManager,
+    DenoRunTarget, EffortLevel, ProviderCode, ThreadStatus, WorkspaceManager,
 };
 use pedelec_shared::paths::bundled_deno_binary_name;
 use std::fs;
@@ -17,7 +17,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const SPRITE_TOOLS_RUNTIME: &str = r#"
+import { readFile, writeFile } from "node:fs/promises";
+
 export const value = "sprite-tools-ok";
+
+export async function roundTripWorkspaceFile(path, contents) {
+  await writeFile(path, contents, "utf8");
+  return await readFile(path, "utf8");
+}
 
 export async function loadWorkspaceModule(path) {
   const relative = String(path).replaceAll("\\", "/").replace(/^\/+/, "");
@@ -95,7 +102,7 @@ fn materialize_sprite_tools(runtime: &mut CoreRuntime, workspace: &Path, thread_
         "version": 1,
         "format": "esm",
         "runtimeSource": SPRITE_TOOLS_RUNTIME,
-        "typesSource": "export declare const value: string;\nexport declare function loadWorkspaceModule(path: string): Promise<unknown>;\n",
+        "typesSource": "export declare const value: string;\nexport declare function roundTripWorkspaceFile(path: string, contents: string): Promise<string>;\nexport declare function loadWorkspaceModule(path: string): Promise<unknown>;\n",
     });
     let bytes = serde_json::to_vec(&envelope).unwrap();
     let ticket = runtime
@@ -118,9 +125,11 @@ fn materialize_sprite_tools(runtime: &mut CoreRuntime, workspace: &Path, thread_
         .unwrap();
 }
 
-fn ready_module_thread(
+fn ready_module_thread_for_target(
     runtime: &mut CoreRuntime,
     workspace: &Path,
+    target: DenoRunTarget,
+    args: Vec<String>,
 ) -> (String, pedelec_core::DenoExecutionIntent) {
     let thread_id = runtime
         .create_sdk_thread(
@@ -159,11 +168,25 @@ fn ready_module_thread(
     let intent = runtime
         .prepare_deno_run_intent(DenoRunInput {
             thread_id: thread_id.clone(),
-            entrypoint: "scripts/work.ts".into(),
-            args: Vec::new(),
+            target,
+            args,
         })
         .unwrap();
     (thread_id, intent)
+}
+
+fn ready_module_thread(
+    runtime: &mut CoreRuntime,
+    workspace: &Path,
+) -> (String, pedelec_core::DenoExecutionIntent) {
+    ready_module_thread_for_target(
+        runtime,
+        workspace,
+        DenoRunTarget::WorkspaceFile {
+            entrypoint: "scripts/work.ts".into(),
+        },
+        Vec::new(),
+    )
 }
 
 fn write_agent_script(workspace: &Path, body: &str) {
@@ -194,11 +217,12 @@ fn real_deno_imports_logical_modules_relative_files_and_workspace_dynamic_import
     write_agent_script(
         &workspace,
         r#"
-import { value, loadWorkspaceModule } from "sprite-tools";
+import { value, loadWorkspaceModule, roundTripWorkspaceFile } from "sprite-tools";
 import { localValue } from "./helper.ts";
 
 const { loaded } = await loadWorkspaceModule("agent-data.ts");
-console.log(JSON.stringify({ value, localValue, loaded }));
+const nodeBuiltinValue = await roundTripWorkspaceFile("node-builtins.txt", "node-builtins-ok");
+console.log(JSON.stringify({ value, localValue, loaded, nodeBuiltinValue }));
 "#,
     );
 
@@ -226,6 +250,21 @@ console.log(JSON.stringify({ value, localValue, loaded }));
     assert!(args.iter().any(|arg| arg == "--no-remote"));
     assert!(args.iter().any(|arg| arg == "--no-npm"));
     assert!(args.iter().any(|arg| arg == "--cached-only"));
+    assert!(args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("--allow-read=")));
+    assert!(args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("--allow-write=")));
+    for denied in [
+        "--deny-net",
+        "--deny-env",
+        "--deny-run",
+        "--deny-ffi",
+        "--deny-sys",
+    ] {
+        assert!(args.iter().any(|arg| arg == denied));
+    }
 
     let output = owner(&executable).dispatch(intent).unwrap();
     assert_eq!(
@@ -244,6 +283,71 @@ console.log(JSON.stringify({ value, localValue, loaded }));
         "{}",
         output.stdout
     );
+    assert!(
+        output.stdout.contains("node-builtins-ok"),
+        "{}",
+        output.stdout
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("node-builtins.txt")).unwrap(),
+        "node-builtins-ok"
+    );
+}
+
+#[test]
+fn real_deno_executes_stdin_source_with_logical_and_relative_imports() {
+    let Some(executable) = test_deno_executable() else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join("helper.ts"),
+        "export const localValue = \"stdin-relative-ok\";\n",
+    )
+    .unwrap();
+    let source = r#"
+import { value } from "sprite-tools";
+import { localValue } from "./helper.ts";
+console.log(JSON.stringify({ value, localValue, arg: Deno.args[0] }));
+"#;
+
+    let mut runtime = runtime_for(&temp);
+    let (_thread_id, intent) = ready_module_thread_for_target(
+        &mut runtime,
+        &workspace,
+        DenoRunTarget::StdinSource {
+            source: source.into(),
+        },
+        vec!["stdin-arg-ok".into()],
+    );
+    let prepared = PreparedDenoExecution::prepare(&intent).unwrap();
+    let args = build_deno_command_args(&prepared);
+    let separator = args.iter().position(|arg| arg == "--").unwrap();
+    assert_eq!(args[separator + 1], "-");
+    assert!(args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("--import-map=")));
+
+    let output = owner(&executable).dispatch(intent).unwrap();
+    assert_eq!(
+        output.exit_code, 0,
+        "stdout={} stderr={}",
+        output.stdout, output.stderr
+    );
+    assert!(
+        output.stdout.contains("sprite-tools-ok"),
+        "{}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("stdin-relative-ok"),
+        "{}",
+        output.stdout
+    );
+    assert!(output.stdout.contains("stdin-arg-ok"), "{}", output.stdout);
+    assert!(!workspace.join("scripts/work.ts").exists());
 }
 
 #[test]

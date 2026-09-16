@@ -62,6 +62,30 @@ async function createTypedPackageFixture(directory: string): Promise<void> {
   );
 }
 
+async function createTransitivePackageDeclarationFixture(directory: string, exposeDependencyType: boolean): Promise<void> {
+  const packageADirectory = join(directory, "node_modules", "package-a");
+  const packageBDirectory = join(directory, "node_modules", "package-b");
+  await mkdir(packageADirectory, { recursive: true });
+  await mkdir(packageBDirectory, { recursive: true });
+  await writeFile(join(packageADirectory, "package.json"), `{"name":"package-a","type":"module","main":"index.js","types":"index.d.ts"}`);
+  await writeFile(
+    join(packageADirectory, "index.js"),
+    `import { packageBValue } from "package-b";\nexport function mark(value) { return value + packageBValue; }\n`,
+  );
+  await writeFile(
+    join(packageADirectory, "index.d.ts"),
+    `import type { PackageBType } from "package-b";\nexport interface PackageAType { nested: PackageBType; }\nexport declare function mark(value: string): string;\n`,
+  );
+  await writeFile(join(packageBDirectory, "package.json"), `{"name":"package-b","type":"module","main":"index.js"}`);
+  await writeFile(join(packageBDirectory, "index.js"), `export const packageBValue = "package-b-runtime";\n`);
+  await writeFile(
+    join(directory, "agent", "module.ts"),
+    exposeDependencyType
+      ? `import { mark, type PackageAType } from "package-a";\nexport function preview(value: string): PackageAType { return { nested: mark(value) as PackageAType["nested"] }; }\n`
+      : `import { mark } from "package-a";\nexport function preview(value: string): string { return mark(value); }\n`,
+  );
+}
+
 async function createServerFor(directory: string, alias: Record<string, string> = {}): Promise<ViteDevServer> {
   return createServer({
     configFile: false,
@@ -416,6 +440,50 @@ describe("pedelecVitePlugin", () => {
     });
   });
 
+  it("preserves node: built-ins for Deno while omitting implementation-only imports from declarations", async () => {
+    const directory = await createFixture();
+    await writeFile(
+      join(directory, "agent", "module.ts"),
+      `import { writeFile } from "node:fs/promises";\nexport async function writeNote(note: string): Promise<void> { await writeFile("notes.txt", note); }\n`,
+    );
+    await withServer(directory, async (server) => {
+      const artifact = extractArtifact(await transformFile(server, join(directory, "main.ts")));
+      expect(artifact.runtimeSource).toContain("node:fs/promises");
+      expect(artifact.runtimeSource).not.toContain("__vite-browser-external");
+      expect(artifact.typesSource).toMatch(/writeNote\s*\(note:\s*string\):\s*Promise<void>/);
+      expect(artifact.typesSource).not.toContain("node:fs/promises");
+      expect(standaloneDeclarationDiagnostics(artifact.typesSource)).toEqual([]);
+    });
+  });
+
+  it("canonicalizes legacy bare Node built-in subpaths", async () => {
+    const directory = await createFixture();
+    await writeFile(
+      join(directory, "agent", "module.ts"),
+      `import { readFile } from "fs/promises";\nexport async function readNote(): Promise<string> { return await readFile("notes.txt", "utf8"); }\n`,
+    );
+    await withServer(directory, async (server) => {
+      const artifact = extractArtifact(await transformFile(server, join(directory, "main.ts")));
+      expect(artifact.runtimeSource).toContain("node:fs/promises");
+      expect(artifact.runtimeSource).not.toMatch(/from["']fs\/promises["']/);
+      expect(artifact.runtimeSource).not.toContain("__vite-browser-external");
+    });
+  });
+
+  it("recognizes Node built-in subpaths from the runtime module registry", async () => {
+    const directory = await createFixture();
+    await writeFile(
+      join(directory, "agent", "module.ts"),
+      `import assert from "assert/strict";\nimport { pipeline } from "stream/promises";\nexport async function pipe(source: AsyncIterable<unknown>, sink: unknown): Promise<void> { assert(source); await pipeline(source as never, sink as never); }\n`,
+    );
+    await withServer(directory, async (server) => {
+      const artifact = extractArtifact(await transformFile(server, join(directory, "main.ts")));
+      expect(artifact.runtimeSource).toContain("node:assert/strict");
+      expect(artifact.runtimeSource).toContain("node:stream/promises");
+      expect(artifact.runtimeSource).not.toContain("__vite-browser-external");
+    });
+  });
+
   it("rejects an unresolved runtime dependency", async () => {
     const directory = await createFixture();
     await writeFile(
@@ -559,6 +627,30 @@ describe("pedelecVitePlugin", () => {
       expect(artifact.typesSource).toContain("exports-extra");
       expect(artifact.typesSource).not.toContain("exports-dep");
       expect(standaloneDeclarationDiagnostics(artifact.typesSource)).toEqual([]);
+    });
+  });
+
+  it("does not crawl transitive package declarations for implementation-only dependencies", async () => {
+    const directory = await createFixture();
+    await createTransitivePackageDeclarationFixture(directory, false);
+    await withServer(directory, async (server) => {
+      const artifact = extractArtifact(await transformFile(server, join(directory, "main.ts")));
+      expect(artifact.runtimeSource).toContain("package-b-runtime");
+      expect(artifact.runtimeSource).not.toMatch(/from["']package-[ab]["']/);
+      expect(artifact.typesSource).toMatch(/preview\s*\(value:\s*string\):\s*string/);
+      expect(artifact.typesSource).not.toContain("PackageAType");
+      expect(artifact.typesSource).not.toContain("PackageBType");
+      expect(standaloneDeclarationDiagnostics(artifact.typesSource)).toEqual([]);
+    });
+  });
+
+  it("fails clearly instead of crawling a transitive type leaked through the public API", async () => {
+    const directory = await createFixture();
+    await createTransitivePackageDeclarationFixture(directory, true);
+    await withServer(directory, async (server) => {
+      await expect(server.transformRequest(join(directory, "main.ts"))).rejects.toThrow(
+        /public declaration still depends on unresolved module "package-b"/,
+      );
     });
   });
 

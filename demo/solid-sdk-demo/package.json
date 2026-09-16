@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "solid-js": "latest",
-    "pedelec": "file:../../sdk"
+    "@kaoruisaac/pedelec": "file:../../sdk"
   },
   "devDependencies": {
     "@types/node": "latest",

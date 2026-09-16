@@ -139,7 +139,9 @@ defineDenoModule({
 });
 ```
 
-`entry` is resolved by Vite during build/dev and is never a Desktop filesystem instruction. The plugin bundles runtime dependencies locally and generates the public `index.d.ts` declarations automatically. `name` is the Agent import specifier, and `usage` is required common-case guidance. `createSession()` transfers the prepared artifact automatically; a session keeps an immutable module snapshot, and `session.end()`/`session.resume()` reuse it while Core still knows the thread. Module code runs inside the same restricted Pedelec Deno execution as Agent code: runtime npm, JSR, and network fetching are unavailable.
+`entry` is resolved by Vite during build/dev and is never a Desktop filesystem instruction. The plugin bundles normal third-party runtime dependencies locally and generates the public `index.d.ts` declarations automatically. Node built-ins may be imported with either canonical `node:` specifiers or legacy bare specifiers; the prepared artifact preserves them as canonical `node:` imports for Deno's Node compatibility layer. This does not change the sandbox: runtime npm, JSR, network fetching, and filesystem access outside the permitted workspace remain unavailable.
+
+The generated declaration describes the module's Agent-facing API, so implementation-only dependency types are omitted. Module-owned types are supported; packages that expose dependency-owned or Node-specific external types directly in their public API are not guaranteed to produce a standalone declaration in V1. `name` is the Agent import specifier, and `usage` is required common-case guidance. `createSession()` transfers the prepared artifact automatically; a session keeps an immutable module snapshot, and `session.end()`/`session.resume()` reuse it while Core still knows the thread.
 
 Deno Modules are imported inside JavaScript/TypeScript run with `pedelec-deno`. They are different from `skills.tools`, whose browser/App RPC capabilities use `pedelec-cli` tool-spec and tool-call commands.
 

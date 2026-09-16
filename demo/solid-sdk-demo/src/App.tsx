@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema } from "pedelec";
+import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema, defineDenoModule } from "@kaoruisaac/pedelec";
 
 const MAX_EVENTS = 300;
 const MAX_ASSET_SIZE_BYTES = 100 * 1024 * 1024;
@@ -99,7 +99,7 @@ const emptyArgsSchema = {
 function createDemoSkills() {
   return {
     guidance:
-      "Use these tools when you need browser page context, selected text, or explicit input from the user. Do not guess page state.",
+      "Use these tools when you need browser page context, selected text, or explicit input from the user. Do not guess page state. do not expain what you going to do, just do it.",
     tools: [
       defineTool({
         name: "get_current_page",
@@ -136,6 +136,17 @@ function createDemoSkills() {
         timeoutMs: 60000,
       }),
     ],
+    denoModules: [
+      defineDenoModule({
+        name: "memory-manager",
+        description: "when you need to remember something, you can use this tool",
+        entry: "./note-generator.ts",
+        usage: `
+          import { writeNote } from "memory-manager";
+          await writeNote("Any note you want to remember");
+        `,
+      }),
+    ]
   };
 }
 
