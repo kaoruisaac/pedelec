@@ -24,6 +24,7 @@ const spriteTools = defineDenoModule({
   description: "Sprite authoring utilities.",
   entry: "./agent/sprite-tools.ts",
   usage: `import { previewActorSource } from "sprite-tools";`,
+  preferStdinExecution: true,
 });
 
 const spriteName: "sprite-tools" = spriteTools.name;

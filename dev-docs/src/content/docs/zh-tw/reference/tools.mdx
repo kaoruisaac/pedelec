@@ -51,6 +51,7 @@ const spriteTools = defineDenoModule({
   description: "Sprite authoring and preview utilities.",
   entry: "./agent/sprite-tools.ts",
   usage: `import { previewActorSource } from "sprite-tools";`,
+  preferStdinExecution: true,
 });
 
 const skills = {
@@ -85,6 +86,8 @@ Plugin 會在轉換後的 module object 上附加 private、non-enumerable 的 r
 `usage` 請保持精簡：它是常見情境的 agent hint；需要檢查 enum 或 option shape 時，以 generated declaration bundle 為準。
 
 Agent 會在以 `pedelec-deno` 執行的 JavaScript/TypeScript script 中，以 logical `name` import module，不會以 private filesystem path 執行 module。Host Context 會列出 name、description、usage，以及 workspace-relative 的 `index.d.ts` pointer，供精確 API discovery；generated `index.mjs` 是 implementation fallback，不是一般 API reference。
+
+`preferStdinExecution` 是主要用於短 script 的 optional boolean preference。設為 `true` 時，Host Context 會加入具體的 module-specific `runCommand`，例如 `pedelec-deno --thread-id <thread-id> run -`，引導 Agent 使用 stdin execution；raw preference flag 不會暴露在 Agent-facing object。這不是限制，file-backed execution 仍然有效；省略或設為 `false` 會維持預設行為，也不會影響 bundling 或 artifact contents。
 
 `entry` 支援 local relative file、Vite alias，以及已安裝的 bare/package `exports` specifier。它只在 build-time 使用；Desktop 不會解析它，runtime 也不能 fetch npm、JSR 或 network。Imported module 和 Agent script 共用相同受限制的 Pedelec Deno permissions。
 
@@ -150,7 +153,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` 必須是 string，`tools` 必須是 array。`denoModules` 是 optional；每個 module 都需要 `name`、`description`、`entry`、`usage`。它應包含 Vite-prepared definitions，`createSession()` 會自動完成 transport。
+`guidance` 必須是 string，`tools` 必須是 array。`denoModules` 是 optional；每個 module 都需要 `name`、`description`、`entry`、`usage`。`preferStdinExecution` 是 optional boolean preference。它應包含 Vite-prepared definitions，`createSession()` 會自動完成 transport。
 
 ## `ToolNameOf`
 
@@ -194,6 +197,7 @@ type SerializableSkillsManifest = {
     name: string;
     description: string;
     usage: string;
+    preferStdinExecution?: boolean;
   }>;
 };
 ```

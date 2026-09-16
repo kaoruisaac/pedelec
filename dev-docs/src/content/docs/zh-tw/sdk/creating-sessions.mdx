@@ -77,6 +77,7 @@ const spriteTools = defineDenoModule({
   description: "Sprite authoring and preview utilities.",
   entry: "./agent/sprite-tools.ts",
   usage: `import { previewActorSource } from "sprite-tools";`,
+  preferStdinExecution: true,
 });
 
 const session = await pedelec.createSession({
@@ -91,6 +92,8 @@ const session = await pedelec.createSession({
 `entry` 只在 Vite build/dev 階段解析，不會送到 Desktop。Plugin 會 bundle 一般第三方 dependencies 並產生 public declarations。Node built-ins 由 Deno 的 Node compatibility layer 在 runtime 提供；`node:fs/promises` 與 `fs/promises` 等舊式 bare specifier 都可使用，prepared runtime import 會統一為 `node:` 形式。這不會開放 runtime npm、network resolution 或更廣泛的 filesystem 權限。
 
 產生的 `index.d.ts` 只描述 Agent-facing public API，implementation-only dependency types 會被省略。Module 自有的 exported types 受支援；若 package 在 public API 直接暴露 dependency-owned 或 Node-specific external types，V1 不保證能產生 standalone declaration。Agent 會在 `pedelec-deno` script 內 import `sprite-tools`；需要精確 API 時，Host Context 會指向 `index.d.ts`。Deno Modules 和 `skills.tools` 的 browser/App Tools 不同，後者走 `pedelec-cli` RPC commands。只要 Core 仍知道 thread，session end/resume 會保留同一 immutable snapshot；要使用重建 artifact 請建立新 session。
+
+`preferStdinExecution` 是 optional。當 module 主要用於短 script 時可設為 `true`；Host Context 會在該 module metadata 提供具體的 stdin `runCommand`，例如 `pedelec-deno --thread-id <thread-id> run -`。這是 execution preference，不是限制，file-backed script 仍然有效。省略或設為 `false` 會維持預設行為，也不會改變 module bundling 或 artifact contents。
 
 ## Metadata 與 resume
 

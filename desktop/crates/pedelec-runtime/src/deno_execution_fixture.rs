@@ -143,6 +143,7 @@ fn ready_module_thread_for_target(
                         name: "sprite-tools".into(),
                         description: "Sprite helpers".into(),
                         usage: "import { value } from \"sprite-tools\";".into(),
+                        prefer_stdin_execution: false,
                     }],
                 }),
                 workspace: Some(CreateThreadWorkspaceInput {

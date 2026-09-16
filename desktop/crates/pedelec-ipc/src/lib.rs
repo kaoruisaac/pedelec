@@ -4123,6 +4123,7 @@ mod deno_ipc_tests {
                 name: "sprite-tools".into(),
                 description: "Sprite helpers".into(),
                 usage: "import \"sprite-tools\";".into(),
+                prefer_stdin_execution: false,
                 state: pedelec_core::DenoModuleSetupState::Pending,
             }],
         );

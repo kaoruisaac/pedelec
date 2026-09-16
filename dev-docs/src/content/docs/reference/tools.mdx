@@ -51,6 +51,7 @@ const spriteTools = defineDenoModule({
   description: "Sprite authoring and preview utilities.",
   entry: "./agent/sprite-tools.ts",
   usage: `import { previewActorSource } from "sprite-tools";`,
+  preferStdinExecution: true,
 });
 
 const skills = {
@@ -85,6 +86,8 @@ The plugin attaches a private, non-enumerable runtime/types artifact on the tran
 Keep `usage` concise: it is the common-case agent hint, while the generated declaration bundle is the authoritative surface when an enum or option shape needs inspection.
 
 The Agent imports the logical `name` from a JavaScript/TypeScript script run with `pedelec-deno`. It does not execute the module by its private filesystem path. Host Context lists the name, description, usage example, and a workspace-relative `index.d.ts` pointer for exact API discovery. The generated `index.mjs` is an implementation fallback, not the normal API reference.
+
+`preferStdinExecution` is optional metadata for modules primarily used by short scripts. When `true`, Host Context adds a concrete module-specific `runCommand`, such as `pedelec-deno --thread-id <thread-id> run -`, to steer the Agent toward stdin execution; the raw preference flag is not exposed in the Agent-facing object. It is a preference rather than a restriction: file-backed execution remains valid, and `false` or omission preserves the default behavior. It does not affect bundling or artifact contents.
 
 `entry` supports local relative files, Vite aliases, and installed bare/package `exports` specifiers. It is build-time only; Desktop does not resolve it and runtime npm, JSR, and network fetching are unavailable. Imported modules run with the same restricted Pedelec Deno permissions as the Agent script.
 
@@ -150,7 +153,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` must be a string and `tools` must be an array. `denoModules` is optional; each module requires `name`, `description`, `entry`, and `usage`. It is populated with Vite-prepared definitions and is transported automatically during `createSession()`.
+`guidance` must be a string and `tools` must be an array. `denoModules` is optional; each module requires `name`, `description`, `entry`, and `usage`. `preferStdinExecution` is an optional boolean preference. It is populated with Vite-prepared definitions and is transported automatically during `createSession()`.
 
 ## `ToolNameOf`
 
@@ -194,6 +197,7 @@ type SerializableSkillsManifest = {
     name: string;
     description: string;
     usage: string;
+    preferStdinExecution?: boolean;
   }>;
 };
 ```

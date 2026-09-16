@@ -122,6 +122,7 @@ const session = await pedelec.createSession({
         description: "Sprite authoring and preview utilities.",
         entry: "./agent/sprite-tools.ts",
         usage: `import { previewActorSource } from "sprite-tools";`,
+        preferStdinExecution: true,
       }),
     ],
   },
@@ -144,6 +145,8 @@ defineDenoModule({
 The generated declaration describes the module's Agent-facing API, so implementation-only dependency types are omitted. Module-owned types are supported; packages that expose dependency-owned or Node-specific external types directly in their public API are not guaranteed to produce a standalone declaration in V1. `name` is the Agent import specifier, and `usage` is required common-case guidance. `createSession()` transfers the prepared artifact automatically; a session keeps an immutable module snapshot, and `session.end()`/`session.resume()` reuse it while Core still knows the thread.
 
 Deno Modules are imported inside JavaScript/TypeScript run with `pedelec-deno`. They are different from `skills.tools`, whose browser/App RPC capabilities use `pedelec-cli` tool-spec and tool-call commands.
+
+Set the optional `preferStdinExecution: true` when short scripts primarily use a module and should be steered toward stdin execution. Host Context then adds that module's concrete `runCommand` (`pedelec-deno --thread-id <thread-id> run -`). This is a preference, not a restriction: file-backed execution remains valid, and omitting the field or setting it to `false` preserves the default behavior. It does not change bundling, artifact contents, or runtime permissions.
 
 ---
 

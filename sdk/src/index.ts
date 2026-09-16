@@ -38,6 +38,7 @@ export type DenoModuleDefinition<TName extends string = string> = {
   description: string;
   entry: string;
   usage: string;
+  preferStdinExecution?: boolean;
 };
 
 function normalizeListAssetsResponse(response: unknown): Asset[] {
@@ -169,6 +170,7 @@ type SerializableDenoModuleManifest = {
   name: string;
   description: string;
   usage: string;
+  preferStdinExecution?: boolean;
 };
 
 export type SerializableSkillsManifest = {
@@ -625,6 +627,11 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
         moduleName: rawModule.name,
       });
     }
+    if (rawModule.preferStdinExecution !== undefined && typeof rawModule.preferStdinExecution !== "boolean") {
+      throw makeError("INVALID_INPUT", "Deno Module preferStdinExecution must be a boolean", {
+        moduleName: rawModule.name,
+      });
+    }
 
     const artifact = getPreparedDenoModuleArtifact(module);
     if (!artifact) {
@@ -639,6 +646,7 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
       name: rawModule.name,
       description: rawModule.description,
       usage: rawModule.usage,
+      ...(rawModule.preferStdinExecution === true ? { preferStdinExecution: true } : {}),
       artifact,
     };
   });
@@ -648,7 +656,14 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
       guidance: skills.guidance,
       tools,
       ...(denoModules.length > 0
-        ? { denoModules: denoModules.map(({ name, description, usage }) => ({ name, description, usage })) }
+        ? {
+            denoModules: denoModules.map(({ name, description, usage, preferStdinExecution }) => ({
+              name,
+              description,
+              usage,
+              ...(preferStdinExecution === true ? { preferStdinExecution: true } : {}),
+            })),
+          }
         : {}),
     },
     handlers,

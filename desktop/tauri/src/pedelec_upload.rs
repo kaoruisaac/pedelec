@@ -710,6 +710,7 @@ mod tests {
                 name: "sprite-tools".into(),
                 description: "Sprite helpers".into(),
                 usage: "import \"sprite-tools\";".into(),
+                prefer_stdin_execution: false,
                 state: DenoModuleSetupState::Pending,
             }],
         );

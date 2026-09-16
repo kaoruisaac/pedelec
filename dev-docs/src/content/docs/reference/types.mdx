@@ -260,10 +260,11 @@ type DenoModuleDefinition<TName extends string = string> = {
   description: string;
   entry: string;
   usage: string;
+  preferStdinExecution?: boolean;
 };
 ```
 
-`entry` is a Vite build/dev authoring string. `name` becomes the Agent import specifier and `usage` is required guidance for the common import. Use `pedelecVitePlugin()` to prepare the runtime and declaration artifact.
+`entry` is a Vite build/dev authoring string. `name` becomes the Agent import specifier and `usage` is required guidance for the common import. `preferStdinExecution` is an optional Agent execution preference; when `true`, Host Context supplies a concrete module-specific stdin `runCommand`. File-backed execution remains valid, and the preference does not change bundling or artifact contents. Use `pedelecVitePlugin()` to prepare the runtime and declaration artifact.
 
 ### `SkillsInput`
 
@@ -303,6 +304,7 @@ type SerializableSkillsManifest = {
     name: string;
     description: string;
     usage: string;
+    preferStdinExecution?: boolean;
   }>;
 };
 ```

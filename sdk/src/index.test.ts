@@ -232,12 +232,13 @@ async function createProviderSession(
   return { session: await create, createRequest };
 }
 
-function preparedDenoModule(name = "sprite-tools"): any {
+function preparedDenoModule(name = "sprite-tools", preferStdinExecution?: boolean): any {
   const module = defineDenoModule({
     name,
     description: "Sprite authoring utilities.",
     entry: "./agent/sprite-tools.ts",
     usage: `import { preview } from "${name}";`,
+    ...(preferStdinExecution === undefined ? {} : { preferStdinExecution }),
   }) as any;
   Object.defineProperty(module, "__pedelecArtifact", {
     value: Object.freeze({
@@ -487,7 +488,7 @@ describe("Pedelec SDK", () => {
 
     try {
       const pedelec = new Pedelec();
-      const module = preparedDenoModule();
+      const module = preparedDenoModule("sprite-tools", false);
       const promise = pedelec.createSession({
         provider: "codex",
         skills: {
@@ -538,6 +539,60 @@ describe("Pedelec SDK", () => {
       expect(fetchCalls[0].url).toBe("http://127.0.0.1:43123/deno-modules/dmp_test");
       expect(fetchCalls[0].size).toBe(new Blob([fetchCalls[0].body]).size);
       expect(JSON.parse(fetchCalls[0].body)).toEqual({
+        version: 1,
+        format: "esm",
+        runtimeSource: "export const preview = () => 'ok';",
+        typesSource: "export declare const preview: () => string;",
+      });
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  it("transports the opted-in Deno stdin preference without changing artifact upload", async () => {
+    const previousFetch = globalThis.fetch;
+    const uploadedBodies: string[] = [];
+    globalThis.fetch = async (_input, init) => {
+      if (!(init?.body instanceof Blob)) throw new Error("module upload body was not a Blob");
+      uploadedBodies.push(await init.body.text());
+      return new Response(JSON.stringify({ moduleName: "memory-manager", ready: true }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    try {
+      const pedelec = new Pedelec();
+      const promise = pedelec.createSession({
+        provider: "codex",
+        skills: {
+          guidance: "Use memory-manager.",
+          tools: [],
+          denoModules: [preparedDenoModule("memory-manager", true)],
+        },
+      });
+      const createRequest = pageWindow.lastSent();
+      expect(createRequest.input.skills.denoModules).toEqual([{
+        name: "memory-manager",
+        description: "Sprite authoring utilities.",
+        usage: 'import { preview } from "memory-manager";',
+        preferStdinExecution: true,
+      }]);
+      respondOk(pageWindow, createRequest, { sessionId: "thread_deno_stdin" });
+      await nextTick();
+      const uploadRequest = pageWindow.lastSent();
+      respondOk(pageWindow, uploadRequest, {
+        uploadId: "dmp_stdin",
+        uploadUrl: "http://127.0.0.1:43123/deno-modules/dmp_stdin",
+        token: "test-token",
+        expiresAt: Date.now() + 60_000,
+      });
+      await nextTick();
+      const completeRequest = pageWindow.lastSent();
+      respondOk(pageWindow, completeRequest, {});
+      await promise;
+
+      expect(JSON.parse(uploadedBodies[0]!)).toEqual({
         version: 1,
         format: "esm",
         runtimeSource: "export const preview = () => 'ok';",
@@ -2092,6 +2147,27 @@ describe("Pedelec SDK", () => {
         skills: { ...validBase, tools: [{ ...validBase.tools[0], timeoutMs: 0 }] },
       } as any)
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    for (const preferStdinExecution of ["true", 1]) {
+      await expect(
+        pedelec.createSession({
+          provider: "codex",
+          skills: {
+            ...validBase,
+            denoModules: [{
+              name: "invalid-preference",
+              description: "Invalid preference.",
+              entry: "./agent/invalid-preference.ts",
+              usage: 'import "invalid-preference";',
+              preferStdinExecution,
+            }],
+          },
+        } as any)
+      ).rejects.toMatchObject({
+        code: "INVALID_INPUT",
+        message: "Deno Module preferStdinExecution must be a boolean",
+      });
+    }
   });
 
   it("deep clones argsSchema before sending the manifest", async () => {

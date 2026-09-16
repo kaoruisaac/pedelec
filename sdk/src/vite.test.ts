@@ -261,6 +261,20 @@ describe("pedelecVitePlugin", () => {
     });
   });
 
+  it("preserves the module-level stdin preference while removing the authoring entry", async () => {
+    const directory = await createFixture();
+    await writeFile(
+      join(directory, "main.ts"),
+      `import { defineDenoModule } from "@kaoruisaac/pedelec";\nexport const module = defineDenoModule({ name: "sprite-tools", description: "Preview sprites.", entry: "./agent/module.ts", usage: "import { preview } from \\\"sprite-tools\\\";", preferStdinExecution: true });\n`,
+    );
+    await withServer(directory, async (server) => {
+      const transformed = await transformFile(server, join(directory, "main.ts"));
+      expect(transformed).toContain("preferStdinExecution: true");
+      expect(transformed).toContain("entry: undefined");
+      expect(transformed).not.toContain("./agent/module.ts");
+    });
+  });
+
   it("rejects dynamic entries and unrelated same-named functions", async () => {
     const directory = await createFixture();
     await writeFile(

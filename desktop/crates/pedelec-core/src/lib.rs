@@ -287,6 +287,8 @@ pub struct CreateThreadDenoModuleInput {
     pub name: String,
     pub description: String,
     pub usage: String,
+    #[serde(default)]
+    pub prefer_stdin_execution: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -303,6 +305,8 @@ pub struct DenoModuleState {
     pub name: String,
     pub description: String,
     pub usage: String,
+    #[serde(default)]
+    pub prefer_stdin_execution: bool,
     pub state: DenoModuleSetupState,
 }
 
@@ -5025,6 +5029,7 @@ fn normalize_deno_module_inputs(
             name: module.name.clone(),
             description: module.description.clone(),
             usage: module.usage.clone(),
+            prefer_stdin_execution: module.prefer_stdin_execution,
             state: DenoModuleSetupState::Pending,
         });
     }
@@ -9534,6 +9539,8 @@ fn build_provider_host_context_with_configuration_and_modules(
         description: &'a str,
         usage: &'a str,
         types: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_command: Option<String>,
     }
     #[derive(Serialize)]
     struct DenoModuleConfiguration<'a> {
@@ -9581,6 +9588,9 @@ fn build_provider_host_context_with_configuration_and_modules(
                     description: &module.description,
                     usage: &module.usage,
                     types: deno_module_types_path(&thread.thread_id, &module.name),
+                    run_command: module
+                        .prefer_stdin_execution
+                        .then(|| format!("pedelec-deno --thread-id {} run -", thread.thread_id)),
                 })
                 .collect(),
         })
@@ -10262,11 +10272,13 @@ mod deno_tests {
                     name: "sprite-tools".into(),
                     description: "one".into(),
                     usage: "one".into(),
+                    prefer_stdin_execution: false,
                 },
                 CreateThreadDenoModuleInput {
                     name: "sprite-tools".into(),
                     description: "two".into(),
                     usage: "two".into(),
+                    prefer_stdin_execution: false,
                 },
             ],
         };
@@ -10293,6 +10305,7 @@ mod deno_tests {
             name: "sprite-tools".into(),
             description: "Sprite authoring utilities".into(),
             usage: "import { preview } from \"sprite-tools\";".into(),
+            prefer_stdin_execution: true,
             state: DenoModuleSetupState::Ready,
         }];
         let context = build_provider_host_context_with_configuration_and_modules(
@@ -10320,6 +10333,9 @@ mod deno_tests {
             context.contains("runStdinCommand: pedelec-deno --thread-id thread-deno-context run -")
         );
         assert!(context.contains("index.d.ts"));
+        assert!(context
+            .contains("\"runCommand\": \"pedelec-deno --thread-id thread-deno-context run -\""));
+        assert!(!context.contains("preferStdinExecution"));
         assert!(context.contains("pedelec-deno"));
         assert!(!context.contains("canonical JavaScript/TypeScript runtime"));
         assert!(!context.contains("Do not silently fall back"));
@@ -10364,12 +10380,14 @@ mod deno_tests {
                 name: "zeta-tools".into(),
                 description: "Zeta".into(),
                 usage: "import \\\"zeta-tools\\\";".into(),
+                prefer_stdin_execution: true,
                 state: DenoModuleSetupState::Ready,
             },
             DenoModuleState {
                 name: "alpha-tools".into(),
                 description: "Alpha".into(),
                 usage: "import \\\"alpha-tools\\\";".into(),
+                prefer_stdin_execution: false,
                 state: DenoModuleSetupState::Ready,
             },
         ];
@@ -10380,6 +10398,9 @@ mod deno_tests {
             &modules,
         );
         assert!(context.find("alpha-tools").unwrap() < context.find("zeta-tools").unwrap());
+        assert_eq!(context.matches("\"runCommand\"").count(), 1);
+        assert!(context
+            .contains("\"runCommand\": \"pedelec-deno --thread-id thread-deno-order run -\""));
         assert!(context.contains(
             ".pedelec-runtime/deno/threads/thread-deno-order/modules/alpha-tools/index.d.ts"
         ));
@@ -10411,6 +10432,7 @@ mod deno_tests {
             name: "sprite-tools".into(),
             description: "Sprite utilities".into(),
             usage: "import { preview } from \\\"sprite-tools\\\";".into(),
+            prefer_stdin_execution: false,
             state: DenoModuleSetupState::Ready,
         }];
         let context = build_provider_host_context_with_configuration_and_modules(
@@ -10422,6 +10444,33 @@ mod deno_tests {
         assert!(context.contains("Use sprite-tools for sprite authoring tasks."));
         assert!(context.contains("[Pedelec Deno Modules]"));
         assert!(context.contains("\"tools\": []"));
+    }
+
+    #[test]
+    fn deno_module_stdin_preference_defaults_to_false_and_survives_normalization() {
+        let missing: CreateThreadDenoModuleInput = serde_json::from_value(serde_json::json!({
+            "name": "default-module",
+            "description": "Default",
+            "usage": "import \\\"default-module\\\";"
+        }))
+        .unwrap();
+        assert!(!missing.prefer_stdin_execution);
+
+        let opted_in = CreateThreadDenoModuleInput {
+            name: "stdin-module".into(),
+            description: "Stdin preference".into(),
+            usage: "import \\\"stdin-module\\\";".into(),
+            prefer_stdin_execution: true,
+        };
+        let modules = normalize_deno_module_inputs(Some(&CreateThreadSkillsInput {
+            guidance: String::new(),
+            tools: Vec::new(),
+            deno_modules: vec![missing, opted_in],
+        }))
+        .unwrap();
+        assert!(!modules[0].prefer_stdin_execution);
+        assert!(modules[1].prefer_stdin_execution);
+        assert_eq!(modules[1].state, DenoModuleSetupState::Pending);
     }
 
     #[test]
@@ -10478,6 +10527,7 @@ mod deno_tests {
                 name: "@example/sprite-tools".into(),
                 description: "Sprite helpers".into(),
                 usage: "import { preview } from \"@example/sprite-tools\";".into(),
+                prefer_stdin_execution: false,
                 state: DenoModuleSetupState::Pending,
             }],
         );
@@ -10624,6 +10674,7 @@ mod deno_tests {
                 name: "sprite-tools".into(),
                 description: "Sprite helpers".into(),
                 usage: "import \"sprite-tools\";".into(),
+                prefer_stdin_execution: false,
                 state: DenoModuleSetupState::Pending,
             }],
         );
@@ -10689,6 +10740,7 @@ mod deno_tests {
                 name: "sprite-tools".into(),
                 description: "Sprite helpers".into(),
                 usage: "import \"sprite-tools\";".into(),
+                prefer_stdin_execution: false,
                 state: DenoModuleSetupState::Ready,
             }],
         );
@@ -10796,6 +10848,7 @@ mod deno_tests {
                 name: "@example/sprite-tools".into(),
                 description: "Sprite helpers".into(),
                 usage: "import \"@example/sprite-tools\";".into(),
+                prefer_stdin_execution: false,
                 state: DenoModuleSetupState::Ready,
             }],
         );
@@ -10847,6 +10900,7 @@ mod deno_tests {
                     name: "sprite-tools".into(),
                     description: "Sprite helpers".into(),
                     usage: "import { preview } from \"sprite-tools\";".into(),
+                    prefer_stdin_execution: false,
                 }],
             }),
             workspace: Some(CreateThreadWorkspaceInput {
@@ -10935,6 +10989,7 @@ mod deno_tests {
                     name: "sprite-tools".into(),
                     description: "Sprite helpers".into(),
                     usage: "import { preview } from \"sprite-tools\";".into(),
+                    prefer_stdin_execution: false,
                 }],
             }),
             workspace: Some(CreateThreadWorkspaceInput {
@@ -11084,6 +11139,7 @@ mod deno_tests {
                 name: "pending-module".into(),
                 description: "Pending".into(),
                 usage: "import \"pending-module\";".into(),
+                prefer_stdin_execution: false,
                 state: DenoModuleSetupState::Pending,
             }],
         );
@@ -11134,6 +11190,7 @@ mod deno_tests {
                     name: "managed-module".into(),
                     description: "Managed".into(),
                     usage: "import \"managed-module\";".into(),
+                    prefer_stdin_execution: false,
                 }],
             }),
             workspace: None,
@@ -11180,6 +11237,7 @@ mod deno_tests {
                             name: "custom-module".into(),
                             description: "Custom".into(),
                             usage: "import \"custom-module\";".into(),
+                            prefer_stdin_execution: false,
                         }],
                     }),
                     workspace: Some(CreateThreadWorkspaceInput {
