@@ -1269,7 +1269,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: vec![],
                 workspace_path: PathBuf::from("workspace").join(thread_id),
                 skills: vec![],

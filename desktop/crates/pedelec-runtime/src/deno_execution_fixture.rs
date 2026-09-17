@@ -137,6 +137,7 @@ fn ready_module_thread_for_target(
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 model: None,
+                effort: None,
                 skills: Some(CreateThreadSkillsInput {
                     guidance: String::new(),
                     tools: Vec::new(),

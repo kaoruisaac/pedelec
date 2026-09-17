@@ -318,19 +318,28 @@ const session = await pedelec.createSession({
 const defaultSession = await pedelec.createSession({ effortLevel: "low" });
 ```
 
-The SDK uses the provider-independent effort levels `default`, `low`, and `high`. An omitted level means `default`. Desktop users map each provider's profiles to concrete model and native effort arguments. That profile remains the default source of both values, but an application may optionally override only the model for one session:
+The SDK supports two mutually exclusive session configuration modes. In Desktop profile mode, `effortLevel` selects the complete Desktop profile, including its configured model and native effort arguments. An omitted level means `default`:
 
 ```ts
-const specializedSession = await pedelec.createSession({
+const profileSession = await pedelec.createSession({
   provider: "codex",
   effortLevel: "high",
-  model: "gpt-x",
 });
 ```
 
-`model` is an optional provider-native identifier. Omitting it preserves the existing Desktop-profile behavior; providing it does not disable `effortLevel`, replaces only the selected profile's model, and leaves its native effort arguments intact. The SDK does not expose or maintain a model catalog, and it does not translate the identifier into provider CLI flags. Model validity and account entitlement remain provider-dependent, so an invalid or unavailable model may fail when the provider starts.
+In explicit model mode, `model` selects the provider-native model directly and does not read or inherit any Desktop profile. The optional `effort` is provider-native and uses `low`, `medium`, `high`, `xhigh`, or `max`:
 
-For an explicit model, the SDK requires an acknowledgment from Core that the override was applied before it exposes the session or starts Deno Module setup. If the connected Extension/Desktop is too old to provide that acknowledgment, the SDK aborts the newly created setup and reports a compatibility error instead of silently ignoring the model.
+```ts
+const modelSession = await pedelec.createSession({
+  provider: "codex",
+  model: "gpt-x",
+  effort: "max",
+});
+```
+
+Model-only requests are valid and use the provider's default effort behavior. `effort` requires `model`; `model` cannot be combined with `effortLevel`. The SDK does not expose or maintain a model catalog, and it does not translate the identifier into provider CLI flags. Model validity, effort support, and account entitlement remain provider-dependent, so an invalid or unavailable configuration may fail when the provider starts.
+
+Explicit model requests require an `explicitModelConfigApplied` acknowledgment from Core before the SDK exposes the session or starts Deno Module setup. If the connected Extension/Desktop is too old to provide that acknowledgment, the SDK aborts the newly created setup and reports a compatibility error instead of silently using a different configuration.
 
 Currently supported provider codes in the SDK:
 
@@ -343,6 +352,6 @@ Currently supported provider codes in the SDK:
 | Claude Code | `claude` |
 | Ollama | `ollama` |
 
-Ollama sessions are executed by the bundled `pedelec-agent`. The selected Ollama effort profile must contain a model unless `createSession({ model })` supplies the explicit model override; otherwise Core returns `MODEL_REQUIRED`. Low and high profiles are optional, but there is no fallback between profiles.
+Ollama sessions are executed by the bundled `pedelec-agent`. In profile mode, the selected Ollama effort profile must contain a model; otherwise Core returns `MODEL_REQUIRED`. In explicit model mode, `{ model }` supplies the model directly. Ollama currently does not accept an explicit `effort`. Low and high profiles are optional, but there is no fallback between profiles.
 
 `getSettings()` returns only `{ defaultProvider }`. It never exposes provider settings, effort arguments, credentials, or model names.

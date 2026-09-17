@@ -11,6 +11,8 @@ sidebar:
 import type {
   PedelecOptions,
   ProviderCode,
+  EffortLevel,
+  Effort,
   ProviderInfo,
   PedelecSessionStatus,
   PedelecSessionUsage,
@@ -45,6 +47,22 @@ type ProviderCode =
   | "ollama";
 ```
 
+### `EffortLevel`
+
+```ts
+type EffortLevel = "default" | "low" | "high";
+```
+
+`EffortLevel` 是 Pedelec/Desktop profile selector。它會選擇一組完整的 Desktop profile，包含該 profile 設定的 model 與 provider-native effort。
+
+### `Effort`
+
+```ts
+type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+```
+
+`Effort` 是 explicit model mode 使用的 provider-native reasoning effort。只有在提供 `model` 時才能使用，且本身是 optional；實際支援哪些值仍由 Core 依 provider 在 runtime 驗證。
+
 ### `CreateSessionInput`
 
 ```ts
@@ -52,22 +70,26 @@ type CreateSessionInput<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > =
   | {
-      provider: ProviderCode;
-      effortLevel?: "default" | "low" | "high";
+      provider?: ProviderCode;
+      effortLevel?: EffortLevel;
+      model?: never;
+      effort?: never;
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
-      provider?: undefined;
-      effortLevel?: "default" | "low" | "high";
+      provider?: ProviderCode;
+      model: string;
+      effort?: Effort;
+      effortLevel?: never;
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
-`effortLevel` 不依賴 provider，可單獨使用。
+`effortLevel` 代表 Desktop profile mode；`model` 代表 explicit provider configuration，並可搭配 optional provider-native `effort`。兩種 mode 互斥，不能同時傳入。只傳 `model` 也是合法的，這時使用 provider 自己的 default effort；`effort` 不能脫離 `model` 單獨使用。
 
 ### `CreateSessionWorkspaceInput`
 

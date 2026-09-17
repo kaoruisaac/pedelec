@@ -74,9 +74,9 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 ### Resolution rules
 
 - No `provider`: use Desktop `defaultProvider`; verify it is available.
-- `provider` may be combined with provider-independent `effortLevel`.
-- `model` is optional and may be combined with `provider` and `effortLevel`; Core replaces only the selected Desktop profile's model and preserves native effort arguments.
-- Omitted `effortLevel` is normalized to `default`.
+- `provider` may be combined with provider-independent `effortLevel` in Desktop profile mode.
+- Explicit model mode uses `model` with optional provider-native `effort`; it must not include `effortLevel`.
+- Model-only explicit mode uses provider-default effort behavior. Omitted `effortLevel` is normalized to `default` only in profile mode.
 - `workspace.path`: optionally use an absolute application-managed workspace instead of a temporary managed workspace.
 - `autoEndOnDisconnect`: defaults to `true`.
 
@@ -92,7 +92,7 @@ A `PedelecSession` registered in this client.
 - `DEFAULT_PROVIDER_NOT_SET`;
 - `DEFAULT_PROVIDER_UNAVAILABLE`;
 - `INVALID_INPUT`;
-- `MODEL_REQUIRED` when the selected Ollama effort profile has no model and no explicit override was supplied;
+- `MODEL_REQUIRED` when profile-mode Ollama has no model in the selected effort profile;
 - provider/Core creation errors.
 
 ### Example

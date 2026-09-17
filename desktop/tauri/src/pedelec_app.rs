@@ -904,7 +904,7 @@ mod debug_send_text_tests {
             ThreadState {
                 thread_id: "t000001".into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path,
                 skills: Vec::new(),

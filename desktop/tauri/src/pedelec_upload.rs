@@ -608,7 +608,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.clone(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: vec![],
                 workspace_path: workspace_path.clone(),
                 skills: vec![],
@@ -690,7 +690,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.clone(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: vec![],
                 workspace_path: workspace_path.clone(),
                 skills: vec![],

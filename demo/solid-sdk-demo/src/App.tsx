@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import { ProviderCode, Pedelec, defineTool, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema, defineDenoModule } from "@kaoruisaac/pedelec";
+import { ProviderCode, Pedelec, defineTool, type Effort, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema, defineDenoModule } from "@kaoruisaac/pedelec";
 
 const MAX_EVENTS = 300;
 const MAX_ASSET_SIZE_BYTES = 100 * 1024 * 1024;
@@ -159,6 +159,7 @@ export default function App() {
   const [providersLoading, setProvidersLoading] = createSignal(false);
   const [model, setModel] = createSignal("");
   const [effortLevel, setEffortLevel] = createSignal<"default" | "low" | "high">("default");
+  const [effort, setEffort] = createSignal<Effort | "">("");
   const [workspacePath, setWorkspacePath] = createSignal("");
   const [workspacePicking, setWorkspacePicking] = createSignal(false);
   const [resumeId, setResumeId] = createSignal("");
@@ -272,20 +273,30 @@ export default function App() {
     const workspace = selectedWorkspacePath ? { path: selectedWorkspacePath } : undefined;
 
     try {
+      const explicitMode = Boolean(selectedModel);
+      const selectedEffort = effort();
       appendGlobalEvent("create_session_requested", {
         provider: provider(),
         model: selectedModel || undefined,
-        effortLevel: effortLevel(),
+        effortLevel: explicitMode ? undefined : effortLevel(),
+        effort: explicitMode ? selectedEffort || undefined : undefined,
         workspacePath: selectedWorkspacePath || undefined,
       });
-      const session = await sdk.createSession({
-        provider: provider() as ProviderCode,
-        ...(selectedModel ? { model: selectedModel } : {}),
-        effortLevel: effortLevel(),
-        skills: createDemoSkills(),
-        ...(workspace ? { workspace } : {}),
-      });
-      registerSession(session, provider(), effortLevel(), selectedWorkspacePath || undefined, false);
+      const session = explicitMode
+        ? await sdk.createSession({
+            provider: provider() as ProviderCode,
+            model: selectedModel,
+            ...(selectedEffort ? { effort: selectedEffort } : {}),
+            skills: createDemoSkills(),
+            ...(workspace ? { workspace } : {}),
+          })
+        : await sdk.createSession({
+            provider: provider() as ProviderCode,
+            effortLevel: effortLevel(),
+            skills: createDemoSkills(),
+            ...(workspace ? { workspace } : {}),
+          });
+      registerSession(session, provider(), explicitMode ? undefined : effortLevel(), selectedWorkspacePath || undefined, false);
       setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
       recordError(toDemoError(err));
@@ -830,13 +841,37 @@ export default function App() {
                 />
               </label>
               <label>
-                Effort level
-                <select value={effortLevel()} onInput={(event) => setEffortLevel(event.currentTarget.value as "default" | "low" | "high")}>
+                Desktop effort profile
+                <select
+                  value={effortLevel()}
+                  disabled={Boolean(model().trim())}
+                  onInput={(event) => setEffortLevel(event.currentTarget.value as "default" | "low" | "high")}
+                >
                   <option value="default">Default</option>
                   <option value="low">Low</option>
                   <option value="high">High</option>
                 </select>
               </label>
+              <label>
+                Explicit effort (optional)
+                <select
+                  value={effort()}
+                  disabled={!model().trim()}
+                  onInput={(event) => setEffort(event.currentTarget.value as Effort | "")}
+                >
+                  <option value="">Provider default</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="max">max</option>
+                </select>
+              </label>
+              <p class="field-hint">
+                {model().trim()
+                  ? "Explicit model mode: Desktop profile is not sent."
+                  : "Desktop profile mode: model and explicit effort are not sent."}
+              </p>
               <div class="workspace-selector">
                 <span class="workspace-label">Workspace (optional)</span>
                 <output class="workspace-path" aria-live="polite">

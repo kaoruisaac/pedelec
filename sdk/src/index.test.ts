@@ -1405,39 +1405,72 @@ describe("Pedelec SDK", () => {
     const createRequest = pageWindow.lastSent();
     expect(createRequest).toMatchObject({
       type: "create_session",
-      input: { provider: "codex", effortLevel: "default", model: "gpt-5" },
+      input: { provider: "codex", effortLevel: undefined, effort: undefined, model: "gpt-5" },
     });
     respondOk(pageWindow, createRequest, {
       sessionId: "thread_model_default",
-      modelOverrideApplied: true,
+      explicitModelConfigApplied: true,
     });
 
     await expect(promise).resolves.toMatchObject({
       sessionId: "thread_model_default",
       provider: "codex",
-      effortLevel: "default",
+      effortLevel: undefined,
     });
   });
 
-  it("forwards provider, effort level, and normalized model together", async () => {
+  it("resolves the default provider for explicit model and effort", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.createSession({ model: "gpt-5", effort: "max" });
+    respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: "codex" });
+    await nextTick();
+    respondOk(pageWindow, pageWindow.lastSent(), [
+      { name: "Codex", code: "codex", available: true, isDefault: true, error: null },
+    ]);
+    await nextTick();
+
+    const createRequest = pageWindow.lastSent();
+    expect(createRequest).toMatchObject({
+      type: "create_session",
+      input: { provider: "codex", model: "gpt-5", effort: "max", effortLevel: undefined },
+    });
+    respondOk(pageWindow, createRequest, {
+      sessionId: "thread_model_effort_default",
+      explicitModelConfigApplied: true,
+    });
+    await expect(promise).resolves.toMatchObject({
+      sessionId: "thread_model_effort_default",
+      effortLevel: undefined,
+    });
+  });
+
+  it("forwards provider, explicit model, and native effort together", async () => {
     const pedelec = new Pedelec();
     const promise = pedelec.createSession({
       provider: "codex",
-      effortLevel: "high",
+      effort: "max",
       model: "  gpt-5  ",
     });
     const request = pageWindow.lastSent();
 
     expect(request).toMatchObject({
       type: "create_session",
-      input: { provider: "codex", effortLevel: "high", model: "gpt-5" },
+      input: { provider: "codex", effortLevel: undefined, effort: "max", model: "gpt-5" },
     });
-    respondOk(pageWindow, request, { sessionId: "thread_model", modelOverrideApplied: true });
+    respondOk(pageWindow, request, { sessionId: "thread_model", explicitModelConfigApplied: true });
     await expect(promise).resolves.toMatchObject({
       sessionId: "thread_model",
       provider: "codex",
-      effortLevel: "high",
+      effortLevel: undefined,
     });
+  });
+
+  it("rejects explicit effort without a model and model/profile combinations", async () => {
+    const pedelec = new Pedelec();
+    await expect(pedelec.createSession({ effort: "high" } as any)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(pedelec.createSession({ model: "gpt-5", effortLevel: "high" } as any)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(pedelec.createSession({ model: "gpt-5", effort: "max", effortLevel: "low" } as any)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(requestMessages(pageWindow.port)).toEqual([]);
   });
 
   it.each([
@@ -1454,6 +1487,14 @@ describe("Pedelec SDK", () => {
     expect(requestMessages(pageWindow.port)).toEqual([]);
   });
 
+  it("rejects an invalid public effort value before thread creation", async () => {
+    const pedelec = new Pedelec();
+    await expect(pedelec.createSession({ model: "gpt-5", effort: "default" } as any)).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    });
+    expect(requestMessages(pageWindow.port)).toEqual([]);
+  });
+
   it.each([
     [undefined, "missing acknowledgment"],
     [false, "false acknowledgment"],
@@ -1463,7 +1504,7 @@ describe("Pedelec SDK", () => {
     const createRequest = pageWindow.lastSent();
     respondOk(pageWindow, createRequest, {
       sessionId: "thread_model_compatibility",
-      ...(acknowledgment === undefined ? {} : { modelOverrideApplied: acknowledgment }),
+      ...(acknowledgment === undefined ? {} : { explicitModelConfigApplied: acknowledgment }),
     });
     await nextTick();
 
@@ -1476,7 +1517,29 @@ describe("Pedelec SDK", () => {
 
     await expect(promise).rejects.toMatchObject({
       code: "SDK_PROTOCOL_ERROR",
-      details: { feature: "modelOverride" },
+      details: { feature: "explicitModelConfig" },
+    });
+  });
+
+  it("does not accept the legacy model acknowledgement for explicit configuration", async () => {
+    const pedelec = new Pedelec();
+    const promise = pedelec.createSession({ provider: "codex", model: "gpt-5" });
+    const createRequest = pageWindow.lastSent();
+    respondOk(pageWindow, createRequest, {
+      sessionId: "thread_model_legacy_ack",
+      legacyModelAcknowledgment: true,
+    });
+    await nextTick();
+
+    const abortRequest = pageWindow.lastSent();
+    expect(abortRequest).toMatchObject({
+      type: "abort_session_setup",
+      sessionId: "thread_model_legacy_ack",
+    });
+    respondOk(pageWindow, abortRequest, {});
+    await expect(promise).rejects.toMatchObject({
+      code: "SDK_PROTOCOL_ERROR",
+      details: { feature: "explicitModelConfig" },
     });
   });
 

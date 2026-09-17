@@ -1,11 +1,11 @@
 ---
 title: Creating sessions
-description: Create Pedelec sessions with provider-independent effort levels and optional model overrides.
+description: Create Pedelec sessions with Desktop profiles or explicit provider model and effort configuration.
 ---
 
 # Creating sessions
 
-The SDK creates a session handle. Core resolves the selected provider and Desktop-configured effort profile, then optionally applies a caller-supplied model override before snapshotting the final provider arguments.
+The SDK creates a session handle. Choose either Desktop profile mode, where `effortLevel` selects the complete configured profile, or explicit model mode, where `model` and optional provider-native `effort` are snapshotted independently of Desktop profiles.
 
 ## Choose a workspace first
 
@@ -49,19 +49,28 @@ const session = await pedelec.createSession({
 });
 ```
 
-`provider` and `effortLevel` are independent of the optional `model` field:
+`provider` and `effortLevel` select Desktop profile mode:
 
 ```ts
-const session = await pedelec.createSession({
+const profileSession = await pedelec.createSession({
   provider: "codex",
   effortLevel: "high",
-  model: "gpt-x",
 });
 ```
 
-An omitted `model` preserves the current behavior. When provided, it is trimmed and replaces only the selected Desktop profile's model; the profile's provider-native effort arguments remain in effect. The SDK and Extension pass the declarative identifier through, while Core performs the provider-specific merge and stores the final immutable snapshot. The SDK does not maintain a model catalog; availability and entitlement remain provider-dependent.
+Explicit model mode is independent:
 
-For an explicit model, Core returns an applied acknowledgment. The SDK requires that acknowledgment before uploading Deno Modules or exposing the session; an older Extension/Desktop combination is aborted and reported as incompatible instead of silently dropping the override.
+```ts
+const explicitSession = await pedelec.createSession({
+  provider: "codex",
+  model: "gpt-x",
+  effort: "max",
+});
+```
+
+`model` is trimmed and used directly. Model-only requests are valid and use provider-default effort behavior. `effort` requires `model`, and explicit mode cannot include `effortLevel`. The SDK and Extension pass the declarative values through, while Core validates provider support and stores the final immutable snapshot. The SDK does not maintain a model catalog; availability, model validity, effort support, and entitlement remain provider-dependent.
+
+For explicit model mode, Core returns `explicitModelConfigApplied: true`. The SDK requires this acknowledgment before uploading Deno Modules or exposing the session; an older Extension/Desktop combination is aborted and reported as incompatible instead of silently using profile semantics.
 
 ## Skills and workspace
 
@@ -79,7 +88,7 @@ const session = await pedelec.createSession({
 });
 ```
 
-Desktop Settings remains the default source of model selection. Applications may use `model` for a per-session override without replacing the rest of the selected effort profile.
+Desktop Settings is the model source only in profile mode. Explicit model mode does not read or merge with a Desktop profile.
 
 ## Deno Modules
 
@@ -123,11 +132,11 @@ The generated `index.d.ts` describes the Agent-facing public API and omits imple
 
 ## Ollama
 
-The selected Ollama profile must contain a model unless an explicit `model` override is supplied. An empty selected profile therefore returns `MODEL_REQUIRED` without an override, while `createSession({ provider: "ollama", effortLevel: "low", model: "qwen3:30b" })` is valid. Low and high do not fall back to default.
+The selected Ollama profile must contain a model in profile mode, so an empty selected profile returns `MODEL_REQUIRED`. Explicit `createSession({ provider: "ollama", model: "qwen3:30b" })` supplies the model directly and is valid; Ollama currently does not accept explicit `effort`. Low and high do not fall back to default.
 
 ## Metadata and resume
 
-New sessions expose the normalized `effortLevel` (`default`, `low`, or `high`) on the session and event contexts. A fresh `resumeSession(sessionId)` handle may not recover provider or effort metadata because the bridge currently returns only the session ID; Core still uses its stored command snapshot.
+Profile-mode sessions expose the normalized `effortLevel` (`default`, `low`, or `high`) on the session and event contexts. Explicit model sessions expose `undefined` because they did not select a Desktop profile. A fresh `resumeSession(sessionId)` handle may not recover provider or effort metadata because the bridge currently returns only the session ID; Core still uses its stored command snapshot.
 
 ```ts
 session.onChat((_text, context) => {

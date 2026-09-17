@@ -1734,6 +1734,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
+            effort: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: "bad".into(),
                 tools: vec![CreateThreadToolInput {
@@ -2059,7 +2060,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: vec![],
                 workspace_path,
                 skills: vec![],

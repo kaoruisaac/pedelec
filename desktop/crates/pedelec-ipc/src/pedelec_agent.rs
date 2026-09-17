@@ -2126,6 +2126,7 @@ mod tests {
                 provider: ProviderCode::Ollama,
                 effort_level: Some(EffortLevel::Default),
                 model: None,
+                effort: None,
                 skills: Some(CreateThreadSkillsInput {
                     guidance: guidance.to_string(),
                     tools: vec![],

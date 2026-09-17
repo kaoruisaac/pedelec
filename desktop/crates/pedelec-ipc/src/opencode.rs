@@ -1631,7 +1631,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::OpenCode,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: workspace,
                 skills: Vec::new(),
@@ -1795,7 +1795,7 @@ mod tests {
                         ThreadState {
                             thread_id: id.clone(),
                             provider: provider.clone(),
-                            effort_level: EffortLevel::Default,
+                            effort_level: Some(EffortLevel::Default),
                             effort_args: vec![],
                             workspace_path: workspace.join(&id),
                             skills: vec![],
@@ -1902,7 +1902,7 @@ mod tests {
             ThreadState {
                 thread_id: "thread-cursor".into(),
                 provider: ProviderCode::Cursor,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: vec!["--model".into(), "fake/selected".into()],
                 workspace_path: workspace.clone(),
                 skills: vec![],
@@ -2067,7 +2067,7 @@ mod tests {
                     ThreadState {
                         thread_id: thread_id.clone(),
                         provider: provider.provider_code(),
-                        effort_level: EffortLevel::Default,
+                        effort_level: Some(EffortLevel::Default),
                         effort_args: vec!["--model".into(), "fake/selected".into()],
                         workspace_path: workspace.clone(),
                         skills: vec![],
@@ -2286,7 +2286,7 @@ mod tests {
             ThreadState {
                 thread_id: "thread-open".into(),
                 provider: ProviderCode::OpenCode,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: vec!["--model".into(), "fake/selected".into()],
                 workspace_path: workspace.clone(),
                 skills: vec![],
@@ -2540,7 +2540,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::OpenCode,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: vec!["--model".into(), "fake/selected".into()],
                 workspace_path: workspace.clone(),
                 skills: vec![],
@@ -2669,7 +2669,7 @@ mod tests {
             provider: ProviderCode::OpenCode,
             provider_session_id,
             workspace_path: workspace.to_path_buf(),
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             model: Some("fake/selected".into()),
             reasoning_effort: None,
             antigravity_reasoning_effort: None,

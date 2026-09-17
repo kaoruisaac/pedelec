@@ -13,7 +13,7 @@ Provider codes are stable lowercase values:
 
 `codex`, `antigravity`, `opencode`, `cursor`, `claude`, and `ollama`.
 
-`listProviders()` exposes only provider name, code, availability, `isDefault`, and an optional diagnostic error. `isDefault` reflects the current Desktop default provider and is independent of `available`, including when the default provider is unavailable. Executable paths, credentials, model catalogs, and effort arguments remain Desktop-internal. Applications may still pass a provider-native model identifier to `createSession({ model })` as a per-session override; Pedelec does not maintain a catalog or capability matrix. SDK and Extension response parsing ignores newly added fields for forward compatibility.
+`listProviders()` exposes only provider name, code, availability, `isDefault`, and an optional diagnostic error. `isDefault` reflects the current Desktop default provider and is independent of `available`, including when the default provider is unavailable. Executable paths, credentials, model catalogs, and profile effort arguments remain Desktop-internal. Applications may pass a provider-native model identifier to explicit `createSession({ model, effort? })`; Pedelec does not maintain a catalog or capability matrix. SDK and Extension response parsing ignores newly added fields for forward compatibility.
 
 ## Effort levels
 
@@ -42,21 +42,30 @@ await pedelec.createSession({
 });
 ```
 
-## Model overrides
+## Explicit model configuration
 
-The Desktop effort profile remains the default source of the model and provider-native effort arguments. `model` is optional and can be combined with either `provider` or `effortLevel`:
+`effortLevel` and `model` select different, mutually exclusive modes. Profile mode uses the complete Desktop profile:
 
 ```ts
 await pedelec.createSession({
   provider: "codex",
   effortLevel: "high",
-  model: "gpt-x",
 });
 ```
 
-When omitted, behavior is unchanged. When provided, the model replaces only the selected profile's model; native effort settings remain intact. Core applies the override and snapshots the merged arguments, so changing Desktop profiles later does not change the session. The identifier is not checked against a Pedelec model list; provider availability, model validity, and account entitlement are provider-dependent and may be reported when the provider starts.
+Explicit mode uses only the requested model and optional native effort:
 
-Omitting `effortLevel` selects `default`. An empty `low` or `high` profile for a non-Ollama provider sends no explicit model or effort arguments. There is no fallback from `low` or `high` to `default`.
+```ts
+await pedelec.createSession({
+  provider: "codex",
+  model: "gpt-x",
+  effort: "max",
+});
+```
+
+Model-only explicit mode uses provider-default effort behavior. The explicit configuration is snapshotted independently; changing Desktop profiles later does not change the session. The identifier is not checked against a Pedelec model list; provider availability, model validity, effort support, and account entitlement are provider-dependent and may be reported when the provider starts.
+
+Omitting `effortLevel` in profile mode selects `default`. An empty `low` or `high` profile for a non-Ollama provider sends no explicit model or effort arguments. There is no fallback from `low` or `high` to `default`.
 
 ## SDK settings boundary
 
@@ -68,13 +77,13 @@ type PedelecSettings = {
 };
 ```
 
-It cannot inspect `providerSettings`, `effortsArgs`, credentials, or the Desktop profile's actual model names. Configure the profile in Desktop Settings, or pass an explicit provider-native `model` identifier for a session-specific override.
+It cannot inspect `providerSettings`, `effortsArgs`, credentials, or the Desktop profile's actual model names. Configure the profile in Desktop Settings for profile mode, or pass an explicit provider-native `model` and optional `effort` for explicit mode.
 
 ## Ollama
 
-Ollama is the exception to empty profiles: the selected profile must contain a `--model` pair unless `createSession({ model })` supplies an explicit override. If both are absent, Core returns `MODEL_REQUIRED`; it never falls back to the default profile. Desktop Settings requires a populated default Ollama model when Ollama is the selected default provider, while low and high remain optional.
+Ollama is the exception to empty profiles: profile mode requires a `--model` pair in the selected profile. If it is absent, Core returns `MODEL_REQUIRED`; it never falls back to the default profile. Explicit `{ model }` mode supplies the model directly and does not require a profile model. Ollama does not currently accept explicit `effort`. Desktop Settings requires a populated default Ollama model when Ollama is the selected default provider, while low and high remain optional.
 
-Ollama uses the bundled `pedelec-agent` and the endpoint configured in Desktop Settings. An explicit SDK model can satisfy an otherwise empty selected Ollama profile; without either a profile model or explicit override, Core returns `MODEL_REQUIRED`. Low and high profiles never fall back to `default`.
+Ollama uses the bundled `pedelec-agent` and the endpoint configured in Desktop Settings. Without a profile model in profile mode, Core returns `MODEL_REQUIRED`; explicit model mode does not consult that profile. Low and high profiles never fall back to `default`.
 
 ## Provider-native skill isolation
 

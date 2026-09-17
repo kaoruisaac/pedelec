@@ -17,6 +17,7 @@ import {
   type ProviderInfo,
   type CreateSessionWorkspaceInput,
   type WorkspaceFolderPickerResult,
+  type Effort,
 } from "./index";
 
 const spriteTools = defineDenoModule({
@@ -193,7 +194,17 @@ async function effortLevelPublicTypeContract() {
   pedelec.sandboxFolderPicker();
 
   await pedelec.createSession({ model: "gpt-5" });
+  await pedelec.createSession({ provider: "codex", model: "gpt-5", effort: "max" });
+  const explicitEffort: Effort = "xhigh";
+  await pedelec.createSession({ provider: "codex", model: "gpt-5", effort: explicitEffort });
+  // @ts-expect-error explicit model mode cannot select a Desktop effort profile
   await pedelec.createSession({ provider: "codex", model: "gpt-5", effortLevel: "high" });
+  // @ts-expect-error explicit effort requires an explicit model
+  await pedelec.createSession({ provider: "codex", effort: "high" });
+  // @ts-expect-error explicit model, effort, and Desktop profile are mutually exclusive
+  await pedelec.createSession({ model: "gpt-5", effort: "max", effortLevel: "low" });
+  // @ts-expect-error unsupported provider-native effort value
+  await pedelec.createSession({ model: "gpt-5", effort: "default" });
   // @ts-expect-error session no longer exposes provider model
   session.model;
   // @ts-expect-error unsupported effort level

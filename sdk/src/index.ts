@@ -18,6 +18,7 @@ export type PedelecOptions = {
 
 export type ProviderCode = "codex" | "antigravity" | "opencode" | "cursor" | "claude" | "ollama";
 export type EffortLevel = "default" | "low" | "high";
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type JsonPrimitive = string | number | boolean | null;
 
@@ -189,33 +190,31 @@ export interface WorkspaceFolderPickerResult {
   hasWorkspaceConfig: boolean;
 }
 
-type CreateSessionInputWithProvider<
+type CreateSessionSharedInput<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
-  provider: ProviderCode;
-  model?: string;
-  effortLevel?: EffortLevel;
   skills?: SkillsInput<TTools>;
   workspace?: CreateSessionWorkspaceInput;
   autoEndOnDisconnect?: boolean;
 };
 
-type CreateSessionInputWithDefaults<
-  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
-> = {
-  provider?: undefined;
-  model?: string;
+type ProfileSessionConfiguration = {
+  model?: never;
+  effort?: never;
   effortLevel?: EffortLevel;
-  skills?: SkillsInput<TTools>;
-  workspace?: CreateSessionWorkspaceInput;
-  autoEndOnDisconnect?: boolean;
+};
+
+type ExplicitModelSessionConfiguration = {
+  model: string;
+  effort?: Effort;
+  effortLevel?: never;
 };
 
 export type CreateSessionInput<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > =
-  | CreateSessionInputWithProvider<TTools>
-  | CreateSessionInputWithDefaults<TTools>;
+  | (CreateSessionSharedInput<TTools> & { provider?: ProviderCode } & ProfileSessionConfiguration)
+  | (CreateSessionSharedInput<TTools> & { provider?: ProviderCode } & ExplicitModelSessionConfiguration);
 
 export type ProviderInfo = {
   name: string;
@@ -731,10 +730,11 @@ export class Pedelec {
     const resolvedInput =
       resolvedOrPromise instanceof Promise ? await resolvedOrPromise : resolvedOrPromise;
 
-    const result = await this.request<{ sessionId: string; modelOverrideApplied?: boolean }>("create_session", {
+    const result = await this.request<{ sessionId: string; explicitModelConfigApplied?: boolean }>("create_session", {
       input: {
         provider: resolvedInput.provider,
         model: resolvedInput.model,
+        effort: resolvedInput.effort,
         effortLevel: resolvedInput.effortLevel,
         skills: resolvedInput.skills,
         workspace: resolvedInput.workspace,
@@ -746,11 +746,11 @@ export class Pedelec {
       throw makeError("SDK_PROTOCOL_ERROR", "create_session response did not include sessionId");
     }
 
-    if (resolvedInput.model !== undefined && result.modelOverrideApplied !== true) {
+    if (resolvedInput.model !== undefined && result.explicitModelConfigApplied !== true) {
       const error = makeError(
         "SDK_PROTOCOL_ERROR",
-        "The connected Pedelec Extension/Desktop does not support createSession model override. Update Pedelec components and try again.",
-        { feature: "modelOverride" },
+        "The connected Pedelec Extension/Desktop does not support explicit model configuration. Update Pedelec components and try again.",
+        { feature: "explicitModelConfig" },
       );
       await this.abortSessionSetup(result.sessionId);
       throw error;
@@ -1073,7 +1073,8 @@ export class Pedelec {
     | {
         provider: ProviderCode;
         model?: string;
-        effortLevel: EffortLevel;
+        effortLevel?: EffortLevel;
+        effort?: Effort;
         skills?: SerializableSkillsManifest;
         workspace?: CreateSessionWorkspaceInput;
         inlineToolHandlers: Map<string, ToolSpecificHandler>;
@@ -1083,7 +1084,8 @@ export class Pedelec {
     | Promise<{
     provider: ProviderCode;
     model?: string;
-    effortLevel: EffortLevel;
+    effortLevel?: EffortLevel;
+    effort?: Effort;
     skills?: SerializableSkillsManifest;
     workspace?: CreateSessionWorkspaceInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
@@ -1093,6 +1095,7 @@ export class Pedelec {
     const raw = (input ?? {}) as {
       provider?: unknown;
       model?: unknown;
+      effort?: unknown;
       effortLevel?: unknown;
       skills?: unknown;
       workspace?: unknown;
@@ -1101,6 +1104,38 @@ export class Pedelec {
     const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
     const hasProvider = provider.length > 0;
     const model = normalizeCreateSessionModelInput(raw.model);
+    if (model !== undefined) {
+      if (raw.effortLevel !== undefined) {
+        throw makeError("INVALID_INPUT", "effortLevel cannot be combined with model");
+      }
+      const effort = normalizeCreateSessionEffortInput(raw.effort);
+      const autoEndOnDisconnect = raw.autoEndOnDisconnect !== false;
+      const normalizedSkills = normalizeSkillsInput(raw.skills);
+      const workspace = normalizeCreateSessionWorkspaceInput(raw.workspace);
+      if (!hasProvider) {
+        return this.resolveDefaultCreateSessionInput(
+          model,
+          effort,
+          undefined,
+          normalizedSkills,
+          workspace,
+          autoEndOnDisconnect,
+        );
+      }
+      return {
+        provider: provider as ProviderCode,
+        model,
+        effort,
+        skills: normalizedSkills.manifest,
+        workspace,
+        inlineToolHandlers: normalizedSkills.handlers,
+        denoModules: normalizedSkills.denoModules,
+        autoEndOnDisconnect,
+      };
+    }
+    if (raw.effort !== undefined) {
+      throw makeError("INVALID_INPUT", "effort requires model");
+    }
     const effortLevel = raw.effortLevel === undefined ? "default" : raw.effortLevel;
     if (!isEffortLevel(effortLevel)) {
       throw makeError("INVALID_INPUT", "effortLevel must be one of default, low, or high");
@@ -1111,7 +1146,8 @@ export class Pedelec {
 
     if (!hasProvider) {
       return this.resolveDefaultCreateSessionInput(
-        model,
+        undefined,
+        undefined,
         effortLevel,
         normalizedSkills,
         workspace,
@@ -1121,7 +1157,6 @@ export class Pedelec {
 
     return {
       provider: provider as ProviderCode,
-      model,
       effortLevel,
       skills: normalizedSkills.manifest,
       workspace,
@@ -1188,14 +1223,16 @@ export class Pedelec {
 
   private async resolveDefaultCreateSessionInput(
     model: string | undefined,
-    effortLevel: EffortLevel,
+    effort: Effort | undefined,
+    effortLevel: EffortLevel | undefined,
     normalizedSkills: NormalizedSkillsInput,
     workspace: CreateSessionWorkspaceInput | undefined,
     autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
     model?: string;
-    effortLevel: EffortLevel;
+    effort?: Effort;
+    effortLevel?: EffortLevel;
     skills?: SerializableSkillsManifest;
     workspace?: CreateSessionWorkspaceInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
@@ -1213,6 +1250,7 @@ export class Pedelec {
     return {
       provider: settings.defaultProvider,
       model,
+      effort,
       effortLevel,
       skills: normalizedSkills.manifest,
       workspace,
@@ -1417,6 +1455,14 @@ function normalizeCreateSessionModelInput(value: unknown): string | undefined {
     throw makeError("INVALID_INPUT", "model must be a non-empty string when provided");
   }
   return value.trim();
+}
+
+function normalizeCreateSessionEffortInput(value: unknown): Effort | undefined {
+  if (value === undefined) return undefined;
+  if (!isEffort(value)) {
+    throw makeError("INVALID_INPUT", "effort must be one of low, medium, high, xhigh, or max");
+  }
+  return value;
 }
 
 export class PedelecSession<TToolName extends string = string> {
@@ -2288,6 +2334,10 @@ function isProviderCode(value: unknown): value is ProviderCode {
 
 function isEffortLevel(value: unknown): value is EffortLevel {
   return value === "default" || value === "low" || value === "high";
+}
+
+function isEffort(value: unknown): value is Effort {
+  return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max";
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

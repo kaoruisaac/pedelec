@@ -2901,7 +2901,7 @@ mod tests {
             pedelec_core::ThreadState {
                 thread_id: "thread-codex".into(),
                 provider: pedelec_core::ProviderCode::Codex,
-                effort_level: pedelec_core::EffortLevel::Default,
+                effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: workspace.clone(),
                 skills: Vec::new(),
@@ -2927,7 +2927,7 @@ mod tests {
                     provider: pedelec_core::ProviderCode::Codex,
                     provider_session_id: Some("codex-restored".into()),
                     workspace_path: workspace.clone(),
-                    effort_level: pedelec_core::EffortLevel::Default,
+                    effort_level: Some(pedelec_core::EffortLevel::Default),
                     model: None,
                     reasoning_effort: None,
                     antigravity_reasoning_effort: None,
@@ -3065,7 +3065,7 @@ mod tests {
             pedelec_core::ThreadState {
                 thread_id: thread_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
-                effort_level: pedelec_core::EffortLevel::Default,
+                effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: workspace,
                 skills: Vec::new(),
@@ -3123,7 +3123,7 @@ mod tests {
             pedelec_core::ThreadState {
                 thread_id: thread_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
-                effort_level: pedelec_core::EffortLevel::Default,
+                effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: PathBuf::from("."),
                 skills: Vec::new(),
@@ -3214,7 +3214,7 @@ mod tests {
             pedelec_core::ThreadState {
                 thread_id: thread_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
-                effort_level: pedelec_core::EffortLevel::Default,
+                effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: temp.path().join("does-not-exist"),
                 skills: Vec::new(),
@@ -3644,7 +3644,7 @@ done
             pedelec_core::ThreadState {
                 thread_id: thread_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
-                effort_level: pedelec_core::EffortLevel::Default,
+                effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: PathBuf::from("."),
                 skills: Vec::new(),
@@ -3718,7 +3718,7 @@ mod deno_ipc_tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: workspace,
                 skills: Vec::new(),
@@ -4103,7 +4103,7 @@ mod deno_ipc_tests {
             ThreadState {
                 thread_id: "thread-module-ipc".into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: workspace,
                 skills: Vec::new(),

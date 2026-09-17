@@ -1,11 +1,11 @@
 ---
 title: 建立 sessions
-description: 使用 provider-independent effort level 與 optional model override 建立 Pedelec session。
+description: 使用 Desktop profile 或 explicit provider model/effort 建立 Pedelec session。
 ---
 
 # 建立 sessions
 
-SDK 建立 session handle，Core 解析 provider 與 Desktop 設定的 effort profile，並在需要時套用 caller 提供的 model override，再 snapshot 最終 provider args。
+SDK 建立 session handle。可以選擇 Desktop profile mode（`effortLevel` 選完整 profile），或 explicit model mode（`model` 與 optional provider-native `effort` 獨立 snapshot，不讀取 Desktop profile）。
 
 ## 先選擇 workspace
 
@@ -49,25 +49,28 @@ const session = await pedelec.createSession({
 });
 ```
 
-Explicit provider 的 SDK 路徑不會為了解析 model args 讀取 Desktop settings；Core 收到 request 後才解析目前 profile。
-
-`model` 是 optional，且可以和 `provider`、`effortLevel` 一起使用：
+`provider` 與 `effortLevel` 代表 Desktop profile mode：
 
 ```ts
 const session = await pedelec.createSession({
   provider: "codex",
   effortLevel: "high",
-  model: "gpt-x",
 });
 ```
 
-省略 `model` 時，既有 Desktop profile 行為不變。提供 `model` 時，Core 只取代選中 profile 的 model，保留其他 provider-native effort 設定；model/effort 合併後會寫入 immutable thread snapshot。SDK 與 Extension 不會把 model 轉成 CLI flag，也不維護 model catalog；model 是否有效、帳號是否有權使用仍由 provider 決定，可能在 provider 啟動時才失敗。
+Explicit model mode 完全獨立：
 
-Explicit model 必須收到 Core 的 applied acknowledgment，SDK 才會開始 Deno Module upload 或公開 session。若連線的 Extension/Desktop 太舊而沒有 acknowledgment，SDK 會 best-effort abort 新建立的 setup 並回報 compatibility error，不會靜默忽略 model。
+```ts
+const session = await pedelec.createSession({ provider: "codex", model: "gpt-x", effort: "max" });
+```
+
+只有 `model` 時使用 provider default effort；`effort` 必須搭配 `model`，explicit mode 不可包含 `effortLevel`。SDK 與 Extension 傳遞 declarative values，Core 驗證 provider 支援並 snapshot 最終 args。Model validity、effort support、availability 與 entitlement 仍由 provider 決定。
+
+Explicit model 必須收到 Core 的 `explicitModelConfigApplied: true` acknowledgment，SDK 才會開始 Deno Module upload 或公開 session。若連線的 Extension/Desktop 太舊，SDK 會 best-effort abort 新 setup 並回報 compatibility error。
 
 ## Skills、workspace 與 Ollama
 
-Effort 可和 `model`、`skills`、`workspace` 一起使用。Desktop Settings 仍是預設的 model 來源；`model` 只提供單一 session 的 override。Ollama 選中的 profile 若沒有 model，只有在沒有 explicit override 時才會回傳 `MODEL_REQUIRED`；Low/High 不會 fallback 到 Default profile。
+Profile mode 可搭配 `skills`、`workspace`。Desktop Settings 只在 profile mode 提供 model。Ollama profile 沒有 model 時回傳 `MODEL_REQUIRED`；explicit `{ model }` 不需要 profile model，且 Ollama 目前不接受 explicit `effort`。Low/High 不會 fallback 到 Default profile。
 
 ## Deno Modules
 
@@ -111,6 +114,6 @@ const session = await pedelec.createSession({
 
 ## Metadata 與 resume
 
-新 session 與 event context 會提供 normalized `effortLevel`。model 不會新增為 session/event public field；Core 只在 thread 的 `effort_args` 保存最終 snapshot。新建立的 `resumeSession(sessionId)` handle 可能無法恢復 provider 或 effort metadata，但 Core 仍使用已儲存的 command snapshot。
+Profile mode 的新 session 與 event context 會提供 normalized `effortLevel`；explicit model mode 的 `effortLevel` 為 `undefined`，因為它沒有選擇 Desktop profile。model 不會新增為 session/event public field；Core 只在 thread 的 `effort_args` 保存最終 snapshot。新建立的 `resumeSession(sessionId)` handle 可能無法恢復 provider 或 effort metadata，但 Core 仍使用已儲存的 command snapshot。
 
 Tool type inference 與 `autoEndOnDisconnect` 行為維持不變。

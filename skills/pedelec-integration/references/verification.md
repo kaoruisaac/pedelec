@@ -31,7 +31,7 @@ Read this checklist before declaring the integration complete.
 - Setup actions match the failing layer; Recheck runs a real probe.
 - User input and unsaved work survive setup, connection, and task failure.
 - The chosen integration level's required UI capabilities exist in an appropriate scope.
-- Web controls use Provider + `default | low | high` effort semantics; a product may pass a known provider-native model identifier for a session, but must not recreate a Desktop model editor or maintain a model catalog.
+- Web controls distinguish Desktop profile mode (`effortLevel: default | low | high`) from explicit model mode (`model` with optional provider-native `effort`). Never send `model` and `effortLevel` together, and do not maintain a model catalog.
 - Running tasks do not make the UI look frozen, show fake percentages, or expose private reasoning.
 - Accessibility does not rely on color alone.
 - Agent Chat, if present, separates user / Agent / system messages, appends deltas, handles typing and tool-wait states, and prevents concurrent turns.

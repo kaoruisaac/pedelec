@@ -50,17 +50,17 @@ const session = await pedelec.createSession({
 });
 ```
 
-只提供 `provider` 時，SDK 使用 `default` effort；Core 從 Desktop Settings 解析 profile。可以在有無 provider 時傳入 `effortLevel: "low"` 或 `"high"`，也可以傳入 provider-native `model` 做單一 session override：
+只提供 `provider` 時，SDK 使用 Desktop profile mode 的 `effortLevel: "default"`；Core 從 Desktop Settings 解析完整 profile。可以在有無 provider 時傳入 `effortLevel: "low"` 或 `"high"`。若要獨立指定 provider 設定，請傳入 `model` 與 optional provider-native `effort`，且不可同時傳 `effortLevel`：
 
 ```ts
 const session = await pedelec.createSession({
   provider: provider.code,
-  effortLevel: "high",
   model: "provider-native-model",
+  effort: "max",
 });
 ```
 
-省略 model 時行為不變；explicit model 只取代 Desktop profile 的 model，native effort 仍保留。Ollama 選中的 profile 沒有 model 時，explicit override 可滿足需求；否則會回傳 `MODEL_REQUIRED`，且不會從 Low/High fallback 到 Default。
+只有 `model` 的 explicit mode 會使用 provider 自己的 default effort。Ollama 在 profile mode 中要求選中的 profile 有 model；explicit `{ model }` 會直接提供 model，而 Ollama 目前不接受 explicit `effort`。Low/High 不會 fallback 到 Default。
 
 ## 4. 傳送前先註冊 callbacks
 

@@ -1,6 +1,6 @@
 # Provider and Effort Level
 
-The current Web SDK contract is **Provider + provider-independent Effort Level**, with an optional caller-supplied provider-native model override for a session. It does not expose arbitrary Desktop model selection or a model catalog.
+The current Web SDK contract has two mutually exclusive modes: **Provider + provider-independent Effort Level** for a complete Desktop profile, or **Provider + explicit model + optional provider-native effort** for an independent session configuration. It does not expose arbitrary Desktop profile editing or a model catalog.
 
 ## Session semantics
 
@@ -8,11 +8,12 @@ Session input may use:
 
 ```text
 provider: an installed Provider code, or omitted to inherit Desktop defaultProvider
-effortLevel: default | low | high
-model: an optional provider-native identifier that overrides only the selected Desktop profile's model
+effortLevel: default | low | high (profile mode)
+model: an explicit provider-native identifier (explicit mode)
+effort: optional low | medium | high | xhigh | max provider-native effort; requires model
 ```
 
-If effort is omitted, use the SDK's documented default behavior, currently `default` in the supported contract. The three levels are product-facing profiles; they do not promise a universal native provider argument or model.
+In profile mode, omitted `effortLevel` means `default` and the complete Desktop profile supplies model and native effort. In explicit model mode, omitted `effort` means provider-default effort and no Desktop profile is read or merged. The public `effort` vocabulary is validated against provider support at runtime.
 
 `getSettings()` exposes only `defaultProvider`. `listProviders()` exposes public Provider discovery such as display name, code, availability, `isDefault`, and an optional diagnostic error. `isDefault` reflects the current Desktop default provider and is independent of availability. The Web App must not expect either API to expose actual model mappings, provider-native effort arguments, credentials, API keys, executable paths, endpoint configuration, or the complete Desktop settings object.
 
@@ -34,7 +35,7 @@ Record the policy, required capabilities, override behavior, whether the choice 
 
 Use a Provider picker or Provider list as the baseline site-local Provider Setting and source it from `listProviders()` after approval. Do not maintain a separate hard-coded Provider registry in the Web App. Provide an inherit Desktop default option when supported by the product policy and a Desktop Settings entry point for Desktop-owned configuration. A site-persisted selection must be labeled as that site's preference.
 
-Effort Level is separate from the Provider Setting and is optional unless the product policy requires it. When included, use `default`, `low`, and `high`. Do not create an arbitrary Model input, Model combobox, or full Desktop settings editor.
+Effort Level is separate from the Provider Setting and is optional unless the product policy requires it. When included, use `default`, `low`, and `high` for profile mode. If the product offers explicit model configuration, keep it visibly separate: `model` may have an optional `effort`, and it must not be sent with `effortLevel`.
 
-Actual profile model selection and provider-native effort configuration remain **Pedelec Desktop-owned configuration**. The Web SDK may optionally accept a caller-supplied provider-native `model` identifier for a single session; Core replaces only the selected profile's model and preserves native effort settings. If a product has a provider-specific requirement, express it as compatibility guidance, a readiness check, or a Desktop Settings action. Do not claim the Web SDK can read or edit the Desktop model profile or maintain a model catalog.
+Actual profile model selection and profile effort configuration remain **Pedelec Desktop-owned configuration**. Explicit `model` + optional `effort` is a separate per-session provider configuration; it does not modify or inherit a Desktop profile. If a product has a provider-specific requirement, express it as compatibility guidance or a readiness check. Do not claim the Web SDK can read or edit the Desktop model profile or maintain a model catalog.
 

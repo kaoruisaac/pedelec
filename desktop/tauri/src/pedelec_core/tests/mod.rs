@@ -202,7 +202,7 @@ mod tests {
             None,
         );
         let thread = runtime.thread_manager.thread_mut(thread_id).unwrap();
-        thread.effort_level = EffortLevel::High;
+        thread.effort_level = Some(EffortLevel::High);
         thread.effort_args = vec![
             "--model".into(),
             "agy-native-model".into(),
@@ -216,7 +216,7 @@ mod tests {
             session.antigravity_reasoning_effort,
             Some(AntigravityReasoningEffort::Low)
         );
-        assert_eq!(session.effort_level, EffortLevel::High);
+        assert_eq!(session.effort_level, Some(EffortLevel::High));
         assert_eq!(session.reasoning_effort, None);
         assert_eq!(session.claude_reasoning_effort, None);
     }
@@ -252,7 +252,7 @@ mod tests {
         let mut runtime =
             runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Claude, None, None);
         let thread = runtime.thread_manager.thread_mut(thread_id).unwrap();
-        thread.effort_level = EffortLevel::High;
+        thread.effort_level = Some(EffortLevel::High);
         thread.effort_args = vec![
             "--model".into(),
             "claude-opus-4-8".into(),
@@ -266,7 +266,7 @@ mod tests {
             session.claude_reasoning_effort,
             Some(ClaudeReasoningEffort::Medium)
         );
-        assert_eq!(session.effort_level, EffortLevel::High);
+        assert_eq!(session.effort_level, Some(EffortLevel::High));
         assert_eq!(session.reasoning_effort, None);
         assert_eq!(session.antigravity_reasoning_effort, None);
     }
@@ -303,7 +303,7 @@ mod tests {
                 None,
             );
             let thread = runtime.thread_manager.thread_mut(&thread_id).unwrap();
-            thread.effort_level = level;
+            thread.effort_level = Some(level);
             thread.effort_args = vec![
                 "--model".into(),
                 model.into(),
@@ -1568,16 +1568,17 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
             .unwrap();
-        assert!(!default_thread.model_override_applied);
+        assert!(!default_thread.explicit_model_config_applied);
         let default_state = runtime
             .thread_manager
             .thread(&default_thread.thread_id)
             .unwrap();
-        assert_eq!(default_state.effort_level, EffortLevel::Default);
+        assert_eq!(default_state.effort_level, Some(EffortLevel::Default));
         assert_eq!(default_state.effort_args, vec!["-m", "gpt-default"]);
 
         let low_thread = runtime
@@ -1585,6 +1586,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Low),
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
@@ -1593,7 +1595,7 @@ mod tests {
             .thread_manager
             .thread(&low_thread.thread_id)
             .unwrap();
-        assert_eq!(low_state.effort_level, EffortLevel::Low);
+        assert_eq!(low_state.effort_level, Some(EffortLevel::Low));
         assert!(low_state.effort_args.is_empty());
     }
 
@@ -1618,6 +1620,7 @@ mod tests {
                 provider: ProviderCode::Ollama,
                 effort_level: Some(EffortLevel::Low),
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
@@ -1626,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_model_override_replaces_only_the_profile_model_and_is_acknowledged() {
+    fn create_thread_explicit_model_is_independent_and_is_acknowledged() {
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
         let mut settings = PedelecSettings::default();
@@ -1648,23 +1651,17 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
-                effort_level: Some(EffortLevel::High),
+                effort_level: None,
                 model: Some("  explicit-model  ".into()),
+                effort: None,
                 skills: None,
                 workspace: None,
             })
             .unwrap();
-        assert!(output.model_override_applied);
+        assert!(output.explicit_model_config_applied);
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
-        assert_eq!(
-            thread.effort_args,
-            vec![
-                "-m",
-                "explicit-model",
-                "-c",
-                "model_reasoning_effort=\"xhigh\"",
-            ]
-        );
+        assert_eq!(thread.effort_level, None);
+        assert_eq!(thread.effort_args, vec!["-m", "explicit-model"]);
 
         settings.provider_settings.codex.efforts_args.high =
             vec!["-m".into(), "changed-after-create".into()];
@@ -1673,7 +1670,127 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_model_override_appends_to_empty_non_ollama_profile() {
+    fn create_thread_explicit_model_and_effort_builds_fresh_codex_args() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: None,
+                model: Some("explicit-model".into()),
+                effort: Some("max".into()),
+                skills: None,
+                workspace: None,
+            })
+            .unwrap();
+
+        assert!(output.explicit_model_config_applied);
+        let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
+        assert_eq!(thread.effort_level, None);
+        assert_eq!(
+            thread.effort_args,
+            vec![
+                "-m",
+                "explicit-model",
+                "-c",
+                "model_reasoning_effort=\"max\""
+            ]
+        );
+        let intent = runtime
+            .build_persistent_session_intent(&output.thread_id)
+            .unwrap();
+        assert_eq!(intent.effort_level, None);
+        assert_eq!(intent.model.as_deref(), Some("explicit-model"));
+        assert_eq!(intent.reasoning_effort, Some(CodexReasoningEffort::Max));
+    }
+
+    #[test]
+    fn create_thread_explicit_antigravity_effort_maps_to_native_args() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_thread(CreateThreadInput {
+                provider: ProviderCode::Antigravity,
+                effort_level: None,
+                model: Some("agy-model".into()),
+                effort: Some("medium".into()),
+                skills: None,
+                workspace: None,
+            })
+            .unwrap();
+        assert_eq!(
+            runtime
+                .thread_manager
+                .thread(&output.thread_id)
+                .unwrap()
+                .effort_args,
+            vec!["--model", "agy-model", "--effort", "medium"]
+        );
+    }
+
+    #[test]
+    fn create_thread_rejects_invalid_explicit_mode_combinations_and_efforts() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
+            ..CoreRuntime::default()
+        };
+
+        for input in [
+            CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: None,
+                model: None,
+                effort: Some("high".into()),
+                skills: None,
+                workspace: None,
+            },
+            CreateThreadInput {
+                provider: ProviderCode::Codex,
+                effort_level: Some(EffortLevel::Low),
+                model: Some("explicit-model".into()),
+                effort: None,
+                skills: None,
+                workspace: None,
+            },
+            CreateThreadInput {
+                provider: ProviderCode::Ollama,
+                effort_level: None,
+                model: Some("qwen3:30b".into()),
+                effort: Some("high".into()),
+                skills: None,
+                workspace: None,
+            },
+            CreateThreadInput {
+                provider: ProviderCode::Antigravity,
+                effort_level: None,
+                model: Some("agy-model".into()),
+                effort: Some("max".into()),
+                skills: None,
+                workspace: None,
+            },
+        ] {
+            let error = runtime.create_thread(input).unwrap_err();
+            assert_eq!(error.code, error_codes::INVALID_INPUT);
+        }
+    }
+
+    #[test]
+    fn create_thread_explicit_model_starts_from_empty_provider_args() {
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
         write_settings_file(&settings_path, &PedelecSettings::default()).unwrap();
@@ -1688,13 +1805,14 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Antigravity,
-                effort_level: Some(EffortLevel::Low),
+                effort_level: None,
                 model: Some("explicit-model".into()),
+                effort: None,
                 skills: None,
                 workspace: None,
             })
             .unwrap();
-        assert!(output.model_override_applied);
+        assert!(output.explicit_model_config_applied);
         assert_eq!(
             runtime
                 .thread_manager
@@ -1706,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn create_thread_model_override_satisfies_empty_selected_ollama_profile() {
+    fn create_thread_explicit_ollama_model_does_not_require_profile_model() {
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
         let mut settings = PedelecSettings::default();
@@ -1723,13 +1841,22 @@ mod tests {
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Ollama,
-                effort_level: Some(EffortLevel::Low),
+                effort_level: None,
                 model: Some("qwen3:30b".into()),
+                effort: None,
                 skills: None,
                 workspace: None,
             })
             .unwrap();
-        assert!(output.model_override_applied);
+        assert!(output.explicit_model_config_applied);
+        assert_eq!(
+            runtime
+                .thread_manager
+                .thread(&output.thread_id)
+                .unwrap()
+                .effort_level,
+            None
+        );
         assert_eq!(
             runtime
                 .thread_manager
@@ -1738,10 +1865,15 @@ mod tests {
                 .effort_args,
             vec!["--model", "qwen3:30b"]
         );
+        let intent = runtime
+            .build_persistent_session_intent(&output.thread_id)
+            .unwrap();
+        assert_eq!(intent.effort_level, None);
+        assert_eq!(intent.model.as_deref(), Some("qwen3:30b"));
     }
 
     #[test]
-    fn create_thread_rejects_whitespace_only_model_override() {
+    fn create_thread_rejects_whitespace_only_explicit_model() {
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
         write_settings_file(&settings_path, &PedelecSettings::default()).unwrap();
@@ -1758,6 +1890,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: Some("  \n".into()),
+                effort: None,
                 skills: None,
                 workspace: None,
             })
@@ -1785,12 +1918,13 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::High),
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
             .unwrap();
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
-        assert_eq!(thread.effort_level, EffortLevel::High);
+        assert_eq!(thread.effort_level, Some(EffortLevel::High));
         assert_eq!(thread.effort_args, vec!["-m", "gpt-5-high"]);
 
         settings.provider_settings.codex.efforts_args.high =
@@ -1819,6 +1953,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
@@ -2205,7 +2340,7 @@ mod tests {
         let state = ThreadState {
             thread_id: "thread_abc123".into(),
             provider: ProviderCode::Codex,
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             effort_args: vec!["-m".into(), "gpt-5".into()],
             workspace_path: PathBuf::from("C:/tmp/pedelec/thread_abc123"),
             skills: vec![SkillFile {
@@ -2236,7 +2371,7 @@ mod tests {
         let thread = ThreadState {
             thread_id: "thread_no_tools_md".into(),
             provider: ProviderCode::Codex,
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
             workspace_path: PathBuf::from("workspace").join("thread_no_tools_md"),
             skills: vec![SkillFile {
@@ -2273,7 +2408,7 @@ mod tests {
         let thread = ThreadState {
             thread_id: "thread_with_tools_md".into(),
             provider: ProviderCode::Codex,
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
             workspace_path: PathBuf::from("workspace").join("thread_with_tools_md"),
             skills: vec![],
@@ -2325,7 +2460,7 @@ mod tests {
         let thread = ThreadState {
             thread_id: "thread_empty_tools".into(),
             provider: ProviderCode::Codex,
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
             workspace_path: PathBuf::from("workspace").join("thread_empty_tools"),
             skills: vec![],
@@ -2796,6 +2931,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: Some(sample_skills_input()),
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -2832,6 +2968,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
+            effort: None,
             skills: None,
             workspace: Some(CreateThreadWorkspaceInput {
                 path: custom.clone(),
@@ -2871,6 +3008,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
+            effort: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: "bad".into(),
                 tools: vec![CreateThreadToolInput {
@@ -2905,6 +3043,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -2935,6 +3074,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -2946,6 +3086,7 @@ mod tests {
                 provider: ProviderCode::Claude,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -2991,6 +3132,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
+            effort: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: "bad".into(),
                 tools: vec![CreateThreadToolInput {
@@ -3031,6 +3173,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: Some(CreateThreadWorkspaceInput {
                     path: custom.clone(),
@@ -4560,7 +4703,7 @@ mod tests {
         let thread = ThreadState {
             thread_id: "thread_asset_isolation".into(),
             provider: ProviderCode::Codex,
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             effort_args: vec![],
             workspace_path: workspace,
             skills: vec![],
@@ -4602,6 +4745,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
+            effort: None,
             skills: None,
             workspace: None,
         };
@@ -4632,6 +4776,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
@@ -4655,7 +4800,7 @@ mod tests {
             ThreadState {
                 thread_id: "t000001".into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: workspace_root.join("t000001"),
                 skills: vec![],
@@ -4675,6 +4820,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
@@ -4697,6 +4843,7 @@ mod tests {
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
+            effort: None,
             skills: None,
             workspace: None,
         };
@@ -4740,6 +4887,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
@@ -4959,7 +5107,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: workspace_path.clone(),
                 skills: Vec::new(),
@@ -5135,6 +5283,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: Some(sample_skills_input()),
                 workspace: None,
             })
@@ -5176,6 +5325,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: Some(sample_skills_input()),
                 workspace: None,
             })
@@ -5213,6 +5363,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: Some(sample_skills_input()),
                 workspace: None,
             })
@@ -5247,6 +5398,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
+                effort: None,
                 skills: None,
                 workspace: None,
             })
@@ -5584,7 +5736,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: PathBuf::from("workspace").join(thread_id),
                 skills: vec![],
@@ -5660,7 +5812,7 @@ mod tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: provider.clone(),
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args,
                 workspace_path,
                 skills: vec![],
@@ -6172,7 +6324,7 @@ mod tests {
             ThreadState {
                 thread_id: second.into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: second_path,
                 skills: Vec::new(),

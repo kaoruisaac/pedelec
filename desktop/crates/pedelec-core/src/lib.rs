@@ -366,7 +366,8 @@ impl PedelecError {
 pub struct ThreadState {
     pub thread_id: String,
     pub provider: ProviderCode,
-    pub effort_level: EffortLevel,
+    #[serde(default)]
+    pub effort_level: Option<EffortLevel>,
     pub effort_args: Vec<String>,
     pub workspace_path: PathBuf,
     pub skills: Vec<SkillFile>,
@@ -922,6 +923,8 @@ pub struct CreateThreadInput {
     pub effort_level: Option<EffortLevel>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
     pub skills: Option<CreateThreadSkillsInput>,
     pub workspace: Option<CreateThreadWorkspaceInput>,
 }
@@ -954,7 +957,7 @@ pub struct CreateThreadToolInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadOutput {
     pub thread_id: String,
-    pub model_override_applied: bool,
+    pub explicit_model_config_applied: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1198,7 +1201,8 @@ pub struct PersistentProviderSessionIntent {
     pub provider: ProviderCode,
     pub provider_session_id: Option<String>,
     pub workspace_path: PathBuf,
-    pub effort_level: EffortLevel,
+    #[serde(default)]
+    pub effort_level: Option<EffortLevel>,
     pub model: Option<String>,
     pub reasoning_effort: Option<CodexReasoningEffort>,
     #[serde(default)]
@@ -2215,16 +2219,33 @@ impl CoreRuntime {
         sdk_origin: Option<String>,
         sdk_version: Option<String>,
     ) -> Result<CreateThreadOutput, PedelecError> {
-        let model_override = normalize_model_override(input.model)?;
+        let model = normalize_explicit_model(input.model)?;
+        if model.is_some() && input.effort_level.is_some() {
+            return Err(PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "effortLevel cannot be combined with model",
+            ));
+        }
+        if model.is_none() && input.effort.is_some() {
+            return Err(PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "effort requires model",
+            ));
+        }
         let deno_modules = normalize_deno_module_inputs(input.skills.as_ref())?;
-        let settings = self.get_settings()?;
-        let effort_level = input.effort_level.unwrap_or_default();
-        let effort_args = resolve_thread_effort_args(
-            &settings,
-            &input.provider,
-            effort_level,
-            model_override.as_deref(),
-        )?;
+        let (effort_level, effort_args) = if let Some(model) = model.as_deref() {
+            (
+                None,
+                resolve_explicit_session_args(&input.provider, model, input.effort.as_deref())?,
+            )
+        } else {
+            let settings = self.get_settings()?;
+            let effort_level = input.effort_level.unwrap_or_default();
+            (
+                Some(effort_level),
+                resolve_profile_session_args(&settings, &input.provider, effort_level)?,
+            )
+        };
         let initialize =
             |workspace: &Path| initialize_generated_skills(workspace, input.skills.as_ref());
         // Custom workspaces persist across Desktop/Core restarts, so allocate
@@ -2294,7 +2315,7 @@ impl CoreRuntime {
 
         Ok(CreateThreadOutput {
             thread_id,
-            model_override_applied: model_override.is_some(),
+            explicit_model_config_applied: model.is_some(),
         })
     }
 
@@ -9020,26 +9041,49 @@ fn normalize_optional_secret(value: Option<String>) -> String {
     value.unwrap_or_default().trim().to_string()
 }
 
-fn resolve_thread_effort_args(
+fn resolve_profile_session_args(
     settings: &PedelecSettings,
     provider: &ProviderCode,
     level: EffortLevel,
-    model_override: Option<&str>,
 ) -> Result<Vec<String>, PedelecError> {
     let efforts = provider_efforts_args(&settings.provider_settings, provider);
     validate_effort_tier(provider, level, efforts.get(level))?;
-    let mut args = efforts.get(level).to_vec();
-    if let Some(model) = model_override {
-        apply_model_override(provider, &mut args, model);
-    }
-    validate_effort_tier(provider, level, &args)?;
+    let args = efforts.get(level).to_vec();
     if *provider == ProviderCode::Ollama {
         required_ollama_model_from_args(&args)?;
     }
     Ok(args)
 }
 
-fn normalize_model_override(value: Option<String>) -> Result<Option<String>, PedelecError> {
+fn resolve_explicit_session_args(
+    provider: &ProviderCode,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<Vec<String>, PedelecError> {
+    let mut args = vec![
+        provider_model_arg_key(provider).to_string(),
+        model.to_string(),
+    ];
+    if let Some(effort) = effort {
+        let effort = normalize_explicit_effort(provider, effort)?;
+        match provider {
+            ProviderCode::Codex => args.extend([
+                "-c".to_string(),
+                format!("model_reasoning_effort=\"{effort}\""),
+            ]),
+            ProviderCode::Antigravity | ProviderCode::Claude => {
+                args.extend(["--effort".to_string(), effort.to_string()])
+            }
+            ProviderCode::OpenCode | ProviderCode::Cursor | ProviderCode::Ollama => {
+                unreachable!("unsupported explicit effort was rejected")
+            }
+        }
+    }
+    validate_effort_tier(provider, EffortLevel::Default, &args)?;
+    Ok(args)
+}
+
+fn normalize_explicit_model(value: Option<String>) -> Result<Option<String>, PedelecError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -9053,13 +9097,28 @@ fn normalize_model_override(value: Option<String>) -> Result<Option<String>, Ped
     Ok(Some(model.to_string()))
 }
 
-fn apply_model_override(provider: &ProviderCode, args: &mut Vec<String>, model: &str) {
-    let model_key = provider_model_arg_key(provider);
-    if let Some(index) = args.iter().position(|arg| arg == model_key) {
-        args[index + 1] = model.to_string();
-    } else {
-        args.extend([model_key.to_string(), model.to_string()]);
+fn normalize_explicit_effort<'a>(
+    provider: &ProviderCode,
+    value: &'a str,
+) -> Result<&'a str, PedelecError> {
+    let effort = value.trim();
+    let supported = match provider {
+        ProviderCode::Codex => is_supported_codex_effort(effort),
+        ProviderCode::Antigravity => is_supported_antigravity_effort(effort),
+        ProviderCode::Claude => is_supported_claude_effort(effort),
+        ProviderCode::OpenCode | ProviderCode::Cursor | ProviderCode::Ollama => false,
+    };
+    if supported {
+        return Ok(effort);
     }
+    Err(PedelecError::with_details(
+        error_codes::INVALID_INPUT,
+        "explicit effort is not supported for this provider",
+        serde_json::json!({
+            "provider": provider_code_as_str(provider),
+            "effort": effort,
+        }),
+    ))
 }
 
 fn provider_efforts_args<'a>(
@@ -10141,7 +10200,7 @@ mod deno_tests {
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
-                effort_level: EffortLevel::Default,
+                effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
                 workspace_path: workspace.to_path_buf(),
                 skills: Vec::new(),
@@ -10335,7 +10394,7 @@ mod deno_tests {
         let thread = ThreadState {
             thread_id: "thread-deno-context".into(),
             provider: ProviderCode::Codex,
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
             workspace_path: temp.path().to_path_buf(),
             skills: Vec::new(),
@@ -10397,7 +10456,7 @@ mod deno_tests {
         let thread = ThreadState {
             thread_id: "thread-deno-order".into(),
             provider: ProviderCode::Codex,
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
             workspace_path: temp.path().to_path_buf(),
             skills: Vec::new(),
@@ -10458,7 +10517,7 @@ mod deno_tests {
         let thread = ThreadState {
             thread_id: "thread-deno-guidance".into(),
             provider: ProviderCode::Codex,
-            effort_level: EffortLevel::Default,
+            effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
             workspace_path: temp.path().to_path_buf(),
             skills: Vec::new(),
@@ -10939,6 +10998,7 @@ mod deno_tests {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
+            effort: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: String::new(),
                 tools: Vec::new(),
@@ -11029,6 +11089,7 @@ mod deno_tests {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
+            effort: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: String::new(),
                 tools: Vec::new(),
@@ -11231,6 +11292,7 @@ mod deno_tests {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
+            effort: None,
             skills: Some(CreateThreadSkillsInput {
                 guidance: String::new(),
                 tools: Vec::new(),
@@ -11279,6 +11341,7 @@ mod deno_tests {
                     provider: ProviderCode::Codex,
                     effort_level: Some(EffortLevel::Default),
                     model: None,
+                    effort: None,
                     skills: Some(CreateThreadSkillsInput {
                         guidance: String::new(),
                         tools: Vec::new(),

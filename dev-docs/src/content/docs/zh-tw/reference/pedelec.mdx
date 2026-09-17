@@ -75,7 +75,7 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 
 - 無 `provider`：使用 Desktop `defaultProvider` 並確認 available。
 - `provider` 可搭配 provider-independent `effortLevel`；省略時使用 `default`。
-- `model` 是 optional，可和 `provider`、`effortLevel` 共存；Core 只取代選中 Desktop profile 的 model，保留 native effort args。
+- `model` 代表 explicit mode，可搭配 optional provider-native `effort`，不可和 `effortLevel` 共存；profile mode 的完整 model/native effort 仍由 Desktop profile 提供。
 - `workspace.path`：可選擇使用 absolute、由 application 管理的 workspace，取代 temporary managed workspace。
 - `autoEndOnDisconnect`：預設 `true`。
 
@@ -91,7 +91,7 @@ Explicit `workspace.path` 可以是新目錄或既有目錄。Core 會建立 Ped
 - `DEFAULT_PROVIDER_NOT_SET`；
 - `DEFAULT_PROVIDER_UNAVAILABLE`；
 - `INVALID_INPUT`；
-- Ollama 沒有 profile model 且未提供 explicit override 時的 `MODEL_REQUIRED`；
+- Ollama profile 沒有 model 時的 `MODEL_REQUIRED`；explicit `{ model }` mode 不需要 profile model；
 - provider/Core creation errors。
 
 ```ts

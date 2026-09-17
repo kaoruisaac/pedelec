@@ -45,7 +45,7 @@ Provider known when this SDK handle was registered. A fresh resumed handle may c
 readonly effortLevel?: "default" | "low" | "high"
 ```
 
-Normalized effort level selected for this session. A fresh resumed handle may leave it undefined because the bridge currently returns only the session ID.
+Normalized Desktop profile level selected for this session. It is `undefined` for explicit model sessions, and a fresh resumed handle may also leave it undefined because the bridge currently returns only the session ID.
 
 ### `sessionCreatedAt`
 

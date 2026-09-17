@@ -9,7 +9,7 @@ Application 選擇 provider 與資源意圖；Desktop 使用者則在 Settings �
 
 ## Provider code
 
-固定的小寫 code 是 `codex`、`antigravity`、`opencode`、`cursor`、`claude` 與 `ollama`。`listProviders()` 只公開名稱、code、availability、`isDefault` 與錯誤訊息。`isDefault` 反映目前 Desktop 的 default provider，與 `available` 無關，即使 default provider unavailable 也仍為 `true`；credentials、model catalog、`providerSettings` 和 `effortsArgs` 不會穿過 SDK boundary。Application 仍可在 `createSession({ model })` 傳入 provider-native model identifier 作為單一 session override；Pedelec 不維護 model catalog 或 capability matrix。SDK 與 Extension 會忽略 response 中新增的未知欄位，以保持 forward compatibility。
+固定的小寫 code 是 `codex`、`antigravity`、`opencode`、`cursor`、`claude` 與 `ollama`。`listProviders()` 只公開名稱、code、availability、`isDefault` 與錯誤訊息。`isDefault` 反映目前 Desktop 的 default provider，與 `available` 無關，即使 default provider unavailable 也仍為 `true`；credentials、model catalog、`providerSettings` 和 profile `effortsArgs` 不會穿過 SDK boundary。Application 可在 `createSession({ model, effort? })` 傳入 explicit provider-native 設定；Pedelec 不維護 model catalog 或 capability matrix。SDK 與 Extension 會忽略 response 中新增的未知欄位，以保持 forward compatibility。
 
 ## Effort levels
 
@@ -35,21 +35,26 @@ await pedelec.createSession({ provider: "codex", effortLevel: "low" });
 
 非 Ollama provider 的空 `low` 或 `high` profile 不會傳送 explicit model/effort 參數，也不會 fallback 到 `default`。
 
-## Model override
+## Explicit model configuration
 
-Desktop effort profile 仍是 model 與 provider-native effort args 的預設來源。`model` 是 optional，可以和 provider-independent `effortLevel` 共存：
+`effortLevel` 與 `model` 是互斥的兩種 mode。Profile mode 使用完整 Desktop profile：
 
 ```ts
 await pedelec.createSession({
   provider: "codex",
   effortLevel: "high",
-  model: "gpt-x",
 });
 ```
 
-省略時維持現有行為；提供時只取代選中 profile 的 model，native effort 設定不變。Core 負責合併並 snapshot 最終 args，因此之後修改 Desktop profile 不會改變已建立 session。SDK 不提供或維護 model list；model validity、provider availability 與帳號 entitlement 由 provider 決定。
+Explicit mode 只使用指定 model 與 optional native effort：
 
-Explicit model 需要 Core 回傳 applied acknowledgment；舊版 Extension/Desktop 若無法提供，SDK 會中止新 setup 並回報不相容，避免 model 被靜默忽略。
+```ts
+await pedelec.createSession({ provider: "codex", model: "gpt-x", effort: "max" });
+```
+
+只有 model 的 explicit mode 使用 provider default effort。Explicit 設定獨立 snapshot；之後修改 Desktop profile 不會改變已建立 session。Model validity、effort support、provider availability 與帳號 entitlement 由 provider 決定。
+
+Explicit model 需要 Core 回傳 `explicitModelConfigApplied: true`；舊版 Extension/Desktop 若無法提供，SDK 會中止新 setup 並回報不相容。
 
 ## SDK settings boundary
 
@@ -61,11 +66,11 @@ type PedelecSettings = {
 };
 ```
 
-實際 provider 設定、effort argv、credentials 與 Desktop profile 內的 model name 只能在 Desktop Settings 查看或修改；application 若已知道 provider-native identifier，也可透過 `createSession({ model })` 做 session-specific override。
+實際 provider 設定、effort argv、credentials 與 Desktop profile 內的 model name 只能在 Desktop Settings 查看或修改；application 可在 explicit mode 傳入 `model` 與 optional `effort`。
 
 ## Ollama
 
-選中的 Ollama profile 必須包含 `--model` pair，除非 `createSession({ model })` 提供 explicit override。兩者皆沒有時 Core 回傳 `MODEL_REQUIRED`，不會 fallback 到 default；Ollama 被選為 Desktop default provider 時，Default profile 必須有 model，Low/High 則可留空。
+Ollama 的 profile mode 必須在選中的 profile 包含 `--model` pair，否則 Core 回傳 `MODEL_REQUIRED`，不會 fallback 到 default。Explicit `{ model }` mode 直接提供 model，不需要 profile model；Ollama 目前不接受 explicit `effort`。Ollama 被選為 Desktop default provider 時，Default profile 必須有 model，Low/High 則可留空。
 
 ## Provider-native skill isolation
 

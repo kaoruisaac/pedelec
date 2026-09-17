@@ -11,6 +11,8 @@ All types below are exported from `@kaoruisaac/pedelec`.
 import type {
   PedelecOptions,
   ProviderCode,
+  EffortLevel,
+  Effort,
   ProviderInfo,
   PedelecSessionStatus,
   PedelecSessionUsage,
@@ -45,6 +47,22 @@ type ProviderCode =
   | "ollama";
 ```
 
+### `EffortLevel`
+
+```ts
+type EffortLevel = "default" | "low" | "high";
+```
+
+`EffortLevel` is the Pedelec/Desktop profile selector. It selects one complete configured profile, including that profile's model and provider-native effort settings.
+
+### `Effort`
+
+```ts
+type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+```
+
+`Effort` is the provider-native reasoning-effort value used only in explicit model mode. It is optional when `model` is supplied and cannot be used by itself. Provider-specific support is validated at runtime.
+
 ### `CreateSessionInput`
 
 ```ts
@@ -52,24 +70,26 @@ type CreateSessionInput<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > =
   | {
-      provider: ProviderCode;
-      model?: string;
-      effortLevel?: "default" | "low" | "high";
+      provider?: ProviderCode;
+      effortLevel?: EffortLevel;
+      model?: never;
+      effort?: never;
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
-      provider?: undefined;
-      model?: string;
-      effortLevel?: "default" | "low" | "high";
+      provider?: ProviderCode;
+      model: string;
+      effort?: Effort;
+      effortLevel?: never;
       skills?: SkillsInput<TTools>;
       workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
-`effortLevel` is provider-independent and may be used with or without `provider`. `model` is an optional provider-native identifier that overrides only the selected Desktop profile's model; it can be used with or without `provider` and `effortLevel`.
+`effortLevel` selects Desktop profile mode. `model` selects explicit provider configuration and may be paired with provider-native `effort`; these modes are mutually exclusive. Model-only explicit mode is valid and uses provider-default effort behavior. `effort` cannot be supplied without `model`.
 
 ### `CreateSessionWorkspaceInput`
 
