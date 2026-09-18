@@ -266,11 +266,30 @@ function emitPageActivity(port, active) {
 async function respondToNative(background, nativePort, result, minimumMessageCount = 1) {
   await waitFor(() => nativePort.sent.length >= minimumMessageCount, "native request was not sent");
   const request = nativePort.sent.at(-1);
+  let normalizedResult = result;
+  if (request.type === "create_thread" && result && typeof result === "object" && !Array.isArray(result) &&
+      typeof result.threadId === "string") {
+    normalizedResult = {
+      explicitModelConfigApplied: true,
+      workspaceId: result.workspaceId ?? `workspace-${result.threadId}`,
+      workspacePath: result.workspacePath ?? null,
+      ...result,
+    };
+  } else if (request.type === "subscribe_thread" && result && typeof result === "object" &&
+      result.snapshot && !result.workspace) {
+    normalizedResult = {
+      ...result,
+      workspace: {
+        workspaceId: `workspace-${result.snapshot.threadId}`,
+        path: null,
+      },
+    };
+  }
   background.handleNativeMessage({
     type: "response",
     requestId: request.requestId,
     ok: true,
-    result,
+    result: normalizedResult,
   });
   await flush();
   return request;
@@ -293,7 +312,7 @@ async function createSdkSession(background, sdkPort, nativePort, sessionId, auto
   return sdkPort.sent.find((message) => message.requestId === requestId);
 }
 
-test("create_session forwards an explicit workspace without inventing a path", async () => {
+test("create_session does not forward the removed workspace path input", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -307,12 +326,11 @@ test("create_session forwards an explicit workspace without inventing a path", a
     type: "create_session",
     input: {
       provider: "codex",
-      workspace: { path: "C:\\workspace\\project-a" },
       autoEndOnDisconnect: true,
     },
   });
   const nativeCreate = await respondToNative(background, native, { threadId: "thread_custom" });
-  assert.deepEqual(nativeCreate.workspace, { path: "C:\\workspace\\project-a" });
+  assert.equal(nativeCreate.workspace, undefined);
 
   await respondToNative(background, native, {
     snapshot: { threadId: "thread_custom", status: "idle", latestSeq: 0 },
@@ -362,6 +380,7 @@ test("create_session forwards profile and explicit model effort configuration", 
   const response = sdk.sent.find((message) => message.requestId === "create_effort");
   assert.deepEqual(response.result, {
     sessionId: "thread_effort",
+    workspace: { workspaceId: "workspace-thread_effort", path: null },
     explicitModelConfigApplied: true,
   });
 });
@@ -457,7 +476,7 @@ test("SDK provider projection does not forward an invalid isDefault value", asyn
   ]);
 });
 
-test("approved pick_workspace_folder forwards the origin and returns folder inspection", async () => {
+test("approved open_workspace forwards the origin and projects a Workspace capability", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -465,27 +484,23 @@ test("approved pick_workspace_folder forwards the origin and returns folder insp
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_path", type: "pick_workspace_folder" });
+  sdk.emit({ channelId: "channel_a", requestId: "open_path", type: "open_workspace", callerSdkVersion: "mock-sdk" });
   const request = await respondToNative(background, native, {
-    path: "C:\\workspace\\project",
-    isEmptyFolder: false,
-    hasWorkspaceConfig: true,
+    workspace: { workspaceId: "workspace_custom", path: "C:\\workspace\\project" },
   });
   assert.deepEqual(
-    { type: request.type, callerOrigin: request.callerOrigin },
-    { type: "pick_workspace_folder", callerOrigin: "https://app.example.test" },
+    { type: request.type, callerOrigin: request.callerOrigin, callerSdkVersion: request.callerSdkVersion },
+    { type: "open_workspace", callerOrigin: "https://app.example.test", callerSdkVersion: "mock-sdk" },
   );
-  await waitFor(() => sdk.sent.some((message) => message.requestId === "pick_path"));
-  assert.deepEqual(sdk.sent.find((message) => message.requestId === "pick_path").result, {
-    path: "C:\\workspace\\project",
-    isEmptyFolder: false,
-    hasWorkspaceConfig: true,
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "open_path"));
+  assert.deepEqual(sdk.sent.find((message) => message.requestId === "open_path").result, {
+    workspace: { workspaceId: "workspace_custom", path: "C:\\workspace\\project" },
   });
   assert.deepEqual(background.getState().events, []);
   assert.equal(background.getState().error, null);
 });
 
-test("pick_workspace_folder cancellation is forwarded as a successful null result and keeps native work alive", async () => {
+test("open_workspace picker cancellation is forwarded as a successful null result", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -493,19 +508,19 @@ test("pick_workspace_folder cancellation is forwarded as a successful null resul
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_cancel", type: "pick_workspace_folder" });
+  sdk.emit({ channelId: "channel_a", requestId: "open_cancel", type: "open_workspace" });
   await waitFor(() => native.sent.length === 1);
   assert.equal(background.getNativeRequestCount(), 1);
   assert.equal(native.disconnectCount, 0);
-  await respondToNative(background, native, { path: null });
-  await waitFor(() => sdk.sent.some((message) => message.requestId === "pick_cancel"));
-  const response = sdk.sent.find((message) => message.requestId === "pick_cancel");
+  await respondToNative(background, native, { workspace: null });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "open_cancel"));
+  const response = sdk.sent.find((message) => message.requestId === "open_cancel");
   assert.equal(response.ok, true);
-  assert.deepEqual(response.result, { path: null });
+  assert.deepEqual(response.result, { workspace: null });
   assert.equal(native.disconnectCount, 1);
 });
 
-test("unapproved pick_workspace_folder enters approval and replays after approval", async () => {
+test("unapproved open_workspace enters approval and replays after approval", async () => {
   const chrome = createChrome({ approved: false });
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -513,7 +528,7 @@ test("unapproved pick_workspace_folder enters approval and replays after approva
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_approval", type: "pick_workspace_folder" });
+  sdk.emit({ channelId: "channel_a", requestId: "open_approval", type: "open_workspace" });
   await waitFor(() => background.getPendingApproval()?.requestCount === 1);
   assert.equal(native.sent.length, 0);
 
@@ -521,13 +536,13 @@ test("unapproved pick_workspace_folder enters approval and replays after approva
   popup.name = "popup";
   background.handlePopupConnect(popup);
   popup.emit({ type: "approve_origin", origin: "https://app.example.test" });
-  const request = await respondToNative(background, native, { path: null });
-  assert.equal(request.type, "pick_workspace_folder");
+  const request = await respondToNative(background, native, { workspace: null });
+  assert.equal(request.type, "open_workspace");
   assert.equal(request.callerOrigin, "https://app.example.test");
-  await waitFor(() => sdk.sent.some((message) => message.requestId === "pick_approval"));
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "open_approval"));
 });
 
-test("pick_workspace_folder native failures are returned as SDK errors without changing extension state", async () => {
+test("open_workspace native failures are returned as SDK errors without changing extension state", async () => {
   const chrome = createChrome();
   const native = new MockPort();
   chrome.nativePortQueue.push(native);
@@ -535,7 +550,7 @@ test("pick_workspace_folder native failures are returned as SDK errors without c
   background.start();
   const sdk = connectExternal(chrome);
 
-  sdk.emit({ channelId: "channel_a", requestId: "pick_failed", type: "pick_workspace_folder" });
+  sdk.emit({ channelId: "channel_a", requestId: "open_failed", type: "open_workspace" });
   await waitFor(() => native.sent.length === 1);
   const request = native.sent[0];
   background.handleNativeMessage({
@@ -544,8 +559,8 @@ test("pick_workspace_folder native failures are returned as SDK errors without c
     ok: false,
     error: { code: "DIRECTORY_PICKER_FAILED", message: "dialog failed" },
   });
-  await waitFor(() => sdk.sent.some((message) => message.requestId === "pick_failed"));
-  const response = sdk.sent.find((message) => message.requestId === "pick_failed");
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "open_failed"));
+  const response = sdk.sent.find((message) => message.requestId === "open_failed");
   assert.equal(response.ok, false);
   assert.equal(response.error.code, "DIRECTORY_PICKER_FAILED");
   assert.deepEqual(background.getState().events, []);
@@ -567,12 +582,11 @@ test("create_session forwards SDK version metadata separately from consumer inpu
     callerSdkVersion: "mock-sdk-version",
     input: {
       provider: "codex",
-      workspace: { path: "C:\\workspace\\project", callerSdkVersion: "consumer-value" },
     },
   });
   const request = await respondToNative(background, native, { threadId: "thread_version" });
   assert.equal(request.callerSdkVersion, "mock-sdk-version");
-  assert.equal(request.workspace.callerSdkVersion, "consumer-value");
+  assert.equal(request.workspace, undefined);
   await respondToNative(background, native, {
     snapshot: { threadId: "thread_version", status: "idle", latestSeq: 0 },
   }, 2);

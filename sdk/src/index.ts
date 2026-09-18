@@ -180,21 +180,22 @@ export type SerializableSkillsManifest = {
   denoModules?: SerializableDenoModuleManifest[];
 };
 
-export type CreateSessionWorkspaceInput = {
-  path: string;
+export type WorkspaceRunOptions = {
+  timeoutMs?: number;
 };
 
-export interface WorkspaceFolderPickerResult {
-  path: string;
-  isEmptyFolder: boolean;
-  hasWorkspaceConfig: boolean;
-}
+export type WorkspaceRunResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+};
 
 type CreateSessionSharedInput<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
   skills?: SkillsInput<TTools>;
-  workspace?: CreateSessionWorkspaceInput;
   autoEndOnDisconnect?: boolean;
 };
 
@@ -696,6 +697,85 @@ function normalizeToolArgsSchema(argsSchema: unknown, toolName: string): ToolArg
   }
 }
 
+export class PedelecWorkspace {
+  private currentPath: string | null;
+
+  constructor(
+    private readonly client: Pedelec,
+    private workspaceId: string,
+    path: string | null,
+  ) {
+    this.currentPath = path;
+  }
+
+  get path(): string | null {
+    return this.currentPath;
+  }
+
+  async createSession(): Promise<PedelecSession<string>>;
+  async createSession<const TTools extends readonly ToolDefinition[]>(
+    input: CreateSessionInput<TTools>,
+  ): Promise<PedelecSession<ToolNameOf<TTools>>>;
+  async createSession(input: CreateSessionInput = {}): Promise<PedelecSession<string>> {
+    return this.client.createSessionInternal(input, this);
+  }
+
+  listFiles(path?: string): Promise<string[]> {
+    return this.list("workspace_list_files", path);
+  }
+
+  listFolders(path?: string): Promise<string[]> {
+    return this.list("workspace_list_folders", path);
+  }
+
+  run(script: string, options: WorkspaceRunOptions = {}): Promise<WorkspaceRunResult> {
+    if (typeof script !== "string") {
+      return Promise.reject(makeError("INVALID_INPUT", "script must be a string"));
+    }
+    if (!isPlainObject(options)) {
+      return Promise.reject(makeError("INVALID_INPUT", "options must be an object"));
+    }
+    const timeoutMs = options.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
+      return Promise.reject(makeError("INVALID_INPUT", "timeoutMs must be a positive integer"));
+    }
+
+    return this.client.requestWithOptions<unknown>(
+      "workspace_run",
+      {
+        workspaceId: this.workspaceId,
+        script,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      },
+      { timeoutMs: null },
+    ).then(normalizeWorkspaceRunResponse);
+  }
+
+  /** @internal */
+  get workspaceIdInternal(): string {
+    return this.workspaceId;
+  }
+
+  /** @internal */
+  hydrate(workspaceId: string, path: string | null): void {
+    this.workspaceId = workspaceId;
+    this.currentPath = path;
+  }
+
+  private list(type: "workspace_list_files" | "workspace_list_folders", path?: string): Promise<string[]> {
+    if (path !== undefined && typeof path !== "string") {
+      return Promise.reject(makeError("INVALID_INPUT", "path must be a string when provided"));
+    }
+    if (path !== undefined && path.trim().length === 0) {
+      return Promise.reject(makeError("INVALID_INPUT", "path must not be empty when provided"));
+    }
+    return this.client.request<unknown>(type, {
+      workspaceId: this.workspaceId,
+      ...(path === undefined ? {} : { path }),
+    }).then(normalizeWorkspaceListResponse);
+  }
+}
+
 export class Pedelec {
   private readonly pageWindow: Window | null;
   private readonly channelId: string;
@@ -726,58 +806,80 @@ export class Pedelec {
     input: CreateSessionInput<TTools>
   ): Promise<PedelecSession<ToolNameOf<TTools>>>;
   async createSession(input: CreateSessionInput = {}): Promise<PedelecSession<string>> {
+    return this.createSessionInternal(input) as Promise<PedelecSession<string>>;
+  }
+
+  /** @internal */
+  async createSessionInternal<const TTools extends readonly ToolDefinition[]>(
+    input: CreateSessionInput<TTools> = {} as CreateSessionInput<TTools>,
+    workspace?: PedelecWorkspace,
+  ): Promise<PedelecSession<ToolNameOf<TTools>>> {
     const resolvedOrPromise = this.resolveCreateSessionInput(input);
     const resolvedInput =
       resolvedOrPromise instanceof Promise ? await resolvedOrPromise : resolvedOrPromise;
 
-    const result = await this.request<{ sessionId: string; explicitModelConfigApplied?: boolean }>("create_session", {
+    const result = await this.request<unknown>("create_session", {
       input: {
         provider: resolvedInput.provider,
         model: resolvedInput.model,
         effort: resolvedInput.effort,
         effortLevel: resolvedInput.effortLevel,
         skills: resolvedInput.skills,
-        workspace: resolvedInput.workspace,
+        ...(workspace ? { workspaceId: workspace.workspaceIdInternal } : {}),
         autoEndOnDisconnect: resolvedInput.autoEndOnDisconnect,
       },
     });
+    const normalizedResult = normalizeCreateSessionResponse(result);
 
-    if (!result.sessionId) {
-      throw makeError("SDK_PROTOCOL_ERROR", "create_session response did not include sessionId");
+    if (workspace && normalizedResult.workspace.workspaceId !== workspace.workspaceIdInternal) {
+      throw makeError(
+        "SDK_PROTOCOL_ERROR",
+        "create_session response returned a different Workspace",
+        {
+          expectedWorkspaceId: workspace.workspaceIdInternal,
+          actualWorkspaceId: normalizedResult.workspace.workspaceId,
+        },
+      );
     }
 
-    if (resolvedInput.model !== undefined && result.explicitModelConfigApplied !== true) {
+    if (resolvedInput.model !== undefined && normalizedResult.explicitModelConfigApplied !== true) {
       const error = makeError(
         "SDK_PROTOCOL_ERROR",
         "The connected Pedelec Extension/Desktop does not support explicit model configuration. Update Pedelec components and try again.",
         { feature: "explicitModelConfig" },
       );
-      await this.abortSessionSetup(result.sessionId);
+      await this.abortSessionSetup(normalizedResult.sessionId);
       throw error;
     }
 
     try {
       for (const module of resolvedInput.denoModules) {
-        await this.uploadDenoModuleArtifact(result.sessionId, module);
+        await this.uploadDenoModuleArtifact(normalizedResult.sessionId, module);
       }
       if (resolvedInput.denoModules.length > 0) {
-        await this.completeSessionSetup(result.sessionId);
+        await this.completeSessionSetup(normalizedResult.sessionId);
       }
     } catch (error) {
       // The thread exists at this point but is not exposed through the SDK
       // session registry yet.  Keep the setup failure as the caller-visible
       // error even if the best-effort cleanup transport also fails.
-      await this.abortSessionSetup(result.sessionId);
+      await this.abortSessionSetup(normalizedResult.sessionId);
       throw normalizeError(error, "DENO_MODULE_UPLOAD_FAILED", "Deno Module setup failed");
     }
 
+    const sessionWorkspace = workspace ?? new PedelecWorkspace(
+      this,
+      normalizedResult.workspace.workspaceId,
+      normalizedResult.workspace.path,
+    );
     return this.registerSession(
-      result.sessionId,
+      normalizedResult.sessionId,
       resolvedInput.provider,
       resolvedInput.effortLevel,
       resolvedInput.inlineToolHandlers,
       resolvedInput.autoEndOnDisconnect,
-    );
+      sessionWorkspace,
+    ) as unknown as PedelecSession<ToolNameOf<TTools>>;
   }
 
   private async uploadDenoModuleArtifact(
@@ -864,13 +966,19 @@ export class Pedelec {
     await this.request("complete_session_setup", { sessionId });
   }
 
-  async workspaceFolderPicker(): Promise<WorkspaceFolderPickerResult | null> {
+  async openWorkspace(): Promise<PedelecWorkspace | null>;
+  async openWorkspace(path: string): Promise<PedelecWorkspace>;
+  async openWorkspace(path?: string): Promise<PedelecWorkspace | null> {
+    if (path !== undefined && (typeof path !== "string" || path.trim().length === 0)) {
+      throw makeError("INVALID_INPUT", "path must be a non-empty string when provided");
+    }
     const result = await this.requestWithOptions<unknown>(
-      "pick_workspace_folder",
-      {},
-      { timeoutMs: null },
+      "open_workspace",
+      path === undefined ? {} : { path },
+      path === undefined ? { timeoutMs: null } : {},
     );
-    return normalizeWorkspaceFolderPickerResponse(result);
+    const workspace = normalizeOpenWorkspaceResponse(result);
+    return workspace === null ? null : new PedelecWorkspace(this, workspace.workspaceId, workspace.path);
   }
 
   async listProviders(): Promise<ProviderInfo[]> {
@@ -914,18 +1022,35 @@ export class Pedelec {
     const existing = this.sessions.get(sessionId);
     const session = existing && !existing.isTransportDetached()
       ? existing
-      : this.registerSession(sessionId, "", undefined, new Map(), false);
+      : this.registerSession(
+          sessionId,
+          "",
+          undefined,
+          new Map(),
+          false,
+          new PedelecWorkspace(this, "", null),
+        );
     try {
-      const result = await this.request<{ sessionId: string; autoEndOnDisconnect?: boolean }>("resume_session", {
+      const result = await this.request<unknown>("resume_session", {
         sessionId,
       });
+      const normalizedResult = normalizeResumeSessionResponse(result);
 
-      if (!result.sessionId) {
-        throw makeError("SDK_PROTOCOL_ERROR", "resume_session response did not include sessionId");
+      if (normalizedResult.sessionId !== sessionId) {
+        throw makeError("SDK_PROTOCOL_ERROR", "resume_session response did not match sessionId");
       }
 
-      if (typeof result.autoEndOnDisconnect === "boolean") {
-        session.setAutoEndOnDisconnect(result.autoEndOnDisconnect);
+      if (existing && existing.workspace.workspaceIdInternal !== normalizedResult.workspace.workspaceId) {
+        throw makeError("SDK_PROTOCOL_ERROR", "resume_session response returned a different Workspace");
+      }
+      if (session !== existing) {
+        session.workspace.hydrate(
+          normalizedResult.workspace.workspaceId,
+          normalizedResult.workspace.path,
+        );
+      }
+      if (typeof normalizedResult.autoEndOnDisconnect === "boolean") {
+        session.setAutoEndOnDisconnect(normalizedResult.autoEndOnDisconnect);
       }
 
       return session;
@@ -939,7 +1064,8 @@ export class Pedelec {
     return this.requestWithOptions<T>(type, payload);
   }
 
-  private requestWithOptions<T>(
+  /** @internal */
+  requestWithOptions<T>(
     type: string,
     payload: Record<string, unknown> = {},
     options: { timeoutMs?: number | null } = {},
@@ -957,7 +1083,9 @@ export class Pedelec {
       type,
       requestId,
       ...payload,
-      ...(type === "create_session" ? { callerSdkVersion: SDK_VERSION } : {}),
+      ...(type === "create_session" || type === "open_workspace"
+        ? { callerSdkVersion: SDK_VERSION }
+        : {}),
     };
 
     return new Promise<T>((resolve, reject) => {
@@ -1076,7 +1204,6 @@ export class Pedelec {
         effortLevel?: EffortLevel;
         effort?: Effort;
         skills?: SerializableSkillsManifest;
-        workspace?: CreateSessionWorkspaceInput;
         inlineToolHandlers: Map<string, ToolSpecificHandler>;
         denoModules: PreparedDenoModuleForSession[];
         autoEndOnDisconnect: boolean;
@@ -1087,7 +1214,6 @@ export class Pedelec {
     effortLevel?: EffortLevel;
     effort?: Effort;
     skills?: SerializableSkillsManifest;
-    workspace?: CreateSessionWorkspaceInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
     denoModules: PreparedDenoModuleForSession[];
     autoEndOnDisconnect: boolean;
@@ -1098,7 +1224,6 @@ export class Pedelec {
       effort?: unknown;
       effortLevel?: unknown;
       skills?: unknown;
-      workspace?: unknown;
       autoEndOnDisconnect?: unknown;
     };
     const provider = typeof raw.provider === "string" ? raw.provider.trim() : "";
@@ -1111,14 +1236,12 @@ export class Pedelec {
       const effort = normalizeCreateSessionEffortInput(raw.effort);
       const autoEndOnDisconnect = raw.autoEndOnDisconnect !== false;
       const normalizedSkills = normalizeSkillsInput(raw.skills);
-      const workspace = normalizeCreateSessionWorkspaceInput(raw.workspace);
       if (!hasProvider) {
         return this.resolveDefaultCreateSessionInput(
           model,
           effort,
           undefined,
           normalizedSkills,
-          workspace,
           autoEndOnDisconnect,
         );
       }
@@ -1127,7 +1250,6 @@ export class Pedelec {
         model,
         effort,
         skills: normalizedSkills.manifest,
-        workspace,
         inlineToolHandlers: normalizedSkills.handlers,
         denoModules: normalizedSkills.denoModules,
         autoEndOnDisconnect,
@@ -1142,15 +1264,12 @@ export class Pedelec {
     }
     const autoEndOnDisconnect = raw.autoEndOnDisconnect !== false;
     const normalizedSkills = normalizeSkillsInput(raw.skills);
-    const workspace = normalizeCreateSessionWorkspaceInput(raw.workspace);
-
     if (!hasProvider) {
       return this.resolveDefaultCreateSessionInput(
         undefined,
         undefined,
         effortLevel,
         normalizedSkills,
-        workspace,
         autoEndOnDisconnect,
       );
     }
@@ -1159,7 +1278,6 @@ export class Pedelec {
       provider: provider as ProviderCode,
       effortLevel,
       skills: normalizedSkills.manifest,
-      workspace,
       inlineToolHandlers: normalizedSkills.handlers,
       denoModules: normalizedSkills.denoModules,
       autoEndOnDisconnect,
@@ -1226,7 +1344,6 @@ export class Pedelec {
     effort: Effort | undefined,
     effortLevel: EffortLevel | undefined,
     normalizedSkills: NormalizedSkillsInput,
-    workspace: CreateSessionWorkspaceInput | undefined,
     autoEndOnDisconnect: boolean
   ): Promise<{
     provider: ProviderCode;
@@ -1234,7 +1351,6 @@ export class Pedelec {
     effort?: Effort;
     effortLevel?: EffortLevel;
     skills?: SerializableSkillsManifest;
-    workspace?: CreateSessionWorkspaceInput;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
     denoModules: PreparedDenoModuleForSession[];
     autoEndOnDisconnect: boolean;
@@ -1253,7 +1369,6 @@ export class Pedelec {
       effort,
       effortLevel,
       skills: normalizedSkills.manifest,
-      workspace,
       inlineToolHandlers: normalizedSkills.handlers,
       denoModules: normalizedSkills.denoModules,
       autoEndOnDisconnect,
@@ -1278,6 +1393,7 @@ export class Pedelec {
     effortLevel: EffortLevel | undefined,
     inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map(),
     autoEndOnDisconnect = false,
+    workspace: PedelecWorkspace,
   ): PedelecSession<string> {
     const existing = this.sessions.get(sessionId);
     if (existing && !existing.isTransportDetached()) {
@@ -1289,6 +1405,7 @@ export class Pedelec {
       this,
       sessionId,
       provider,
+      workspace,
       effortLevel,
       inlineToolHandlers,
       autoEndOnDisconnect,
@@ -1432,23 +1549,6 @@ export class Pedelec {
   }
 }
 
-function normalizeCreateSessionWorkspaceInput(value: unknown): CreateSessionWorkspaceInput | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw makeError("INVALID_INPUT", "workspace must be an object");
-  }
-
-  const path = (value as { path?: unknown }).path;
-  if (typeof path !== "string") {
-    throw makeError("INVALID_INPUT", "workspace.path must be a string");
-  }
-  if (path.trim().length === 0) {
-    throw makeError("INVALID_INPUT", "workspace.path must not be empty");
-  }
-
-  return { path };
-}
-
 function normalizeCreateSessionModelInput(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -1469,6 +1569,7 @@ export class PedelecSession<TToolName extends string = string> {
   readonly sessionId: string;
   readonly provider: string;
   readonly effortLevel?: EffortLevel;
+  readonly workspace: PedelecWorkspace;
   readonly sessionCreatedAt = Date.now();
   readonly usage: PedelecSessionUsage = { totalTokens: undefined };
 
@@ -1498,6 +1599,7 @@ export class PedelecSession<TToolName extends string = string> {
     private readonly client: Pedelec,
     sessionId: string,
     provider: string,
+    workspace: PedelecWorkspace,
     effortLevel?: EffortLevel,
     inlineToolHandlers: Map<string, ToolSpecificHandler> = new Map(),
     autoEndOnDisconnect = false,
@@ -1505,6 +1607,7 @@ export class PedelecSession<TToolName extends string = string> {
     this.sessionId = sessionId;
     this.provider = provider;
     this.effortLevel = effortLevel;
+    this.workspace = workspace;
     this.inlineToolHandlers = new Map(inlineToolHandlers);
     this.autoEndOnDisconnect = autoEndOnDisconnect;
   }
@@ -2351,22 +2454,88 @@ function normalizePedelecSettings(value: unknown): PedelecSettings {
   return { defaultProvider: value.defaultProvider };
 }
 
-function normalizeWorkspaceFolderPickerResponse(value: unknown): WorkspaceFolderPickerResult | null {
-  if (!isPlainObject(value) || !("path" in value)) {
-    throw makeError("SDK_PROTOCOL_ERROR", "pick_workspace_folder response had an invalid shape");
-  }
+type WorkspaceCapability = {
+  workspaceId: string;
+  path: string | null;
+};
 
-  const path = value.path;
-  if (path === null) return null;
-  if (typeof path !== "string" || path.length === 0 ||
-      typeof value.isEmptyFolder !== "boolean" || typeof value.hasWorkspaceConfig !== "boolean") {
-    throw makeError("SDK_PROTOCOL_ERROR", "pick_workspace_folder response had an invalid shape");
+function normalizeWorkspaceCapability(value: unknown, context: string): WorkspaceCapability {
+  if (!isPlainObject(value) || typeof value.workspaceId !== "string" || value.workspaceId.trim().length === 0 ||
+      (value.path !== null && (typeof value.path !== "string" || value.path.length === 0))) {
+    throw makeError("SDK_PROTOCOL_ERROR", `${context} response had an invalid Workspace shape`);
   }
-
   return {
-    path,
-    isEmptyFolder: value.isEmptyFolder,
-    hasWorkspaceConfig: value.hasWorkspaceConfig,
+    workspaceId: value.workspaceId,
+    path: value.path as string | null,
+  };
+}
+
+function normalizeOpenWorkspaceResponse(value: unknown): WorkspaceCapability | null {
+  if (value === null) return null;
+  if (!isPlainObject(value) || !("workspace" in value)) {
+    throw makeError("SDK_PROTOCOL_ERROR", "open_workspace response had an invalid shape");
+  }
+  if (value.workspace === null) return null;
+  return normalizeWorkspaceCapability(value.workspace, "open_workspace");
+}
+
+function normalizeCreateSessionResponse(value: unknown): {
+  sessionId: string;
+  workspace: WorkspaceCapability;
+  explicitModelConfigApplied?: boolean;
+} {
+  if (!isPlainObject(value) || typeof value.sessionId !== "string" || value.sessionId.trim().length === 0 ||
+      !("workspace" in value)) {
+    throw makeError("SDK_PROTOCOL_ERROR", "create_session response had an invalid shape");
+  }
+  if ("explicitModelConfigApplied" in value && typeof value.explicitModelConfigApplied !== "boolean") {
+    throw makeError("SDK_PROTOCOL_ERROR", "create_session response had an invalid model configuration flag");
+  }
+  return {
+    sessionId: value.sessionId,
+    workspace: normalizeWorkspaceCapability(value.workspace, "create_session"),
+    ...(typeof value.explicitModelConfigApplied === "boolean"
+      ? { explicitModelConfigApplied: value.explicitModelConfigApplied }
+      : {}),
+  };
+}
+
+function normalizeResumeSessionResponse(value: unknown): {
+  sessionId: string;
+  workspace: WorkspaceCapability;
+  autoEndOnDisconnect: boolean;
+} {
+  if (!isPlainObject(value) || typeof value.sessionId !== "string" || value.sessionId.trim().length === 0 ||
+      typeof value.autoEndOnDisconnect !== "boolean" || !("workspace" in value)) {
+    throw makeError("SDK_PROTOCOL_ERROR", "resume_session response had an invalid shape");
+  }
+  return {
+    sessionId: value.sessionId,
+    autoEndOnDisconnect: value.autoEndOnDisconnect,
+    workspace: normalizeWorkspaceCapability(value.workspace, "resume_session"),
+  };
+}
+
+function normalizeWorkspaceListResponse(value: unknown): string[] {
+  const paths = Array.isArray(value) ? value : isPlainObject(value) ? value.paths : undefined;
+  if (!Array.isArray(paths) || paths.some((path) => typeof path !== "string")) {
+    throw makeError("SDK_PROTOCOL_ERROR", "workspace list response had an invalid shape");
+  }
+  return paths as string[];
+}
+
+function normalizeWorkspaceRunResponse(value: unknown): WorkspaceRunResult {
+  if (!isPlainObject(value) || !Number.isInteger(value.exitCode) || typeof value.stdout !== "string" ||
+      typeof value.stderr !== "string" || typeof value.stdoutTruncated !== "boolean" ||
+      typeof value.stderrTruncated !== "boolean") {
+    throw makeError("SDK_PROTOCOL_ERROR", "workspace_run response had an invalid shape");
+  }
+  return {
+    exitCode: value.exitCode as number,
+    stdout: value.stdout,
+    stderr: value.stderr,
+    stdoutTruncated: value.stdoutTruncated,
+    stderrTruncated: value.stderrTruncated,
   };
 }
 

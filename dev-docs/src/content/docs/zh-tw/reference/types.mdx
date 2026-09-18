@@ -20,8 +20,9 @@ import type {
   Asset,
   AssetPath,
   ReadAssetType,
-  CreateSessionWorkspaceInput,
-  WorkspaceFolderPickerResult,
+  PedelecWorkspace,
+  WorkspaceRunOptions,
+  WorkspaceRunResult,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -75,7 +76,6 @@ type CreateSessionInput<
       model?: never;
       effort?: never;
       skills?: SkillsInput<TTools>;
-      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
@@ -84,34 +84,48 @@ type CreateSessionInput<
       effort?: Effort;
       effortLevel?: never;
       skills?: SkillsInput<TTools>;
-      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
 `effortLevel` 代表 Desktop profile mode；`model` 代表 explicit provider configuration，並可搭配 optional provider-native `effort`。兩種 mode 互斥，不能同時傳入。只傳 `model` 也是合法的，這時使用 provider 自己的 default effort；`effort` 不能脫離 `model` 單獨使用。
 
-### `CreateSessionWorkspaceInput`
+### `PedelecWorkspace`
 
 ```ts
-type CreateSessionWorkspaceInput = {
-  path: string;
-};
-```
-
-`path` 是 absolute、由 application 管理的 workspace path。Pedelec 會建立缺少的 workspace 子目錄，但永遠不會刪除這個 workspace。它可以由多個 active session 共用，且不得與 managed workspace root overlap。
-
-### `WorkspaceFolderPickerResult`
-
-```ts
-interface WorkspaceFolderPickerResult {
-  path: string;
-  isEmptyFolder: boolean;
-  hasWorkspaceConfig: boolean;
+class PedelecWorkspace {
+  readonly path: string | null;
+  createSession(): Promise<PedelecSession<string>>;
+  createSession<const TTools extends readonly ToolDefinition[]>(
+    input: CreateSessionInput<TTools>,
+  ): Promise<PedelecSession<ToolNameOf<TTools>>>;
+  listFiles(path?: string): Promise<string[]>;
+  listFolders(path?: string): Promise<string[]>;
+  run(script: string, options?: WorkspaceRunOptions): Promise<WorkspaceRunResult>;
 }
 ```
 
-這是 `workspaceFolderPicker()` 回傳的 read-only snapshot。`hasWorkspaceConfig` 只表示 `.pedelec-workspace.json` 是 regular file，不會驗證 marker 內容。
+`PedelecWorkspace` 會由 `openWorkspace()`、`createSession().workspace` 與 `resumeSession().workspace` 回傳。Workspace identity 是 opaque，刻意不公開。
+
+### `WorkspaceRunOptions`
+
+```ts
+type WorkspaceRunOptions = {
+  timeoutMs?: number;
+};
+```
+
+### `WorkspaceRunResult`
+
+```ts
+type WorkspaceRunResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+}
+```
 
 ## Provider 與 settings
 
@@ -170,7 +184,7 @@ type PedelecAvailability = {
 type AssetPath = `/${string}`;
 ```
 
-Session shared store 中 asset 的 SDK public path。Agent 可見的 shared store 實際位於 `<workspace.path>/.pedelec-runtime/assets/`；`.pedelec-runtime` 是 private runtime layout，不會出現在 SDK value 中。例如 `/images/photo.png` 對應到 `<workspace.path>/.pedelec-runtime/assets/images/photo.png`。Runtime validation 也會拒絕 backslash、空 path segment、`.` 與 `..`。
+Workspace shared store 中 asset 的 SDK public path。Agent 可見的 shared store 實際位於 `<workspace.path>/.pedelec-runtime/assets/`；`.pedelec-runtime` 是 private runtime layout，不會出現在 SDK value 中。例如 `/images/photo.png` 對應到 `<workspace.path>/.pedelec-runtime/assets/images/photo.png`。Runtime validation 也會拒絕 backslash、空 path segment、`.` 與 `..`。
 
 ### `ReadAssetType`
 

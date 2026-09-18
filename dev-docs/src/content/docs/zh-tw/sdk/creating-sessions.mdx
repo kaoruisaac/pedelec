@@ -9,22 +9,28 @@ SDK 建立 session handle。可以選擇 Desktop profile mode（`effortLevel` �
 
 ## 先選擇 workspace
 
-若 application 使用自己管理的 workspace，請先透過原生 picker 讓使用者選取資料夾，再呼叫 `createSession()`：
+Managed convenience flow 是 `pedelec.createSession()`：它會自動建立 managed Workspace，透過 `session.workspace` 暴露，且不接受 Workspace option。需要 custom Workspace 時，請使用下面的 explicit flow。
+
+若 application 使用自己管理的 workspace，請先開啟 workspace，再建立 session。省略 path 時會開啟原生 picker；使用者取消時回傳 `null`：
 
 ```ts
-const folder = await pedelec.workspaceFolderPicker();
-if (!folder) return;
+const workspace = await pedelec.openWorkspace();
+if (!workspace) return;
 
-if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
-  // application 自行決定是否警告使用者。
-}
-
-const session = await pedelec.createSession({
-  workspace: { path: folder.path },
+const session = await workspace.createSession({
+  provider: "codex",
+  effortLevel: "high",
 });
 ```
 
-Picker 取消時回傳 `null`。它是 read-only snapshot，只提供根目錄是否為空的 `isEmptyFolder`，以及 `.pedelec-workspace.json` 是否為 regular file 的 `hasWorkspaceConfig`；不判斷資料夾是否為有效 Pedelec workspace，也不初始化內容。Core 會在 `createSession()` 階段套用 workspace 規則，成功初始化 custom workspace 後才建立 marker。
+指定 path 時會使用相同的 validation 與 initialization flow，但不會開啟 picker：
+
+```ts
+const workspace = await pedelec.openWorkspace("C:\\workspace\\project-a");
+const session = await workspace.createSession({ provider: "codex" });
+```
+
+`PedelecWorkspace` 提供 `path`、`createSession()`、`listFiles()`、`listFolders()` 與 `run()`。method semantics、security、concurrency 與 lifetime 請見 [PedelecWorkspace reference](../reference/pedelec-workspace/)。使用 `pedelec.createSession()` 建立的 managed session 也會透過 `session.workspace` 暴露 Workspace；即使 `session.end()` 後，Workspace handle 仍然存在。
 
 ```ts
 const session = await pedelec.createSession();
@@ -68,9 +74,9 @@ const session = await pedelec.createSession({ provider: "codex", model: "gpt-x",
 
 Explicit model 必須收到 Core 的 `explicitModelConfigApplied: true` acknowledgment，SDK 才會開始 Deno Module upload 或公開 session。若連線的 Extension/Desktop 太舊，SDK 會 best-effort abort 新 setup 並回報 compatibility error。
 
-## Skills、workspace 與 Ollama
+## Skills 與 Ollama
 
-Profile mode 可搭配 `skills`、`workspace`。Desktop Settings 只在 profile mode 提供 model。Ollama profile 沒有 model 時回傳 `MODEL_REQUIRED`；explicit `{ model }` 不需要 profile model，且 Ollama 目前不接受 explicit `effort`。Low/High 不會 fallback 到 Default profile。
+Profile mode 可搭配 `skills`；application-owned workspace 透過 `openWorkspace()` 選取，再使用 `workspace.createSession()`。Desktop Settings 只在 profile mode 提供 model。Ollama profile 沒有 model 時回傳 `MODEL_REQUIRED`；explicit `{ model }` 不需要 profile model，且 Ollama 目前不接受 explicit `effort`。Low/High 不會 fallback 到 Default profile。
 
 ## Deno Modules
 

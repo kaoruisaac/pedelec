@@ -24,7 +24,7 @@ Pedelec is a browser SDK and local bridge for applications that want to work wit
 A web application can use Pedelec to:
 
 - create an agent session on the user's machine;
-- choose an application-managed workspace with the native directory picker;
+- open an application-managed workspace with the native directory picker or an explicit path;
 - send user instructions and receive streamed assistant text;
 - expose narrowly scoped browser-side tools to the agent;
 - resume or end sessions; and
@@ -223,7 +223,7 @@ const path = await session.uploadAsset(file);
 const assets = await session.listAssets();
 ```
 
-The physical shared App/Agent directory is `.pedelec-runtime/assets/`. In the SDK contract, `assets/` is its implicit root: `listAssets()` recursively lists regular files at every level as a flat array, ordered by filesystem modification time (newest first) and then by name; nested paths such as `/results/report.json` are returned in full. Directory entries and symlinks are excluded, as are `.pedelec-*` entries at every level; other dotfiles are included. It may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution.
+Assets are stored in the Workspace shared by the Session. The physical shared App/Agent directory is `.pedelec-runtime/assets/`. In the SDK contract, `assets/` is its implicit root: `listAssets()` recursively lists regular files at every level as a flat array, ordered by filesystem modification time (newest first) and then by name; nested paths such as `/results/report.json` are returned in full. Directory entries and symlinks are excluded, as are `.pedelec-*` entries at every level; other dotfiles are included. It may run while the agent runs. One session can only upload one file at a time, but uploads can run alongside prepare or agent execution. When several sessions share a Workspace, they share this `.pedelec-runtime/assets/` area.
 
 ```ts
 const text = await session.readAsset("/report.txt", "text");
@@ -235,37 +235,66 @@ Public asset paths use `/...` with `assets/` as their implicit root; nested path
 
 ## Workspace
 
-Workspace is the filesystem root in which the Agent works. Pedelec stores its private runtime data under `<workspace>/.pedelec-runtime/`.
+Workspace is the filesystem root in which the Agent works. Pedelec stores its private runtime data under `<workspace>/.pedelec-runtime/`. There are two supported flows:
 
-By default, each session receives a temporary Desktop-managed workspace. To use an application-owned workspace that can persist across sessions, pass an absolute path:
+### Explicit Workspace
 
 ```ts
-const session = await pedelec.createSession({
-  provider: "codex",
-  workspace: { path: "C:\\workspace\\project-a" },
+const workspace = await pedelec.openWorkspace();
+if (!workspace) return;
+
+const session = await workspace.createSession({
+  model: "gpt-5.6-sol",
+  effort: "high",
 });
 ```
 
-Pedelec creates `.pedelec-runtime/` with missing `assets/`, `logs/`, `skills/`, and `tmp/` subdirectories, preserving existing project files and existing private data. It never deletes an explicit workspace, and multiple active sessions may share it. Filesystem write conflicts are the application's responsibility. An explicit path must not overlap Pedelec's managed workspace root.
-
-## Selecting an Application Workspace
-
-Use `workspaceFolderPicker()` when the application wants the user to choose a local workspace before creating a session:
+`openWorkspace()` without a path opens the native folder picker. User cancellation resolves to `null`; no Workspace or Session is created. The returned `PedelecWorkspace` handle is the object to retain and reuse. An explicit path bypasses the picker:
 
 ```ts
-const folder = await pedelec.workspaceFolderPicker();
-if (!folder) return; // The user cancelled the native picker.
+const workspace = await pedelec.openWorkspace("C:\\workspace\\project-a");
+```
 
-if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
-  // The application decides whether to warn the user.
+Pedelec initializes `.pedelec-runtime` for Workspace-owned runtime data without clearing project files or existing private data. Assets, logs, and temporary data are Workspace-level, while generated Session skills and Deno Module state are isolated per Thread. Applications should not depend on the private `.pedelec-runtime` subdirectory layout. Explicit Workspaces are application-managed, are never deleted by Pedelec, and can own multiple Sessions. An explicit path must not overlap Pedelec's managed workspace root.
+
+### Managed convenience
+
+```ts
+const session = await pedelec.createSession({
+  effortLevel: "high",
+});
+console.log(session.workspace.path); // null for managed Workspace
+```
+
+`Pedelec.createSession()` creates a temporary Desktop-managed Workspace automatically. It no longer accepts Workspace configuration; use `openWorkspace()` followed by `workspace.createSession()` for an explicit Workspace. Every created or resumed Session exposes its Workspace as `session.workspace`.
+
+### Workspace methods
+
+`workspace.listFiles(path?)` and `workspace.listFolders(path?)` recursively return Workspace-relative paths. An omitted path lists from the Workspace root; `/` is the separator and results are lexicographically sorted. The `.pedelec-runtime` directory is included. Symlinks and junctions are neither followed nor returned. Results are not silently truncated: an oversized response fails with `WORKSPACE_LIST_TOO_LARGE`, so retry with a narrower path.
+
+`workspace.run(script, options?)` executes application-supplied Deno code in the Workspace:
+
+```ts
+const result = await workspace.run(
+  "console.log(JSON.stringify({ ok: true }))",
+  { timeoutMs: 60_000 },
+);
+
+if (result.stdoutTruncated) {
+  throw new Error("Workspace script output was truncated");
 }
-
-const session = await pedelec.createSession({
-  workspace: { path: folder.path },
-});
+const value = JSON.parse(result.stdout);
 ```
 
-`workspaceFolderPicker()` returns `Promise<WorkspaceFolderPickerResult | null>`. It is a read-only snapshot: it does not validate or initialize the selected folder, create workspace directories, or create the workspace marker. `isEmptyFolder` only reports whether the selected folder root has any filesystem entry. `hasWorkspaceConfig` is true only when `.pedelec-workspace.json` exists as a regular file; its JSON is not parsed. The picker requires the same origin approval as other sensitive Desktop APIs, and cancellation returns `null`. `createSession()` still applies the full workspace rules and creates the marker after successful custom workspace initialization. The marker currently records the SDK version and normalized caller origin but does not restrict reuse by origin or SDK version.
+The default timeout is 60 seconds; `timeoutMs` must be a positive integer. The return value is the raw `DenoRunOutput` shape: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`, and `stderrTruncated`. A non-zero `exitCode` still resolves normally. The application parses `stdout` when it wants a function-like return value. Check truncation flags before relying on output; an oversized browser response fails with `WORKSPACE_RUN_OUTPUT_TOO_LARGE`.
+
+`workspace.run()` has read and write access to the Workspace, but no network, host environment, subprocess execution, FFI, or `sys` permission. The existing no-remote, cached-only, and no-npm runtime restrictions still apply. This is a direct deterministic capability for an approved Web application to read and modify the opened Workspace; it is not unrestricted host code execution and is not mediated by an Agent.
+
+Several `workspace.run()` calls in one Workspace may execute concurrently. A Workspace run cannot start while any Session in that Workspace has an active Agent/provider operation. Conversely, a Session in that Workspace cannot begin `sendText()` or provider preparation while one or more Workspace runs are active. This rule is Workspace-wide, including operations started through another `PedelecSession` handle; conflicts reject with `WORKSPACE_BUSY`.
+
+Session `skills.denoModules` belong to the Session/Thread that declares them and are available only to Agent-side `pedelec-deno` execution for that Thread. `workspace.run()` does not inherit any Session Deno Modules and the Workspace has no Deno Module registration API. `workspace.run()` is intentionally Workspace-only: it does not choose a Session and does not receive a Session import map.
+
+The Workspace handle outlives an individual Session conceptually. Ending a Session does not close or delete a custom Workspace, and Pedelec does not delete it during app cleanup. Managed Workspaces remain under Desktop cleanup ownership and are not promised to disappear immediately when a Thread ends. The browser capability is runtime-scoped; reopen the custom Workspace after a Desktop/Core restart when necessary. `pedelec.resumeSession(sessionId)` returns a Session that already includes `session.workspace`; the application does not need to call `openWorkspace()` separately. Same-handle `session.resume()` preserves the existing Workspace handle, subject to the existing Core/thread and transport caveats.
 
 ---
 

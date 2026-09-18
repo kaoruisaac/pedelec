@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import { ProviderCode, Pedelec, defineTool, type Effort, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema, defineDenoModule } from "@kaoruisaac/pedelec";
+import { ProviderCode, Pedelec, PedelecWorkspace, defineTool, type Effort, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema, type WorkspaceRunResult, defineDenoModule } from "@kaoruisaac/pedelec";
 
 const MAX_EVENTS = 300;
 const MAX_ASSET_SIZE_BYTES = 100 * 1024 * 1024;
@@ -53,7 +53,7 @@ type DemoSessionState = {
   sessionId: string;
   provider: string;
   effortLevel?: "default" | "low" | "high";
-  workspacePath?: string;
+  workspacePath: string | null;
   resumed: boolean;
   status: SessionStatus;
   transcript: DemoChatMessage[];
@@ -160,8 +160,14 @@ export default function App() {
   const [model, setModel] = createSignal("");
   const [effortLevel, setEffortLevel] = createSignal<"default" | "low" | "high">("default");
   const [effort, setEffort] = createSignal<Effort | "">("");
-  const [workspacePath, setWorkspacePath] = createSignal("");
+  const [selectedWorkspace, setSelectedWorkspace] = createSignal<PedelecWorkspace | null>(null);
   const [workspacePicking, setWorkspacePicking] = createSignal(false);
+  const [workspaceListPath, setWorkspaceListPath] = createSignal("");
+  const [workspaceOperation, setWorkspaceOperation] = createSignal<"idle" | "files" | "folders" | "run">("idle");
+  const [workspaceFiles, setWorkspaceFiles] = createSignal<string[]>([]);
+  const [workspaceFolders, setWorkspaceFolders] = createSignal<string[]>([]);
+  const [workspaceScript, setWorkspaceScript] = createSignal("console.log(JSON.stringify({ ok: true }));");
+  const [workspaceRunResult, setWorkspaceRunResult] = createSignal<WorkspaceRunResult | null>(null);
   const [resumeId, setResumeId] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
   const [selectedAsset, setSelectedAsset] = createSignal<File | null>(null);
@@ -173,6 +179,7 @@ export default function App() {
   let assetFileInput: HTMLInputElement | undefined;
 
   const activeSession = createMemo(() => sessions().find((session) => session.sessionId === activeSessionId()));
+  const workspaceTarget = createMemo(() => selectedWorkspace() ?? activeSession()?.session.workspace ?? null);
   const allErrors = createMemo(() => {
     const sessionErrors = activeSession()?.errors ?? [];
     return [...sessionErrors, ...globalErrors()].sort((a, b) => b.createdAt - a.createdAt);
@@ -219,8 +226,13 @@ export default function App() {
     setProviders([]);
     setProvidersLoading(false);
     setProvider("");
-    setWorkspacePath("");
+    setSelectedWorkspace(null);
     setWorkspacePicking(false);
+    setWorkspaceListPath("");
+    setWorkspaceFiles([]);
+    setWorkspaceFolders([]);
+    setWorkspaceRunResult(null);
+    setWorkspaceOperation("idle");
     setSelectedAsset(null);
     clearAssetFileInput();
     setConnection(initializeClient(setClient));
@@ -268,9 +280,8 @@ export default function App() {
     const sdk = client();
     if (!sdk || workspacePicking()) return;
 
-    const selectedWorkspacePath = workspacePath();
+    const explicitWorkspace = selectedWorkspace();
     const selectedModel = model().trim();
-    const workspace = selectedWorkspacePath ? { path: selectedWorkspacePath } : undefined;
 
     try {
       const explicitMode = Boolean(selectedModel);
@@ -280,23 +291,24 @@ export default function App() {
         model: selectedModel || undefined,
         effortLevel: explicitMode ? undefined : effortLevel(),
         effort: explicitMode ? selectedEffort || undefined : undefined,
-        workspacePath: selectedWorkspacePath || undefined,
+        workspacePath: explicitWorkspace?.path ?? null,
       });
-      const session = explicitMode
-        ? await sdk.createSession({
+      const input = explicitMode
+        ? {
             provider: provider() as ProviderCode,
             model: selectedModel,
             ...(selectedEffort ? { effort: selectedEffort } : {}),
             skills: createDemoSkills(),
-            ...(workspace ? { workspace } : {}),
-          })
-        : await sdk.createSession({
+          }
+        : {
             provider: provider() as ProviderCode,
             effortLevel: effortLevel(),
             skills: createDemoSkills(),
-            ...(workspace ? { workspace } : {}),
-          });
-      registerSession(session, provider(), explicitMode ? undefined : effortLevel(), selectedWorkspacePath || undefined, false);
+          };
+      const session = explicitWorkspace
+        ? await explicitWorkspace.createSession(input)
+        : await sdk.createSession(input);
+      registerSession(session, provider(), explicitMode ? undefined : effortLevel(), false);
       setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
       recordError(toDemoError(err));
@@ -313,7 +325,7 @@ export default function App() {
     try {
       appendGlobalEvent("resume_session_requested", { sessionId });
       const session = await sdk.resumeSession(sessionId);
-      registerSession(session, "resumed", undefined, undefined, true);
+      registerSession(session, "resumed", undefined, true);
       setResumeId("");
       setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
@@ -328,15 +340,55 @@ export default function App() {
 
     setWorkspacePicking(true);
     try {
-      const folder = await sdk.workspaceFolderPicker();
-      if (folder !== null) {
-        setWorkspacePath(folder.path);
-      }
+      const workspace = await sdk.openWorkspace();
+      if (workspace !== null) setSelectedWorkspace(workspace);
     } catch (err) {
       recordError(toDemoError(err));
       markExtensionError(err);
     } finally {
       setWorkspacePicking(false);
+    }
+  }
+
+  async function listWorkspace(kind: "files" | "folders") {
+    const workspace = workspaceTarget();
+    if (!workspace) return;
+
+    setWorkspaceOperation(kind);
+    try {
+      const path = workspaceListPath().trim();
+      const values = kind === "files"
+        ? await workspace.listFiles(path || undefined)
+        : await workspace.listFolders(path || undefined);
+      if (kind === "files") setWorkspaceFiles(values);
+      else setWorkspaceFolders(values);
+      appendGlobalEvent(`workspace_list_${kind}_resolved`, { path: path || undefined, count: values.length });
+    } catch (err) {
+      recordError(toDemoError(err));
+      markExtensionError(err);
+    } finally {
+      setWorkspaceOperation("idle");
+    }
+  }
+
+  async function runWorkspaceScript() {
+    const workspace = workspaceTarget();
+    if (!workspace) return;
+
+    setWorkspaceOperation("run");
+    try {
+      const result = await workspace.run(workspaceScript(), { timeoutMs: 60_000 });
+      setWorkspaceRunResult(result);
+      appendGlobalEvent("workspace_run_resolved", {
+        exitCode: result.exitCode,
+        stdoutTruncated: result.stdoutTruncated,
+        stderrTruncated: result.stderrTruncated,
+      });
+    } catch (err) {
+      recordError(toDemoError(err));
+      markExtensionError(err);
+    } finally {
+      setWorkspaceOperation("idle");
     }
   }
 
@@ -480,7 +532,6 @@ export default function App() {
     session: PedelecSession,
     fallbackProvider: string,
     fallbackEffortLevel?: "default" | "low" | "high",
-    workspacePath?: string,
     resumed = false,
   ) {
     const existing = sessions().find((item) => item.sessionId === session.sessionId);
@@ -525,7 +576,7 @@ export default function App() {
       sessionId: session.sessionId,
       provider: session.provider || fallbackProvider || "unknown",
       effortLevel: session.effortLevel || fallbackEffortLevel,
-      workspacePath,
+      workspacePath: session.workspace.path,
       resumed,
       status: session.getStatus(),
       transcript: [],
@@ -873,9 +924,9 @@ export default function App() {
                   : "Desktop profile mode: model and explicit effort are not sent."}
               </p>
               <div class="workspace-selector">
-                <span class="workspace-label">Workspace (optional)</span>
+                <span class="workspace-label">Workspace mode</span>
                 <output class="workspace-path" aria-live="polite">
-                  {workspacePath() || "Desktop-managed temporary workspace"}
+                  {selectedWorkspace()?.path || "Managed Workspace (public path is null)"}
                 </output>
                 <div class="workspace-actions">
                   <button
@@ -884,19 +935,24 @@ export default function App() {
                     disabled={!client() || workspacePicking()}
                     onClick={() => void selectWorkspaceDirectory()}
                   >
-                    {workspacePicking() ? "Opening..." : "Select directory"}
+                    {workspacePicking() ? "Opening..." : "Open explicit Workspace"}
                   </button>
-                  <Show when={workspacePath()}>
+                  <Show when={selectedWorkspace()}>
                     <button
                       type="button"
                       class="secondary"
                       disabled={workspacePicking()}
-                      onClick={() => setWorkspacePath("")}
+                      onClick={() => setSelectedWorkspace(null)}
                     >
-                      Clear
+                      Use managed
                     </button>
                   </Show>
                 </div>
+                <p class="field-hint">
+                  {selectedWorkspace()
+                    ? "New sessions use the selected Workspace handle."
+                    : "New sessions use Pedelec.createSession() and a managed Workspace."}
+                </p>
               </div>
               <button type="submit" disabled={!canCreate()}>Create</button>
             </form>
@@ -946,8 +1002,8 @@ export default function App() {
                     <Info label="Effort" value={session().effortLevel || "unknown"} />
                     <Info label="Status" value={session().status} />
                     <Info
-                      label="Workspace"
-                      value={session().resumed ? "Unknown / resumed session" : session().workspacePath || "Desktop managed"}
+                      label="Workspace path"
+                      value={session().workspacePath ?? "Managed Workspace (path is null)"}
                     />
                     <Info label="Created" value={formatTime(session().createdAt)} />
                     <Info label="Updated" value={formatTime(session().updatedAt)} />
@@ -968,6 +1024,78 @@ export default function App() {
                       End Session
                     </button>
                   </div>
+                </div>
+              )}
+            </Show>
+          </Panel>
+
+          <Panel title="Workspace API">
+            <Show when={workspaceTarget()} fallback={<EmptyText text="Create or resume a session, or open an explicit Workspace first." />}>
+              {(workspace) => (
+                <div class="workspace-api">
+                  <p class="field-hint">
+                    Target: {workspace().path ?? "Managed Workspace (path is null)"}
+                  </p>
+                  <label>
+                    List path (optional)
+                    <input
+                      value={workspaceListPath()}
+                      placeholder="src"
+                      onInput={(event) => setWorkspaceListPath(event.currentTarget.value)}
+                    />
+                  </label>
+                  <div class="workspace-actions">
+                    <button
+                      type="button"
+                      disabled={workspaceOperation() !== "idle"}
+                      onClick={() => void listWorkspace("files")}
+                    >
+                      {workspaceOperation() === "files" ? "Listing..." : "List files"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={workspaceOperation() !== "idle"}
+                      onClick={() => void listWorkspace("folders")}
+                    >
+                      {workspaceOperation() === "folders" ? "Listing..." : "List folders"}
+                    </button>
+                  </div>
+                  <div class="workspace-results">
+                    <JsonBlock label="Files" value={workspaceFiles()} />
+                    <JsonBlock label="Folders" value={workspaceFolders()} />
+                  </div>
+                  <label>
+                    workspace.run script
+                    <textarea
+                      rows="5"
+                      value={workspaceScript()}
+                      onInput={(event) => setWorkspaceScript(event.currentTarget.value)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={workspaceOperation() !== "idle"}
+                    onClick={() => void runWorkspaceScript()}
+                  >
+                    {workspaceOperation() === "run" ? "Running..." : "Run Workspace script"}
+                  </button>
+                  <Show when={workspaceRunResult()}>
+                    {(result) => (
+                      <div class="workspace-run-result">
+                        <Info label="Exit code" value={String(result().exitCode)} />
+                        <Info label="stdout truncated" value={String(result().stdoutTruncated)} />
+                        <Info label="stderr truncated" value={String(result().stderrTruncated)} />
+                        <div class="json-block">
+                          <span>stdout (raw)</span>
+                          <pre>{result().stdout}</pre>
+                        </div>
+                        <div class="json-block">
+                          <span>stderr (raw)</span>
+                          <pre>{result().stderr}</pre>
+                        </div>
+                      </div>
+                    )}
+                  </Show>
                 </div>
               )}
             </Show>
@@ -1223,7 +1351,7 @@ function AssetUploadBlock(props: {
           if (session().uploadingAsset) return "Uploading asset...";
           if (session().status === "ended") return "Assets cannot be uploaded after the session ends.";
           if (props.selectedFile && props.selectedFile.size > MAX_ASSET_SIZE_BYTES) return "File exceeds the 100 MiB limit.";
-          return `Single files up to 100 MiB can be uploaded to this session's workspace.`;
+          return `Single files up to 100 MiB can be uploaded to the Workspace shared by this Session.`;
         };
 
         return (

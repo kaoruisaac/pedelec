@@ -58,7 +58,6 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
@@ -66,7 +65,6 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -76,10 +74,9 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 - 無 `provider`：使用 Desktop `defaultProvider` 並確認 available。
 - `provider` 可搭配 provider-independent `effortLevel`；省略時使用 `default`。
 - `model` 代表 explicit mode，可搭配 optional provider-native `effort`，不可和 `effortLevel` 共存；profile mode 的完整 model/native effort 仍由 Desktop profile 提供。
-- `workspace.path`：可選擇使用 absolute、由 application 管理的 workspace，取代 temporary managed workspace。
 - `autoEndOnDisconnect`：預設 `true`。
 
-Explicit `workspace.path` 可以是新目錄或既有目錄。Core 會建立 Pedelec 擁有的 `.pedelec-runtime/{skills,assets,logs,tmp}/` runtime 結構，但不清空既有 project 內容。Pedelec 永遠不會刪除 explicit workspace，多個 active session 也可以共用它。Path 不得與 Pedelec managed workspace root overlap；無效 path 回傳 `WORKSPACE_PATH_INVALID`。
+`createSession()` 一律使用 managed convenience flow，不接受 Workspace configuration。若要使用 application 管理的 Workspace，請呼叫 `openWorkspace()`，再用 `workspace.createSession()`。Workspace methods、lifecycle、concurrency 與 security boundary 請見 [PedelecWorkspace reference](../pedelec-workspace/)。
 
 ### Returns
 
@@ -101,28 +98,25 @@ const session = await pedelec.createSession({
 });
 ```
 
-## `workspaceFolderPicker()`
+## `openWorkspace()`
 
 ```ts
-workspaceFolderPicker(): Promise<WorkspaceFolderPickerResult | null>
+openWorkspace(): Promise<PedelecWorkspace | null>
+openWorkspace(path: string): Promise<PedelecWorkspace>
 ```
 
-透過 Pedelec Desktop 開啟作業系統的原生、僅可選取資料夾的 picker。選取資料夾時回傳 path、根目錄是否為空，以及 `.pedelec-workspace.json` 是否為 regular file；關閉或取消時 resolve `null`。
+開啟或初始化 workspace capability。省略 path 時，Pedelec Desktop 開啟原生資料夾 picker，取消時回傳 `null`；指定 path 時不會開啟 picker。回傳的 workspace 提供 `path`、`createSession()`、`listFiles()`、`listFolders()` 與 `run()`。
 
 ```ts
-const folder = await pedelec.workspaceFolderPicker();
-if (!folder) return;
+const workspace = await pedelec.openWorkspace();
+if (!workspace) return;
 
-if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
-  // application 自行決定是否警告使用者。
-}
-
-const session = await pedelec.createSession({
-  workspace: { path: folder.path },
-});
+const session = await workspace.createSession({ provider: "codex" });
+const files = await workspace.listFiles();
+const result = await workspace.run("console.log('hello');");
 ```
 
-這是敏感的 Desktop API，可能觸發目前 origin 的 approval flow。Picker 只做 read-only observation，不會驗證或初始化 workspace、建立 workspace 子目錄、parse marker JSON，也不限制 origin 或 SDK version。`isEmptyFolder` 只反映根目錄當下是否有任何 entry；`hasWorkspaceConfig` 只判斷 `.pedelec-workspace.json` 是否為 regular file，即使內容不是合法 JSON 也算存在。既有的 custom workspace validation 仍由 `createSession()` 負責；成功初始化後才建立含 SDK version 與 normalized caller origin 的 `.pedelec-workspace.json`。Picker 真正失敗時 reject `DIRECTORY_PICKER_FAILED`；使用者取消不是 error。
+這是敏感的 Desktop API，可能觸發目前 origin 的 approval flow。Workspace validation、runtime initialization 與 marker handling 由 Core 負責。不帶 path 的 picker overload 在原生 picker 開啟時不套用一般 SDK bridge timeout；explicit-path overload 會套用設定的 bridge timeout。Extension disconnect 或明確 bridge error 仍會 reject。
 
 ## `listProviders()`
 
@@ -220,7 +214,7 @@ checkAvailability(): Promise<PedelecAvailability>
 resumeSession(sessionId: string): Promise<PedelecSession<string>>
 ```
 
-讓此 SDK client 以新的 handle subscribe 到既有 Core session。這是 reattachment，不會把 `Ended` thread 重新啟用；若要在 `end()` 後繼續使用同一個 handle，請改用 `session.resume()`。
+讓此 SDK client 以新的 handle subscribe 到既有 Core session，並 hydrate 其 associated `workspace`。這是 reattachment，不會把 `Ended` thread 重新啟用；回傳的 Session 已經包含 `session.workspace`，不需要另外呼叫 `openWorkspace()`。若要在 `end()` 後繼續使用同一個 handle，請改用 `session.resume()`。
 
 ```ts
 const session = await pedelec.resumeSession(savedSessionId);
@@ -230,7 +224,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 | --- | --- | --- |
 | `sessionId` | `string` | Non-empty Core session/thread identifier。 |
 
-回傳註冊於此 client 的 session handle。目前 bridge 只回傳 ID，因此新的 resumed handle 可能沒有 provider/effort metadata。若 Core session 已是 `Ended`，這個 handle 會維持 `ended`，直到明確呼叫 `session.resume()`（且 workspace 仍可載入）或建立新的 session。
+回傳註冊於此 client 的 session handle，並 hydrate 其 owning `workspace`。若 Core session 已是 `Ended`，這個 handle 會維持 `ended`，直到明確呼叫 `session.resume()`（且 workspace 仍可載入）或建立新的 session。
 
 常見 errors：空 ID 的 `INVALID_INPUT`、approval errors、caller origin 無法傳遞時的 `SDK_ORIGIN_UNAVAILABLE`、session 屬於其他 origin 時的 `THREAD_ACCESS_DENIED`、Core 已找不到 ID 時的 `THREAD_NOT_FOUND`，以及 transport errors。
 

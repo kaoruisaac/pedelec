@@ -11,7 +11,7 @@ sidebar:
 import type { PedelecSession } from "@kaoruisaac/pedelec";
 ```
 
-Application 應透過 `Pedelec.createSession()` 或 `Pedelec.resumeSession()` 取得，不直接 constructor。符合條件的 ended handle 可再用 `session.resume()` 明確 reactivation。
+Application 應透過 `Pedelec.createSession()`、`PedelecWorkspace.createSession()` 或 `Pedelec.resumeSession()` 取得，不直接 constructor。符合條件的 ended handle 可再用 `session.resume()` 明確 reactivation。
 
 ## Type parameter
 
@@ -46,6 +46,14 @@ readonly effortLevel?: "default" | "low" | "high"
 ```
 
 此 session 選擇的 normalized Desktop profile level。Explicit model session 會是 `undefined`；fresh resume handle 也可能因 bridge 只回傳 ID 而為 `undefined`。
+
+### `workspace`
+
+```ts
+readonly workspace: PedelecWorkspace
+```
+
+這個 Session 共用的 Workspace capability。Managed session 會取得 managed Workspace handle；由 `workspace.createSession()` 建立的 session 會保留同一個 Workspace object。`session.end()` 後這個 handle 仍然存在。直接 filesystem methods 與 Workspace-wide admission rules 請見 [PedelecWorkspace reference](../pedelec-workspace/)。
 
 ### `sessionCreatedAt`
 
@@ -115,7 +123,7 @@ uploadAsset(file: File): Promise<AssetPath>
 uploadAsset(file: File, targetPath: AssetPath): Promise<AssetPath>
 ```
 
-Session 尚未結束時可 upload 一個 browser `File`。upload 可與 prepare、send 和 provider execution 同時進行，但每個 session 只允許一個 upload。單檔上限 100 MiB；實體儲存於 `.pedelec-runtime/assets/`，成功時回傳以 `assets/` 為 SDK 隱含根目錄的 `/...` path。傳入 `targetPath` 可精確寫入 nested path，自動建立父目錄並覆蓋既有一般檔案。
+Session 尚未結束時可 upload 一個 browser `File`。upload 可與 prepare、send 和 provider execution 同時進行，但每個 session 只允許一個 upload。檔案儲存在 Session 共用的 Workspace，實體位置是 `.pedelec-runtime/assets/`；成功時回傳以 `assets/` 為 SDK 隱含根目錄的 `/...` path。傳入 `targetPath` 可精確寫入 nested path，自動建立父目錄並覆蓋既有一般檔案。
 
 內容經由 Desktop 內部的 `127.0.0.1` loopback asset transfer server 傳輸，不經 Extension、Native Messaging 或 Core IPC message body。SDK request、loopback upload `PUT` 與 ticket 都可能失敗，請見 [Error Codes](./error-codes/)。
 
@@ -125,7 +133,7 @@ Session 尚未結束時可 upload 一個 browser `File`。upload 可與 prepare�
 listAssets(): Promise<Asset[]>
 ```
 
-以 flat array 回傳 App 與 Agent 共用的實體 `.pedelec-runtime/assets/` 目錄所有層級中已完成的一般檔案。依 filesystem modification time 由新到舊排序；時間相同時依 `name` 排序。資料夾項目不會回傳，file 與 directory symlink 也不會回傳或被跟隨。所有層級 basename 以 `.pedelec-` 開頭的 entry 都會排除；其他 dotfile 與 dot-directory 中的檔案會列出。
+以 flat array 回傳 App 與 Agent 共用 Workspace 的實體 `.pedelec-runtime/assets/` 目錄所有層級中已完成的一般檔案。依 filesystem modification time 由新到舊排序；時間相同時依 `name` 排序。資料夾項目不會回傳，file 與 directory symlink 也不會回傳或被跟隨。所有層級 basename 以 `.pedelec-` 開頭的 entry 都會排除；其他 dotfile 與 dot-directory 中的檔案會列出。
 
 `name` 是 basename，`path` 是相對於 `assets/` 的完整 public path，例如 `/results/report.json`。`modifiedAt` 是 filesystem modification time，不保證等同精確的 write completion timestamp。Agent 執行期間仍可 listing；session 正在結束或已結束時會 reject `SESSION_ENDED`。目前不支援 pagination、delete、rename 或 move。
 
@@ -137,7 +145,7 @@ readAsset<T = JsonValue>(path: AssetPath, type: "json"): Promise<T>
 readAsset(path: AssetPath, type: "file"): Promise<File>
 ```
 
-讀取實體 shared session `.pedelec-runtime/assets/` 中的已知檔案，使用 `/results/report.json` 之類的 nested public path。Path 必須以 `/` 開頭、使用 `/`，且不能包含空 segment、`.` 或 `..`。
+讀取 Workspace shared 的實體 `.pedelec-runtime/assets/` 中的已知檔案，使用 `/results/report.json` 之類的 nested public path。Path 必須以 `/` 開頭、使用 `/`，且不能包含空 segment、`.` 或 `..`。
 
 單檔 read 上限為 100 MiB。prepare、send 或 provider execution 進行時仍可讀取；session 正在結束或已結束時會 reject `SESSION_ENDED`。若 Agent 可能仍在寫入相同 path，application 或 agent workflow 應先協調完成時機再讀取。
 
@@ -330,7 +338,7 @@ end(): Promise<void>
 - session 從 client registry 移除；
 - 後續 `sendText()`／`prepare()` 在同一個 handle 成功 `resume()` 前 reject。
 
-呼叫 `end()` 會結束 session，但不會立即刪除其 workspace。未指定 `workspace.path` 時，session 使用 Desktop 管理的暫存資料：Desktop App 正常退出時清除 managed workspace，異常終止遺留的內容會在下次啟動時嘗試清除。指定 absolute `workspace.path` 時，workspace 由 application 管理，Pedelec 在 session 結束、App 退出或 stale cleanup 時都不會刪除它，多個 active session 可以共用。關閉主視窗只會隱藏 App，不會觸發 managed cleanup。即使 workspace 仍存在，ended session 也不能使用 `uploadAsset()`、`listAssets()` 或 `readAsset()`；shared workspace 的 filesystem conflict 由 application 負責，explicit path 不得與 managed workspace root overlap。
+呼叫 `end()` 會結束 session，但不會立即刪除其 workspace。`pedelec.createSession()` 建立的 session 使用 Desktop 管理的暫存資料：Desktop App 正常退出時清除 managed workspace，異常終止遺留的內容會在下次啟動時嘗試清除。`workspace.createSession()` 建立的 session 使用 `openWorkspace()` 回傳的 application-managed workspace；Pedelec 在 session 結束、App 退出或 stale cleanup 時都不會刪除它，多個 active session 可以共用。關閉主視窗只會隱藏 App，不會觸發 managed cleanup。即使 workspace 仍存在，ended session 也不能使用 `uploadAsset()`、`listAssets()` 或 `readAsset()`；shared workspace 的 filesystem conflict 由 application 負責，explicit path 不得與 managed workspace root overlap。
 
 Already-ended handle 呼叫 `end()` 立即 resolve。
 

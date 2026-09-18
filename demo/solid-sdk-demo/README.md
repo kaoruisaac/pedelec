@@ -12,8 +12,9 @@ It demonstrates:
 - `sendText`, completed chat messages, streaming chat deltas, session errors, and ended sessions
 - frontend tool handlers and tool result/error display
 - per-session transcript, tool call log, error log, and debug event log
-- selecting an optional application-owned workspace with `workspaceFolderPicker()`
-- creating sessions with an explicit workspace
+- the managed `Pedelec.createSession()` flow and explicit `PedelecWorkspace.createSession()` flow
+- `session.workspace.path` visibility without exposing a Desktop-managed absolute path
+- `workspace.listFiles()`, `workspace.listFolders()`, and `workspace.run()` with raw output/truncation flags
 
 ## Install
 
@@ -59,15 +60,15 @@ The page registers these frontend tools:
 
 Unknown tools return a structured `TOOL_HANDLER_NOT_FOUND` result.
 
-## Optional Workspace
+## Workspace flows
 
-The Create Session panel can optionally select the workspace used by a new session:
+The Create Session panel makes the two public flows explicit:
 
-- Leave Workspace unselected to use the Desktop-managed temporary workspace.
-- Select directory to choose an application-owned workspace with the native directory picker.
-- Click Clear to return to the Desktop-managed temporary workspace.
+- Leave the Workspace in managed mode to call `pedelec.createSession()`.
+- Click Open explicit Workspace to call `pedelec.openWorkspace()`. Cancellation leaves the current selection unchanged; a selected `PedelecWorkspace` handle is retained and used for `selectedWorkspace.createSession()`.
+- Click Use managed to switch future sessions back to the managed flow. Existing sessions keep their own `session.workspace` handle, so multiple sessions can share one explicit Workspace.
 
-The selected workspace remains in the form after a session is created, so consecutive demo sessions can share it.
+The Workspace API panel exercises the active/selected Workspace directly. Its list path is omitted when empty, and the script result displays `exitCode`, raw `stdout`/`stderr`, and both truncation flags without parsing stdout.
 
 ## Common Errors
 

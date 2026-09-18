@@ -1,0 +1,96 @@
+---
+title: PedelecWorkspace API
+description: Workspace 的 path、session、filesystem listing、Deno execution、lifecycle 與安全邊界 reference。
+sidebar:
+  order: 3
+---
+
+`PedelecWorkspace` 是 application 操作單一 Workspace filesystem 的 capability。它可由 `pedelec.openWorkspace()`、`session.workspace` 或 `resumeSession().workspace` 取得。
+
+```ts
+import type { PedelecWorkspace, WorkspaceRunResult } from "@kaoruisaac/pedelec";
+```
+
+## `path`
+
+```ts
+readonly path: string | null
+```
+
+Explicit Workspace 會暴露通過 validation 的 custom path。Desktop-managed Workspace 刻意暴露 `null`；application 不應推測或顯示它的 physical managed directory。
+
+## 開啟 Workspace 與建立 Sessions
+
+```ts
+const workspace = await pedelec.openWorkspace();
+if (!workspace) return; // 使用者取消原生 picker
+
+const session = await workspace.createSession({
+  model: "gpt-5.6-sol",
+  effort: "high",
+});
+```
+
+傳入 absolute path 可跳過 picker：
+
+```ts
+const workspace = await pedelec.openWorkspace("C:\\workspace\\project-a");
+const first = await workspace.createSession();
+const second = await workspace.createSession();
+```
+
+一個 Workspace 可以擁有多個 Sessions。透過這個 handle 建立的 session 會保留同一個 Workspace capability。`pedelec.createSession()` 是 managed convenience flow，不接受 Workspace configuration；但回傳的 `session.workspace` 仍然可使用。
+
+## `listFiles(path?)`
+
+```ts
+listFiles(path?: string): Promise<string[]>
+```
+
+遞迴列出 Workspace-relative `path` 下的一般檔案。省略 path 代表 Workspace root。結果使用 `/` separator、以 Workspace-relative path 回傳，並依 lexicographic 順序排序。`.pedelec-runtime` 會包含在結果中。Symlink 與 junction 不會被跟隨，也不會回傳。
+
+結果會以單一 response 回傳，不會靜默截斷。結果過大時 reject `WORKSPACE_LIST_TOO_LARGE`；請改列較窄的 path。
+
+## `listFolders(path?)`
+
+```ts
+listFolders(path?: string): Promise<string[]>
+```
+
+除了回傳 directories 外，root、relative path、separator、sorting、`.pedelec-runtime`、symlink/junction 與 response size 行為都與 `listFiles()` 相同。
+
+## `run(script, options?)`
+
+```ts
+run(script: string, options?: { timeoutMs?: number }): Promise<WorkspaceRunResult>
+```
+
+在此 Workspace 執行 application 提供的 Deno code。Default timeout 是 60 秒；override 必須是 positive integer。
+
+```ts
+const result = await workspace.run(
+  "console.log(JSON.stringify({ ok: true }))",
+  { timeoutMs: 60_000 },
+);
+
+if (result.stdoutTruncated || result.stderrTruncated) {
+  throw new Error("Workspace script output was truncated");
+}
+const value = JSON.parse(result.stdout);
+```
+
+Result 是 raw Deno output：`exitCode`、`stdout`、`stderr`、`stdoutTruncated` 與 `stderrTruncated`。非零 `exitCode` 仍會正常 resolve；如何解讀由 application 決定，需要 function-like value 時再自行 parse `stdout`。Browser response 過大時 reject `WORKSPACE_RUN_OUTPUT_TOO_LARGE`。
+
+## Security boundary
+
+`workspace.run()` 是 approved Web application 的直接 capability。Deno code 可以讀寫 Workspace，但沒有 network、host environment、subprocess execution、FFI 或 `sys` permission；既有 no-remote、cached-only 與 no-npm runtime restrictions 仍適用。這不是 unrestricted host code execution，也不是 Agent-mediated action。
+
+`skills.denoModules` 屬於宣告它的 Session/Thread，只提供給該 Thread 的 Agent-side `pedelec-deno` execution。`workspace.run()` 不會繼承任何 Session import map，Workspace 目前也沒有 Deno Module registration API。它刻意是 Workspace-only，不會選擇 Session。
+
+## Concurrency 與 lifetime
+
+同一個 Workspace 的多個 `workspace.run()` 可以 concurrent 執行。只要該 Workspace 中任一 Session 有 active Agent/provider operation，就不能開始 Workspace run。反過來，只要一個或多個 Workspace runs active，該 Workspace 中的 Session 也不能開始 `sendText()` 或 provider preparation。這是 Workspace-wide 規則，即使 active operation 來自另一個 `PedelecSession` handle 也一樣；衝突會 reject `WORKSPACE_BUSY`。
+
+Custom Workspace 是明確開啟的，可以由多個 Session 共用，也會在 Session 結束或 app cleanup 時由 Pedelec 保留、不刪除。Managed Workspace 由 `Pedelec.createSession()` 自動建立，cleanup 由 Desktop 負責；Thread 結束不代表會立即刪除。Browser capability 受 runtime scope 限制，Desktop/Core restart 後需要時請重新開啟 custom Workspace。
+
+`resumeSession(sessionId)` 回傳的 Session 已經包含 `session.workspace`；不需要另外呼叫 `openWorkspace()`。同一 handle 的 `session.resume()` 會保留既有 Workspace handle，但仍受 transport、Core thread 與 recorded Workspace caveats 限制。

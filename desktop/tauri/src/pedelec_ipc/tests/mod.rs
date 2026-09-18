@@ -10,7 +10,7 @@ mod tests {
         PedelecSettings, PendingProviderOperation, PendingProviderOperationKind,
         PersistentRuntimeOperation, ProviderCode, ProviderRuntimeEvent, ProviderSessionState,
         ThreadOperationKind, ThreadSnapshot, ThreadState, ThreadStatus, ThreadSubscription,
-        ToolRegistry, WorkspaceManager,
+        ToolRegistry, WorkspaceKind, WorkspaceManager,
     };
     use serde_json::{json, Value};
     use std::env;
@@ -444,6 +444,7 @@ mod tests {
                 events: event_rx,
                 snapshot: ThreadSnapshot {
                     thread_id: "thread_cutoff".into(),
+                    workspace_id: "workspace-cutoff".into(),
                     status: ThreadStatus::Idle,
                     latest_seq: 1,
                     usage: None,
@@ -1745,7 +1746,7 @@ mod tests {
                 }],
                 deno_modules: vec![],
             }),
-            workspace: None,
+            workspace_id: None,
         });
 
         assert_eq!(
@@ -2056,13 +2057,17 @@ mod tests {
         runtime.workspace_manager = WorkspaceManager::with_workspace_root(&workspace_root);
         let workspace_path = workspace_root.join(thread_id);
         std::fs::create_dir_all(workspace_logs_root(&workspace_path)).unwrap();
+        let workspace_id = format!("workspace-{thread_id}");
+        runtime
+            .register_workspace_for_test(&workspace_id, &workspace_path, WorkspaceKind::Custom)
+            .unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id,
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: vec![],
-                workspace_path,
                 skills: vec![],
                 status: status.clone(),
                 created_at: now,

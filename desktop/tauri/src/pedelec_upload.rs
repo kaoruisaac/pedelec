@@ -591,7 +591,7 @@ mod tests {
         workspace_assets_root, workspace_deno_modules_root, workspace_tmp_root, AssetUploadState,
         CoreRuntime, CreateAssetUploadInput, CreateDenoModuleUploadInput, DenoModuleSetupState,
         DenoModuleState, DenoModuleUploadState, EffortLevel, ProviderCode, ProviderSessionState,
-        ThreadState, ThreadStatus,
+        ThreadState, ThreadStatus, WorkspaceKind,
     };
     use std::io::{Read, Write};
     use std::net::Shutdown;
@@ -604,13 +604,18 @@ mod tests {
         let workspace_path = temp.path().join("workspace");
         let thread_id = "thread_upload_layout".to_string();
         let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-upload-layout";
+        runtime_guard
+            .register_workspace_for_test(workspace_id, &workspace_path, WorkspaceKind::Custom)
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.clone(),
+                workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: vec![],
-                workspace_path: workspace_path.clone(),
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 created_at: Utc::now(),
@@ -622,6 +627,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
 
         let port = start_asset_upload_server(runtime.clone()).unwrap();
         let payload = b"private asset layout";
@@ -686,13 +692,18 @@ mod tests {
         let thread_id = "thread_deno_transfer".to_string();
         std::fs::create_dir_all(&workspace_path).unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-deno-transfer";
+        runtime_guard
+            .register_workspace_for_test(workspace_id, &workspace_path, WorkspaceKind::Custom)
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.clone(),
+                workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: vec![],
-                workspace_path: workspace_path.clone(),
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 created_at: Utc::now(),
@@ -704,6 +715,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
         runtime.lock().unwrap().deno_modules.insert(
             thread_id.clone(),
             vec![DenoModuleState {

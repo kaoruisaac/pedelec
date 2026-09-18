@@ -97,7 +97,7 @@ pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path
 
 ### Workspace ownership
 
-未指定 `workspace.path` 時，Desktop Runtime 會在 `~/.pedelec/workspaces/<threadId>` 建立 temporary managed workspace，並負責 cleanup。Application 也可以傳入 absolute `workspace.path`，選擇由 application 管理的 workspace。Pedelec 會建立 `.pedelec-runtime/{assets,logs,skills,tmp}/`，保留既有 project content 與 private data，且永遠不會刪除 explicit workspace。多個 active session 可以共用同一個 path；filesystem write coordination 由 application 負責。Explicit path 不得與 managed workspace root overlap。
+使用 `pedelec.createSession()` 建立的 session 會取得 temporary managed Workspace；physical location 與 cleanup 由 Desktop 負責，SDK 的 public `workspace.path` 會是 `null`。Application 管理的 Workspace 透過 `pedelec.openWorkspace(path)` 選取，再使用 `workspace.createSession()`。Pedelec 會初始化 `.pedelec-runtime` 來存放 Workspace-owned runtime data：assets、logs 與 temporary data 位於 Workspace 層級，generated Session skills 與 Deno Module state 則按 Thread 隔離。Application 不應依賴 private `.pedelec-runtime` 的子目錄 layout。Pedelec 會保留既有 project content 與 private data，且永遠不會刪除 application-managed Workspace。多個 active Session 可以共用；filesystem write coordination 由 application 負責。Explicit path 不得與 managed Workspace root overlap。
 
 ## `sendText()` 的資料流
 

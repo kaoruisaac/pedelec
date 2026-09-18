@@ -57,14 +57,29 @@ try {
 | `CORE_RUNTIME_UNAVAILABLE` | Native host 在任何 background launch attempt 後仍無法連到 valid Core | 手動開啟 Desktop，或修復 installation/launch config | Core ready 後 |
 | `IPC_UNAVAILABLE` | Local Core IPC bind/connect/parse/respond 失敗 | 重啟 Desktop App、查看 local logs | Recovery 後 |
 | `MESSAGE_TOO_LARGE` | Local IPC message 超過 size limit | 縮小 prompt/tool/result payload | 只在資料縮小後 |
+| `WORKSPACE_LIST_TOO_LARGE` | Workspace file/folder listing 無法放入 browser transport envelope | 改列較窄的 workspace path | 縮小結果後 |
+| `WORKSPACE_RUN_OUTPUT_TOO_LARGE` | Workspace script 的 stdout/stderr 無法放入 browser transport envelope | 減少 script output，或寫入 workspace file | 縮小 output 後 |
 | `SDK_BRIDGE_TIMEOUT` | Extension 未在 `bridgeTimeoutMs` 內回應 | 檢查下游 layers，不要重複 write | 診斷後 |
 | `DIRECTORY_PICKER_FAILED` | 原生 directory picker 無法建立、顯示，或無法轉換成 SDK path result | 請使用者重試並檢查 Desktop/native dialog 支援；取消不是 error | 修復 dialog/runtime 問題後 |
 | `WORKSPACE_PATH_INVALID` | Workspace path 不是 absolute、不是 directory、與 managed workspace root overlap，或無法解析 | 選擇有效的 application-managed workspace path | 修正 path 後 |
 | `WORKSPACE_CREATE_FAILED` | Pedelec 無法建立或初始化 managed workspace 或其 private runtime data | 保留 application-owned workspace，查看 error details | 修復 filesystem 問題後 |
 | `WORKSPACE_REMOVE_FAILED` | Pedelec 無法移除 managed temporary workspace | 保留 path 供後續 cleanup，查看 locked file 或 permission details | filesystem 問題解除後 |
-| `WORKSPACE_OPEN_FAILED` | Desktop 無法開啟已驗證的 thread workspace folder | 檢查 folder 與 OS opener integration | 修復 opener 問題後 |
+| `WORKSPACE_OPEN_FAILED` | Desktop 無法開啟已驗證的 Workspace folder | 檢查 folder 與 OS opener integration | 修復 opener 問題後 |
+| `WORKSPACE_NOT_FOUND` | Workspace capability 或記錄的 directory 已不存在 | 重新開啟 custom Workspace 或建立新的 Session；不要只用 path 重建 handle | Workspace 恢復後 |
+| `WORKSPACE_ACCESS_DENIED` | Process 無法讀取、寫入或初始化指定 Workspace path | 檢查 OS permissions、ownership、locks 與 application access grant | 修正 permissions 後 |
+| `WORKSPACE_BUSY` | Workspace-wide admission rule 阻擋 operation：`workspace.run()` 遇到 active Agent/provider operation，或 Session 在 Workspace run active 時嘗試開始 provider work | 等待該 Workspace 的衝突 operation 全部結束；只檢查目前 Session 不足夠 | Workspace idle 後 |
 | `SDK_TRANSPORT_ERROR` | Generic bridge failure | 查看 message/details，驗證 Extension/native/Core | 視 operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape 或 request type 不相容 | 對齊 component versions，回報 reproducible mismatch | 通常修復前不可 |
+
+## Workspace Deno execution
+
+| Code | Meaning | Recommended response | Retry? |
+| --- | --- | --- | --- |
+| `DENO_EXECUTION_TIMEOUT` | Workspace Deno code 超過 timeout；default 是 60 秒 | 適當時提高 timeout，或拆分/縮短 script | 修改工作後 |
+| `DENO_EXECUTION_CANCELLED` | Workspace Deno execution 在 shutdown 或 interruption 中被取消 | Retry 前先確認 Workspace 是否有 partial writes | Workspace/runtime 可用後 |
+| `DENO_RUNTIME_UNAVAILABLE` | Bundled/cached Deno runtime 找不到或無法啟動 | 修復/重新安裝 Desktop runtime，確認 packaged Deno asset | 修復 runtime 後 |
+| `DENO_PROCESS_SPAWN_FAILED` | Desktop 無法 spawn Deno process | 檢查 Desktop installation、executable permissions 與 runtime logs | 修復 process environment 後 |
+| `DENO_PROCESS_IO_FAILED` | Deno process 的 stdin/stdout/stderr communication 失敗 | 將 operation 視為失敗，查看 runtime logs 並確認 partial writes | transport/runtime 恢復後 |
 
 ## Provider 與 configuration
 

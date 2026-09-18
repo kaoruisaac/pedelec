@@ -1570,7 +1570,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         assert!(!default_thread.explicit_model_config_applied);
@@ -1588,7 +1588,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         let low_state = runtime
@@ -1622,7 +1622,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap_err();
         assert_eq!(error.code, error_codes::MODEL_REQUIRED);
@@ -1655,7 +1655,7 @@ mod tests {
                 model: Some("  explicit-model  ".into()),
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         assert!(output.explicit_model_config_applied);
@@ -1686,7 +1686,7 @@ mod tests {
                 model: Some("explicit-model".into()),
                 effort: Some("max".into()),
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
 
@@ -1727,7 +1727,7 @@ mod tests {
                 model: Some("agy-model".into()),
                 effort: Some("medium".into()),
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         assert_eq!(
@@ -1757,7 +1757,7 @@ mod tests {
                 model: None,
                 effort: Some("high".into()),
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             },
             CreateThreadInput {
                 provider: ProviderCode::Codex,
@@ -1765,7 +1765,7 @@ mod tests {
                 model: Some("explicit-model".into()),
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             },
             CreateThreadInput {
                 provider: ProviderCode::Ollama,
@@ -1773,7 +1773,7 @@ mod tests {
                 model: Some("qwen3:30b".into()),
                 effort: Some("high".into()),
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             },
             CreateThreadInput {
                 provider: ProviderCode::Antigravity,
@@ -1781,7 +1781,7 @@ mod tests {
                 model: Some("agy-model".into()),
                 effort: Some("max".into()),
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             },
         ] {
             let error = runtime.create_thread(input).unwrap_err();
@@ -1809,7 +1809,7 @@ mod tests {
                 model: Some("explicit-model".into()),
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         assert!(output.explicit_model_config_applied);
@@ -1845,7 +1845,7 @@ mod tests {
                 model: Some("qwen3:30b".into()),
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         assert!(output.explicit_model_config_applied);
@@ -1892,7 +1892,7 @@ mod tests {
                 model: Some("  \n".into()),
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap_err();
         assert_eq!(error.code, error_codes::INVALID_INPUT);
@@ -1920,7 +1920,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
@@ -1955,7 +1955,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         let thread_id = output.thread_id.clone();
@@ -2339,10 +2339,10 @@ mod tests {
 
         let state = ThreadState {
             thread_id: "thread_abc123".into(),
+            workspace_id: "workspace-abc123".into(),
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             effort_args: vec!["-m".into(), "gpt-5".into()],
-            workspace_path: PathBuf::from("C:/tmp/pedelec/thread_abc123"),
             skills: vec![SkillFile {
                 original_url: "https://example.test/tools.md".into(),
                 original_filename: "tools.md".into(),
@@ -2358,10 +2358,11 @@ mod tests {
 
         let value = serde_json::to_value(state).unwrap();
         assert!(value.get("threadId").is_some());
-        assert!(value.get("workspacePath").is_some());
+        assert!(value.get("workspaceId").is_some());
         assert!(value.get("createdAt").is_some());
         assert!(value.get("thread_id").is_none());
         assert!(value.get("workspace_path").is_none());
+        assert!(value.get("workspacePath").is_none());
         assert!(value.get("created_at").is_none());
     }
 
@@ -2370,10 +2371,10 @@ mod tests {
         let now = chrono::Utc::now();
         let thread = ThreadState {
             thread_id: "thread_no_tools_md".into(),
+            workspace_id: "thread_no_tools_md-workspace".into(),
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
-            workspace_path: PathBuf::from("workspace").join("thread_no_tools_md"),
             skills: vec![SkillFile {
                 original_url: "https://example.test/tools.json".into(),
                 original_filename: "tools.json".into(),
@@ -2387,7 +2388,9 @@ mod tests {
             sdk_origin: None,
         };
 
-        let instruction = build_provider_instruction(&thread, &ToolRegistry::default());
+        let workspace_path = PathBuf::from("workspace").join("thread_no_tools_md");
+        let instruction =
+            build_provider_instruction(&thread, &workspace_path, &ToolRegistry::default());
 
         assert!(instruction.contains("[Pedelec Host Context]"));
         assert!(instruction.contains("Workspace Path:"));
@@ -2407,10 +2410,10 @@ mod tests {
         let now = chrono::Utc::now();
         let thread = ThreadState {
             thread_id: "thread_with_tools_md".into(),
+            workspace_id: "thread_with_tools_md-workspace".into(),
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
-            workspace_path: PathBuf::from("workspace").join("thread_with_tools_md"),
             skills: vec![],
             status: ThreadStatus::Idle,
             created_at: now,
@@ -2419,8 +2422,9 @@ mod tests {
         };
 
         let registry = ToolRegistry::from_skills_input(Some(&sample_skills_input())).unwrap();
-        let instruction = build_provider_instruction(&thread, &registry);
-        let persistent = build_persistent_host_instructions(&thread, &registry);
+        let workspace_path = PathBuf::from("workspace").join("thread_with_tools_md");
+        let instruction = build_provider_instruction(&thread, &workspace_path, &registry);
+        let persistent = build_persistent_host_instructions(&thread, &workspace_path, &registry);
 
         assert!(instruction.contains("[Pedelec Host Context]"));
         assert!(instruction.contains("[Pedelec App Tool Configuration]"));
@@ -2459,10 +2463,10 @@ mod tests {
         let now = chrono::Utc::now();
         let thread = ThreadState {
             thread_id: "thread_empty_tools".into(),
+            workspace_id: "thread_empty_tools-workspace".into(),
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
-            workspace_path: PathBuf::from("workspace").join("thread_empty_tools"),
             skills: vec![],
             status: ThreadStatus::Idle,
             created_at: now,
@@ -2477,7 +2481,8 @@ mod tests {
         }))
         .unwrap();
 
-        let instruction = build_provider_instruction(&thread, &registry);
+        let workspace_path = PathBuf::from("workspace").join("thread_empty_tools");
+        let instruction = build_provider_instruction(&thread, &workspace_path, &registry);
         let start = instruction
             .find("[Pedelec App Tool Configuration]\n")
             .unwrap()
@@ -2737,11 +2742,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let manager = WorkspaceManager::with_workspace_root(temp.path().join("workspace"));
 
-        let workspace = manager.create_thread_workspace("thread_abc123").unwrap();
+        let workspace = manager.create_managed_workspace("thread_abc123").unwrap();
 
         assert!(workspace.exists());
         assert!(workspace_runtime_data_root(&workspace).is_dir());
-        assert!(workspace_skills_root(&workspace).is_dir());
+        assert!(!workspace_skills_root(&workspace).exists());
+        assert!(workspace_threads_root(&workspace).is_dir());
         assert!(workspace_assets_root(&workspace).is_dir());
         assert!(workspace_logs_root(&workspace).is_dir());
         assert!(workspace_tmp_root(&workspace).is_dir());
@@ -2753,7 +2759,7 @@ mod tests {
             );
         }
 
-        manager.remove_thread_workspace(&workspace).unwrap();
+        manager.remove_managed_workspace(&workspace).unwrap();
         assert!(!workspace.exists());
     }
 
@@ -2780,7 +2786,7 @@ mod tests {
         fs::create_dir_all(legacy_root.join("thread_legacy")).unwrap();
         let manager = WorkspaceManager::with_workspace_root(&workspace_root);
 
-        assert!(manager.remove_all_thread_workspaces().is_empty());
+        assert!(manager.remove_all_managed_workspaces().is_empty());
         assert!(!workspace_root.join("thread_current").exists());
         assert!(legacy_root.join("thread_legacy").exists());
     }
@@ -2792,7 +2798,7 @@ mod tests {
         let skill_manager = SkillManager::default();
         let bad_urls = vec!["http://example.com/tools.md".to_string()];
 
-        let result = manager.create_thread_workspace_with("thread_rollback", |workspace| {
+        let result = manager.create_managed_workspace_with("thread_rollback", |workspace| {
             skill_manager.download_skills(workspace_skills_root(workspace), &bad_urls)
         });
 
@@ -2925,7 +2931,16 @@ mod tests {
             workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
-
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: custom.clone(),
+                },
+                "https://example.com",
+                Some("mock-sdk-version"),
+            )
+            .unwrap()
+            .workspace_id;
         let output = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
@@ -2933,19 +2948,17 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: Some(sample_skills_input()),
-                workspace: Some(CreateThreadWorkspaceInput {
-                    path: custom.clone(),
-                }),
+                workspace_id: Some(workspace_id),
             })
             .unwrap();
 
         let workspace = runtime.thread_workspace_path(&output.thread_id).unwrap();
         assert_eq!(workspace, custom.canonicalize().unwrap());
-        let generated =
-            fs::read_to_string(workspace_skills_root(&workspace).join("tools-get_app_state.json"))
-                .unwrap();
+        let generated = fs::read_to_string(
+            thread_skills_root(&workspace, &output.thread_id).join("tools-get_app_state.json"),
+        )
+        .unwrap();
         assert!(generated.contains("get_app_state"));
-        assert_ne!(generated, "OLD");
         assert_eq!(
             fs::read_to_string(workspace_skills_root(&workspace).join("unrelated.txt")).unwrap(),
             "KEEP"
@@ -2964,19 +2977,28 @@ mod tests {
             workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
-        let input = || CreateThreadInput {
-            provider: ProviderCode::Codex,
-            effort_level: None,
-            model: None,
-            effort: None,
-            skills: None,
-            workspace: Some(CreateThreadWorkspaceInput {
-                path: custom.clone(),
-            }),
-        };
-
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: custom.clone(),
+                },
+                "https://Example.com:443",
+                Some("mock-sdk-version"),
+            )
+            .unwrap();
         runtime
-            .create_sdk_thread(input(), "https://Example.com:443", Some("mock-sdk-version"))
+            .create_sdk_thread(
+                CreateThreadInput {
+                    provider: ProviderCode::Codex,
+                    effort_level: None,
+                    model: None,
+                    effort: None,
+                    skills: None,
+                    workspace_id: Some(workspace_id.workspace_id.clone()),
+                },
+                "https://Example.com:443",
+                Some("mock-sdk-version"),
+            )
             .unwrap();
         let marker = workspace_metadata_path(&custom);
         assert_eq!(
@@ -2990,7 +3012,27 @@ mod tests {
 
         fs::write(&marker, "not json").unwrap();
         runtime
-            .create_sdk_thread(input(), "https://other.example", Some("9.9.9"))
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: custom.clone(),
+                },
+                "https://other.example",
+                Some("9.9.9"),
+            )
+            .unwrap();
+        runtime
+            .create_sdk_thread(
+                CreateThreadInput {
+                    provider: ProviderCode::Codex,
+                    effort_level: None,
+                    model: None,
+                    effort: None,
+                    skills: None,
+                    workspace_id: Some(workspace_id.workspace_id),
+                },
+                "https://other.example",
+                Some("9.9.9"),
+            )
             .unwrap();
         assert_eq!(fs::read_to_string(marker).unwrap(), "not json");
     }
@@ -3003,6 +3045,16 @@ mod tests {
             workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: custom.clone(),
+                },
+                "https://example.com",
+                Some("mock-sdk-version"),
+            )
+            .unwrap()
+            .workspace_id;
 
         let invalid_skills = CreateThreadInput {
             provider: ProviderCode::Codex,
@@ -3019,9 +3071,7 @@ mod tests {
                 }],
                 deno_modules: vec![],
             }),
-            workspace: Some(CreateThreadWorkspaceInput {
-                path: custom.clone(),
-            }),
+            workspace_id: Some(workspace_id.clone()),
         };
         assert_eq!(
             runtime
@@ -3034,20 +3084,14 @@ mod tests {
                 .code,
             error_codes::TOOLS_MANIFEST_INVALID
         );
-        assert!(!workspace_metadata_path(&custom).exists());
+        assert!(workspace_metadata_path(&custom).is_file());
 
-        let marker = workspace_metadata_path(&custom);
+        let marker = temp.path().join("invalid-marker-project");
         fs::create_dir_all(&marker).unwrap();
-        let result = runtime.create_sdk_thread(
-            CreateThreadInput {
-                provider: ProviderCode::Codex,
-                effort_level: None,
-                model: None,
-                effort: None,
-                skills: None,
-                workspace: Some(CreateThreadWorkspaceInput {
-                    path: custom.clone(),
-                }),
+        fs::create_dir_all(marker.join(PEDELEC_WORKSPACE_FILE)).unwrap();
+        let result = runtime.open_workspace(
+            OpenWorkspaceInput {
+                path: marker.clone(),
             },
             "https://example.com",
             Some("mock-sdk-version"),
@@ -3056,7 +3100,7 @@ mod tests {
             result.unwrap_err().code,
             error_codes::WORKSPACE_CREATE_FAILED
         );
-        assert!(marker.is_dir());
+        assert!(marker.join(PEDELEC_WORKSPACE_FILE).is_dir());
         assert!(runtime.thread_manager.thread("thread_000001").is_err());
     }
 
@@ -3068,6 +3112,16 @@ mod tests {
             workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: custom.clone(),
+                },
+                "https://example.com",
+                Some("mock-sdk-version"),
+            )
+            .unwrap()
+            .workspace_id;
 
         let first = runtime
             .create_thread(CreateThreadInput {
@@ -3076,9 +3130,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: Some(CreateThreadWorkspaceInput {
-                    path: custom.clone(),
-                }),
+                workspace_id: Some(workspace_id.clone()),
             })
             .unwrap();
         let second = runtime
@@ -3088,9 +3140,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: Some(CreateThreadWorkspaceInput {
-                    path: custom.clone(),
-                }),
+                workspace_id: Some(workspace_id),
             })
             .unwrap();
 
@@ -3127,6 +3177,16 @@ mod tests {
             workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: custom.clone(),
+                },
+                "https://example.com",
+                Some("mock-sdk-version"),
+            )
+            .unwrap()
+            .workspace_id;
 
         let result = runtime.create_thread(CreateThreadInput {
             provider: ProviderCode::Codex,
@@ -3143,9 +3203,7 @@ mod tests {
                 }],
                 deno_modules: vec![],
             }),
-            workspace: Some(CreateThreadWorkspaceInput {
-                path: custom.clone(),
-            }),
+            workspace_id: Some(workspace_id),
         });
 
         assert_eq!(
@@ -3168,6 +3226,16 @@ mod tests {
             workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
             ..CoreRuntime::default()
         };
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: custom.clone(),
+                },
+                "https://example.com",
+                Some("mock-sdk-version"),
+            )
+            .unwrap()
+            .workspace_id;
         let custom_thread = runtime
             .create_thread(CreateThreadInput {
                 provider: ProviderCode::Codex,
@@ -3175,19 +3243,19 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: Some(CreateThreadWorkspaceInput {
-                    path: custom.clone(),
-                }),
+                workspace_id: Some(workspace_id),
             })
             .unwrap();
         runtime
             .workspace_manager
-            .create_thread_workspace("t000001")
+            .create_managed_workspace("t000001")
             .unwrap();
         fs::write(custom.join("keep.txt"), "keep").unwrap();
 
         assert!(runtime.cleanup_for_app_exit().is_empty());
-        assert!(!managed_root.join("t000001").exists());
+        assert!(fs::read_dir(&managed_root)
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(true));
         assert!(custom.exists());
         assert!(custom.join("keep.txt").exists());
         assert_eq!(
@@ -3195,7 +3263,7 @@ mod tests {
             Some(ThreadStatus::Ended)
         );
 
-        let startup_runtime = CoreRuntime {
+        let mut startup_runtime = CoreRuntime {
             workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
             ..CoreRuntime::default()
         };
@@ -4702,10 +4770,10 @@ mod tests {
         let now = chrono::Utc::now();
         let thread = ThreadState {
             thread_id: "thread_asset_isolation".into(),
+            workspace_id: "thread_asset_isolation-workspace".into(),
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             effort_args: vec![],
-            workspace_path: workspace,
             skills: vec![],
             status: ThreadStatus::Idle,
             created_at: now,
@@ -4713,7 +4781,12 @@ mod tests {
             sdk_origin: None,
         };
 
-        let error = resolve_asset_file(&thread, "/result.json").unwrap_err();
+        let error = resolve_asset_file(
+            &thread,
+            &temp.path().join("workspace/thread_asset_isolation"),
+            "/result.json",
+        )
+        .unwrap_err();
         assert_eq!(error.code, error_codes::ASSET_NOT_FOUND);
     }
 
@@ -4747,7 +4820,7 @@ mod tests {
             model: None,
             effort: None,
             skills: None,
-            workspace: None,
+            workspace_id: None,
         };
 
         let first = runtime.create_thread(input.clone()).unwrap();
@@ -4757,8 +4830,14 @@ mod tests {
         assert_eq!(second.thread_id, "t000002");
         assert_short_thread_id(&first.thread_id);
         assert_short_thread_id(&second.thread_id);
-        assert!(workspace_root.join("t000001").exists());
-        assert!(workspace_root.join("t000002").exists());
+        assert!(runtime
+            .thread_workspace_path(&first.thread_id)
+            .unwrap()
+            .exists());
+        assert!(runtime
+            .thread_workspace_path(&second.thread_id)
+            .unwrap()
+            .exists());
     }
 
     #[test]
@@ -4778,13 +4857,16 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
 
-        assert_eq!(output.thread_id, "t000002");
+        assert_eq!(output.thread_id, "t000001");
         assert_short_thread_id(&output.thread_id);
-        assert!(workspace_root.join("t000002").exists());
+        assert!(runtime
+            .thread_workspace_path(&output.thread_id)
+            .unwrap()
+            .exists());
     }
 
     #[test]
@@ -4795,14 +4877,21 @@ mod tests {
             workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
+        runtime
+            .register_workspace_for_test(
+                "workspace-existing-thread",
+                workspace_root.join("t000001"),
+                WorkspaceKind::Managed,
+            )
+            .unwrap();
         let now = chrono::Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: "t000001".into(),
+                workspace_id: "workspace-existing-thread".into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: workspace_root.join("t000001"),
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 created_at: now,
@@ -4822,13 +4911,16 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
 
         assert_eq!(output.thread_id, "t000002");
         assert_short_thread_id(&output.thread_id);
-        assert!(workspace_root.join("t000002").exists());
+        assert!(runtime
+            .thread_workspace_path(&output.thread_id)
+            .unwrap()
+            .exists());
     }
 
     #[test]
@@ -4845,7 +4937,7 @@ mod tests {
             model: None,
             effort: None,
             skills: None,
-            workspace: None,
+            workspace_id: None,
         };
         let first = runtime.create_thread(input.clone()).unwrap();
         let second = runtime.create_thread(input).unwrap();
@@ -4889,7 +4981,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
         let workspace_path = runtime.thread_workspace_path(&thread.thread_id).unwrap();
@@ -5021,9 +5113,9 @@ mod tests {
             .event_bus
             .register_thread_log(thread_id, old_log_path.clone());
         let workspace_path = runtime.thread_workspace_path(thread_id).unwrap();
-        fs::create_dir_all(workspace_skills_root(&workspace_path)).unwrap();
+        fs::create_dir_all(thread_skills_root(&workspace_path, thread_id)).unwrap();
         fs::write(
-            workspace_skills_root(&workspace_path).join("tools.json"),
+            thread_skills_root(&workspace_path, thread_id).join("tools.json"),
             json!({
                 "tools": [{
                     "name": "get_app_state",
@@ -5096,12 +5188,16 @@ mod tests {
     fn resume_thread_reactivates_an_ended_custom_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let workspace_path = temp.path().join("custom-workspace");
-        fs::create_dir_all(workspace_skills_root(&workspace_path)).unwrap();
         let thread_id = "thread_resume_custom";
         let mut runtime = CoreRuntime {
             workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
             ..CoreRuntime::default()
         };
+        let workspace_id = "workspace-resume-custom";
+        runtime
+            .register_workspace_for_test(workspace_id, &workspace_path, WorkspaceKind::Custom)
+            .unwrap();
+        fs::create_dir_all(thread_skills_root(&workspace_path, thread_id)).unwrap();
         let now = chrono::Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
@@ -5109,7 +5205,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: workspace_path.clone(),
+                workspace_id: workspace_id.into(),
                 skills: Vec::new(),
                 status: ThreadStatus::Ended,
                 created_at: now,
@@ -5221,7 +5317,7 @@ mod tests {
         )
         .unwrap();
         fs::write(workspace_root.join("keep.txt"), "not a workspace").unwrap();
-        let runtime = CoreRuntime {
+        let mut runtime = CoreRuntime {
             workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
@@ -5236,7 +5332,7 @@ mod tests {
     fn startup_cleanup_succeeds_when_workspace_root_does_not_exist() {
         let temp = tempfile::tempdir().unwrap();
         let workspace_root = temp.path().join("missing-workspace");
-        let runtime = CoreRuntime {
+        let mut runtime = CoreRuntime {
             workspace_manager: WorkspaceManager::with_workspace_root(&workspace_root),
             ..CoreRuntime::default()
         };
@@ -5246,12 +5342,12 @@ mod tests {
     }
 
     #[test]
-    fn remove_all_thread_workspaces_succeeds_when_root_does_not_exist() {
+    fn remove_all_managed_workspaces_succeeds_when_root_does_not_exist() {
         let temp = tempfile::tempdir().unwrap();
         let workspace_root = temp.path().join("missing-workspace");
         let manager = WorkspaceManager::with_workspace_root(&workspace_root);
 
-        let errors = manager.remove_all_thread_workspaces();
+        let errors = manager.remove_all_managed_workspaces();
 
         assert!(errors.is_empty());
         assert!(!workspace_root.exists());
@@ -5285,12 +5381,13 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: Some(sample_skills_input()),
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
-        let skills_dir = workspace_skills_root(&thread.workspace_path);
+        let workspace_path = runtime.thread_workspace_path(&output.thread_id).unwrap();
+        let skills_dir = thread_skills_root(&workspace_path, &output.thread_id);
         let spec = fs::read_to_string(skills_dir.join("tools-get_app_state.json")).unwrap();
 
         assert!(!skills_dir.join("tools.md").exists());
@@ -5327,12 +5424,12 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: Some(sample_skills_input()),
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
+        let workspace_path = runtime.thread_workspace_path(&output.thread_id).unwrap();
         fs::write(
-            workspace_skills_root(&workspace_root.join(&output.thread_id))
-                .join("tools-get_app_state.json"),
+            thread_skills_root(&workspace_path, &output.thread_id).join("tools-get_app_state.json"),
             "{}",
         )
         .unwrap();
@@ -5365,7 +5462,7 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: Some(sample_skills_input()),
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
 
@@ -5400,13 +5497,14 @@ mod tests {
                 model: None,
                 effort: None,
                 skills: None,
-                workspace: None,
+                workspace_id: None,
             })
             .unwrap();
 
         let thread = runtime.thread_manager.thread(&output.thread_id).unwrap();
         assert_eq!(thread.status, ThreadStatus::Idle);
-        let skills_dir = workspace_skills_root(&thread.workspace_path);
+        let workspace_path = runtime.thread_workspace_path(&output.thread_id).unwrap();
+        let skills_dir = thread_skills_root(&workspace_path, &output.thread_id);
         assert!(skills_dir.exists());
         assert!(skills_dir.is_dir());
         assert!(!skills_dir.join("tools.md").exists());
@@ -5732,13 +5830,18 @@ mod tests {
         tools_json: &str,
     ) {
         let now = chrono::Utc::now();
+        let workspace_path = PathBuf::from("workspace").join(thread_id);
+        let workspace_id = format!("test-workspace-{thread_id}");
+        runtime
+            .register_workspace_for_test(&workspace_id, &workspace_path, WorkspaceKind::Custom)
+            .unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: PathBuf::from("workspace").join(thread_id),
+                workspace_id,
                 skills: vec![],
                 status: status.clone(),
                 created_at: now,
@@ -5798,6 +5901,11 @@ mod tests {
         runtime.set_core_ipc_runtime("127.0.0.1:12345", temp.join("runtime.json"));
         let workspace_path = temp.join("workspace").join(thread_id);
         fs::create_dir_all(workspace_logs_root(&workspace_path)).unwrap();
+        fs::create_dir_all(thread_skills_root(&workspace_path, thread_id)).unwrap();
+        let workspace_id = format!("test-workspace-{thread_id}");
+        runtime
+            .register_workspace_for_test(&workspace_id, &workspace_path, WorkspaceKind::Custom)
+            .unwrap();
         let now = chrono::Utc::now();
         let effort_args = model
             .map(|model| {
@@ -5814,7 +5922,7 @@ mod tests {
                 provider: provider.clone(),
                 effort_level: Some(EffortLevel::Default),
                 effort_args,
-                workspace_path,
+                workspace_id,
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 created_at: now,
@@ -6319,6 +6427,10 @@ mod tests {
         let second = "thread_persistent_b";
         let second_path = temp.path().join("workspace").join(second);
         fs::create_dir_all(workspace_logs_root(&second_path)).unwrap();
+        let second_workspace_id = format!("test-workspace-{second}");
+        runtime
+            .register_workspace_for_test(&second_workspace_id, &second_path, WorkspaceKind::Custom)
+            .unwrap();
         let now = chrono::Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
@@ -6326,7 +6438,7 @@ mod tests {
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: second_path,
+                workspace_id: second_workspace_id,
                 skills: Vec::new(),
                 status: ThreadStatus::Idle,
                 created_at: now,
@@ -6449,9 +6561,14 @@ mod tests {
         ] {
             let mut thread = base_thread.clone();
             thread.thread_id = thread_id.into();
-            thread.workspace_path = temp.path().join("workspace").join(thread_id);
+            let workspace_path = temp.path().join("workspace").join(thread_id);
+            let workspace_id = format!("test-workspace-{thread_id}");
+            runtime
+                .register_workspace_for_test(&workspace_id, &workspace_path, WorkspaceKind::Custom)
+                .unwrap();
+            thread.workspace_id = workspace_id;
             thread.status = status;
-            fs::create_dir_all(workspace_logs_root(&thread.workspace_path)).unwrap();
+            fs::create_dir_all(workspace_logs_root(&workspace_path)).unwrap();
             let mut provider_state = base_provider_state.clone();
             provider_state.provider_session_id = Some(provider_session_id.into());
             provider_state.active_provider_turn_id = Some(format!("turn-{thread_id}"));
@@ -6689,6 +6806,199 @@ mod tests {
                 .as_deref(),
             Some("provider-session")
         );
+    }
+
+    #[test]
+    fn workspace_lists_recursive_normalized_files_and_folders_without_following_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("nested/deeper")).unwrap();
+        fs::create_dir_all(workspace.join(".pedelec-runtime/deno")).unwrap();
+        fs::write(workspace.join("root.txt"), "root").unwrap();
+        fs::write(workspace.join(".hidden"), "hidden").unwrap();
+        fs::write(workspace.join("nested/file.txt"), "nested").unwrap();
+        fs::write(workspace.join(".pedelec-runtime/deno/cache"), "cache").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(workspace.join("nested"), workspace.join("link-dir")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(workspace.join("root.txt"), workspace.join("link-file"))
+            .unwrap();
+
+        let mut runtime = CoreRuntime::new();
+        runtime
+            .register_workspace_for_test("workspace-list", &workspace, WorkspaceKind::Custom)
+            .unwrap();
+
+        let files = runtime
+            .list_files(WorkspaceListInput {
+                workspace_id: "workspace-list".into(),
+                path: None,
+            })
+            .unwrap()
+            .paths;
+        assert_eq!(
+            files,
+            vec![
+                ".hidden",
+                ".pedelec-runtime/deno/cache",
+                "nested/file.txt",
+                "root.txt",
+            ]
+        );
+
+        let folders = runtime
+            .list_folders(WorkspaceListInput {
+                workspace_id: "workspace-list".into(),
+                path: None,
+            })
+            .unwrap()
+            .paths;
+        assert_eq!(
+            folders,
+            vec![
+                ".pedelec-runtime",
+                ".pedelec-runtime/deno",
+                "nested",
+                "nested/deeper",
+            ]
+        );
+        assert!(!folders.iter().any(|path| path.is_empty()));
+
+        let nested = runtime
+            .list_files(WorkspaceListInput {
+                workspace_id: "workspace-list".into(),
+                path: Some("nested".into()),
+            })
+            .unwrap();
+        assert_eq!(nested.paths, vec!["nested/file.txt"]);
+    }
+
+    #[test]
+    fn workspace_list_rejects_absolute_traversal_missing_and_file_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("file.txt"), "file").unwrap();
+        let mut runtime = CoreRuntime::new();
+        runtime
+            .register_workspace_for_test("workspace-list-errors", &workspace, WorkspaceKind::Custom)
+            .unwrap();
+
+        for path in [
+            Some("../outside".to_string()),
+            Some(workspace.to_string_lossy().into_owned()),
+            Some("missing".to_string()),
+            Some("file.txt".to_string()),
+        ] {
+            let error = runtime
+                .list_files(WorkspaceListInput {
+                    workspace_id: "workspace-list-errors".into(),
+                    path,
+                })
+                .unwrap_err();
+            assert_eq!(error.code, error_codes::WORKSPACE_PATH_INVALID);
+        }
+    }
+
+    #[test]
+    fn workspace_run_reservation_is_workspace_wide_and_does_not_use_thread_modules() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut runtime = CoreRuntime::new();
+        let workspace_id = "workspace-run-admission";
+        runtime
+            .register_workspace_for_test(workspace_id, &workspace, WorkspaceKind::Custom)
+            .unwrap();
+        let now = Utc::now();
+        for thread_id in ["thread-a", "thread-b"] {
+            runtime.thread_manager.insert_thread(
+                ThreadState {
+                    thread_id: thread_id.into(),
+                    workspace_id: workspace_id.into(),
+                    provider: ProviderCode::Codex,
+                    effort_level: Some(EffortLevel::Default),
+                    effort_args: Vec::new(),
+                    skills: Vec::new(),
+                    status: ThreadStatus::Idle,
+                    created_at: now,
+                    updated_at: now,
+                    sdk_origin: None,
+                },
+                ProviderSessionState {
+                    provider_session_id: None,
+                    active_provider_turn_id: None,
+                },
+            );
+        }
+        // A Thread module snapshot, including an incomplete setup, must not
+        // affect Workspace.run admission or synthesize an import map.
+        runtime.deno_modules.insert(
+            "thread-a".into(),
+            vec![DenoModuleState {
+                name: "thread-module".into(),
+                description: String::new(),
+                usage: String::new(),
+                prefer_stdin_execution: false,
+                state: DenoModuleSetupState::Pending,
+            }],
+        );
+
+        let first = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.into(),
+                script: "console.log('one')".into(),
+                timeout_ms: Some(1_000),
+            })
+            .unwrap();
+        let second = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.into(),
+                script: "console.log('two')".into(),
+                timeout_ms: None,
+            })
+            .unwrap();
+        assert_ne!(first.run_id, second.run_id);
+        assert_eq!(runtime.active_workspace_run_count(workspace_id), 2);
+        assert_eq!(first.intent.import_map_path, None);
+        assert!(matches!(
+            first.intent.owner,
+            DenoExecutionOwner::Workspace { .. }
+        ));
+        assert_eq!(first.intent.timeout_ms, 1_000);
+
+        let provider_busy = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: "thread-a".into(),
+                message: "blocked".into(),
+                operation_id: None,
+            })
+            .unwrap_err();
+        assert_eq!(provider_busy.code, error_codes::WORKSPACE_BUSY);
+
+        runtime.finish_workspace_run(workspace_id, &first.run_id);
+        assert_eq!(runtime.active_workspace_run_count(workspace_id), 1);
+        runtime.finish_workspace_run(workspace_id, &second.run_id);
+        assert_eq!(runtime.active_workspace_run_count(workspace_id), 0);
+
+        runtime
+            .thread_manager
+            .thread_mut("thread-a")
+            .unwrap()
+            .status = ThreadStatus::Running;
+        runtime
+            .thread_manager
+            .provider_state_mut("thread-a")
+            .unwrap()
+            .active_provider_turn_id = Some("turn-a".into());
+        let provider_active = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.into(),
+                script: String::new(),
+                timeout_ms: None,
+            })
+            .unwrap_err();
+        assert_eq!(provider_active.code, error_codes::WORKSPACE_BUSY);
     }
 
     fn collect_available_core_events(event_rx: &mpsc::Receiver<ThreadEvent>) -> Vec<ThreadEvent> {

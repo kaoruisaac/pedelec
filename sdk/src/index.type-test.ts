@@ -1,5 +1,6 @@
 import {
   Pedelec,
+  PedelecWorkspace,
   defineTool,
   defineDenoModule,
   type DenoModuleDefinition,
@@ -15,8 +16,7 @@ import {
   type PedelecAvailability,
   type ApprovalStatus,
   type ProviderInfo,
-  type CreateSessionWorkspaceInput,
-  type WorkspaceFolderPickerResult,
+  type WorkspaceRunResult,
   type Effort,
 } from "./index";
 
@@ -54,10 +54,6 @@ defineDenoModule({
   entry: 42,
   usage: 'import "non-string-entry";',
 });
-
-function workspaceInputHasPublicType(): CreateSessionWorkspaceInput {
-  return { path: "C:\\workspace\\project" };
-}
 
 async function typedOnToolNameFromCreateSession() {
   const pedelec = new Pedelec();
@@ -168,10 +164,7 @@ async function noSkillsFallsBackToString() {
   const pedelec = new Pedelec();
   const session = await pedelec.createSession({
     provider: "codex",
-    workspace: { path: "C:\\workspace\\project" },
   });
-  const typedWorkspace: CreateSessionWorkspaceInput = workspaceInputHasPublicType();
-  void typedWorkspace;
 
   session.onTool((name) => {
     const anyString: string = name;
@@ -243,15 +236,34 @@ async function availabilityHasPublicType() {
   void promise;
 }
 
-async function workspaceFolderPickerHasPublicType() {
+async function workspacePublicTypeContract() {
   const pedelec = new Pedelec();
-  const result: Promise<WorkspaceFolderPickerResult | null> = pedelec.workspaceFolderPicker();
-  void result;
+  const maybeWorkspace: PedelecWorkspace | null = await pedelec.openWorkspace();
+  const workspace: PedelecWorkspace = await pedelec.openWorkspace("C:\\workspace\\project");
+  const files: Promise<string[]> = workspace.listFiles();
+  const folders: Promise<string[]> = workspace.listFolders("src");
+  const run: Promise<WorkspaceRunResult> = workspace.run("console.log('hello')", { timeoutMs: 1000 });
+  const session = await workspace.createSession({
+    skills: {
+      guidance: "Use tools.",
+      tools: [defineTool({ name: "workspace_tool", description: "Tool", argsSchema: { type: "object" } })],
+    },
+  });
+  session.workspace satisfies PedelecWorkspace;
+  maybeWorkspace?.listFiles();
+  void files;
+  void folders;
+  void run;
+
+  // @ts-expect-error workspace is now selected through openWorkspace
+  pedelec.createSession({ workspace: { path: "C:\\workspace\\project" } });
+  // @ts-expect-error the removed picker API must not be public
+  pedelec.workspaceFolderPicker();
 }
 
 function directoryPickerIsRemoved() {
   const pedelec = new Pedelec();
-  // @ts-expect-error directoryPicker was removed in favor of workspaceFolderPicker
+  // @ts-expect-error directoryPicker was removed in favor of openWorkspace
   pedelec.directoryPicker();
 }
 
@@ -276,7 +288,7 @@ void noSkillsFallsBackToString;
 void effortLevelPublicTypeContract;
 void listAssetsHasPublicTypes;
 void availabilityHasPublicType;
-void workspaceFolderPickerHasPublicType;
+void workspacePublicTypeContract;
 void directoryPickerIsRemoved;
 void publicSecurityTypesAreRestricted;
 

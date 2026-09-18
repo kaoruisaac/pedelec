@@ -109,7 +109,7 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
             let response = send_core_request(&request, runtime_file_path.as_deref());
             let native_response = core_response_to_native_response(response);
             let mut stdout = stdout.lock().unwrap();
-            write_chrome_message(&mut *stdout, &native_response)?;
+            write_bounded_native_response(&mut *stdout, &native_response, &request.r#type)?;
         }
     }
 
@@ -223,8 +223,18 @@ fn native_message_to_core_request(
     let caller_origin = take_string_field(&mut object, "callerOrigin");
     let caller_sdk_version = take_string_field(&mut object, "callerSdkVersion");
     let payload = match request_type.as_str() {
-        "create_thread"
-        | "send_text"
+        "create_thread" => Some(Value::Object(select_fields(
+            &object,
+            &[
+                "provider",
+                "model",
+                "effort",
+                "effortLevel",
+                "skills",
+                "workspaceId",
+            ],
+        ))),
+        "send_text"
         | "prepare_thread"
         | "end_thread"
         | "resume_thread"
@@ -239,8 +249,15 @@ fn native_message_to_core_request(
         ))),
         "abort_session_setup" => Some(Value::Object(select_fields(&object, &["threadId"]))),
         "list_providers" | "get_settings" => Some(Value::Object(object)),
-        // The directory picker deliberately has no caller-controlled payload.
-        "pick_workspace_folder" => Some(serde_json::json!({})),
+        "open_workspace" => Some(Value::Object(select_fields(&object, &["path"]))),
+        "workspace_list_files" | "workspace_list_folders" => Some(Value::Object(select_fields(
+            &object,
+            &["workspaceId", "path"],
+        ))),
+        "workspace_run" => Some(Value::Object(select_fields(
+            &object,
+            &["workspaceId", "script", "timeoutMs"],
+        ))),
         // The connectivity probe deliberately has no caller-controlled payload.
         "ping" => Some(serde_json::json!({})),
         "submit_tool_result" => {
@@ -443,6 +460,33 @@ fn native_error_response(request_id: &str, error: PedelecError) -> NativeProtoco
         result: None,
         error: Some(error),
     }
+}
+
+fn write_bounded_native_response<W: Write>(
+    writer: &mut W,
+    response: &NativeProtocolResponse,
+    request_type: &str,
+) -> io::Result<()> {
+    let payload = serde_json::to_vec(response)?;
+    if payload.len() <= MAX_CORE_IPC_MESSAGE_BYTES {
+        return write_chrome_message(writer, response);
+    }
+
+    let error = match request_type {
+        "workspace_list_files" | "workspace_list_folders" => PedelecError::new(
+            error_codes::WORKSPACE_LIST_TOO_LARGE,
+            "workspace listing is too large; list a narrower path",
+        ),
+        "workspace_run" => PedelecError::new(
+            error_codes::WORKSPACE_RUN_OUTPUT_TOO_LARGE,
+            "workspace run output is too large",
+        ),
+        _ => PedelecError::new(
+            error_codes::MESSAGE_TOO_LARGE,
+            "native response exceeds size limit",
+        ),
+    };
+    write_chrome_message(writer, &native_error_response(&response.request_id, error))
 }
 
 fn start_forward_subscription(
@@ -802,9 +846,9 @@ mod tests {
     }
 
     #[test]
-    fn native_workspace_folder_picker_preserves_metadata_without_session_payload() {
+    fn native_open_workspace_projects_only_the_selected_path() {
         let request = native_message_to_core_request(json!({
-            "type": "pick_workspace_folder",
+            "type": "open_workspace",
             "requestId": "req_picker",
             "callerOrigin": "https://approved.example",
             "callerSdkVersion": "mock-sdk-version",
@@ -813,7 +857,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(request.r#type, "pick_workspace_folder");
+        assert_eq!(request.r#type, "open_workspace");
         assert_eq!(
             request.caller_origin.as_deref(),
             Some("https://approved.example")
@@ -822,7 +866,47 @@ mod tests {
             request.caller_sdk_version.as_deref(),
             Some("mock-sdk-version")
         );
-        assert_eq!(request.payload, Some(json!({})));
+        assert_eq!(
+            request.payload,
+            Some(json!({ "path": "C:\\user-controlled-path" }))
+        );
+    }
+
+    #[test]
+    fn native_workspace_requests_allowlist_only_expected_fields() {
+        let list = native_message_to_core_request(json!({
+            "type": "workspace_list_files",
+            "requestId": "req_list",
+            "callerOrigin": "https://approved.example",
+            "workspaceId": "ws_1",
+            "path": "src",
+            "script": "must-not-cross-ipc",
+            "workspacePath": "must-not-cross-ipc",
+        }))
+        .unwrap();
+        assert_eq!(
+            list.payload,
+            Some(json!({ "workspaceId": "ws_1", "path": "src" }))
+        );
+
+        let run = native_message_to_core_request(json!({
+            "type": "workspace_run",
+            "requestId": "req_run",
+            "callerOrigin": "https://approved.example",
+            "workspaceId": "ws_1",
+            "script": "console.log(1)",
+            "timeoutMs": 1000,
+            "args": ["must-not-cross-ipc"],
+        }))
+        .unwrap();
+        assert_eq!(
+            run.payload,
+            Some(json!({
+                "workspaceId": "ws_1",
+                "script": "console.log(1)",
+                "timeoutMs": 1000,
+            }))
+        );
     }
 
     #[test]
@@ -1261,17 +1345,28 @@ mod tests {
     }
 
     fn insert_idle_thread(runtime: &SharedCoreRuntime, thread_id: &str) {
-        use pedelec_core::{EffortLevel, ProviderSessionState, ThreadState, ThreadStatus};
+        use pedelec_core::{
+            EffortLevel, ProviderSessionState, ThreadState, ThreadStatus, WorkspaceKind,
+        };
         use std::path::PathBuf;
 
         let now = chrono::Utc::now();
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime = runtime.lock().unwrap();
+        let workspace_id = format!("test-workspace-{thread_id}");
+        runtime
+            .register_workspace_for_test(
+                &workspace_id,
+                PathBuf::from("workspace").join(thread_id),
+                WorkspaceKind::Custom,
+            )
+            .unwrap();
+        runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id,
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: vec![],
-                workspace_path: PathBuf::from("workspace").join(thread_id),
                 skills: vec![],
                 status: ThreadStatus::Idle,
                 created_at: now,

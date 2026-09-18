@@ -57,14 +57,29 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `CORE_RUNTIME_UNAVAILABLE` | Native host cannot reach a valid Core runtime after any background launch attempt | Open Desktop manually or repair its installation/launch configuration | After Core is ready |
 | `IPC_UNAVAILABLE` | Local Core IPC could not bind, connect, parse, or respond | Restart Desktop App; inspect local logs | After recovery |
 | `MESSAGE_TOO_LARGE` | Local IPC message exceeded its size limit | Reduce prompt/tool/result payload | Only with smaller data |
+| `WORKSPACE_LIST_TOO_LARGE` | A workspace file or folder listing cannot fit in the browser transport envelope | List a narrower workspace path | After reducing the result |
+| `WORKSPACE_RUN_OUTPUT_TOO_LARGE` | Workspace script stdout/stderr cannot fit in the browser transport envelope | Reduce script output or capture it in a workspace file | After reducing the output |
 | `SDK_BRIDGE_TIMEOUT` | Extension did not answer within `bridgeTimeoutMs` | Check all downstream layers; avoid repeated writes | After diagnosing connection |
 | `DIRECTORY_PICKER_FAILED` | The native directory picker could not be created, shown, or converted to the SDK path result | Ask the user to retry and check Desktop/native dialog support; cancellation is not an error | Usually after the dialog/runtime issue is fixed |
 | `WORKSPACE_PATH_INVALID` | The requested workspace path is not absolute, is not a directory, overlaps the managed workspace root, or cannot be resolved | Choose a valid application-managed workspace path | After fixing the path |
 | `WORKSPACE_CREATE_FAILED` | Pedelec could not create or initialize a managed workspace or its private runtime data | Preserve the application-owned workspace and inspect the error details | After fixing the filesystem issue |
 | `WORKSPACE_REMOVE_FAILED` | Pedelec could not remove a managed temporary workspace | Keep the path available for cleanup and inspect locked-file or permission details | After the filesystem issue clears |
-| `WORKSPACE_OPEN_FAILED` | Desktop could not open the validated thread workspace folder | Check the folder and OS opener integration | After fixing the opener issue |
+| `WORKSPACE_OPEN_FAILED` | Desktop could not open the validated Workspace folder | Check the folder and OS opener integration | After fixing the opener issue |
+| `WORKSPACE_NOT_FOUND` | The Workspace capability or its recorded directory no longer exists | Reopen the custom Workspace or create a new Session; do not reconstruct a handle from only a path | After the Workspace exists again |
+| `WORKSPACE_ACCESS_DENIED` | The process cannot read, write, or initialize the requested Workspace path | Check OS permissions, ownership, locks, and the application's access grant | After permissions are corrected |
+| `WORKSPACE_BUSY` | A Workspace-wide admission rule prevents the operation: an Agent/provider operation is active during `workspace.run()`, or a Session tries to begin provider work while a Workspace run is active | Wait for all conflicting operations in that Workspace to finish; checking only the current Session is insufficient | Yes, after the Workspace is idle |
 | `SDK_TRANSPORT_ERROR` | Generic bridge request failure | Inspect `message/details`; verify Extension/native/Core | Depends on operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape or request type did not match SDK expectations | Align component versions; report reproducible mismatch | Usually not until versions/config fixed |
+
+## Workspace Deno execution
+
+| Code | Meaning | Recommended response | Retry? |
+| --- | --- | --- | --- |
+| `DENO_EXECUTION_TIMEOUT` | Workspace Deno code exceeded its positive timeout, which defaults to 60 seconds | Increase the timeout only when appropriate, or split/shorten the script | Yes after changing the work |
+| `DENO_EXECUTION_CANCELLED` | Workspace Deno execution was cancelled during shutdown or interruption | Reconcile partial Workspace writes before retrying | After the Workspace/runtime is usable |
+| `DENO_RUNTIME_UNAVAILABLE` | The bundled/cached Deno runtime cannot be located or started | Repair/reinstall the Desktop runtime and verify its packaged Deno asset | After runtime repair |
+| `DENO_PROCESS_SPAWN_FAILED` | Desktop could not spawn the Deno process | Check Desktop installation, executable permissions, and runtime logs | After fixing the process environment |
+| `DENO_PROCESS_IO_FAILED` | Deno process stdin/stdout/stderr communication failed | Treat the operation as failed, inspect runtime logs, and reconcile partial writes | After transport/runtime recovery |
 
 ## Provider and configuration
 

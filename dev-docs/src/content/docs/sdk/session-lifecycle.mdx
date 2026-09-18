@@ -62,7 +62,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 2. triggers origin approval if the current origin is not approved;
 3. subscribes the current SDK route to the existing Core thread;
 4. reconciles the returned authoritative lifecycle snapshot, including status, active/last operation identity, and a pending tool request when present. An ended thread remains ended; this method never implicitly calls Core `resume_thread`;
-5. returns a synchronized `PedelecSession` handle.
+5. returns a synchronized `PedelecSession` handle whose `session.workspace` is already hydrated; the application does not need to call `openWorkspace()` separately.
 
 When Core already knows normalized token usage, the same resume snapshot hydrates `session.usage.totalTokens`. A missing usage field means that no supported total is known yet; it does not reset usage on an existing handle.
 
@@ -88,7 +88,7 @@ await session.sendText("Continue");
 
 `PedelecSession.resume()` is an explicit `Ended → Idle` Core lifecycle transition for the same non-detached browser handle. It preserves the thread ID, handlers, usage, provider/effort metadata, `prepared` state, and provider session identity. It does not start or contact the provider runtime; the next `sendText()` or other normal operation resumes provider work lazily.
 
-Reactivation succeeds only while Core still knows the thread and its recorded `workspace_path` still exists and is a directory. Managed and explicit application workspaces are both supported. A missing or unusable workspace rejects with `WORKSPACE_OPEN_FAILED`; workspace contents alone cannot reconstruct a thread after a Desktop/Core restart. A missing Core thread rejects with `THREAD_NOT_FOUND`.
+Reactivation succeeds only while Core still knows the thread and its recorded Workspace still exists and is a directory. Managed and explicit application Workspaces are both supported. A missing or unusable Workspace rejects with `WORKSPACE_OPEN_FAILED`; Workspace contents alone cannot reconstruct a thread after a Desktop/Core restart. A missing Core thread rejects with `THREAD_NOT_FOUND`. Same-handle `session.resume()` preserves the existing Workspace handle.
 
 `resume()` is idempotent for an active handle, and concurrent calls on one ended handle share one request. A transport-detached handle rejects; use `pedelec.resumeSession(sessionId)` to attach a new handle to a surviving Core thread instead. The detached-handle rule also applies when the Core thread is ended.
 
@@ -153,10 +153,10 @@ A successful `end()`:
 - unregisters the session from the client; and
 - causes future `sendText()`/`prepare()` calls to reject with `SESSION_ENDED` until same-handle `resume()` succeeds.
 
-`end()` does not immediately delete the session workspace. The lifecycle depends on how the session was created:
+`end()` does not immediately delete the session workspace. The lifecycle depends on how the workspace was obtained:
 
-- Without `workspace.path`, the session uses temporary Desktop-managed storage. The Desktop App removes managed workspaces on normal app exit and attempts to clean up leftovers at the next launch after an abnormal termination. Closing the main window only hides the app and does not run this cleanup.
-- With an explicit absolute `workspace.path`, the session uses an application-managed workspace. Pedelec never deletes it on `end()`, normal app exit, or stale-workspace cleanup, and multiple active sessions may share it.
+- `pedelec.createSession()` uses temporary Desktop-managed storage. The Desktop App removes managed Workspaces on normal app exit and attempts to clean up leftovers at the next launch after an abnormal termination. Closing the main window only hides the app and does not run this cleanup.
+- `pedelec.openWorkspace(path)` returns an application-managed Workspace for `workspace.createSession()`. Pedelec never deletes it on `end()`, normal app exit, or stale-workspace cleanup, and multiple active Sessions may share it.
 
 The ended handle cannot access assets through `uploadAsset()`, `listAssets()`, or `readAsset()`, even before cleanup runs. Shared workspaces do not receive filesystem conflict coordination from Pedelec, and an explicit path must not overlap the managed workspace root. Locked files can leave managed cleanup for a later launch.
 

@@ -62,7 +62,7 @@ const session = await pedelec.resumeSession(savedSessionId);
 2. 目前 origin 未核准時觸發 approval；
 3. 將目前 SDK route subscribe 到既有 Core thread；
 4. reconciliation 回傳的 authoritative lifecycle snapshot，包括 status、active/last operation identity，以及可能存在的 pending tool request；Ended thread 仍會保持 ended，這個 method 不會隱式呼叫 Core `resume_thread`；
-5. 回傳已同步的 `PedelecSession` handle。
+5. 回傳已同步且已 hydrate `session.workspace` 的 `PedelecSession` handle；application 不需要另外呼叫 `openWorkspace()`。
 
 若 Core 已知 normalized token usage，同一個 resume snapshot 也會 hydrate `session.usage.totalTokens`。缺少 usage field 代表目前尚未知道受支援的 total；對既有 handle 不會因此重設 usage。
 
@@ -88,7 +88,7 @@ await session.sendText("繼續");
 
 `PedelecSession.resume()` 是同一個、尚未 transport-detached 的 browser handle 所執行的明確 `Ended → Idle` Core lifecycle transition。它保留 thread ID、handlers、usage、provider/effort metadata、`prepared` 狀態與 provider session identity。它不會啟動或接觸 provider runtime；下一個 `sendText()` 或其他正常 operation 才會 lazy resume provider work。
 
-只有 Core 仍知道 thread，且記錄的 `workspace_path` 仍存在並且是 directory 時才能 reactivation。Desktop-managed 與 application-managed workspace 都支援。Workspace 缺失或無法開啟時 reject `WORKSPACE_OPEN_FAILED`；Desktop/Core restart 後若 Core 不再知道 thread，會 reject `THREAD_NOT_FOUND`，不能只靠 workspace contents 重建 thread。
+只有 Core 仍知道 thread，且記錄的 Workspace 仍存在並且是 directory 時才能 reactivation。Desktop-managed 與 application-managed Workspace 都支援。Workspace 缺失或無法開啟時 reject `WORKSPACE_OPEN_FAILED`；Desktop/Core restart 後若 Core 不再知道 thread，會 reject `THREAD_NOT_FOUND`，不能只靠 Workspace contents 重建 thread。同一個 handle 的 `session.resume()` 會保留既有 Workspace handle。
 
 Active handle 的 `resume()` 是 idempotent，同一個 ended handle 的 concurrent calls 會共用一個 request。Transport-detached handle 會 reject；請改用 `pedelec.resumeSession(sessionId)`，讓新的 handle attach 到仍存活的 Core thread。即使該 Core thread 是 ended，detached handle 也不能用 `session.resume()` 復活。
 
@@ -154,10 +154,10 @@ await session.end();
 - 從 client unregister session；
 - 未來 `sendText()`／`prepare()` 在同一個 handle 成功 `resume()` 前收到 `SESSION_ENDED`。
 
-`end()` 不會立即刪除 session workspace；lifecycle 取決於建立 session 時的設定：
+`end()` 不會立即刪除 session workspace；lifecycle 取決於 workspace 的取得方式：
 
-- 未指定 `workspace.path`：使用 Desktop 管理的 temporary storage。Desktop App 正常退出時移除 managed workspace，異常終止的 leftovers 會在下次啟動嘗試清除。關閉主視窗只會隱藏 App，不會執行這個 cleanup。
-- 指定 absolute `workspace.path`：使用 application 管理的 workspace。Pedelec 在 `end()`、App 正常退出或 stale-workspace cleanup 時都不會刪除它，多個 active session 也可以共用。
+- `pedelec.createSession()`：使用 Desktop 管理的 temporary storage。Desktop App 正常退出時移除 managed Workspace，異常終止的 leftovers 會在下次啟動嘗試清除。關閉主視窗只會隱藏 App，不會執行這個 cleanup。
+- `pedelec.openWorkspace(path)`：回傳 application 管理的 Workspace，供 `workspace.createSession()` 使用。Pedelec 在 `end()`、App 正常退出或 stale-workspace cleanup 時都不會刪除它，多個 active Session 也可以共用。
 
 即使 cleanup 尚未執行，ended handle 也不能透過 `uploadAsset()`、`listAssets()` 或 `readAsset()` 存取 asset。Shared workspace 的 filesystem conflict 不由 Pedelec 協調，explicit path 也不得與 managed workspace root overlap。檔案被鎖定時，managed cleanup 可能要到後續啟動才能完成。
 

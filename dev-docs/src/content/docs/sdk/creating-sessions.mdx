@@ -9,22 +9,28 @@ The SDK creates a session handle. Choose either Desktop profile mode, where `eff
 
 ## Choose a workspace first
 
-For an application-managed workspace, let the user choose the folder with the native picker before calling `createSession()`:
+The managed convenience path is `pedelec.createSession()`. It creates a managed Workspace automatically, exposes it as `session.workspace`, and does not accept a Workspace option. Use the explicit flow below when the application needs a custom Workspace.
+
+For an application-managed workspace, open the workspace before creating a session. With no path, Pedelec opens the native folder picker and returns `null` when the user cancels:
 
 ```ts
-const folder = await pedelec.workspaceFolderPicker();
-if (!folder) return;
+const workspace = await pedelec.openWorkspace();
+if (!workspace) return;
 
-if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
-  // The application decides whether to warn the user.
-}
-
-const session = await pedelec.createSession({
-  workspace: { path: folder.path },
+const session = await workspace.createSession({
+  provider: "codex",
+  effortLevel: "high",
 });
 ```
 
-The picker returns a folder result or `null` on cancellation. It is read-only and reports only the root-folder snapshot (`isEmptyFolder`) and whether `.pedelec-workspace.json` is a regular file (`hasWorkspaceConfig`). It does not decide whether the folder is a valid Pedelec workspace or initialize its contents; Core applies the workspace rules during `createSession()`, then creates the marker after successful custom initialization.
+An explicit path uses the same validation and initialization flow without opening a picker:
+
+```ts
+const workspace = await pedelec.openWorkspace("C:\\workspace\\project-a");
+const session = await workspace.createSession({ provider: "codex" });
+```
+
+`PedelecWorkspace` exposes `path`, `createSession()`, `listFiles()`, `listFolders()`, and `run()`. See the [PedelecWorkspace reference](../reference/pedelec-workspace/) for method semantics, security, concurrency, and lifetime. A managed session created with `pedelec.createSession()` also exposes its managed Workspace as `session.workspace`; the Workspace handle remains available after `session.end()`.
 
 ```ts
 const session = await pedelec.createSession();
@@ -72,15 +78,14 @@ const explicitSession = await pedelec.createSession({
 
 For explicit model mode, Core returns `explicitModelConfigApplied: true`. The SDK requires this acknowledgment before uploading Deno Modules or exposing the session; an older Extension/Desktop combination is aborted and reported as incompatible instead of silently using profile semantics.
 
-## Skills and workspace
+## Skills
 
-Effort selection composes with skills and an application-owned workspace:
+Effort selection composes with skills. Application-owned Workspaces are selected through `openWorkspace()` and then passed implicitly by calling `workspace.createSession()`:
 
 ```ts
 const session = await pedelec.createSession({
   provider: "claude",
   effortLevel: "default",
-  workspace: { path: "C:\\workspace\\project-a" },
   skills: {
     guidance: "Use the declared tools and report structured failures.",
     tools,

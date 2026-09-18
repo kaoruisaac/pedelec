@@ -1,6 +1,6 @@
 use pedelec_core::{
-    error_codes, workspace_runtime_data_root, DenoExecutionIntent, DenoExecutionTarget,
-    DenoRunOutput, DenoRuntimeDispatcher, PedelecError,
+    error_codes, workspace_runtime_data_root, DenoExecutionIntent, DenoExecutionOwner,
+    DenoExecutionTarget, DenoRunOutput, DenoRuntimeDispatcher, PedelecError,
 };
 use pedelec_shared::paths::path_for_external_use;
 use std::collections::HashMap;
@@ -14,6 +14,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -51,6 +52,13 @@ struct ActiveDenoRun {
     cancel_requested: AtomicBool,
 }
 
+#[derive(Debug)]
+struct ActiveDenoRunEntry {
+    execution_id: String,
+    owner: DenoExecutionOwner,
+    run: Arc<ActiveDenoRun>,
+}
+
 impl Drop for ActiveDenoRun {
     fn drop(&mut self) {
         if let Ok(mut child_slot) = self.child.lock() {
@@ -65,7 +73,7 @@ impl Drop for ActiveDenoRun {
 struct DenoRuntimeInner {
     executable_path: Mutex<PathBuf>,
     policy: DenoRuntimePolicy,
-    active_runs: Mutex<HashMap<String, Arc<ActiveDenoRun>>>,
+    active_runs: Mutex<HashMap<String, ActiveDenoRunEntry>>,
     shutting_down: AtomicBool,
 }
 
@@ -120,7 +128,15 @@ impl DenoRuntimeOwner {
         self.inner
             .active_runs
             .lock()
-            .map(|runs| runs.contains_key(thread_id))
+            .map(|runs| {
+                runs.values().any(|entry| {
+                    matches!(
+                        &entry.owner,
+                        DenoExecutionOwner::Thread { thread_id: owner_thread_id }
+                            if owner_thread_id == thread_id
+                    )
+                })
+            })
             .unwrap_or(false)
     }
 
@@ -137,8 +153,18 @@ impl DenoRuntimeOwner {
             .active_runs
             .lock()
             .ok()
-            .and_then(|runs| runs.get(thread_id).cloned());
-        if let Some(run) = run {
+            .map(|runs| {
+                runs.values()
+                    .filter_map(|entry| match &entry.owner {
+                        DenoExecutionOwner::Thread {
+                            thread_id: owner_thread_id,
+                        } if owner_thread_id == thread_id => Some(Arc::clone(&entry.run)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for run in run {
             run.cancel_requested.store(true, Ordering::Release);
             let _ = terminate_active_child(&run);
         }
@@ -152,10 +178,14 @@ impl DenoRuntimeOwner {
             .inner
             .active_runs
             .lock()
-            .map(|runs| runs.values().cloned().collect::<Vec<_>>())
+            .map(|runs| {
+                runs.values()
+                    .map(|entry| (entry.execution_id.clone(), Arc::clone(&entry.run)))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let mut errors = Vec::new();
-        for run in &runs {
+        for (_, run) in &runs {
             run.cancel_requested.store(true, Ordering::Release);
             if let Some(error) = terminate_active_child(run) {
                 errors.push(error);
@@ -163,27 +193,30 @@ impl DenoRuntimeOwner {
         }
 
         if let Ok(mut active_runs) = self.inner.active_runs.lock() {
-            active_runs.retain(|_, active| !runs.iter().any(|run| Arc::ptr_eq(run, active)));
+            for (execution_id, _) in runs {
+                active_runs.remove(&execution_id);
+            }
         }
         errors
     }
 
     fn dispatch_intent(&self, intent: DenoExecutionIntent) -> Result<DenoRunOutput, PedelecError> {
-        let run = self.reserve_run(&intent.thread_id)?;
+        let execution_id = execution_label(&intent);
+        let (registry_id, run) = self.reserve_run(&intent)?;
         let _registration = ActiveRunRegistration {
             owner: self.clone(),
-            thread_id: intent.thread_id.clone(),
+            execution_id: registry_id,
             run: Arc::clone(&run),
         };
 
         let executable_path = self.executable_path();
-        validate_executable_path(&executable_path, &intent.thread_id)?;
+        validate_executable_path(&executable_path, &execution_id)?;
         let prepared = PreparedDenoExecution::prepare(&intent)?;
         let command_args = build_deno_command_args(&prepared);
 
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(deno_unavailable_error(
-                &intent.thread_id,
+                &execution_id,
                 &executable_path,
                 "Deno runtime owner is shutting down",
             ));
@@ -214,7 +247,7 @@ impl DenoRuntimeOwner {
                 error_codes::DENO_PROCESS_SPAWN_FAILED,
                 "could not start the configured Deno runtime",
                 serde_json::json!({
-                    "threadId": intent.thread_id,
+                    "executionId": execution_id,
                     "executablePath": executable_path,
                     "error": err.to_string(),
                 }),
@@ -228,7 +261,7 @@ impl DenoRuntimeOwner {
                     PedelecError::with_details(
                         error_codes::DENO_PROCESS_IO_FAILED,
                         "Deno stdin pipe was not available",
-                        serde_json::json!({ "threadId": intent.thread_id }),
+                        serde_json::json!({ "executionId": execution_id }),
                     )
                 })?,
                 source.to_owned(),
@@ -281,16 +314,24 @@ impl DenoRuntimeOwner {
         }
 
         let started_at = Instant::now();
+        let timeout = if intent.timeout_ms == 0 {
+            // Existing direct runtime callers may still rely on the injected
+            // policy. Core-admitted production intents always carry a
+            // positive per-execution timeout.
+            self.inner.policy.execution_timeout
+        } else {
+            Duration::from_millis(intent.timeout_ms)
+        };
         let exit_status = loop {
             if run.cancel_requested.load(Ordering::Acquire) {
                 let _ = terminate_active_child(&run);
                 let capture = collect_captures(stdout_rx, stderr_rx);
-                return Err(cancelled_error(&intent.thread_id, capture));
+                return Err(cancelled_error(&execution_id, capture));
             }
             if self.inner.shutting_down.load(Ordering::Acquire) {
                 let _ = terminate_active_child(&run);
                 let capture = collect_captures(stdout_rx, stderr_rx);
-                return Err(cancelled_error(&intent.thread_id, capture));
+                return Err(cancelled_error(&execution_id, capture));
             }
 
             let status = {
@@ -316,10 +357,10 @@ impl DenoRuntimeOwner {
                 break status;
             }
 
-            if started_at.elapsed() >= self.inner.policy.execution_timeout {
+            if started_at.elapsed() >= timeout {
                 let _ = terminate_active_child(&run);
                 let capture = collect_captures(stdout_rx, stderr_rx);
-                return Err(timeout_error(&intent.thread_id, capture));
+                return Err(timeout_error(&execution_id, capture));
             }
             thread::sleep(Duration::from_millis(10));
         };
@@ -331,14 +372,14 @@ impl DenoRuntimeOwner {
                     return Err(PedelecError::with_details(
                         error_codes::DENO_PROCESS_IO_FAILED,
                         "could not write Deno source to process stdin",
-                        serde_json::json!({ "threadId": intent.thread_id, "error": error }),
+                        serde_json::json!({ "executionId": execution_id, "error": error }),
                     ));
                 }
                 Err(error) => {
                     return Err(PedelecError::with_details(
                         error_codes::DENO_PROCESS_IO_FAILED,
                         "could not observe Deno stdin writer completion",
-                        serde_json::json!({ "threadId": intent.thread_id, "error": error.to_string() }),
+                        serde_json::json!({ "executionId": execution_id, "error": error.to_string() }),
                     ));
                 }
             }
@@ -348,7 +389,7 @@ impl DenoRuntimeOwner {
             PedelecError::with_details(
                 error_codes::DENO_PROCESS_IO_FAILED,
                 "could not collect Deno process output",
-                serde_json::json!({ "threadId": intent.thread_id, "error": error }),
+                serde_json::json!({ "executionId": execution_id, "error": error }),
             )
         })?;
 
@@ -361,7 +402,10 @@ impl DenoRuntimeOwner {
         })
     }
 
-    fn reserve_run(&self, thread_id: &str) -> Result<Arc<ActiveDenoRun>, PedelecError> {
+    fn reserve_run(
+        &self,
+        intent: &DenoExecutionIntent,
+    ) -> Result<(String, Arc<ActiveDenoRun>), PedelecError> {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(PedelecError::new(
                 error_codes::DENO_RUNTIME_UNAVAILABLE,
@@ -374,19 +418,35 @@ impl DenoRuntimeOwner {
                 "Deno active-run registry was poisoned",
             )
         })?;
-        if active_runs.contains_key(thread_id) {
-            return Err(PedelecError::with_details(
-                error_codes::DENO_EXECUTION_BUSY,
-                "a Deno execution is already active for this thread",
-                serde_json::json!({ "threadId": thread_id }),
-            ));
+        if let DenoExecutionOwner::Thread { thread_id } = &intent.owner {
+            if active_runs.values().any(|entry| {
+                matches!(
+                    &entry.owner,
+                    DenoExecutionOwner::Thread { thread_id: owner_thread_id }
+                        if owner_thread_id == thread_id
+                )
+            }) {
+                return Err(PedelecError::with_details(
+                    error_codes::DENO_EXECUTION_BUSY,
+                    "a Deno execution is already active for this thread",
+                    serde_json::json!({ "threadId": thread_id }),
+                ));
+            }
         }
         let run = Arc::new(ActiveDenoRun {
             child: Mutex::new(None),
             cancel_requested: AtomicBool::new(false),
         });
-        active_runs.insert(thread_id.to_string(), Arc::clone(&run));
-        Ok(run)
+        let execution_id = format!("deno_{}", Uuid::new_v4().simple());
+        active_runs.insert(
+            execution_id.clone(),
+            ActiveDenoRunEntry {
+                execution_id: execution_id.clone(),
+                owner: intent.owner.clone(),
+                run: Arc::clone(&run),
+            },
+        );
+        Ok((execution_id, run))
     }
 }
 
@@ -406,7 +466,7 @@ impl DenoRuntimeDispatcher for DenoRuntimeOwner {
 
 struct ActiveRunRegistration {
     owner: DenoRuntimeOwner,
-    thread_id: String,
+    execution_id: String,
     run: Arc<ActiveDenoRun>,
 }
 
@@ -414,12 +474,22 @@ impl Drop for ActiveRunRegistration {
     fn drop(&mut self) {
         if let Ok(mut active_runs) = self.owner.inner.active_runs.lock() {
             if active_runs
-                .get(&self.thread_id)
-                .is_some_and(|active| Arc::ptr_eq(active, &self.run))
+                .get(&self.execution_id)
+                .is_some_and(|active| Arc::ptr_eq(&active.run, &self.run))
             {
-                active_runs.remove(&self.thread_id);
+                active_runs.remove(&self.execution_id);
             }
         }
+    }
+}
+
+fn execution_label(intent: &DenoExecutionIntent) -> String {
+    match &intent.owner {
+        DenoExecutionOwner::Thread { thread_id } => thread_id.clone(),
+        DenoExecutionOwner::Workspace {
+            workspace_id,
+            run_id,
+        } => format!("workspace:{workspace_id}/{run_id}"),
     }
 }
 
@@ -490,11 +560,18 @@ impl PreparedDenoExecution {
             }
         };
 
-        let import_map_path = intent
-            .import_map_path
-            .as_deref()
-            .map(|path| prepare_import_map_path(path, &workspace, &intent.thread_id))
-            .transpose()?;
+        let import_map_path = if matches!(&intent.owner, DenoExecutionOwner::Workspace { .. }) {
+            // Workspace-owned execution is deliberately independent from all
+            // Thread/Session Deno Module snapshots, even if a malformed
+            // directly-constructed intent tries to attach one.
+            None
+        } else {
+            intent
+                .import_map_path
+                .as_deref()
+                .map(|path| prepare_import_map_path(path, &workspace, &intent.thread_id))
+                .transpose()?
+        };
         let cache_dir = prepare_deno_cache_dir(&workspace)?;
         Ok(Self {
             workspace,
@@ -900,11 +977,15 @@ mod tests {
         }
         DenoExecutionIntent {
             thread_id: "thread-deno-test".into(),
+            owner: DenoExecutionOwner::Thread {
+                thread_id: "thread-deno-test".into(),
+            },
             workspace_path: workspace.to_path_buf(),
             target: DenoExecutionTarget::WorkspaceFile {
                 entrypoint: entrypoint_path,
             },
             args,
+            timeout_ms: 0,
             import_map_path: None,
         }
     }
@@ -912,11 +993,15 @@ mod tests {
     fn stdin_intent(workspace: &Path, source: &str, args: Vec<String>) -> DenoExecutionIntent {
         DenoExecutionIntent {
             thread_id: "thread-deno-test".into(),
+            owner: DenoExecutionOwner::Thread {
+                thread_id: "thread-deno-test".into(),
+            },
             workspace_path: workspace.to_path_buf(),
             target: DenoExecutionTarget::StdinSource {
                 source: source.into(),
             },
             args,
+            timeout_ms: 0,
             import_map_path: None,
         }
     }
@@ -1330,6 +1415,159 @@ mod tests {
         assert_eq!(owner.active_run_count(), 0);
     }
 
+    #[cfg(unix)]
+    fn workspace_intent(
+        workspace: &Path,
+        workspace_id: &str,
+        run_id: &str,
+        timeout_ms: u64,
+    ) -> DenoExecutionIntent {
+        DenoExecutionIntent {
+            thread_id: String::new(),
+            owner: DenoExecutionOwner::Workspace {
+                workspace_id: workspace_id.into(),
+                run_id: run_id.into(),
+            },
+            workspace_path: workspace.to_path_buf(),
+            target: DenoExecutionTarget::StdinSource {
+                source: "console.log('workspace')".into(),
+            },
+            args: Vec::new(),
+            timeout_ms,
+            import_map_path: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_runs_are_concurrent_and_have_independent_timeouts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("sleep-deno.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\ncat >/dev/null\nsleep 0.20\nprintf 'done=%s\\n' \"$1\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let owner = DenoRuntimeOwner::with_policy(
+            &script,
+            DenoRuntimePolicy {
+                execution_timeout: Duration::from_secs(5),
+                stdout_cap_bytes: 4096,
+                stderr_cap_bytes: 4096,
+            },
+        );
+
+        let first_owner = owner.clone();
+        let first_workspace = temp.path().to_path_buf();
+        let first = thread::spawn(move || {
+            first_owner.dispatch_intent(workspace_intent(
+                &first_workspace,
+                "workspace-runtime",
+                "run-a",
+                60,
+            ))
+        });
+        let second_owner = owner.clone();
+        let second_workspace = temp.path().to_path_buf();
+        let second = thread::spawn(move || {
+            second_owner.dispatch_intent(workspace_intent(
+                &second_workspace,
+                "workspace-runtime",
+                "run-b",
+                2_000,
+            ))
+        });
+
+        for _ in 0..100 {
+            if owner.active_run_count() == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(owner.active_run_count(), 2);
+        assert!(!owner.is_thread_active("run-a"));
+        assert!(!owner.is_thread_active("run-b"));
+
+        let first_error = first.join().unwrap().unwrap_err();
+        assert_eq!(first_error.code, error_codes::DENO_EXECUTION_TIMEOUT);
+        let second_output = second.join().unwrap().unwrap();
+        assert_eq!(second_output.exit_code, 0);
+        assert!(second_output.stdout.contains("done="));
+        assert_eq!(owner.active_run_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_thread_only_cancels_thread_owned_runs_and_shutdown_cancels_workspace_runs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("long-deno.sh");
+        fs::write(&script, "#!/bin/sh\ncat >/dev/null\nsleep 5\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let owner = DenoRuntimeOwner::with_policy(
+            &script,
+            DenoRuntimePolicy {
+                execution_timeout: Duration::from_secs(10),
+                stdout_cap_bytes: 1024,
+                stderr_cap_bytes: 1024,
+            },
+        );
+
+        let thread_owner = owner.clone();
+        let thread_workspace = temp.path().to_path_buf();
+        let thread_run = thread::spawn(move || {
+            thread_owner.dispatch_intent(DenoExecutionIntent {
+                thread_id: "agent-thread".into(),
+                owner: DenoExecutionOwner::Thread {
+                    thread_id: "agent-thread".into(),
+                },
+                workspace_path: thread_workspace,
+                target: DenoExecutionTarget::StdinSource {
+                    source: "agent".into(),
+                },
+                args: Vec::new(),
+                timeout_ms: 10_000,
+                import_map_path: None,
+            })
+        });
+        let workspace_owner = owner.clone();
+        let workspace_path = temp.path().to_path_buf();
+        let workspace_run = thread::spawn(move || {
+            workspace_owner.dispatch_intent(workspace_intent(
+                &workspace_path,
+                "workspace-runtime",
+                "run-cancel",
+                10_000,
+            ))
+        });
+        for _ in 0..100 {
+            if owner.active_run_count() == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(owner.active_run_count(), 2);
+
+        owner.cancel_thread("agent-thread");
+        assert_eq!(
+            thread_run.join().unwrap().unwrap_err().code,
+            error_codes::DENO_EXECUTION_CANCELLED
+        );
+        assert_eq!(owner.active_run_count(), 1);
+        assert!(!owner.is_thread_active("agent-thread"));
+
+        owner.shutdown_all();
+        assert_eq!(
+            workspace_run.join().unwrap().unwrap_err().code,
+            error_codes::DENO_EXECUTION_CANCELLED
+        );
+        assert_eq!(owner.active_run_count(), 0);
+    }
+
     #[test]
     fn prepared_execution_derives_every_path_from_one_canonical_root() {
         let temp = tempfile::tempdir().unwrap();
@@ -1397,11 +1635,15 @@ mod tests {
 
         let error = PreparedDenoExecution::prepare(&DenoExecutionIntent {
             thread_id: "thread-deno-test".into(),
+            owner: DenoExecutionOwner::Thread {
+                thread_id: "thread-deno-test".into(),
+            },
             workspace_path: workspace,
             target: DenoExecutionTarget::WorkspaceFile {
                 entrypoint: outside,
             },
             args: Vec::new(),
+            timeout_ms: 0,
             import_map_path: None,
         })
         .unwrap_err();
@@ -1417,11 +1659,15 @@ mod tests {
 
         let error = PreparedDenoExecution::prepare(&DenoExecutionIntent {
             thread_id: "thread-deno-test".into(),
+            owner: DenoExecutionOwner::Thread {
+                thread_id: "thread-deno-test".into(),
+            },
             workspace_path: workspace.clone(),
             target: DenoExecutionTarget::WorkspaceFile {
                 entrypoint: workspace.join("..").join("outside.ts"),
             },
             args: Vec::new(),
+            timeout_ms: 0,
             import_map_path: None,
         })
         .unwrap_err();
@@ -1443,11 +1689,15 @@ mod tests {
 
         let prepared = PreparedDenoExecution::prepare(&DenoExecutionIntent {
             thread_id: "thread-deno-test".into(),
+            owner: DenoExecutionOwner::Thread {
+                thread_id: "thread-deno-test".into(),
+            },
             workspace_path: alias.clone(),
             target: DenoExecutionTarget::WorkspaceFile {
                 entrypoint: alias.join("script.ts"),
             },
             args: Vec::new(),
+            timeout_ms: 0,
             import_map_path: None,
         })
         .unwrap();
@@ -1487,9 +1737,13 @@ mod tests {
 
         let error = PreparedDenoExecution::prepare(&DenoExecutionIntent {
             thread_id: "thread-deno-test".into(),
+            owner: DenoExecutionOwner::Thread {
+                thread_id: "thread-deno-test".into(),
+            },
             workspace_path: workspace.clone(),
             target: DenoExecutionTarget::WorkspaceFile { entrypoint: escape },
             args: Vec::new(),
+            timeout_ms: 0,
             import_map_path: None,
         })
         .unwrap_err();

@@ -20,8 +20,9 @@ import type {
   Asset,
   AssetPath,
   ReadAssetType,
-  CreateSessionWorkspaceInput,
-  WorkspaceFolderPickerResult,
+  PedelecWorkspace,
+  WorkspaceRunOptions,
+  WorkspaceRunResult,
 } from "@kaoruisaac/pedelec";
 ```
 
@@ -75,7 +76,6 @@ type CreateSessionInput<
       model?: never;
       effort?: never;
       skills?: SkillsInput<TTools>;
-      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
@@ -84,34 +84,48 @@ type CreateSessionInput<
       effort?: Effort;
       effortLevel?: never;
       skills?: SkillsInput<TTools>;
-      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
 
 `effortLevel` selects Desktop profile mode. `model` selects explicit provider configuration and may be paired with provider-native `effort`; these modes are mutually exclusive. Model-only explicit mode is valid and uses provider-default effort behavior. `effort` cannot be supplied without `model`.
 
-### `CreateSessionWorkspaceInput`
+### `PedelecWorkspace`
 
 ```ts
-type CreateSessionWorkspaceInput = {
-  path: string;
-};
-```
-
-`path` is an absolute application-managed workspace path. Pedelec creates missing runtime subdirectories but never deletes this workspace. It may be shared by multiple active sessions and must not overlap the managed workspace root.
-
-### `WorkspaceFolderPickerResult`
-
-```ts
-interface WorkspaceFolderPickerResult {
-  path: string;
-  isEmptyFolder: boolean;
-  hasWorkspaceConfig: boolean;
+class PedelecWorkspace {
+  readonly path: string | null;
+  createSession(): Promise<PedelecSession<string>>;
+  createSession<const TTools extends readonly ToolDefinition[]>(
+    input: CreateSessionInput<TTools>,
+  ): Promise<PedelecSession<ToolNameOf<TTools>>>;
+  listFiles(path?: string): Promise<string[]>;
+  listFolders(path?: string): Promise<string[]>;
+  run(script: string, options?: WorkspaceRunOptions): Promise<WorkspaceRunResult>;
 }
 ```
 
-This is the read-only snapshot returned by `workspaceFolderPicker()`. `hasWorkspaceConfig` only indicates that `.pedelec-workspace.json` is a regular file; it does not validate the marker contents.
+`PedelecWorkspace` is returned by `openWorkspace()`, `createSession().workspace`, and `resumeSession().workspace`. Its opaque workspace identity is intentionally not public.
+
+### `WorkspaceRunOptions`
+
+```ts
+type WorkspaceRunOptions = {
+  timeoutMs?: number;
+};
+```
+
+### `WorkspaceRunResult`
+
+```ts
+type WorkspaceRunResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+}
+```
 
 ## Provider and settings
 
@@ -170,7 +184,7 @@ type PedelecAvailability = {
 type AssetPath = `/${string}`;
 ```
 
-The SDK public path for an asset in the session's shared store. Physically, the Agent-visible shared store is `<workspace.path>/.pedelec-runtime/assets/`; the `.pedelec-runtime` directory is private runtime layout and is not exposed in SDK values. For example, `/images/photo.png` refers to `<workspace.path>/.pedelec-runtime/assets/images/photo.png`. Runtime validation also rejects backslashes, empty path segments, `.` and `..`.
+The SDK public path for an asset in the Workspace shared store. Physically, the Agent-visible shared store is `<workspace.path>/.pedelec-runtime/assets/`; the `.pedelec-runtime` directory is private runtime layout and is not exposed in SDK values. For example, `/images/photo.png` refers to `<workspace.path>/.pedelec-runtime/assets/images/photo.png`. Runtime validation also rejects backslashes, empty path segments, `.` and `..`.
 
 ### `ReadAssetType`
 

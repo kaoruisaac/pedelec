@@ -19,9 +19,16 @@ pub mod effort_wizard;
 pub use effort_wizard::*;
 
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 60_000;
+pub const DEFAULT_WORKSPACE_RUN_TIMEOUT_MS: u64 = 60_000;
+// Keep conservative headroom for the Core IPC response envelope. The exact
+// response-size check belongs to the transport layer, but this guard prevents
+// Core traversal from accumulating an unbounded result before it gets there.
+const WORKSPACE_LIST_EARLY_LIMIT_BYTES: usize = 900 * 1024;
 const DEFAULT_MAX_SKILL_SIZE_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_OLLAMA_TIMEOUT_MS: u64 = 120_000;
@@ -61,9 +68,31 @@ pub fn workspace_assets_root(workspace_path: &Path) -> PathBuf {
     workspace_runtime_data_root(workspace_path).join("assets")
 }
 
-/// Returns the physical root used for generated Pedelec skill/tool specs.
+/// Returns the legacy workspace-global skills root for callers inspecting
+/// existing data.
+///
+/// This path is retained as a legacy filesystem helper for callers that need
+/// to inspect an existing workspace.  Core no longer creates or reads this
+/// workspace-global directory; generated skills are stored below
+/// [`thread_skills_root`].
 pub fn workspace_skills_root(workspace_path: &Path) -> PathBuf {
     workspace_runtime_data_root(workspace_path).join("skills")
+}
+
+/// Returns the runtime root containing private state for all threads in a
+/// workspace.
+pub fn workspace_threads_root(workspace_path: &Path) -> PathBuf {
+    workspace_runtime_data_root(workspace_path).join("threads")
+}
+
+/// Returns the private runtime root for one thread.
+pub fn workspace_thread_root(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_threads_root(workspace_path).join(thread_id)
+}
+
+/// Returns the generated skill/tool-spec directory for one thread.
+pub fn thread_skills_root(workspace_path: &Path, thread_id: &str) -> PathBuf {
+    workspace_thread_root(workspace_path, thread_id).join("skills")
 }
 
 /// Returns the physical root used for thread/session event logs.
@@ -361,15 +390,144 @@ impl PedelecError {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceKind {
+    Managed,
+    Custom,
+}
+
+/// Core-owned capability and filesystem identity for one Workspace.
+///
+/// The canonical path is intentionally kept in this resource rather than in
+/// [`ThreadState`].  Browser-facing protocol responses should use the opaque
+/// `workspace_id` and must not serialize this state directly for managed
+/// workspaces.
+#[derive(Debug, Clone)]
+pub struct WorkspaceState {
+    pub workspace_id: String,
+    pub canonical_path: PathBuf,
+    pub kind: WorkspaceKind,
+    authorized_sdk_origins: HashSet<String>,
+}
+
+impl WorkspaceState {
+    fn new(workspace_id: String, canonical_path: PathBuf, kind: WorkspaceKind) -> Self {
+        Self {
+            workspace_id: workspace_id.clone(),
+            canonical_path,
+            kind,
+            authorized_sdk_origins: HashSet::new(),
+        }
+    }
+
+    pub fn is_origin_authorized(&self, origin: &str) -> bool {
+        self.authorized_sdk_origins.contains(origin)
+    }
+
+    pub fn authorized_origins(&self) -> impl Iterator<Item = &String> {
+        self.authorized_sdk_origins.iter()
+    }
+}
+
+/// Runtime registry of Workspace capabilities.  Custom Workspaces are
+/// deduplicated by canonical physical path so repeated opens coordinate on
+/// one resource and one thread membership domain.
+#[derive(Debug, Default)]
+pub struct WorkspaceRegistry {
+    workspaces: HashMap<String, WorkspaceState>,
+    by_canonical_identity: HashMap<String, String>,
+}
+
+impl WorkspaceRegistry {
+    fn insert(&mut self, state: WorkspaceState) -> Result<(), PedelecError> {
+        let identity = workspace_canonical_identity(&state.canonical_path);
+        if self.workspaces.contains_key(&state.workspace_id)
+            || self.by_canonical_identity.contains_key(&identity)
+        {
+            return Err(PedelecError::new(
+                error_codes::WORKSPACE_CREATE_FAILED,
+                "workspace resource already exists",
+            ));
+        }
+        self.by_canonical_identity
+            .insert(identity, state.workspace_id.clone());
+        self.workspaces.insert(state.workspace_id.clone(), state);
+        Ok(())
+    }
+
+    fn insert_or_get_custom(
+        &mut self,
+        workspace_id: String,
+        canonical_path: PathBuf,
+    ) -> Result<(String, bool), PedelecError> {
+        let identity = workspace_canonical_identity(&canonical_path);
+        if let Some(existing_id) = self.by_canonical_identity.get(&identity) {
+            return Ok((existing_id.clone(), false));
+        }
+
+        self.insert(WorkspaceState::new(
+            workspace_id.clone(),
+            canonical_path,
+            WorkspaceKind::Custom,
+        ))?;
+        Ok((workspace_id, true))
+    }
+
+    fn workspace(&self, workspace_id: &str) -> Result<&WorkspaceState, PedelecError> {
+        self.workspaces.get(workspace_id).ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::WORKSPACE_NOT_FOUND,
+                "workspace was not found",
+                serde_json::json!({ "workspaceId": workspace_id }),
+            )
+        })
+    }
+
+    fn workspace_mut(&mut self, workspace_id: &str) -> Result<&mut WorkspaceState, PedelecError> {
+        self.workspaces.get_mut(workspace_id).ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::WORKSPACE_NOT_FOUND,
+                "workspace was not found",
+                serde_json::json!({ "workspaceId": workspace_id }),
+            )
+        })
+    }
+
+    fn remove(&mut self, workspace_id: &str) -> Option<WorkspaceState> {
+        let state = self.workspaces.remove(workspace_id)?;
+        self.by_canonical_identity
+            .remove(&workspace_canonical_identity(&state.canonical_path));
+        Some(state)
+    }
+
+    fn clear(&mut self) {
+        self.workspaces.clear();
+        self.by_canonical_identity.clear();
+    }
+}
+
+fn workspace_canonical_identity(path: &Path) -> String {
+    let value = path.to_string_lossy().to_string();
+    #[cfg(windows)]
+    {
+        value.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        value
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadState {
     pub thread_id: String,
+    pub workspace_id: String,
     pub provider: ProviderCode,
     #[serde(default)]
     pub effort_level: Option<EffortLevel>,
     pub effort_args: Vec<String>,
-    pub workspace_path: PathBuf,
     pub skills: Vec<SkillFile>,
     pub status: ThreadStatus,
     pub created_at: DateTime<Utc>,
@@ -926,13 +1084,9 @@ pub struct CreateThreadInput {
     #[serde(default)]
     pub effort: Option<String>,
     pub skills: Option<CreateThreadSkillsInput>,
-    pub workspace: Option<CreateThreadWorkspaceInput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateThreadWorkspaceInput {
-    pub path: PathBuf,
+    /// An existing Core Workspace capability.  `None` asks Core to create a
+    /// new managed Workspace before creating the Thread.
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -957,14 +1111,24 @@ pub struct CreateThreadToolInput {
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadOutput {
     pub thread_id: String,
+    pub workspace_id: String,
+    /// Custom Workspace paths are safe to expose to the SDK after Core has
+    /// validated them. Managed Workspace paths remain intentionally opaque.
+    pub workspace_path: Option<String>,
     pub explicit_model_config_applied: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceFolderInspection {
-    pub is_empty_folder: bool,
-    pub has_workspace_config: bool,
+pub struct OpenWorkspaceInput {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenWorkspaceOutput {
+    pub workspace_id: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1002,6 +1166,29 @@ pub struct DenoRunInput {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceListInput {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceListOutput {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRunInput {
+    pub workspace_id: String,
+    pub script: String,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
 /// Bounded result returned by one raw Deno child process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1020,21 +1207,52 @@ pub enum DenoExecutionTarget {
     StdinSource { source: String },
 }
 
+/// Ownership identity for one raw Deno process. Agent executions are
+/// thread-scoped; Workspace executions are independent run identities and do
+/// not borrow a Thread or its Deno Module snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DenoExecutionOwner {
+    Thread {
+        thread_id: String,
+    },
+    Workspace {
+        workspace_id: String,
+        run_id: String,
+    },
+}
+
 /// The validated, authoritative execution intent passed from Core to the
-/// Desktop-owned runtime. `workspace_path` always comes from the thread, while
-/// file entrypoints are resolved by Core before dispatch.
+/// Desktop-owned runtime. `workspace_path` always comes from an authoritative
+/// Core Workspace resource, while file entrypoints are resolved by Core before
+/// dispatch. `thread_id` remains populated for Agent executions for existing
+/// diagnostics; Workspace executions use an empty value because no Thread
+/// owns them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DenoExecutionIntent {
     pub thread_id: String,
+    pub owner: DenoExecutionOwner,
     pub workspace_path: PathBuf,
     pub target: DenoExecutionTarget,
     pub args: Vec<String>,
+    /// Core-resolved timeout for this execution. Zero is reserved for legacy
+    /// direct runtime tests; all production Core admission paths provide a
+    /// positive value.
+    #[serde(default)]
+    pub timeout_ms: u64,
     /// Core-owned import map for a ready Deno Module snapshot.  This is never
     /// sourced from the Agent CLI request; threads without registered modules
     /// keep the existing `None` behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_map_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceRunStart {
+    pub workspace_id: String,
+    pub run_id: String,
+    pub intent: DenoExecutionIntent,
 }
 
 /// Runtime seam used by Core IPC.  The default lifecycle methods keep test
@@ -1132,6 +1350,9 @@ pub struct SubscribeThreadInput {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadSnapshot {
     pub thread_id: String,
+    /// Internal transport identity used by SDK resume hydration.  It is not
+    /// part of the public Session event context.
+    pub workspace_id: String,
     pub status: ThreadStatus,
     pub latest_seq: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1590,6 +1811,10 @@ impl ProviderReadiness {
 pub struct CoreRuntime {
     pub thread_manager: ThreadManager,
     pub workspace_manager: WorkspaceManager,
+    /// Authoritative Core Workspace resources.  `workspace_manager` owns
+    /// managed-root filesystem policy; this registry owns Workspace identity,
+    /// canonical paths, kind, and SDK capabilities.
+    pub workspace_registry: WorkspaceRegistry,
     pub skill_manager: SkillManager,
     pub tool_registry: ToolRegistryStore,
     pub tool_request_broker: ToolRequestBroker,
@@ -1623,6 +1848,10 @@ pub struct CoreRuntime {
     /// Operation identities already included in the normalized total.
     pub session_usage_operations: HashSet<(String, String)>,
     pub provider_usage: HashMap<String, Value>,
+    /// Workspace-owned Deno reservations. Multiple run IDs may be active in
+    /// one Workspace, while provider admission is excluded for the whole
+    /// Workspace until every reservation is released.
+    pub active_workspace_runs: HashMap<String, HashSet<String>>,
     /// Threads in this set have restored ended-thread diagnostic resources
     /// and are waiting for the trusted dispatch boundary to admit the turn.
     /// It lets a pre-admission failure restore the original Ended semantics.
@@ -1642,6 +1871,354 @@ impl CoreRuntime {
     /// the production owner.
     pub fn new_for_application() -> Self {
         Self::new()
+    }
+
+    /// Returns an authoritative Workspace resource by opaque Core identity.
+    pub fn workspace(&self, workspace_id: &str) -> Result<&WorkspaceState, PedelecError> {
+        self.workspace_registry.workspace(workspace_id)
+    }
+
+    /// Returns a mutable authoritative Workspace resource by opaque Core
+    /// identity.  This is kept internal-facing so capability mutation remains
+    /// inside Core.
+    pub fn workspace_mut(
+        &mut self,
+        workspace_id: &str,
+    ) -> Result<&mut WorkspaceState, PedelecError> {
+        self.workspace_registry.workspace_mut(workspace_id)
+    }
+
+    /// Returns managed Workspace paths for the trusted SDK error-sanitization
+    /// boundary. These paths never leave Core; the IPC layer uses them only to
+    /// redact Desktop-owned filesystem details from browser-facing errors.
+    pub fn managed_workspace_paths_for_error_sanitization(&self) -> Vec<PathBuf> {
+        let mut paths = self
+            .workspace_manager
+            .managed_workspace_root_for_internal_use()
+            .ok()
+            .into_iter()
+            .collect::<Vec<_>>();
+        paths.extend(
+            self.workspace_registry
+                .workspaces
+                .values()
+                .filter(|workspace| matches!(workspace.kind, WorkspaceKind::Managed))
+                .map(|workspace| workspace.canonical_path.clone()),
+        );
+        paths
+    }
+
+    /// Resolves a Thread to the Workspace capability that owns its path.
+    pub fn thread_workspace(&self, thread_id: &str) -> Result<&WorkspaceState, PedelecError> {
+        let workspace_id = self.thread_manager.thread(thread_id)?.workspace_id.clone();
+        self.workspace(&workspace_id)
+    }
+
+    /// Resolves a Thread's authoritative Workspace path.  The path is cloned
+    /// at this boundary so callers cannot retain a mutable alias to registry
+    /// state.
+    pub fn thread_workspace_path(&self, thread_id: &str) -> Option<PathBuf> {
+        self.thread_workspace(thread_id)
+            .ok()
+            .map(|workspace| workspace.canonical_path.clone())
+    }
+
+    /// Returns all currently registered Threads bound to a Workspace without
+    /// scanning its filesystem.
+    pub fn threads_in_workspace(&self, workspace_id: &str) -> Result<Vec<String>, PedelecError> {
+        self.workspace(workspace_id)?;
+        Ok(self.thread_manager.threads_in_workspace(workspace_id))
+    }
+
+    /// Authorizes a normalized SDK origin for a Workspace capability.
+    pub fn authorize_workspace_access(
+        &self,
+        workspace_id: &str,
+        caller_origin: &str,
+    ) -> Result<(), PedelecError> {
+        let caller_origin = normalize_workspace_origin(caller_origin)?;
+        let workspace = self.workspace(workspace_id)?;
+        if workspace.is_origin_authorized(&caller_origin) {
+            Ok(())
+        } else {
+            Err(PedelecError::with_details(
+                error_codes::WORKSPACE_ACCESS_DENIED,
+                "workspace is not accessible to this caller",
+                serde_json::json!({ "workspaceId": workspace_id }),
+            ))
+        }
+    }
+
+    /// Lists regular files below an authoritative Workspace directory. The
+    /// caller-origin check belongs to the IPC boundary; this Core method only
+    /// operates on the already-resolved capability.
+    pub fn list_files(
+        &self,
+        input: WorkspaceListInput,
+    ) -> Result<WorkspaceListOutput, PedelecError> {
+        let workspace = self.workspace(&input.workspace_id)?;
+        list_workspace_descendants(workspace, input.path.as_deref(), WorkspaceListKind::Files)
+    }
+
+    /// Lists regular directories below an authoritative Workspace directory.
+    pub fn list_folders(
+        &self,
+        input: WorkspaceListInput,
+    ) -> Result<WorkspaceListOutput, PedelecError> {
+        let workspace = self.workspace(&input.workspace_id)?;
+        list_workspace_descendants(workspace, input.path.as_deref(), WorkspaceListKind::Folders)
+    }
+
+    /// Explicit aliases make the Workspace ownership visible to callers that
+    /// also have Thread-oriented list methods in scope.
+    pub fn list_workspace_files(
+        &self,
+        input: WorkspaceListInput,
+    ) -> Result<WorkspaceListOutput, PedelecError> {
+        self.list_files(input)
+    }
+
+    pub fn list_workspace_folders(
+        &self,
+        input: WorkspaceListInput,
+    ) -> Result<WorkspaceListOutput, PedelecError> {
+        self.list_folders(input)
+    }
+
+    /// Verifies that no provider operation is active in any Thread bound to a
+    /// Workspace. This is deliberately Workspace-wide so the caller never
+    /// has to pick an arbitrary Thread to report as busy.
+    pub fn ensure_workspace_provider_idle(&self, workspace_id: &str) -> Result<(), PedelecError> {
+        self.workspace(workspace_id)?;
+        for thread_id in self.thread_manager.threads_in_workspace(workspace_id) {
+            let provider_turn_active = self
+                .thread_manager
+                .provider_state(&thread_id)
+                .and_then(|state| state.active_provider_turn_id.as_deref())
+                .is_some_and(|turn_id| !turn_id.trim().is_empty());
+            let pending_operation = self.pending_provider_operations.contains_key(&thread_id);
+            let provider_status_active = self
+                .thread_manager
+                .thread(&thread_id)
+                .map(|thread| {
+                    matches!(
+                        thread.status,
+                        ThreadStatus::Starting
+                            | ThreadStatus::Running
+                            | ThreadStatus::WaitingToolResult
+                            | ThreadStatus::Stopping
+                    )
+                })
+                .unwrap_or(false);
+            if provider_turn_active || pending_operation || provider_status_active {
+                return Err(workspace_busy_error(workspace_id));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_workspace_runs_idle_for_thread(&self, thread_id: &str) -> Result<(), PedelecError> {
+        let workspace_id = self.thread_manager.thread(thread_id)?.workspace_id.clone();
+        if self
+            .active_workspace_runs
+            .get(&workspace_id)
+            .is_some_and(|runs| !runs.is_empty())
+        {
+            return Err(workspace_busy_error(&workspace_id));
+        }
+        Ok(())
+    }
+
+    /// Atomically admits a Workspace-owned Deno execution and reserves its
+    /// run ID. No Thread status, provider session, or Thread Deno modules are
+    /// consulted by this operation.
+    pub fn begin_workspace_run(
+        &mut self,
+        input: WorkspaceRunInput,
+    ) -> Result<WorkspaceRunStart, PedelecError> {
+        let timeout_ms = input.timeout_ms.unwrap_or(DEFAULT_WORKSPACE_RUN_TIMEOUT_MS);
+        if timeout_ms == 0 {
+            return Err(PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "workspace run timeoutMs must be a positive integer",
+            ));
+        }
+
+        let workspace = self.workspace(&input.workspace_id)?.clone();
+        self.ensure_workspace_provider_idle(&input.workspace_id)?;
+        let workspace_path = resolve_workspace_root(&workspace)?;
+        let run_id = loop {
+            let candidate = format!("wr_{}", Uuid::new_v4().simple());
+            let occupied = self
+                .active_workspace_runs
+                .get(&input.workspace_id)
+                .is_some_and(|runs| runs.contains(&candidate));
+            if !occupied {
+                break candidate;
+            }
+        };
+        self.active_workspace_runs
+            .entry(input.workspace_id.clone())
+            .or_default()
+            .insert(run_id.clone());
+
+        Ok(WorkspaceRunStart {
+            workspace_id: input.workspace_id.clone(),
+            run_id: run_id.clone(),
+            intent: DenoExecutionIntent {
+                thread_id: String::new(),
+                owner: DenoExecutionOwner::Workspace {
+                    workspace_id: input.workspace_id,
+                    run_id,
+                },
+                workspace_path,
+                target: DenoExecutionTarget::StdinSource {
+                    source: input.script,
+                },
+                args: Vec::new(),
+                timeout_ms,
+                import_map_path: None,
+            },
+        })
+    }
+
+    /// Releases a Workspace run reservation. It is intentionally idempotent
+    /// so dispatch/error cleanup can use a finally-style path safely.
+    pub fn finish_workspace_run(&mut self, workspace_id: &str, run_id: &str) {
+        let remove_workspace = if let Some(runs) = self.active_workspace_runs.get_mut(workspace_id)
+        {
+            runs.remove(run_id);
+            runs.is_empty()
+        } else {
+            false
+        };
+        if remove_workspace {
+            self.active_workspace_runs.remove(workspace_id);
+        }
+    }
+
+    pub fn active_workspace_run_count(&self, workspace_id: &str) -> usize {
+        self.active_workspace_runs
+            .get(workspace_id)
+            .map_or(0, HashSet::len)
+    }
+
+    /// Opens (or reuses) a custom Workspace capability after the selected
+    /// path has passed the existing custom-workspace validation rules.
+    ///
+    /// Workspace metadata and runtime directories are initialized here, not
+    /// as a side effect of Thread creation.
+    pub fn open_workspace(
+        &mut self,
+        input: OpenWorkspaceInput,
+        caller_origin: &str,
+        caller_sdk_version: Option<&str>,
+    ) -> Result<OpenWorkspaceOutput, PedelecError> {
+        let caller_origin = normalize_workspace_origin(caller_origin)?;
+        let sdk_version = caller_sdk_version
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .unwrap_or(env!("CARGO_PKG_VERSION"));
+        let canonical_path = self
+            .workspace_manager
+            .prepare_custom_workspace(&input.path)?;
+        self.workspace_manager.ensure_custom_workspace_config(
+            &canonical_path,
+            sdk_version,
+            &caller_origin,
+        )?;
+
+        let candidate_id = format!("ws_{}", Uuid::new_v4().simple());
+        let (workspace_id, inserted) = self
+            .workspace_registry
+            .insert_or_get_custom(candidate_id, canonical_path.clone())?;
+        if inserted {
+            // The state was created with an empty capability set.  Keep the
+            // mutation in one place so a future caller cannot forget to add
+            // the origin on a newly opened resource.
+            self.workspace_registry
+                .workspace_mut(&workspace_id)?
+                .authorized_sdk_origins
+                .insert(caller_origin);
+        } else {
+            self.workspace_registry
+                .workspace_mut(&workspace_id)?
+                .authorized_sdk_origins
+                .insert(caller_origin);
+        }
+
+        let workspace = self.workspace(&workspace_id)?;
+        Ok(OpenWorkspaceOutput {
+            workspace_id,
+            path: path_for_external_use(&workspace.canonical_path),
+        })
+    }
+
+    /// Explicit name for SDK/transport callers that want to distinguish this
+    /// operation from the later managed-workspace convenience flow.
+    pub fn open_custom_workspace(
+        &mut self,
+        input: OpenWorkspaceInput,
+        caller_origin: &str,
+        caller_sdk_version: Option<&str>,
+    ) -> Result<OpenWorkspaceOutput, PedelecError> {
+        self.open_workspace(input, caller_origin, caller_sdk_version)
+    }
+
+    /// Test/integration seam for constructing synthetic Thread states without
+    /// bypassing the Workspace registry. Production callers should use
+    /// [`Self::open_workspace`] or managed Thread creation.
+    #[doc(hidden)]
+    pub fn register_workspace_for_test(
+        &mut self,
+        workspace_id: impl Into<String>,
+        canonical_path: impl Into<PathBuf>,
+        kind: WorkspaceKind,
+    ) -> Result<(), PedelecError> {
+        let canonical_path = canonical_path.into();
+        self.workspace_registry.insert(WorkspaceState::new(
+            workspace_id.into(),
+            canonical_path,
+            kind,
+        ))
+    }
+
+    fn create_managed_workspace_resource(
+        &mut self,
+        caller_origin: Option<&str>,
+    ) -> Result<(String, PathBuf), PedelecError> {
+        let caller_origin = caller_origin.map(normalize_workspace_origin).transpose()?;
+        let workspace_id = format!("ws_{}", Uuid::new_v4().simple());
+        let workspace_path = self
+            .workspace_manager
+            .create_managed_workspace(&workspace_id)?;
+        let canonical_path = workspace_path.canonicalize().map_err(|err| {
+            workspace_io_error(
+                error_codes::WORKSPACE_CREATE_FAILED,
+                "cannot canonicalize managed workspace",
+                &workspace_path,
+                err,
+            )
+        })?;
+        let mut state = WorkspaceState::new(
+            workspace_id.clone(),
+            canonical_path.clone(),
+            WorkspaceKind::Managed,
+        );
+        if let Some(origin) = caller_origin {
+            state.authorized_sdk_origins.insert(origin);
+        }
+        if let Err(error) = self.workspace_registry.insert(state) {
+            let _ = self
+                .workspace_manager
+                .remove_managed_workspace_with_retry(&canonical_path);
+            return Err(error);
+        }
+        Ok((workspace_id, canonical_path))
+    }
+
+    fn remove_workspace_resource(&mut self, workspace_id: &str) {
+        self.workspace_registry.remove(workspace_id);
     }
 
     pub fn set_core_ipc_runtime(
@@ -1687,6 +2264,10 @@ impl CoreRuntime {
             )
         })?;
         let thread = self.thread_manager.thread(&input.thread_id)?.clone();
+        let workspace_path = self
+            .thread_workspace(&input.thread_id)?
+            .canonical_path
+            .clone();
         match thread.status {
             ThreadStatus::Idle => {}
             ThreadStatus::Ended | ThreadStatus::Stopping => {
@@ -1761,7 +2342,7 @@ impl CoreRuntime {
             upload_id.clone(),
             DenoModuleUploadTicket {
                 thread_id: input.thread_id,
-                workspace_path: thread.workspace_path,
+                workspace_path,
                 module_name: input.module_name,
                 expected_size_bytes: input.expected_size_bytes,
                 token_hash: format!("{:x}", Sha256::digest(token.as_bytes())),
@@ -2003,7 +2584,10 @@ impl CoreRuntime {
                 "thread has ended",
             ));
         }
-        let workspace_path = thread.workspace_path.clone();
+        let workspace_path = self
+            .thread_workspace(&input.thread_id)?
+            .canonical_path
+            .clone();
         self.expire_asset_uploads();
         if self.asset_upload_tickets.values().any(|ticket| {
             ticket.thread_id == input.thread_id
@@ -2081,7 +2665,11 @@ impl CoreRuntime {
                 "thread has ended",
             ));
         }
-        let input_path = workspace_assets_root(&thread.workspace_path);
+        let workspace_path = self
+            .thread_workspace(&input.thread_id)?
+            .canonical_path
+            .clone();
+        let input_path = workspace_assets_root(&workspace_path);
         if !input_path.exists() {
             return Ok(ListAssetsOutput { assets: Vec::new() });
         }
@@ -2128,8 +2716,12 @@ impl CoreRuntime {
                 "thread has ended",
             ));
         }
-        let (target, name, size_bytes, modified_at) = resolve_asset_file(thread, &input.path)?;
-        let workspace_path = thread.workspace_path.clone();
+        let workspace_path = self
+            .thread_workspace(&input.thread_id)?
+            .canonical_path
+            .clone();
+        let (target, name, size_bytes, modified_at) =
+            resolve_asset_file(thread, &workspace_path, &input.path)?;
         let port = self.asset_upload_port.ok_or_else(|| {
             PedelecError::new(
                 error_codes::ASSET_UPLOAD_SERVER_UNAVAILABLE,
@@ -2217,7 +2809,7 @@ impl CoreRuntime {
         &mut self,
         input: CreateThreadInput,
         sdk_origin: Option<String>,
-        sdk_version: Option<String>,
+        _sdk_version: Option<String>,
     ) -> Result<CreateThreadOutput, PedelecError> {
         let model = normalize_explicit_model(input.model)?;
         if model.is_some() && input.effort_level.is_some() {
@@ -2246,49 +2838,64 @@ impl CoreRuntime {
                 resolve_profile_session_args(&settings, &input.provider, effort_level)?,
             )
         };
-        let initialize =
-            |workspace: &Path| initialize_generated_skills(workspace, input.skills.as_ref());
-        // Custom workspaces persist across Desktop/Core restarts, so allocate
-        // the short thread ID only after the selected workspace is known and
-        // can be checked for a leftover Deno thread root.
-        let prepared_custom_workspace = match input.workspace.as_ref() {
-            Some(custom_workspace) => Some(
-                self.workspace_manager
-                    .prepare_custom_workspace(&custom_workspace.path)?,
-            ),
-            None => None,
-        };
-        let thread_id = self.next_available_thread_id(prepared_custom_workspace.as_deref())?;
-        let (workspace_path, (skills, registry)) = match prepared_custom_workspace {
-            Some(workspace_path) => {
-                let initialized = initialize(&workspace_path)?;
+        let skills_input = input.skills.clone();
+
+        // A Thread may only bind to an already-registered Workspace. SDK
+        // callers must have opened/authorized custom Workspaces first.
+        let (workspace_id, workspace_path, managed_workspace_created) =
+            if let Some(workspace_id) = input.workspace_id.clone() {
+                let workspace = self.workspace(&workspace_id)?.clone();
                 if let Some(origin) = sdk_origin.as_deref() {
-                    let sdk_version = sdk_version.as_deref().ok_or_else(|| {
-                        PedelecError::new(
-                            error_codes::WORKSPACE_CREATE_FAILED,
-                            "SDK version metadata is required for custom workspace sessions",
-                        )
-                    })?;
-                    self.workspace_manager.ensure_custom_workspace_config(
-                        &workspace_path,
-                        sdk_version,
-                        origin,
-                    )?;
+                    self.authorize_workspace_access(&workspace_id, origin)?;
                 }
-                (workspace_path, initialized)
+                (workspace_id, workspace.canonical_path, false)
+            } else {
+                let (workspace_id, workspace_path) =
+                    self.create_managed_workspace_resource(sdk_origin.as_deref())?;
+                (workspace_id, workspace_path, true)
+            };
+
+        // Custom workspaces persist across Core restarts, so allocate the
+        // short thread ID only after the selected Workspace is known and can
+        // be checked for a leftover Deno thread root.
+        let thread_id = match self.next_available_thread_id(
+            (!managed_workspace_created).then_some(workspace_path.as_path()),
+        ) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                if managed_workspace_created {
+                    let _ = self
+                        .workspace_manager
+                        .remove_managed_workspace_with_retry(&workspace_path);
+                    self.remove_workspace_resource(&workspace_id);
+                }
+                return Err(error);
             }
-            None => self
-                .workspace_manager
-                .create_thread_workspace_with(&thread_id, initialize)?,
+        };
+        let initialized =
+            initialize_generated_skills(&workspace_path, &thread_id, skills_input.as_ref());
+        let (skills, registry) = match initialized {
+            Ok(value) => value,
+            Err(error) => {
+                if managed_workspace_created {
+                    let _ = self
+                        .workspace_manager
+                        .remove_managed_workspace_with_retry(&workspace_path);
+                    self.remove_workspace_resource(&workspace_id);
+                } else {
+                    let _ = cleanup_thread_private_runtime_artifacts(&workspace_path, &thread_id);
+                }
+                return Err(error);
+            }
         };
 
         let now = Utc::now();
         let state = ThreadState {
             thread_id: thread_id.clone(),
+            workspace_id: workspace_id.clone(),
             provider: input.provider,
             effort_level,
             effort_args,
-            workspace_path: workspace_path.clone(),
             skills,
             status: ThreadStatus::Idle,
             created_at: now,
@@ -2315,6 +2922,12 @@ impl CoreRuntime {
 
         Ok(CreateThreadOutput {
             thread_id,
+            workspace_id: workspace_id.clone(),
+            workspace_path: self
+                .workspace(&workspace_id)
+                .ok()
+                .filter(|workspace| workspace.kind == WorkspaceKind::Custom)
+                .map(|workspace| path_for_external_use(&workspace.canonical_path)),
             explicit_model_config_applied: model.is_some(),
         })
     }
@@ -2387,11 +3000,13 @@ impl CoreRuntime {
             return Ok(None);
         }
 
-        let workspace_path = self
-            .thread_manager
-            .thread(thread_id)?
-            .workspace_path
-            .clone();
+        let workspace_path = self.thread_workspace_path(thread_id).ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::WORKSPACE_NOT_FOUND,
+                "thread workspace was not found",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+        })?;
         validate_deno_module_runtime_snapshot_files(&workspace_path, thread_id, modules)
     }
 
@@ -2469,14 +3084,13 @@ impl CoreRuntime {
             let _ = fs::remove_file(path);
         }
 
-        let cleanup_result = if self
-            .workspace_manager
-            .is_managed_workspace(&thread.workspace_path)
-        {
+        let workspace = self.workspace(&thread.workspace_id)?.clone();
+        let cleanup_result = if workspace.kind == WorkspaceKind::Managed {
             self.workspace_manager
-                .remove_thread_workspace_with_retry(&thread.workspace_path)
+                .remove_managed_workspace_with_retry(&workspace.canonical_path)
+                .map(|_| self.remove_workspace_resource(&workspace.workspace_id))
         } else {
-            cleanup_aborted_custom_workspace(&thread.workspace_path, &thread.thread_id)
+            cleanup_thread_private_runtime_artifacts(&workspace.canonical_path, &thread.thread_id)
         };
         cleanup_result
     }
@@ -2659,9 +3273,6 @@ impl CoreRuntime {
             if self.thread_manager.contains_thread(&thread_id) {
                 continue;
             }
-            if self.workspace_manager.thread_workspace_exists(&thread_id)? {
-                continue;
-            }
             if let Some(workspace) = custom_workspace {
                 if workspace_deno_thread_root_occupied(workspace, &thread_id) {
                     continue;
@@ -2704,6 +3315,7 @@ impl CoreRuntime {
     }
 
     fn validate_normal_send_text_status(&self, thread_id: &str) -> Result<(), PedelecError> {
+        self.ensure_workspace_runs_idle_for_thread(thread_id)?;
         self.ensure_deno_module_setup_ready(thread_id)?;
         let thread = self.thread_manager.thread(thread_id)?;
         match thread.status {
@@ -2734,6 +3346,7 @@ impl CoreRuntime {
     }
 
     fn validate_debug_send_text_status(&self, thread_id: &str) -> Result<bool, PedelecError> {
+        self.ensure_workspace_runs_idle_for_thread(thread_id)?;
         self.ensure_deno_module_setup_ready(thread_id)?;
         let thread = self.thread_manager.thread(thread_id)?;
         match thread.status {
@@ -2777,11 +3390,13 @@ impl CoreRuntime {
         thread_id: &str,
         validate_workspace: bool,
     ) -> Result<(ToolRegistry, PathBuf), PedelecError> {
-        let workspace_path = self
-            .thread_manager
-            .thread(thread_id)?
-            .workspace_path
-            .clone();
+        let workspace_path = self.thread_workspace_path(thread_id).ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::WORKSPACE_NOT_FOUND,
+                "thread workspace was not found",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+        })?;
 
         if validate_workspace {
             let metadata = fs::metadata(&workspace_path).map_err(|err| {
@@ -2805,7 +3420,29 @@ impl CoreRuntime {
             }
         }
 
-        let registry = ToolRegistry::load_from_skills_dir(workspace_skills_root(&workspace_path))?;
+        let skills_root = thread_skills_root(&workspace_path, thread_id);
+        if validate_workspace {
+            let metadata = fs::symlink_metadata(&skills_root).map_err(|err| {
+                workspace_open_error(
+                    thread_id,
+                    &workspace_path,
+                    "cannot open recorded thread skills",
+                    err,
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(workspace_open_error(
+                    thread_id,
+                    &workspace_path,
+                    "recorded thread skills path is not a directory",
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "recorded thread skills path is not a directory",
+                    ),
+                ));
+            }
+        }
+        let registry = ToolRegistry::load_from_skills_dir(skills_root)?;
         Ok((registry, thread_event_log_path(&workspace_path, thread_id)))
     }
 
@@ -2891,6 +3528,7 @@ impl CoreRuntime {
         &mut self,
         input: PrepareThreadInput,
     ) -> Result<PrepareExecutionStart, PedelecError> {
+        self.ensure_workspace_runs_idle_for_thread(&input.thread_id)?;
         self.ensure_deno_module_setup_ready(&input.thread_id)?;
         {
             let thread = self.thread_manager.thread(&input.thread_id)?;
@@ -2976,6 +3614,13 @@ impl CoreRuntime {
                 serde_json::json!({ "threadId": thread_id }),
             )
         })?;
+        let workspace_path = self.thread_workspace_path(thread_id).ok_or_else(|| {
+            PedelecError::with_details(
+                error_codes::WORKSPACE_NOT_FOUND,
+                "thread workspace was not found",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+        })?;
         let (model, reasoning_effort, antigravity_reasoning_effort, claude_reasoning_effort) =
             match &thread.provider {
                 ProviderCode::Codex => {
@@ -3003,6 +3648,7 @@ impl CoreRuntime {
             };
         let host_instructions = build_persistent_host_instructions_with_modules(
             &thread,
+            &workspace_path,
             registry,
             self.deno_modules
                 .get(thread_id)
@@ -3018,7 +3664,7 @@ impl CoreRuntime {
             thread_id: thread.thread_id,
             provider: thread.provider.clone(),
             provider_session_id: provider_state.provider_session_id,
-            workspace_path: thread.workspace_path,
+            workspace_path,
             effort_level: thread.effort_level,
             model,
             reasoning_effort,
@@ -3820,6 +4466,10 @@ impl CoreRuntime {
         let status = self.thread_manager.thread(&input.thread_id)?.status.clone();
         match status {
             ThreadStatus::Idle => {
+                // Even a same-handle resume must re-resolve the Core
+                // Workspace capability and verify the Thread-private skills
+                // snapshot before reporting success.
+                let _ = self.load_thread_runtime(&input.thread_id, true)?;
                 self.validate_deno_module_runtime_snapshot(&input.thread_id)?;
                 return Ok(ResumeThreadOutput {
                     snapshot: self.build_thread_snapshot(&input.thread_id)?,
@@ -3882,8 +4532,10 @@ impl CoreRuntime {
         self.finish_end_thread(&start.thread_id)
     }
 
-    pub fn cleanup_stale_workspaces_for_app_start(&self) -> Vec<PedelecError> {
-        self.workspace_manager.remove_all_thread_workspaces()
+    pub fn cleanup_stale_workspaces_for_app_start(&mut self) -> Vec<PedelecError> {
+        let errors = self.workspace_manager.remove_all_managed_workspaces();
+        self.workspace_registry.clear();
+        errors
     }
 
     pub fn cleanup_for_app_exit(&mut self) -> Vec<PedelecError> {
@@ -3892,7 +4544,9 @@ impl CoreRuntime {
             let _ = self.end_thread(EndThreadInput { thread_id });
         }
 
-        self.workspace_manager.remove_all_thread_workspaces()
+        let errors = self.workspace_manager.remove_all_managed_workspaces();
+        self.workspace_registry.clear();
+        errors
     }
 
     pub fn thread_status(&self, thread_id: &str) -> Option<ThreadStatus> {
@@ -3912,13 +4566,6 @@ impl CoreRuntime {
 
     pub fn event_log_path(&self, thread_id: &str) -> Option<PathBuf> {
         self.event_bus.event_log_path(thread_id)
-    }
-
-    pub fn thread_workspace_path(&self, thread_id: &str) -> Option<PathBuf> {
-        self.thread_manager
-            .thread(thread_id)
-            .ok()
-            .map(|thread| thread.workspace_path.clone())
     }
 
     /// Validates and admits a Deno execution without changing public thread
@@ -3967,7 +4614,15 @@ impl CoreRuntime {
             ));
         }
 
-        let workspace_path = thread.workspace_path.clone();
+        let workspace_path = self
+            .thread_workspace_path(&input.thread_id)
+            .ok_or_else(|| {
+                PedelecError::with_details(
+                    error_codes::WORKSPACE_NOT_FOUND,
+                    "thread workspace was not found",
+                    serde_json::json!({ "threadId": input.thread_id }),
+                )
+            })?;
         let (workspace_path, target) = match input.target {
             DenoRunTarget::WorkspaceFile { entrypoint } => {
                 let (workspace_path, entrypoint) =
@@ -3985,10 +4640,14 @@ impl CoreRuntime {
         let import_map_path = self.validate_deno_module_runtime_snapshot(&input.thread_id)?;
 
         Ok(DenoExecutionIntent {
-            thread_id: input.thread_id,
+            thread_id: input.thread_id.clone(),
+            owner: DenoExecutionOwner::Thread {
+                thread_id: input.thread_id,
+            },
             workspace_path,
             target,
             args: input.args,
+            timeout_ms: DEFAULT_WORKSPACE_RUN_TIMEOUT_MS,
             import_map_path,
         })
     }
@@ -4237,6 +4896,7 @@ impl CoreRuntime {
             });
         Ok(ThreadSnapshot {
             thread_id: thread_id.to_string(),
+            workspace_id: self.thread_manager.thread(thread_id)?.workspace_id.clone(),
             status: self.thread_manager.thread(thread_id)?.status.clone(),
             latest_seq: self.event_bus.latest_seq(thread_id),
             usage: self.session_usage.get(thread_id).cloned(),
@@ -4469,6 +5129,7 @@ impl ProviderProtocolTrafficBus {
 pub struct ThreadManager {
     threads: HashMap<String, ThreadState>,
     provider_sessions: HashMap<String, ProviderSessionState>,
+    workspace_threads: HashMap<String, HashSet<String>>,
     next_thread_number: u64,
 }
 
@@ -4507,7 +5168,25 @@ impl ThreadManager {
 
     pub fn insert_thread(&mut self, state: ThreadState, provider_session: ProviderSessionState) {
         let thread_id = state.thread_id.clone();
-        self.threads.insert(thread_id.clone(), state);
+        let workspace_id = state.workspace_id.clone();
+        if let Some(previous) = self.threads.insert(thread_id.clone(), state) {
+            if previous.workspace_id != workspace_id {
+                let remove_previous_index =
+                    if let Some(threads) = self.workspace_threads.get_mut(&previous.workspace_id) {
+                        threads.remove(&thread_id);
+                        threads.is_empty()
+                    } else {
+                        false
+                    };
+                if remove_previous_index {
+                    self.workspace_threads.remove(&previous.workspace_id);
+                }
+            }
+        }
+        self.workspace_threads
+            .entry(workspace_id)
+            .or_default()
+            .insert(thread_id.clone());
         self.provider_sessions.insert(thread_id, provider_session);
     }
 
@@ -4516,6 +5195,16 @@ impl ThreadManager {
         thread_id: &str,
     ) -> Option<(ThreadState, ProviderSessionState)> {
         let state = self.threads.remove(thread_id)?;
+        let remove_workspace_index =
+            if let Some(threads) = self.workspace_threads.get_mut(&state.workspace_id) {
+                threads.remove(thread_id);
+                threads.is_empty()
+            } else {
+                false
+            };
+        if remove_workspace_index {
+            self.workspace_threads.remove(&state.workspace_id);
+        }
         let provider_session =
             self.provider_sessions
                 .remove(thread_id)
@@ -4566,6 +5255,18 @@ impl ThreadManager {
     pub fn provider_state_mut(&mut self, thread_id: &str) -> Option<&mut ProviderSessionState> {
         self.provider_session_state_mut(thread_id)
     }
+
+    pub fn threads_in_workspace(&self, workspace_id: &str) -> Vec<String> {
+        let mut thread_ids = self
+            .workspace_threads
+            .get(workspace_id)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        thread_ids.sort();
+        thread_ids
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4580,9 +5281,13 @@ impl WorkspaceManager {
         }
     }
 
-    pub fn thread_workspace_exists(&self, thread_id: &str) -> Result<bool, PedelecError> {
-        let safe_thread_id = sanitize_thread_id(thread_id)?;
-        Ok(self.workspace_root()?.join(safe_thread_id).exists())
+    pub fn managed_workspace_exists(&self, workspace_id: &str) -> Result<bool, PedelecError> {
+        let safe_workspace_id = sanitize_workspace_resource_id(workspace_id)?;
+        Ok(self.workspace_root()?.join(safe_workspace_id).exists())
+    }
+
+    pub fn managed_workspace_root_for_internal_use(&self) -> Result<PathBuf, PedelecError> {
+        self.workspace_root()
     }
 
     pub fn is_managed_workspace(&self, workspace_path: &Path) -> bool {
@@ -4597,15 +5302,15 @@ impl WorkspaceManager {
         }
     }
 
-    pub fn create_thread_workspace(&self, thread_id: &str) -> Result<PathBuf, PedelecError> {
-        let safe_thread_id = sanitize_thread_id(thread_id)?;
+    pub fn create_managed_workspace(&self, workspace_id: &str) -> Result<PathBuf, PedelecError> {
+        let safe_workspace_id = sanitize_workspace_resource_id(workspace_id)?;
         let workspace_root = self.workspace_root()?;
-        let workspace_path = workspace_root.join(safe_thread_id);
+        let workspace_path = workspace_root.join(safe_workspace_id);
 
         if workspace_path.exists() {
             return Err(PedelecError::with_details(
                 error_codes::WORKSPACE_CREATE_FAILED,
-                "thread workspace already exists",
+                "managed workspace already exists",
                 serde_json::json!({ "workspacePath": path_for_external_use(&workspace_path) }),
             ));
         }
@@ -4614,7 +5319,7 @@ impl WorkspaceManager {
             fs::create_dir_all(&workspace_path).map_err(|err| {
                 workspace_io_error(
                     error_codes::WORKSPACE_CREATE_FAILED,
-                    "cannot create thread workspace",
+                    "cannot create managed workspace",
                     &workspace_path,
                     err,
                 )
@@ -4801,33 +5506,33 @@ impl WorkspaceManager {
             "cannot create Pedelec runtime data directory",
         )?;
         for path in [
-            workspace_skills_root(workspace_path),
+            workspace_threads_root(workspace_path),
             workspace_assets_root(workspace_path),
             workspace_logs_root(workspace_path),
             workspace_tmp_root(workspace_path),
         ] {
-            ensure_runtime_directory(&path, "cannot create thread workspace subdirectory")?;
+            ensure_runtime_directory(&path, "cannot create workspace runtime subdirectory")?;
         }
         Ok(())
     }
 
-    pub fn create_thread_workspace_with<T>(
+    pub fn create_managed_workspace_with<T>(
         &self,
-        thread_id: &str,
+        workspace_id: &str,
         initialize: impl FnOnce(&Path) -> Result<T, PedelecError>,
     ) -> Result<(PathBuf, T), PedelecError> {
-        let workspace_path = self.create_thread_workspace(thread_id)?;
+        let workspace_path = self.create_managed_workspace(workspace_id)?;
 
         match initialize(&workspace_path) {
             Ok(value) => Ok((workspace_path, value)),
             Err(err) => {
-                let _ = self.remove_thread_workspace(&workspace_path);
+                let _ = self.remove_managed_workspace(&workspace_path);
                 Err(err)
             }
         }
     }
 
-    pub fn remove_thread_workspace(
+    pub fn remove_managed_workspace(
         &self,
         workspace_path: impl AsRef<Path>,
     ) -> Result<(), PedelecError> {
@@ -4840,21 +5545,21 @@ impl WorkspaceManager {
         fs::remove_dir_all(workspace_path).map_err(|err| {
             workspace_io_error(
                 error_codes::WORKSPACE_REMOVE_FAILED,
-                "cannot remove thread workspace",
+                "cannot remove managed workspace",
                 workspace_path,
                 err,
             )
         })
     }
 
-    pub fn remove_thread_workspace_with_retry(
+    pub fn remove_managed_workspace_with_retry(
         &self,
         workspace_path: impl AsRef<Path>,
     ) -> Result<(), PedelecError> {
         let workspace_path = workspace_path.as_ref();
         let mut last_error = None;
         for attempt in 0..WORKSPACE_REMOVE_MAX_ATTEMPTS {
-            match self.remove_thread_workspace(workspace_path) {
+            match self.remove_managed_workspace(workspace_path) {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     last_error = Some(err);
@@ -4868,13 +5573,13 @@ impl WorkspaceManager {
         Err(last_error.unwrap_or_else(|| {
             PedelecError::with_details(
                 error_codes::WORKSPACE_REMOVE_FAILED,
-                "cannot remove thread workspace",
+                "cannot remove managed workspace",
                 serde_json::json!({ "path": path_for_external_use(workspace_path) }),
             )
         }))
     }
 
-    pub fn remove_all_thread_workspaces(&self) -> Vec<PedelecError> {
+    pub fn remove_all_managed_workspaces(&self) -> Vec<PedelecError> {
         let workspace_root = match self.workspace_root() {
             Ok(root) => root,
             Err(err) => return vec![err],
@@ -4927,7 +5632,7 @@ impl WorkspaceManager {
                 continue;
             }
 
-            if let Err(err) = self.remove_thread_workspace_with_retry(&path) {
+            if let Err(err) = self.remove_managed_workspace_with_retry(&path) {
                 errors.push(err);
             }
         }
@@ -5803,10 +6508,44 @@ fn deno_module_materialization_error(
     PedelecError::new(error_codes::DENO_MODULE_MATERIALIZATION_FAILED, message)
 }
 
-fn cleanup_aborted_custom_workspace(
+fn cleanup_thread_private_runtime_artifacts(
     workspace_path: &Path,
     thread_id: &str,
 ) -> Result<(), PedelecError> {
+    let skills_root = thread_skills_root(workspace_path, thread_id);
+    ensure_thread_skills_root_is_safe(workspace_path, thread_id).map_err(|err| {
+        PedelecError::with_details(
+            error_codes::WORKSPACE_REMOVE_FAILED,
+            "cannot inspect aborted thread skills state",
+            serde_json::json!({ "error": err.to_string() }),
+        )
+    })?;
+    match fs::symlink_metadata(&skills_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(&skills_root).map_err(|err| {
+                PedelecError::with_details(
+                    error_codes::WORKSPACE_REMOVE_FAILED,
+                    "cannot remove aborted thread skills state",
+                    serde_json::json!({ "error": err.to_string() }),
+                )
+            })?;
+        }
+        Ok(_) => {
+            return Err(PedelecError::new(
+                error_codes::WORKSPACE_REMOVE_FAILED,
+                "aborted thread skills path is not a regular directory",
+            ));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(PedelecError::with_details(
+                error_codes::WORKSPACE_REMOVE_FAILED,
+                "cannot inspect aborted thread skills state",
+                serde_json::json!({ "error": err.to_string() }),
+            ));
+        }
+    }
+
     let deno_thread_root = workspace_deno_thread_root(workspace_path, thread_id);
     ensure_deno_module_thread_root_is_safe(workspace_path, thread_id).map_err(|err| {
         deno_module_materialization_error(
@@ -5837,6 +6576,41 @@ fn cleanup_aborted_custom_workspace(
                 "cannot inspect aborted Deno Module state",
                 &deno_thread_root,
                 err,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_thread_skills_root_is_safe(workspace_path: &Path, thread_id: &str) -> io::Result<()> {
+    validate_deno_module_thread_id(thread_id)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid thread id"))?;
+    let workspace_metadata = fs::symlink_metadata(workspace_path)?;
+    if workspace_metadata.file_type().is_symlink() || !workspace_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "thread skills workspace is not a regular directory",
+        ));
+    }
+    let canonical_workspace = workspace_path.canonicalize()?;
+    let mut current = workspace_path.to_path_buf();
+    for component in [PEDELEC_RUNTIME_DATA_DIR, "threads", thread_id, "skills"] {
+        current.push(component);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "thread skills path is not a regular directory",
+            ));
+        }
+        if !current.canonicalize()?.starts_with(&canonical_workspace) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "thread skills path escapes the workspace",
             ));
         }
     }
@@ -5894,9 +6668,10 @@ fn ensure_deno_module_thread_root_is_safe(
 
 fn initialize_generated_skills(
     workspace: &Path,
+    thread_id: &str,
     skills_input: Option<&CreateThreadSkillsInput>,
 ) -> Result<(Vec<SkillFile>, ToolRegistry), PedelecError> {
-    let skills_dir = workspace_skills_root(workspace);
+    let skills_dir = thread_skills_root(workspace, thread_id);
     fs::create_dir_all(&skills_dir).map_err(|err| {
         skill_download_error(
             "cannot create skills directory",
@@ -5908,49 +6683,6 @@ fn initialize_generated_skills(
     let registry = ToolRegistry::from_skills_input(skills_input)?;
     let skills = write_generated_tool_specs(&skills_dir, &registry)?;
     Ok((skills, registry))
-}
-
-pub fn inspect_workspace_folder(path: &Path) -> Result<WorkspaceFolderInspection, PedelecError> {
-    let entries = fs::read_dir(path).map_err(|err| {
-        workspace_io_error(
-            error_codes::DIRECTORY_PICKER_FAILED,
-            "cannot inspect selected workspace folder",
-            path,
-            err,
-        )
-    })?;
-    let mut is_empty_folder = true;
-    let mut has_workspace_config = false;
-
-    for entry in entries {
-        let entry = entry.map_err(|err| {
-            workspace_io_error(
-                error_codes::DIRECTORY_PICKER_FAILED,
-                "cannot inspect selected workspace folder entry",
-                path,
-                err,
-            )
-        })?;
-        is_empty_folder = false;
-        if entry.file_name() == OsStr::new(PEDELEC_WORKSPACE_FILE) {
-            has_workspace_config = entry
-                .file_type()
-                .map_err(|err| {
-                    workspace_io_error(
-                        error_codes::DIRECTORY_PICKER_FAILED,
-                        "cannot inspect selected workspace config entry",
-                        &entry.path(),
-                        err,
-                    )
-                })?
-                .is_file();
-        }
-    }
-
-    Ok(WorkspaceFolderInspection {
-        is_empty_folder,
-        has_workspace_config,
-    })
 }
 
 fn thread_event_log_path(workspace_path: &Path, thread_id: &str) -> PathBuf {
@@ -7528,6 +8260,332 @@ pub fn normalize_sdk_origin(value: &str) -> Result<String, PedelecError> {
     Ok(origin)
 }
 
+fn normalize_workspace_origin(value: &str) -> Result<String, PedelecError> {
+    normalize_sdk_origin(value).map_err(|_| {
+        PedelecError::new(
+            error_codes::WORKSPACE_ACCESS_DENIED,
+            "invalid caller origin for workspace access",
+        )
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WorkspaceListKind {
+    Files,
+    Folders,
+}
+
+fn list_workspace_descendants(
+    workspace: &WorkspaceState,
+    requested_path: Option<&str>,
+    kind: WorkspaceListKind,
+) -> Result<WorkspaceListOutput, PedelecError> {
+    let start = resolve_workspace_directory(workspace, requested_path)?;
+    let mut pending = vec![start];
+    let mut paths = Vec::new();
+    let mut estimated_json_bytes = br#"{"paths":[ ]}"#.len();
+
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory).map_err(|error| {
+            workspace_list_io_error(
+                &workspace.workspace_id,
+                requested_path,
+                "cannot read workspace directory",
+                error,
+            )
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                workspace_list_io_error(
+                    &workspace.workspace_id,
+                    requested_path,
+                    "cannot read workspace directory entry",
+                    error,
+                )
+            })?;
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
+                workspace_list_io_error(
+                    &workspace.workspace_id,
+                    requested_path,
+                    "cannot inspect workspace directory entry",
+                    error,
+                )
+            })?;
+            if is_link_or_junction(&metadata) {
+                continue;
+            }
+
+            let relative_path = workspace_relative_path(&workspace.canonical_path, &entry_path)?;
+            if metadata.is_dir() {
+                if matches!(kind, WorkspaceListKind::Folders) {
+                    push_workspace_list_path(
+                        &workspace.workspace_id,
+                        requested_path,
+                        relative_path,
+                        &mut paths,
+                        &mut estimated_json_bytes,
+                    )?;
+                }
+                pending.push(entry_path);
+            } else if metadata.is_file() && matches!(kind, WorkspaceListKind::Files) {
+                push_workspace_list_path(
+                    &workspace.workspace_id,
+                    requested_path,
+                    relative_path,
+                    &mut paths,
+                    &mut estimated_json_bytes,
+                )?;
+            }
+        }
+    }
+
+    paths.sort();
+    Ok(WorkspaceListOutput { paths })
+}
+
+fn push_workspace_list_path(
+    workspace_id: &str,
+    requested_path: Option<&str>,
+    path: String,
+    paths: &mut Vec<String>,
+    estimated_json_bytes: &mut usize,
+) -> Result<(), PedelecError> {
+    let encoded_len = serde_json::to_vec(&path)
+        .map(|value| value.len())
+        .unwrap_or_else(|_| path.len().saturating_add(2));
+    *estimated_json_bytes = estimated_json_bytes
+        .saturating_add(encoded_len)
+        .saturating_add(usize::from(!paths.is_empty()));
+    if *estimated_json_bytes > WORKSPACE_LIST_EARLY_LIMIT_BYTES {
+        return Err(workspace_list_too_large_error(workspace_id, requested_path));
+    }
+    paths.push(path);
+    Ok(())
+}
+
+fn resolve_workspace_root(workspace: &WorkspaceState) -> Result<PathBuf, PedelecError> {
+    let metadata = fs::symlink_metadata(&workspace.canonical_path).map_err(|error| {
+        workspace_list_io_error(
+            &workspace.workspace_id,
+            None,
+            "workspace is no longer available",
+            error,
+        )
+    })?;
+    if is_link_or_junction(&metadata) || !metadata.is_dir() {
+        return Err(workspace_path_error(
+            &workspace.workspace_id,
+            None,
+            "workspace root is not a directory",
+        ));
+    }
+    Ok(workspace.canonical_path.clone())
+}
+
+fn resolve_workspace_directory(
+    workspace: &WorkspaceState,
+    requested_path: Option<&str>,
+) -> Result<PathBuf, PedelecError> {
+    let root = resolve_workspace_root(workspace)?;
+    let relative = match requested_path {
+        None => PathBuf::new(),
+        Some(value) => workspace_relative_input(value, &workspace.workspace_id)?,
+    };
+    let mut current = root.clone();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(workspace_path_error(
+                &workspace.workspace_id,
+                requested_path,
+                "workspace path contains a malformed component",
+            ));
+        };
+        current.push(part);
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            workspace_path_io_error(
+                &workspace.workspace_id,
+                requested_path,
+                "workspace path could not be opened",
+                error,
+            )
+        })?;
+        if is_link_or_junction(&metadata) {
+            return Err(workspace_path_error(
+                &workspace.workspace_id,
+                requested_path,
+                "workspace path contains a symbolic link or junction",
+            ));
+        }
+    }
+
+    let metadata = fs::symlink_metadata(&current).map_err(|error| {
+        workspace_path_io_error(
+            &workspace.workspace_id,
+            requested_path,
+            "workspace path could not be opened",
+            error,
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(workspace_path_error(
+            &workspace.workspace_id,
+            requested_path,
+            "workspace path is not a directory",
+        ));
+    }
+    Ok(current)
+}
+
+fn workspace_relative_input(value: &str, workspace_id: &str) -> Result<PathBuf, PedelecError> {
+    if value.is_empty() || value.contains('\0') {
+        return Err(workspace_path_error(
+            workspace_id,
+            Some(value),
+            "workspace path is empty or contains NUL",
+        ));
+    }
+    let candidate = Path::new(value);
+    if candidate.is_absolute() {
+        return Err(workspace_path_error(
+            workspace_id,
+            Some(value),
+            "workspace path must be relative",
+        ));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(workspace_path_error(
+                    workspace_id,
+                    Some(value),
+                    "workspace path contains traversal or an absolute component",
+                ));
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn workspace_relative_path(root: &Path, path: &Path) -> Result<String, PedelecError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        PedelecError::new(
+            error_codes::WORKSPACE_PATH_INVALID,
+            "workspace entry escaped the authoritative workspace root",
+        )
+    })?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(PedelecError::new(
+                error_codes::WORKSPACE_PATH_INVALID,
+                "workspace entry contained a malformed relative path",
+            ));
+        };
+        components.push(part.to_string_lossy().into_owned());
+    }
+    Ok(components.join("/"))
+}
+
+fn is_link_or_junction(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn workspace_path_error(
+    workspace_id: &str,
+    requested_path: Option<&str>,
+    message: &'static str,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::WORKSPACE_PATH_INVALID,
+        message,
+        serde_json::json!({
+            "workspaceId": workspace_id,
+            "path": requested_path,
+        }),
+    )
+}
+
+fn workspace_path_io_error(
+    workspace_id: &str,
+    requested_path: Option<&str>,
+    message: &'static str,
+    error: io::Error,
+) -> PedelecError {
+    let code = if error.kind() == io::ErrorKind::PermissionDenied {
+        error_codes::WORKSPACE_ACCESS_DENIED
+    } else {
+        error_codes::WORKSPACE_PATH_INVALID
+    };
+    PedelecError::with_details(
+        code,
+        message,
+        serde_json::json!({
+            "workspaceId": workspace_id,
+            "path": requested_path,
+            "error": error.to_string(),
+        }),
+    )
+}
+
+fn workspace_list_io_error(
+    workspace_id: &str,
+    requested_path: Option<&str>,
+    message: &'static str,
+    error: io::Error,
+) -> PedelecError {
+    let code = if error.kind() == io::ErrorKind::PermissionDenied {
+        error_codes::WORKSPACE_ACCESS_DENIED
+    } else {
+        error_codes::WORKSPACE_OPEN_FAILED
+    };
+    PedelecError::with_details(
+        code,
+        message,
+        serde_json::json!({
+            "workspaceId": workspace_id,
+            "path": requested_path,
+            "error": error.to_string(),
+        }),
+    )
+}
+
+fn workspace_list_too_large_error(
+    workspace_id: &str,
+    requested_path: Option<&str>,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::WORKSPACE_LIST_TOO_LARGE,
+        "workspace listing is too large; list a narrower path",
+        serde_json::json!({
+            "workspaceId": workspace_id,
+            "path": requested_path,
+        }),
+    )
+}
+
+fn workspace_busy_error(workspace_id: &str) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::WORKSPACE_BUSY,
+        "workspace has an active provider or Workspace run",
+        serde_json::json!({ "workspaceId": workspace_id }),
+    )
+}
+
 fn invalid_sdk_origin_error() -> PedelecError {
     PedelecError::new(error_codes::THREAD_ACCESS_DENIED, "invalid caller origin")
 }
@@ -7677,6 +8735,7 @@ fn parse_public_asset_path(public_path: &str) -> Result<(String, PathBuf), ()> {
 
 fn resolve_asset_file(
     thread: &ThreadState,
+    workspace_path: &Path,
     public_path: &str,
 ) -> Result<(PathBuf, String, u64, i64), PedelecError> {
     let (_, relative_path) = parse_public_asset_path(public_path).map_err(|_| {
@@ -7686,7 +8745,7 @@ fn resolve_asset_file(
             serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
         )
     })?;
-    let root = workspace_assets_root(&thread.workspace_path);
+    let root = workspace_assets_root(workspace_path);
     let target = root.join(relative_path);
     let metadata = fs::symlink_metadata(&target).map_err(|_| {
         PedelecError::with_details(
@@ -7808,6 +8867,11 @@ pub mod error_codes {
     pub const WORKSPACE_REMOVE_FAILED: &str = "WORKSPACE_REMOVE_FAILED";
     pub const WORKSPACE_PATH_INVALID: &str = "WORKSPACE_PATH_INVALID";
     pub const WORKSPACE_OPEN_FAILED: &str = "WORKSPACE_OPEN_FAILED";
+    pub const WORKSPACE_NOT_FOUND: &str = "WORKSPACE_NOT_FOUND";
+    pub const WORKSPACE_ACCESS_DENIED: &str = "WORKSPACE_ACCESS_DENIED";
+    pub const WORKSPACE_BUSY: &str = "WORKSPACE_BUSY";
+    pub const WORKSPACE_LIST_TOO_LARGE: &str = "WORKSPACE_LIST_TOO_LARGE";
+    pub const WORKSPACE_RUN_OUTPUT_TOO_LARGE: &str = "WORKSPACE_RUN_OUTPUT_TOO_LARGE";
     pub const DIRECTORY_PICKER_FAILED: &str = "DIRECTORY_PICKER_FAILED";
     pub const TOOLS_JSON_NOT_FOUND: &str = "TOOLS_JSON_NOT_FOUND";
     pub const TOOLS_JSON_INVALID: &str = "TOOLS_JSON_INVALID";
@@ -9603,9 +10667,14 @@ Before accessing local files outside the declared workspace, ask the user for pe
 If a `pedelec-cli` tool-call ends before a complete structured Pedelec response is received, exact-retry the same listed call command with semantically identical arguments; a received structured `TOOL_TIMEOUT` is final.\n\n\
 Pedelec host instructions never override provider safety policies.";
 
-fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) -> String {
+fn build_provider_host_context(
+    thread: &ThreadState,
+    workspace_path: &Path,
+    registry: &ToolRegistry,
+) -> String {
     build_provider_host_context_with_configuration_and_modules(
         thread,
+        workspace_path,
         registry,
         registry.has_skills_configuration(),
         &[],
@@ -9614,6 +10683,7 @@ fn build_provider_host_context(thread: &ThreadState, registry: &ToolRegistry) ->
 
 fn build_provider_host_context_with_configuration_and_modules(
     thread: &ThreadState,
+    workspace_path: &Path,
     registry: &ToolRegistry,
     include_configuration: bool,
     deno_modules: &[DenoModuleState],
@@ -9670,7 +10740,7 @@ fn build_provider_host_context_with_configuration_and_modules(
         .expect("App tool configuration is always serializable");
     let mut context = format!(
         "[Pedelec Host Context]\nWorkspace Path: {}\n",
-        path_for_external_use(&thread.workspace_path)
+        path_for_external_use(workspace_path)
     );
     context.push_str(&format!(
         "\n[Pedelec Deno]\nrunFileCommand: pedelec-deno --thread-id {} run <workspace-relative-script-path>\nrunStdinCommand: pedelec-deno --thread-id {} run -\n[/Pedelec Deno]\n",
@@ -9711,8 +10781,12 @@ fn build_provider_host_context_with_configuration_and_modules(
 }
 
 #[allow(dead_code)]
-fn build_provider_instruction(thread: &ThreadState, registry: &ToolRegistry) -> String {
-    build_provider_host_context(thread, registry)
+fn build_provider_instruction(
+    thread: &ThreadState,
+    workspace_path: &Path,
+    registry: &ToolRegistry,
+) -> String {
+    build_provider_host_context(thread, workspace_path, registry)
 }
 
 fn insert_antigravity_custom_agent_body(bootstrap: &str) -> String {
@@ -9767,12 +10841,17 @@ fn build_pedelec_bootstrap_instruction() -> String {
 /// with a native instruction channel can consume this directly; Cursor's ACP
 /// adapter wraps it only for its first real user prompt.
 #[allow(dead_code)]
-fn build_persistent_host_instructions(thread: &ThreadState, registry: &ToolRegistry) -> String {
-    build_persistent_host_instructions_with_modules(thread, registry, &[])
+fn build_persistent_host_instructions(
+    thread: &ThreadState,
+    workspace_path: &Path,
+    registry: &ToolRegistry,
+) -> String {
+    build_persistent_host_instructions_with_modules(thread, workspace_path, registry, &[])
 }
 
 fn build_persistent_host_instructions_with_modules(
     thread: &ThreadState,
+    workspace_path: &Path,
     registry: &ToolRegistry,
     deno_modules: &[DenoModuleState],
 ) -> String {
@@ -9781,6 +10860,7 @@ fn build_persistent_host_instructions_with_modules(
         PEDELEC_INVARIANT_HOST_INSTRUCTIONS,
         build_provider_host_context_with_configuration_and_modules(
             thread,
+            workspace_path,
             registry,
             registry.has_skills_configuration(),
             deno_modules,
@@ -9854,21 +10934,21 @@ fn to_base36(mut value: u64) -> String {
     encoded.iter().rev().collect()
 }
 
-fn sanitize_thread_id(thread_id: &str) -> Result<String, PedelecError> {
-    if thread_id.is_empty()
-        || thread_id.len() > 128
-        || !thread_id
+fn sanitize_workspace_resource_id(workspace_id: &str) -> Result<String, PedelecError> {
+    if workspace_id.is_empty()
+        || workspace_id.len() > 128
+        || !workspace_id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
     {
         return Err(PedelecError::with_details(
             error_codes::WORKSPACE_PATH_INVALID,
-            "thread id is not safe for workspace path",
-            serde_json::json!({ "threadId": thread_id }),
+            "workspace id is not safe for a managed workspace path",
+            serde_json::json!({ "workspaceId": workspace_id }),
         ));
     }
 
-    Ok(thread_id.to_string())
+    Ok(workspace_id.to_string())
 }
 
 fn validate_skill_url_and_filename(skill_url: &str) -> Result<(Url, String, String), PedelecError> {
@@ -10196,13 +11276,17 @@ mod deno_tests {
     fn runtime_with_thread(workspace: &Path, thread_id: &str, status: ThreadStatus) -> CoreRuntime {
         let now = Utc::now();
         let mut runtime = CoreRuntime::new();
+        runtime
+            .register_workspace_for_test(thread_id, workspace.to_path_buf(), WorkspaceKind::Custom)
+            .unwrap();
+        fs::create_dir_all(thread_skills_root(workspace, thread_id)).unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id: thread_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: workspace.to_path_buf(),
                 skills: Vec::new(),
                 status,
                 created_at: now,
@@ -10393,10 +11477,10 @@ mod deno_tests {
         let temp = tempfile::tempdir().unwrap();
         let thread = ThreadState {
             thread_id: "thread-deno-context".into(),
+            workspace_id: "thread-deno-context".into(),
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
-            workspace_path: temp.path().to_path_buf(),
             skills: Vec::new(),
             status: ThreadStatus::Idle,
             created_at: Utc::now(),
@@ -10412,6 +11496,7 @@ mod deno_tests {
         }];
         let context = build_provider_host_context_with_configuration_and_modules(
             &thread,
+            temp.path(),
             &ToolRegistry::default(),
             false,
             &modules,
@@ -10423,10 +11508,7 @@ mod deno_tests {
         assert!(context.contains(
             ".pedelec-runtime/deno/threads/thread-deno-context/modules/sprite-tools/index.d.ts"
         ));
-        let workspace_path = format!(
-            "Workspace Path: {}",
-            path_for_external_use(&thread.workspace_path)
-        );
+        let workspace_path = format!("Workspace Path: {}", path_for_external_use(temp.path()));
         assert!(context.contains(&workspace_path));
         assert!(context.contains(
             "runFileCommand: pedelec-deno --thread-id thread-deno-context run <workspace-relative-script-path>"
@@ -10455,10 +11537,10 @@ mod deno_tests {
         let temp = tempfile::tempdir().unwrap();
         let thread = ThreadState {
             thread_id: "thread-deno-order".into(),
+            workspace_id: "thread-deno-order".into(),
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
-            workspace_path: temp.path().to_path_buf(),
             skills: Vec::new(),
             status: ThreadStatus::Idle,
             created_at: Utc::now(),
@@ -10468,6 +11550,7 @@ mod deno_tests {
 
         let empty = build_provider_host_context_with_configuration_and_modules(
             &thread,
+            temp.path(),
             &ToolRegistry::default(),
             false,
             &[],
@@ -10496,6 +11579,7 @@ mod deno_tests {
         ];
         let context = build_provider_host_context_with_configuration_and_modules(
             &thread,
+            temp.path(),
             &ToolRegistry::default(),
             false,
             &modules,
@@ -10516,10 +11600,10 @@ mod deno_tests {
         let temp = tempfile::tempdir().unwrap();
         let thread = ThreadState {
             thread_id: "thread-deno-guidance".into(),
+            workspace_id: "thread-deno-guidance".into(),
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             effort_args: Vec::new(),
-            workspace_path: temp.path().to_path_buf(),
             skills: Vec::new(),
             status: ThreadStatus::Idle,
             created_at: Utc::now(),
@@ -10541,6 +11625,7 @@ mod deno_tests {
         }];
         let context = build_provider_host_context_with_configuration_and_modules(
             &thread,
+            temp.path(),
             &registry,
             registry.has_skills_configuration(),
             &modules,
@@ -10994,7 +12079,7 @@ mod deno_tests {
             asset_upload_port: Some(43124),
             ..CoreRuntime::default()
         };
-        let input = |workspace: &Path| CreateThreadInput {
+        let input = |workspace_id: &str| CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
@@ -11009,16 +12094,32 @@ mod deno_tests {
                     prefer_stdin_execution: false,
                 }],
             }),
-            workspace: Some(CreateThreadWorkspaceInput {
-                path: workspace.to_path_buf(),
-            }),
+            workspace_id: Some(workspace_id.to_string()),
         };
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: workspace.clone(),
+                },
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
+            .unwrap()
+            .workspace_id;
         let thread_a = runtime
-            .create_sdk_thread(input(&workspace), "https://app.example.test", Some("0.3.3"))
+            .create_sdk_thread(
+                input(&workspace_id),
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
             .unwrap()
             .thread_id;
         let thread_b = runtime
-            .create_sdk_thread(input(&workspace), "https://app.example.test", Some("0.3.3"))
+            .create_sdk_thread(
+                input(&workspace_id),
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
             .unwrap()
             .thread_id;
         assert_ne!(thread_a, thread_b);
@@ -11084,7 +12185,7 @@ mod deno_tests {
         }
     }
 
-    fn sprite_tools_thread_input(workspace: &Path) -> CreateThreadInput {
+    fn sprite_tools_thread_input(workspace_id: &str) -> CreateThreadInput {
         CreateThreadInput {
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
@@ -11100,9 +12201,7 @@ mod deno_tests {
                     prefer_stdin_execution: false,
                 }],
             }),
-            workspace: Some(CreateThreadWorkspaceInput {
-                path: workspace.to_path_buf(),
-            }),
+            workspace_id: Some(workspace_id.to_string()),
         }
     }
 
@@ -11147,9 +12246,19 @@ mod deno_tests {
         fs::create_dir_all(&workspace).unwrap();
         fs::write(workspace.join("t000001"), "user file, not a Deno root").unwrap();
         let mut runtime = custom_workspace_runtime(&temp);
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: workspace.clone(),
+                },
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
+            .unwrap()
+            .workspace_id;
         let thread_id = runtime
             .create_sdk_thread(
-                sprite_tools_thread_input(&workspace),
+                sprite_tools_thread_input(&workspace_id),
                 "https://app.example.test",
                 Some("0.3.3"),
             )
@@ -11166,9 +12275,19 @@ mod deno_tests {
         let stale_source = "export const preview = () => 'stale-process';";
         let first_thread_id = {
             let mut runtime = custom_workspace_runtime(&temp);
+            let workspace_id = runtime
+                .open_workspace(
+                    OpenWorkspaceInput {
+                        path: workspace.clone(),
+                    },
+                    "https://app.example.test",
+                    Some("0.3.3"),
+                )
+                .unwrap()
+                .workspace_id;
             let thread_id = runtime
                 .create_sdk_thread(
-                    sprite_tools_thread_input(&workspace),
+                    sprite_tools_thread_input(&workspace_id),
                     "https://app.example.test",
                     Some("0.3.3"),
                 )
@@ -11192,9 +12311,19 @@ mod deno_tests {
         ));
 
         let mut restarted = custom_workspace_runtime(&temp);
+        let workspace_id = restarted
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: workspace.clone(),
+                },
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
+            .unwrap()
+            .workspace_id;
         let second_thread_id = restarted
             .create_sdk_thread(
-                sprite_tools_thread_input(&workspace),
+                sprite_tools_thread_input(&workspace_id),
                 "https://app.example.test",
                 Some("0.3.3"),
             )
@@ -11303,7 +12432,7 @@ mod deno_tests {
                     prefer_stdin_execution: false,
                 }],
             }),
-            workspace: None,
+            workspace_id: None,
         };
         let managed_thread = managed_runtime
             .create_sdk_thread(input, "https://app.example.test", Some("0.3.3"))
@@ -11335,6 +12464,16 @@ mod deno_tests {
             workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
             ..CoreRuntime::default()
         };
+        let custom_workspace_id = custom_runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: custom_root.clone(),
+                },
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
+            .unwrap()
+            .workspace_id;
         let custom_thread = custom_runtime
             .create_sdk_thread(
                 CreateThreadInput {
@@ -11352,9 +12491,7 @@ mod deno_tests {
                             prefer_stdin_execution: false,
                         }],
                     }),
-                    workspace: Some(CreateThreadWorkspaceInput {
-                        path: custom_root.clone(),
-                    }),
+                    workspace_id: Some(custom_workspace_id),
                 },
                 "https://app.example.test",
                 Some("0.3.3"),

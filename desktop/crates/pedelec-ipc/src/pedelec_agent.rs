@@ -1218,8 +1218,8 @@ mod tests {
     use super::*;
     use crate::ProviderRuntimeDispatcher;
     use pedelec_core::{
-        CreateThreadInput, CreateThreadSkillsInput, CreateThreadWorkspaceInput, EffortLevel,
-        EffortsArgs, EndThreadInput, OllamaProviderSettingsInput, PersistentRuntimeOperation,
+        CreateThreadInput, CreateThreadSkillsInput, EffortLevel, EffortsArgs, EndThreadInput,
+        OllamaProviderSettingsInput, OpenWorkspaceInput, PersistentRuntimeOperation,
         PrepareThreadInput, ProviderExecutionOperationKind, ProviderSettingsInput, SendTextInput,
         ThreadEvent, ThreadStatus, UpdateSettingsInput, WorkspaceManager,
     };
@@ -2119,6 +2119,18 @@ mod tests {
 
     fn create_thread(runtime: &SharedCoreRuntime, workspace: &Path, guidance: &str) -> String {
         fs::create_dir_all(workspace).unwrap();
+        let workspace_id = runtime
+            .lock()
+            .unwrap()
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: workspace.to_path_buf(),
+                },
+                "https://app.example.test",
+                Some("0.3.3"),
+            )
+            .unwrap()
+            .workspace_id;
         runtime
             .lock()
             .unwrap()
@@ -2132,9 +2144,7 @@ mod tests {
                     tools: vec![],
                     deno_modules: vec![],
                 }),
-                workspace: Some(CreateThreadWorkspaceInput {
-                    path: workspace.to_path_buf(),
-                }),
+                workspace_id: Some(workspace_id),
             })
             .unwrap()
             .thread_id

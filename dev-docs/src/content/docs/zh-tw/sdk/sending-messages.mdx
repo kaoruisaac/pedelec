@@ -9,7 +9,7 @@ sidebar:
 
 ## 操作 session assets
 
-App 與 Agent 共用 session 實體上的 `.pedelec-runtime/assets/` 目錄。SDK 以 public `/...` path 提供這個 store，隱含根目錄不會出現在回傳 path。Session 結束前，App 可以 upload input file、遞迴列出所有已完成檔案，並讀取任一方產生的檔案。
+App 與 Agent 共用 Session 所在 Workspace 的 `.pedelec-runtime/assets/` 目錄。SDK 以 public `/...` path 提供這個 store，隱含根目錄不會出現在回傳 path。Session 結束前，App 可以 upload input file、遞迴列出所有已完成檔案，並讀取任一方產生的檔案；多個 Session 共用 Workspace 時也共用同一個 assets area。
 
 ### Upload 檔案
 

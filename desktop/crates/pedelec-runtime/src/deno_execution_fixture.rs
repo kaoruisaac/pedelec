@@ -8,8 +8,8 @@ use super::{build_deno_command_args, DenoRuntimeOwner, DenoRuntimePolicy, Prepar
 use pedelec_core::{
     workspace_deno_import_map_path, workspace_deno_modules_root, workspace_tmp_root, CoreRuntime,
     CreateDenoModuleUploadInput, CreateThreadDenoModuleInput, CreateThreadInput,
-    CreateThreadSkillsInput, CreateThreadWorkspaceInput, DenoModuleUploadState, DenoRunInput,
-    DenoRunTarget, EffortLevel, ProviderCode, ThreadStatus, WorkspaceManager,
+    CreateThreadSkillsInput, DenoModuleUploadState, DenoRunInput, DenoRunTarget, EffortLevel,
+    OpenWorkspaceInput, ProviderCode, ThreadStatus, WorkspaceManager,
 };
 use pedelec_shared::paths::bundled_deno_binary_name;
 use std::fs;
@@ -131,6 +131,16 @@ fn ready_module_thread_for_target(
     target: DenoRunTarget,
     args: Vec<String>,
 ) -> (String, pedelec_core::DenoExecutionIntent) {
+    let workspace_id = runtime
+        .open_workspace(
+            OpenWorkspaceInput {
+                path: workspace.to_path_buf(),
+            },
+            "https://app.example.test",
+            Some("0.3.3"),
+        )
+        .unwrap()
+        .workspace_id;
     let thread_id = runtime
         .create_sdk_thread(
             CreateThreadInput {
@@ -148,9 +158,7 @@ fn ready_module_thread_for_target(
                         prefer_stdin_execution: false,
                     }],
                 }),
-                workspace: Some(CreateThreadWorkspaceInput {
-                    path: workspace.to_path_buf(),
-                }),
+                workspace_id: Some(workspace_id),
             },
             "https://app.example.test",
             Some("0.3.3"),

@@ -1593,7 +1593,7 @@ mod tests {
     use pedelec_core::{
         EffortLevel, PendingProviderOperation, PendingProviderOperationKind,
         PersistentApprovalPolicy, PersistentProviderEndIntent, PersistentProviderTurnIntent,
-        PersistentSandboxPolicy, ProviderSessionState, ThreadState, ThreadStatus,
+        PersistentSandboxPolicy, ProviderSessionState, ThreadState, ThreadStatus, WorkspaceKind,
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -1627,13 +1627,18 @@ mod tests {
         let thread_id = "thread-open";
         let workspace = tempdir().unwrap().path().to_path_buf();
         let now = Utc::now();
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-thread-open";
+        runtime_guard
+            .register_workspace_for_test(workspace_id, &workspace, WorkspaceKind::Custom)
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id: workspace_id.into(),
                 provider: ProviderCode::OpenCode,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: workspace,
                 skills: Vec::new(),
                 status: ThreadStatus::Running,
                 created_at: now,
@@ -1645,6 +1650,7 @@ mod tests {
                 active_provider_turn_id: Some("local-turn-1".into()),
             },
         );
+        drop(runtime_guard);
         runtime.lock().unwrap().pending_provider_operations.insert(
             thread_id.into(),
             PendingProviderOperation {
@@ -1791,13 +1797,20 @@ mod tests {
                     ProviderCode::Codex,
                 ] {
                     let id = format!("thread-{}", format!("{provider:?}").to_lowercase());
+                    let workspace_id = format!("workspace-{id}");
+                    core.register_workspace_for_test(
+                        &workspace_id,
+                        workspace.join(&id),
+                        WorkspaceKind::Custom,
+                    )
+                    .unwrap();
                     core.thread_manager.insert_thread(
                         ThreadState {
                             thread_id: id.clone(),
+                            workspace_id,
                             provider: provider.clone(),
                             effort_level: Some(EffortLevel::Default),
                             effort_args: vec![],
-                            workspace_path: workspace.join(&id),
                             skills: vec![],
                             status: ThreadStatus::Running,
                             created_at: Utc::now(),
@@ -1898,13 +1911,18 @@ mod tests {
         let log = temp.path().join("cursor-frames.jsonl");
         let fake_program = fake_cursor_program(temp.path());
         let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-thread-cursor";
+        runtime_guard
+            .register_workspace_for_test(workspace_id, &workspace, WorkspaceKind::Custom)
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             ThreadState {
                 thread_id: "thread-cursor".into(),
+                workspace_id: workspace_id.into(),
                 provider: ProviderCode::Cursor,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: vec!["--model".into(), "fake/selected".into()],
-                workspace_path: workspace.clone(),
                 skills: vec![],
                 status: ThreadStatus::Running,
                 created_at: Utc::now(),
@@ -1916,6 +1934,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
         runtime.lock().unwrap().pending_provider_operations.insert(
             "thread-cursor".into(),
             PendingProviderOperation {
@@ -2063,13 +2082,16 @@ mod tests {
             let thread_id = format!("thread-{}-resume", provider.code());
             {
                 let mut core = runtime.lock().unwrap();
+                let workspace_id = format!("workspace-{thread_id}");
+                core.register_workspace_for_test(&workspace_id, &workspace, WorkspaceKind::Custom)
+                    .unwrap();
                 core.thread_manager.insert_thread(
                     ThreadState {
                         thread_id: thread_id.clone(),
                         provider: provider.provider_code(),
                         effort_level: Some(EffortLevel::Default),
                         effort_args: vec!["--model".into(), "fake/selected".into()],
-                        workspace_path: workspace.clone(),
+                        workspace_id,
                         skills: vec![],
                         status: ThreadStatus::Running,
                         created_at: Utc::now(),
@@ -2282,13 +2304,18 @@ mod tests {
         let log = temp.path().join("frames.jsonl");
         let fake_program = fake_opencode_program(temp.path());
         let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-thread-open";
+        runtime_guard
+            .register_workspace_for_test(workspace_id, &workspace, WorkspaceKind::Custom)
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             ThreadState {
                 thread_id: "thread-open".into(),
+                workspace_id: workspace_id.into(),
                 provider: ProviderCode::OpenCode,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: vec!["--model".into(), "fake/selected".into()],
-                workspace_path: workspace.clone(),
                 skills: vec![],
                 status: ThreadStatus::Running,
                 created_at: Utc::now(),
@@ -2300,6 +2327,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
         runtime.lock().unwrap().pending_provider_operations.insert(
             "thread-open".into(),
             PendingProviderOperation {
@@ -2536,13 +2564,18 @@ mod tests {
         let log = temp.path().join("frames.jsonl");
         let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
         let thread_id = "thread-open-leading-slash";
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-thread-open-leading-slash";
+        runtime_guard
+            .register_workspace_for_test(workspace_id, &workspace, WorkspaceKind::Custom)
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id: workspace_id.into(),
                 provider: ProviderCode::OpenCode,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: vec!["--model".into(), "fake/selected".into()],
-                workspace_path: workspace.clone(),
                 skills: vec![],
                 status: ThreadStatus::Running,
                 created_at: Utc::now(),
@@ -2554,6 +2587,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
         runtime.lock().unwrap().pending_provider_operations.insert(
             thread_id.into(),
             PendingProviderOperation {

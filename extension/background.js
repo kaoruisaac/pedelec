@@ -81,6 +81,7 @@ function createBackground(runtimeChrome, options = {}) {
   const sdkContextsByPort = new Map();
   const sdkRoutesBySession = new Map();
   const sdkLifecycleBySession = new Map();
+  const sdkWorkspaceBySession = new Map();
   const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
   let pendingApproval = null;
   let providerErrorOperation = Promise.resolve();
@@ -1650,6 +1651,9 @@ function createBackground(runtimeChrome, options = {}) {
         message: "subscribe_thread response did not include a valid lifecycle snapshot.",
       };
     }
+    if (result?.workspace !== undefined) {
+      sdkWorkspaceBySession.set(threadId, projectSdkWorkspace(result.workspace, "subscribe_thread"));
+    }
     const subscription = getThreadSubscription(threadId);
     if (subscription && typeof snapshot.latestSeq === "number") {
       subscription.lastSeq = Math.max(subscription.lastSeq ?? 0, snapshot.latestSeq);
@@ -1836,6 +1840,7 @@ function createBackground(runtimeChrome, options = {}) {
   function forgetSdkSession(sessionId) {
     removeSdkSessionRoutes(sessionId);
     sdkLifecycleBySession.delete(sessionId);
+    sdkWorkspaceBySession.delete(sessionId);
   }
 
   function shouldAutoEndSdkSession(sessionId) {
@@ -2013,6 +2018,50 @@ function createBackground(runtimeChrome, options = {}) {
     });
   }
 
+  function projectSdkWorkspace(value, context = "Workspace") {
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        typeof value.workspaceId !== "string" || !value.workspaceId.trim() ||
+        (value.path !== null && (typeof value.path !== "string" || !value.path.length))) {
+      throw { code: "SDK_PROTOCOL_ERROR", message: `${context} response had an invalid Workspace shape.` };
+    }
+    return { workspaceId: value.workspaceId, path: value.path };
+  }
+
+  function projectSdkCreateSessionResult(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        typeof value.threadId !== "string" || !value.threadId.trim() ||
+        typeof value.workspaceId !== "string" || !value.workspaceId.trim() ||
+        (value.workspacePath !== null && value.workspacePath !== undefined &&
+          (typeof value.workspacePath !== "string" || !value.workspacePath.length)) ||
+        typeof value.explicitModelConfigApplied !== "boolean") {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "create_thread response had an invalid Workspace contract." };
+    }
+    return {
+      sessionId: value.threadId,
+      workspace: {
+        workspaceId: value.workspaceId,
+        path: value.workspacePath ?? null,
+      },
+      explicitModelConfigApplied: value.explicitModelConfigApplied,
+    };
+  }
+
+  function requireSdkWorkspaceRequest(message, { script = false } = {}) {
+    if (typeof message.workspaceId !== "string" || !message.workspaceId.trim()) {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "workspaceId is required" };
+    }
+    if (message.path !== undefined && (typeof message.path !== "string" || !message.path.trim())) {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "path must be a non-empty string when provided" };
+    }
+    if (script && typeof message.script !== "string") {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "script is required" };
+    }
+    if (message.timeoutMs !== undefined &&
+        (!Number.isInteger(message.timeoutMs) || message.timeoutMs <= 0)) {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "timeoutMs must be a positive integer" };
+    }
+  }
+
   function dispatchSdkThreadEvent(event) {
     const message = sdkEventFromThreadEvent(event);
     if (!message) return;
@@ -2083,14 +2132,13 @@ function createBackground(runtimeChrome, options = {}) {
             effort: input.effort,
             effortLevel: input.effortLevel,
             skills: input.skills,
-            workspace: input.workspace,
+            ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
           }, message.callerSdkVersion === undefined
             ? {}
             : { callerSdkVersion: message.callerSdkVersion });
-          const sessionId = result?.threadId;
-          if (!sessionId) {
-            throw { code: "SDK_PROTOCOL_ERROR", message: "create_thread response did not include threadId." };
-          }
+          const projected = projectSdkCreateSessionResult(result);
+          const sessionId = projected.sessionId;
+          sdkWorkspaceBySession.set(sessionId, projected.workspace);
 
           addActiveThread(sessionId, context.origin);
           addSdkSession(port, channelId, sessionId);
@@ -2110,7 +2158,8 @@ function createBackground(runtimeChrome, options = {}) {
           }
           postSdkResponse(port, channelId, requestId, true, {
             sessionId,
-            explicitModelConfigApplied: result?.explicitModelConfigApplied === true,
+            workspace: projected.workspace,
+            explicitModelConfigApplied: projected.explicitModelConfigApplied,
           });
         });
         return;
@@ -2136,14 +2185,55 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
-      if (message.type === "pick_workspace_folder") {
+      if (message.type === "open_workspace") {
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
         }
+        if (message.path !== undefined && (typeof message.path !== "string" || !message.path.trim())) {
+          throw { code: "SDK_PROTOCOL_ERROR", message: "path must be a non-empty string when provided" };
+        }
         const result = await withNativeOperation(() =>
-          sendSdkNativeRequest(context, "pick_workspace_folder")
+          sendSdkNativeRequest(
+            context,
+            "open_workspace",
+            message.path === undefined ? {} : { path: message.path },
+            message.callerSdkVersion === undefined ? {} : { callerSdkVersion: message.callerSdkVersion },
+          )
         );
+        if (!result || typeof result !== "object" || !("workspace" in result)) {
+          throw { code: "SDK_PROTOCOL_ERROR", message: "open_workspace response did not include workspace." };
+        }
+        const projected = result.workspace === null ? null : projectSdkWorkspace(result.workspace, "open_workspace");
+        postSdkResponse(port, channelId, requestId, true, { workspace: projected });
+        return;
+      }
+
+      if (message.type === "workspace_list_files" || message.type === "workspace_list_folders") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        requireSdkWorkspaceRequest(message);
+        const result = await sendSdkNativeRequest(context, message.type, {
+          workspaceId: message.workspaceId,
+          ...(message.path === undefined ? {} : { path: message.path }),
+        });
+        postSdkResponse(port, channelId, requestId, true, result);
+        return;
+      }
+
+      if (message.type === "workspace_run") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        requireSdkWorkspaceRequest(message, { script: true });
+        const result = await sendSdkNativeRequest(context, "workspace_run", {
+          workspaceId: message.workspaceId,
+          script: message.script,
+          ...(message.timeoutMs === undefined ? {} : { timeoutMs: message.timeoutMs }),
+        });
         postSdkResponse(port, channelId, requestId, true, result);
         return;
       }
@@ -2168,8 +2258,13 @@ function createBackground(runtimeChrome, options = {}) {
             throw err;
           }
           const lifecycle = sdkLifecycleBySession.get(sessionId);
+          const workspace = sdkWorkspaceBySession.get(sessionId);
+          if (!workspace) {
+            throw { code: "SDK_PROTOCOL_ERROR", message: "resume_session response did not include Workspace data." };
+          }
           postSdkResponse(port, channelId, requestId, true, {
             sessionId,
+            workspace,
             autoEndOnDisconnect: lifecycle?.autoEndOnDisconnect === true,
           });
         });

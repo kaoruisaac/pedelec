@@ -1,0 +1,96 @@
+---
+title: PedelecWorkspace API
+description: Workspace capability reference for paths, sessions, filesystem listing, Deno execution, lifecycle, and safety.
+sidebar:
+  order: 3
+---
+
+`PedelecWorkspace` is the application-facing capability for one Workspace filesystem. Obtain it from `pedelec.openWorkspace()`, `session.workspace`, or `resumeSession().workspace`.
+
+```ts
+import type { PedelecWorkspace, WorkspaceRunResult } from "@kaoruisaac/pedelec";
+```
+
+## `path`
+
+```ts
+readonly path: string | null
+```
+
+An explicit Workspace exposes its validated custom path. A Desktop-managed Workspace intentionally exposes `null`; applications must not infer or display its physical managed directory.
+
+## Open a Workspace and create Sessions
+
+```ts
+const workspace = await pedelec.openWorkspace();
+if (!workspace) return; // the user cancelled the native picker
+
+const session = await workspace.createSession({
+  model: "gpt-5.6-sol",
+  effort: "high",
+});
+```
+
+Pass an absolute path to skip the picker:
+
+```ts
+const workspace = await pedelec.openWorkspace("C:\\workspace\\project-a");
+const first = await workspace.createSession();
+const second = await workspace.createSession();
+```
+
+One Workspace can own multiple Sessions. Session creation through this handle retains the same Workspace capability. `pedelec.createSession()` is the managed convenience flow and does not accept Workspace configuration; its returned `session.workspace` is still available.
+
+## `listFiles(path?)`
+
+```ts
+listFiles(path?: string): Promise<string[]>
+```
+
+Recursively lists regular files below the Workspace-relative `path`. An omitted path means the Workspace root. Results use `/` separators, are Workspace-relative, and are sorted lexicographically. `.pedelec-runtime` is included. Symlinks and junctions are neither followed nor returned.
+
+The result is returned as one response and is not silently truncated. A large result rejects with `WORKSPACE_LIST_TOO_LARGE`; retry with a narrower path.
+
+## `listFolders(path?)`
+
+```ts
+listFolders(path?: string): Promise<string[]>
+```
+
+Has the same root, relative path, separator, sorting, `.pedelec-runtime`, symlink/junction, and oversized-response semantics as `listFiles()`, but returns directories.
+
+## `run(script, options?)`
+
+```ts
+run(script: string, options?: { timeoutMs?: number }): Promise<WorkspaceRunResult>
+```
+
+Runs application-supplied Deno code in this Workspace. The default timeout is 60 seconds; an override must be a positive integer.
+
+```ts
+const result = await workspace.run(
+  "console.log(JSON.stringify({ ok: true }))",
+  { timeoutMs: 60_000 },
+);
+
+if (result.stdoutTruncated || result.stderrTruncated) {
+  throw new Error("Workspace script output was truncated");
+}
+const value = JSON.parse(result.stdout);
+```
+
+The result is raw Deno output: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`, and `stderrTruncated`. A non-zero `exitCode` resolves normally; the application decides how to interpret it and parses `stdout` itself when it wants a function-like value. An oversized browser response rejects with `WORKSPACE_RUN_OUTPUT_TOO_LARGE`.
+
+## Security boundary
+
+`workspace.run()` is a direct capability for the approved Web application. Its Deno code has read and write access to the Workspace, but has no network, host environment, subprocess execution, FFI, or `sys` permission. No-remote, cached-only, and no-npm runtime restrictions continue to apply. This is not unrestricted host code execution and is not an Agent-mediated action.
+
+Session `skills.denoModules` remain owned by the Session/Thread that declared them and are available to Agent-side `pedelec-deno` execution for that Thread. `workspace.run()` does not inherit a Session import map, and Workspace currently has no Deno Module registration API. It is intentionally Workspace-only: it does not choose a Session.
+
+## Concurrency and lifetime
+
+Several `workspace.run()` calls in one Workspace may execute concurrently. A Workspace run cannot begin while any Session in that Workspace has an active Agent/provider operation. A Session in that Workspace cannot begin `sendText()` or provider preparation while one or more Workspace runs are active. This exclusion is Workspace-wide, including different `PedelecSession` handles, and conflicts reject with `WORKSPACE_BUSY`.
+
+Custom Workspaces are opened explicitly, can outlive and be shared by multiple Sessions, and are never deleted by Pedelec when a Session ends or during app cleanup. Managed Workspaces are created by `Pedelec.createSession()` and remain under Desktop cleanup ownership; Thread end does not imply immediate deletion. The browser capability is runtime-scoped, so reopen a custom Workspace after a Desktop/Core restart when needed.
+
+`resumeSession(sessionId)` returns a Session that already includes `session.workspace`; do not separately call `openWorkspace()` for a resumed Session. Same-handle `session.resume()` preserves its existing Workspace handle, subject to the documented transport, Core thread, and recorded Workspace caveats.

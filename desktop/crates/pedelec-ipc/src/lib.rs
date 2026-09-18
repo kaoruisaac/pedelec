@@ -1,13 +1,13 @@
 pub use pedelec_core::DenoRuntimeDispatcher;
 use pedelec_core::{
-    error_codes, inspect_workspace_folder, wait_for_provider_readiness, AbortSessionSetupInput,
-    CreateAssetDownloadInput, CreateAssetUploadInput, CreateDenoModuleUploadInput,
-    CreateThreadInput, DenoExecutionIntent, DenoRunInput, DenoRunOutput, EndThreadInput,
-    ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation, PrepareThreadInput,
-    PrepareThreadOutput, ProviderCode, ProviderProtocolTraffic, ProviderRuntimeDiagnostic,
-    ResumeThreadInput, SendTextInput, SharedCoreRuntime, SubmitToolResultInput,
-    SubscribeThreadInput, ThreadEvent, ThreadSubscription, ToolCallInput, ToolInvocationOutcome,
-    ToolInvocationRegistration, ToolInvocationWait, ToolSpecInput, UpdateSettingsInput,
+    error_codes, wait_for_provider_readiness, AbortSessionSetupInput, CreateAssetDownloadInput,
+    CreateAssetUploadInput, CreateDenoModuleUploadInput, CreateThreadInput, DenoExecutionIntent,
+    DenoRunInput, DenoRunOutput, EndThreadInput, ListAssetsInput, PedelecError, PedelecSettings,
+    PersistentRuntimeOperation, PrepareThreadInput, PrepareThreadOutput, ProviderCode,
+    ProviderProtocolTraffic, ProviderRuntimeDiagnostic, ResumeThreadInput, SendTextInput,
+    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
+    ThreadSubscription, ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration,
+    ToolInvocationWait, ToolSpecInput, UpdateSettingsInput, WorkspaceListInput, WorkspaceRunInput,
 };
 use pedelec_runtime::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
@@ -1723,7 +1723,7 @@ fn handle_core_ipc_connection(
             let (response, subscription) = handle_subscribe_thread(&request, &runtime);
             {
                 let mut writer = writer.lock().unwrap();
-                write_json_line(&mut *writer, &response)?;
+                write_core_ipc_response(&mut *writer, &response, Some(&request.r#type))?;
             }
             if let Some(subscription) = subscription {
                 spawn_thread_subscription_forwarder(subscription, Arc::clone(&writer));
@@ -1731,6 +1731,7 @@ fn handle_core_ipc_connection(
             continue;
         }
 
+        let request_type = request.r#type.clone();
         let handled = if request.r#type == "tool_call" {
             handle_tool_call_request_with_metadata(&request, Arc::clone(&runtime))
         } else {
@@ -1750,6 +1751,7 @@ fn handle_core_ipc_connection(
             &mut *writer,
             &handled.response,
             handled.tool_delivery_request_id.as_deref(),
+            Some(&request_type),
         )
         .is_ok();
         drop(writer);
@@ -1771,6 +1773,7 @@ fn write_tool_delivery_response<W: Write>(
     writer: &mut W,
     response: &CoreIpcResponse,
     _tool_delivery_request_id: Option<&str>,
+    request_type: Option<&str>,
 ) -> io::Result<()> {
     #[cfg(test)]
     if _tool_delivery_request_id.is_some()
@@ -1782,7 +1785,54 @@ fn write_tool_delivery_response<W: Write>(
         ));
     }
 
-    write_json_line(writer, response)
+    write_core_ipc_response(writer, response, request_type)
+}
+
+fn write_core_ipc_response<W: Write>(
+    writer: &mut W,
+    response: &CoreIpcResponse,
+    request_type: Option<&str>,
+) -> io::Result<()> {
+    let payload = serde_json::to_vec(response)?;
+    if payload.len() <= MAX_CORE_IPC_MESSAGE_BYTES {
+        writer.write_all(&payload)?;
+        writer.write_all(b"\n")?;
+        return writer.flush();
+    }
+
+    let error = match request_type {
+        Some("workspace_list_files") | Some("workspace_list_folders") => PedelecError::new(
+            error_codes::WORKSPACE_LIST_TOO_LARGE,
+            "workspace listing is too large; list a narrower path",
+        ),
+        Some("workspace_run") => PedelecError::new(
+            error_codes::WORKSPACE_RUN_OUTPUT_TOO_LARGE,
+            "workspace run output is too large",
+        ),
+        _ => PedelecError::new(
+            error_codes::MESSAGE_TOO_LARGE,
+            "Core IPC response exceeds size limit",
+        ),
+    };
+    let mut fallback = error_response(&bounded_response_request_id(&response.request_id), error);
+    let mut fallback_payload = serde_json::to_vec(&fallback)?;
+    if fallback_payload.len() > MAX_CORE_IPC_MESSAGE_BYTES {
+        fallback = error_response(
+            "",
+            PedelecError::new(
+                error_codes::MESSAGE_TOO_LARGE,
+                "Core IPC response exceeds size limit",
+            ),
+        );
+        fallback_payload = serde_json::to_vec(&fallback)?;
+    }
+    writer.write_all(&fallback_payload)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+fn bounded_response_request_id(request_id: &str) -> String {
+    request_id.chars().take(256).collect()
 }
 
 fn parse_core_ipc_request(value: Value) -> Result<CoreIpcRequest, CoreIpcResponse> {
@@ -1840,10 +1890,16 @@ fn handle_core_ipc_request_with_services(
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
     deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
 ) -> CoreIpcResponse {
-    match request.r#type.as_str() {
-        "pick_workspace_folder" => {
-            handle_pick_workspace_folder_request(&request, platform_services)
-        }
+    // SDK-origin requests are the browser-facing trust boundary. Capture the
+    // managed path set before dispatch because individual handlers consume the
+    // shared runtime handle. Desktop-internal requests deliberately retain
+    // their richer diagnostics.
+    let managed_paths = request
+        .caller_origin
+        .as_ref()
+        .map(|_| managed_workspace_path_strings(&runtime));
+    let response = match request.r#type.as_str() {
+        "open_workspace" => handle_open_workspace_request(&request, runtime, platform_services),
         "create_thread" => match decode_payload::<CreateThreadInput>(&request) {
             Ok(input) => match match request.caller_origin.as_deref() {
                 Some(origin) => runtime.lock().unwrap().create_sdk_thread(
@@ -1906,6 +1962,9 @@ fn handle_core_ipc_request_with_services(
             Err(err) => error_response(&request.request_id, err),
         },
         "deno_run" => handle_deno_run_request(&request, runtime, deno_dispatcher),
+        "workspace_list_files" => handle_workspace_list_request(&request, runtime, false),
+        "workspace_list_folders" => handle_workspace_list_request(&request, runtime, true),
+        "workspace_run" => handle_workspace_run_request(&request, runtime, deno_dispatcher),
         "create_asset_upload" => match decode_payload::<CreateAssetUploadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| runtime.lock().unwrap().create_asset_upload(input))
@@ -2011,11 +2070,17 @@ fn handle_core_ipc_request_with_services(
                 serde_json::json!({ "type": request.r#type }),
             ),
         ),
+    };
+
+    match managed_paths {
+        Some(paths) => sanitize_sdk_error_response(response, &paths),
+        None => response,
     }
 }
 
-fn handle_pick_workspace_folder_request(
+fn handle_open_workspace_request(
     request: &CoreIpcRequest,
+    runtime: SharedCoreRuntime,
     platform_services: Arc<dyn CoreIpcPlatformServices>,
 ) -> CoreIpcResponse {
     if request
@@ -2029,36 +2094,62 @@ fn handle_pick_workspace_folder_request(
             &request.request_id,
             PedelecError::new(
                 error_codes::IPC_UNAUTHORIZED,
-                "directory picker requires an approved caller origin",
+                "open_workspace requires an approved caller origin",
             ),
         );
     }
 
-    match platform_services.pick_directory() {
-        Ok(None) => ok_response(&request.request_id, serde_json::json!({ "path": null })),
-        Ok(Some(path)) => {
-            let inspection = match inspect_workspace_folder(&path) {
-                Ok(inspection) => inspection,
-                Err(err) => return error_response(&request.request_id, err),
-            };
-            match path.into_os_string().into_string() {
-                Ok(path) => ok_response(
-                    &request.request_id,
-                    serde_json::json!({
-                        "path": path,
-                        "isEmptyFolder": inspection.is_empty_folder,
-                        "hasWorkspaceConfig": inspection.has_workspace_config,
-                    }),
-                ),
-                Err(_) => error_response(
+    let caller_origin = request.caller_origin.as_deref().unwrap_or_default();
+    let selected_path = match request.payload.as_ref() {
+        Some(Value::Object(payload)) if payload.contains_key("path") => {
+            let Some(path) = payload.get("path").and_then(Value::as_str) else {
+                return error_response(
                     &request.request_id,
                     PedelecError::new(
-                        error_codes::DIRECTORY_PICKER_FAILED,
-                        "selected directory path could not be represented as a string",
+                        error_codes::INVALID_INPUT,
+                        "open_workspace path must be a string",
                     ),
-                ),
+                );
+            };
+            if path.trim().is_empty() {
+                return error_response(
+                    &request.request_id,
+                    PedelecError::new(
+                        error_codes::INVALID_INPUT,
+                        "open_workspace path must not be empty",
+                    ),
+                );
             }
+            PathBuf::from(path)
         }
+        _ => match platform_services.pick_directory() {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return ok_response(
+                    &request.request_id,
+                    serde_json::json!({ "workspace": null }),
+                )
+            }
+            Err(err) => return error_response(&request.request_id, err),
+        },
+    };
+
+    match runtime.lock().unwrap().open_workspace(
+        pedelec_core::OpenWorkspaceInput {
+            path: selected_path,
+        },
+        caller_origin,
+        request.caller_sdk_version.as_deref(),
+    ) {
+        Ok(output) => ok_response(
+            &request.request_id,
+            serde_json::json!({
+                "workspace": {
+                    "workspaceId": output.workspace_id,
+                    "path": output.path,
+                }
+            }),
+        ),
         Err(err) => error_response(&request.request_id, err),
     }
 }
@@ -2095,6 +2186,77 @@ fn handle_deno_run_request(
     }
 }
 
+fn authorize_workspace_request(
+    runtime: &SharedCoreRuntime,
+    request: &CoreIpcRequest,
+    workspace_id: &str,
+) -> Result<(), PedelecError> {
+    let caller_origin = request.caller_origin.as_deref().ok_or_else(|| {
+        PedelecError::new(
+            error_codes::IPC_UNAUTHORIZED,
+            "workspace operation requires an approved caller origin",
+        )
+    })?;
+    runtime
+        .lock()
+        .unwrap()
+        .authorize_workspace_access(workspace_id, caller_origin)
+}
+
+fn handle_workspace_list_request(
+    request: &CoreIpcRequest,
+    runtime: SharedCoreRuntime,
+    folders: bool,
+) -> CoreIpcResponse {
+    let input = match decode_payload::<WorkspaceListInput>(request) {
+        Ok(input) => input,
+        Err(error) => return error_response(&request.request_id, error),
+    };
+    if let Err(error) = authorize_workspace_request(&runtime, request, &input.workspace_id) {
+        return error_response(&request.request_id, error);
+    }
+    let result = if folders {
+        runtime.lock().unwrap().list_folders(input)
+    } else {
+        runtime.lock().unwrap().list_files(input)
+    };
+    match result {
+        Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+        Err(error) => error_response(&request.request_id, error),
+    }
+}
+
+fn handle_workspace_run_request(
+    request: &CoreIpcRequest,
+    runtime: SharedCoreRuntime,
+    deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
+) -> CoreIpcResponse {
+    let input = match decode_payload::<WorkspaceRunInput>(request) {
+        Ok(input) => input,
+        Err(error) => return error_response(&request.request_id, error),
+    };
+    if let Err(error) = authorize_workspace_request(&runtime, request, &input.workspace_id) {
+        return error_response(&request.request_id, error);
+    }
+
+    let start = match runtime.lock().unwrap().begin_workspace_run(input) {
+        Ok(start) => start,
+        Err(error) => return error_response(&request.request_id, error),
+    };
+    let workspace_id = start.workspace_id.clone();
+    let run_id = start.run_id.clone();
+    let dispatch_result = deno_dispatcher.dispatch(start.intent);
+    runtime
+        .lock()
+        .unwrap()
+        .finish_workspace_run(&workspace_id, &run_id);
+
+    match dispatch_result {
+        Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+        Err(error) => error_response(&request.request_id, error),
+    }
+}
+
 fn handle_subscribe_thread(
     request: &CoreIpcRequest,
     runtime: &SharedCoreRuntime,
@@ -2117,10 +2279,21 @@ fn handle_subscribe_thread(
     };
 
     let snapshot = subscription.snapshot.clone();
+    let workspace = match runtime.lock().unwrap().workspace(&snapshot.workspace_id) {
+        Ok(workspace) => serde_json::json!({
+            "workspaceId": workspace.workspace_id,
+            "path": if matches!(workspace.kind, pedelec_core::WorkspaceKind::Managed) {
+                Value::Null
+            } else {
+                Value::String(path_for_external_use(&workspace.canonical_path))
+            },
+        }),
+        Err(error) => return (error_response(&request.request_id, error), None),
+    };
     (
         ok_response(
             &request.request_id,
-            serde_json::json!({ "subscribed": true, "snapshot": snapshot }),
+            serde_json::json!({ "subscribed": true, "snapshot": snapshot, "workspace": workspace }),
         ),
         Some(subscription),
     )
@@ -2793,6 +2966,65 @@ fn error_response(request_id: &str, error: PedelecError) -> CoreIpcResponse {
     }
 }
 
+fn managed_workspace_path_strings(runtime: &SharedCoreRuntime) -> Vec<String> {
+    let paths = runtime
+        .lock()
+        .unwrap()
+        .managed_workspace_paths_for_error_sanitization();
+    let mut values = paths
+        .iter()
+        .flat_map(|path| {
+            [
+                path.to_string_lossy().into_owned(),
+                path_for_external_use(path),
+            ]
+        })
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    values.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    values.dedup();
+    values
+}
+
+fn sanitize_sdk_error_response(
+    mut response: CoreIpcResponse,
+    managed_paths: &[String],
+) -> CoreIpcResponse {
+    if let Some(error) = response.error.as_mut() {
+        error.message = redact_managed_paths(&error.message, managed_paths);
+        error.details = error
+            .details
+            .take()
+            .map(|details| redact_managed_paths_in_value(details, managed_paths));
+    }
+    response
+}
+
+fn redact_managed_paths(value: &str, managed_paths: &[String]) -> String {
+    managed_paths.iter().fold(value.to_string(), |value, path| {
+        value.replace(path, "[managed workspace]")
+    })
+}
+
+fn redact_managed_paths_in_value(value: Value, managed_paths: &[String]) -> Value {
+    match value {
+        Value::String(value) => Value::String(redact_managed_paths(&value, managed_paths)),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| redact_managed_paths_in_value(value, managed_paths))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, redact_managed_paths_in_value(value, managed_paths)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
 fn write_runtime_file(path: &Path, runtime_file: &RuntimeFile) -> Result<(), PedelecError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
@@ -2897,13 +3129,22 @@ mod tests {
         let fake_program = fake_codex_resume_program(temp.path());
         let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
         let now = chrono::Utc::now();
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-codex-resume";
+        runtime_guard
+            .register_workspace_for_test(
+                workspace_id,
+                &workspace,
+                pedelec_core::WorkspaceKind::Custom,
+            )
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
                 thread_id: "thread-codex".into(),
+                workspace_id: workspace_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
                 effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: workspace.clone(),
                 skills: Vec::new(),
                 status: pedelec_core::ThreadStatus::Idle,
                 created_at: now,
@@ -2915,6 +3156,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
 
         let owner = ProviderRuntimeOwner::new();
         let dispatcher = CodexRuntimeDispatcher::new(owner.clone(), Arc::clone(&runtime))
@@ -3061,13 +3303,23 @@ mod tests {
         let thread_id = "thread-ipc-resume";
         let now = chrono::Utc::now();
         let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-ipc-resume";
+        runtime_guard
+            .register_workspace_for_test(
+                workspace_id,
+                &workspace,
+                pedelec_core::WorkspaceKind::Custom,
+            )
+            .unwrap();
+        std::fs::create_dir_all(pedelec_core::thread_skills_root(&workspace, thread_id)).unwrap();
+        runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id: workspace_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
                 effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: workspace,
                 skills: Vec::new(),
                 status: pedelec_core::ThreadStatus::Ended,
                 created_at: now,
@@ -3079,6 +3331,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
 
         let unauthorized = handle_core_ipc_request(
             CoreIpcRequest {
@@ -3119,13 +3372,22 @@ mod tests {
         let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
         let thread_id = "thread-ipc-snapshot";
         let now = chrono::Utc::now();
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-ipc-snapshot";
+        runtime_guard
+            .register_workspace_for_test(
+                workspace_id,
+                PathBuf::from("."),
+                pedelec_core::WorkspaceKind::Custom,
+            )
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id: workspace_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
                 effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: PathBuf::from("."),
                 skills: Vec::new(),
                 status: pedelec_core::ThreadStatus::Idle,
                 created_at: now,
@@ -3137,6 +3399,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
 
         let request = CoreIpcRequest {
             request_id: "snapshot_authorized".into(),
@@ -3210,13 +3473,23 @@ mod tests {
 
         let thread_id = "thread_missing_workspace";
         let now = chrono::Utc::now();
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-missing";
+        let workspace_path = temp.path().join("does-not-exist");
+        runtime_guard
+            .register_workspace_for_test(
+                workspace_id,
+                &workspace_path,
+                pedelec_core::WorkspaceKind::Custom,
+            )
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id: workspace_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
                 effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: temp.path().join("does-not-exist"),
                 skills: Vec::new(),
                 status: pedelec_core::ThreadStatus::Ended,
                 created_at: now,
@@ -3228,6 +3501,7 @@ mod tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
 
         let missing_workspace = handle_core_ipc_request(
             CoreIpcRequest {
@@ -3640,13 +3914,20 @@ done
         runtime_guard
             .provider_readiness
             .mark_initial_scanning_for_test();
+        runtime_guard
+            .register_workspace_for_test(
+                format!("workspace-{thread_id}"),
+                PathBuf::from("."),
+                pedelec_core::WorkspaceKind::Custom,
+            )
+            .unwrap();
         runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id: format!("workspace-{thread_id}"),
                 provider: pedelec_core::ProviderCode::Codex,
                 effort_level: Some(pedelec_core::EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: PathBuf::from("."),
                 skills: Vec::new(),
                 status: pedelec_core::ThreadStatus::Idle,
                 created_at: now,
@@ -3714,13 +3995,22 @@ mod deno_ipc_tests {
             workspace_manager: WorkspaceManager::with_workspace_root(temp.join("managed")),
             ..CoreRuntime::default()
         }));
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = format!("workspace-{thread_id}");
+        runtime_guard
+            .register_workspace_for_test(
+                &workspace_id,
+                &workspace,
+                pedelec_core::WorkspaceKind::Custom,
+            )
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             ThreadState {
                 thread_id: thread_id.into(),
+                workspace_id,
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: workspace,
                 skills: Vec::new(),
                 status: ThreadStatus::Running,
                 created_at: now,
@@ -3732,7 +4022,173 @@ mod deno_ipc_tests {
                 active_provider_turn_id: Some("turn-1".into()),
             },
         );
+        drop(runtime_guard);
         runtime
+    }
+
+    fn create_managed_sdk_thread(
+        temp: &std::path::Path,
+        origin: &str,
+    ) -> (SharedCoreRuntime, String, String, std::path::PathBuf) {
+        let runtime = Arc::new(Mutex::new(CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.join("managed")),
+            ..CoreRuntime::default()
+        }));
+        let mut runtime_guard = runtime.lock().unwrap();
+        let created = runtime_guard
+            .create_sdk_thread(
+                CreateThreadInput {
+                    provider: ProviderCode::Codex,
+                    effort_level: None,
+                    model: Some("managed-test-model".into()),
+                    effort: None,
+                    skills: None,
+                    workspace_id: None,
+                },
+                origin,
+                Some("0.4.0"),
+            )
+            .unwrap();
+        let workspace_path = runtime_guard
+            .workspace(&created.workspace_id)
+            .unwrap()
+            .canonical_path
+            .clone();
+        drop(runtime_guard);
+        (
+            runtime,
+            created.thread_id,
+            created.workspace_id,
+            workspace_path,
+        )
+    }
+
+    #[test]
+    fn sdk_workspace_run_errors_redact_managed_workspace_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = "https://app.example.test";
+        let (runtime, _thread_id, workspace_id, workspace_path) =
+            create_managed_sdk_thread(temp.path(), origin);
+        let workspace_path_text = path_for_external_use(&workspace_path);
+        let dispatcher = Arc::new(RecordingDenoDispatcher {
+            intents: Mutex::new(Vec::new()),
+            error: Some(PedelecError::with_details(
+                error_codes::DENO_EXECUTION_TIMEOUT,
+                format!("cannot prepare Deno at {workspace_path_text}"),
+                serde_json::json!({
+                    "workspacePath": workspace_path_text,
+                    "nested": [{ "message": format!("failed at {workspace_path_text}") }],
+                }),
+            )),
+        });
+
+        let response = handle_core_ipc_request_with_services(
+            CoreIpcRequest {
+                request_id: "managed-workspace-run-error".into(),
+                r#type: "workspace_run".into(),
+                caller_origin: Some(origin.into()),
+                caller_sdk_version: Some("0.4.0".into()),
+                payload: Some(serde_json::json!({
+                    "workspaceId": workspace_id,
+                    "script": "throw new Error('test')",
+                })),
+            },
+            runtime,
+            Arc::new(NoopCoreIpcPlatformServices),
+            Arc::new(RejectPersistentRuntimeDispatcher),
+            dispatcher,
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().unwrap().code,
+            error_codes::DENO_EXECUTION_TIMEOUT
+        );
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert!(!serialized.contains(&workspace_path_text));
+        assert!(!serialized.contains(temp.path().to_string_lossy().as_ref()));
+        assert!(serialized.contains("[managed workspace]"));
+    }
+
+    #[test]
+    fn sdk_resume_errors_redact_managed_workspace_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = "https://app.example.test";
+        let (runtime, thread_id, _workspace_id, workspace_path) =
+            create_managed_sdk_thread(temp.path(), origin);
+        {
+            let mut runtime_guard = runtime.lock().unwrap();
+            runtime_guard
+                .thread_manager
+                .thread_mut(&thread_id)
+                .unwrap()
+                .status = ThreadStatus::Ended;
+            runtime_guard
+                .workspace_manager
+                .remove_managed_workspace(&workspace_path)
+                .unwrap();
+        }
+
+        let response = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "managed-workspace-resume-error".into(),
+                r#type: "resume_thread".into(),
+                caller_origin: Some(origin.into()),
+                caller_sdk_version: Some("0.4.0".into()),
+                payload: Some(serde_json::json!({ "threadId": thread_id })),
+            },
+            runtime,
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().unwrap().code,
+            error_codes::WORKSPACE_OPEN_FAILED
+        );
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert!(!serialized.contains(workspace_path.to_string_lossy().as_ref()));
+        assert!(!serialized.contains(temp.path().to_string_lossy().as_ref()));
+        assert_eq!(
+            response.error.as_ref().unwrap().details.as_ref().unwrap()["threadId"],
+            thread_id
+        );
+    }
+
+    #[test]
+    fn sdk_managed_workspace_creation_errors_redact_allocated_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed_root = temp.path().join("managed-root");
+        std::fs::write(&managed_root, "not a directory").unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(&managed_root),
+            ..CoreRuntime::default()
+        }));
+
+        let response = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "managed-workspace-create-error".into(),
+                r#type: "create_thread".into(),
+                caller_origin: Some("https://app.example.test".into()),
+                caller_sdk_version: Some("0.4.0".into()),
+                payload: Some(serde_json::json!({
+                    "provider": "codex",
+                    "model": "managed-test-model",
+                    "effort": null,
+                    "skills": null,
+                    "workspaceId": null,
+                })),
+            },
+            runtime,
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().unwrap().code,
+            error_codes::WORKSPACE_CREATE_FAILED
+        );
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert!(!serialized.contains(managed_root.to_string_lossy().as_ref()));
+        assert!(!serialized.contains(temp.path().to_string_lossy().as_ref()));
     }
 
     #[test]
@@ -4099,13 +4555,22 @@ mod deno_ipc_tests {
             ..CoreRuntime::default()
         }));
         let now = chrono::Utc::now();
-        runtime.lock().unwrap().thread_manager.insert_thread(
+        let mut runtime_guard = runtime.lock().unwrap();
+        let workspace_id = "workspace-module-ipc";
+        runtime_guard
+            .register_workspace_for_test(
+                workspace_id,
+                &workspace,
+                pedelec_core::WorkspaceKind::Custom,
+            )
+            .unwrap();
+        runtime_guard.thread_manager.insert_thread(
             ThreadState {
                 thread_id: "thread-module-ipc".into(),
+                workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path: workspace,
                 skills: Vec::new(),
                 status: ThreadStatus::Idle,
                 created_at: now,
@@ -4117,6 +4582,7 @@ mod deno_ipc_tests {
                 active_provider_turn_id: None,
             },
         );
+        drop(runtime_guard);
         runtime.lock().unwrap().deno_modules.insert(
             "thread-module-ipc".into(),
             vec![pedelec_core::DenoModuleState {

@@ -776,7 +776,7 @@ mod debug_send_text_tests {
     use super::*;
     use pedelec_core::{
         CoreRuntime, EffortLevel, PersistentRuntimeOperation, ProviderCode, ProviderSessionState,
-        ThreadState, ThreadStatus, WorkspaceManager,
+        ThreadState, ThreadStatus, WorkspaceKind, WorkspaceManager,
     };
     use std::sync::{Arc, Mutex};
 
@@ -900,13 +900,17 @@ mod debug_send_text_tests {
         runtime.provider_readiness.mark_ready_for_test();
         runtime.workspace_manager = WorkspaceManager::with_workspace_root(&workspace_root);
         let now = chrono::Utc::now();
+        let workspace_id = "workspace-app-test";
+        runtime
+            .register_workspace_for_test(workspace_id, &workspace_path, WorkspaceKind::Custom)
+            .unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
                 thread_id: "t000001".into(),
+                workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 effort_args: Vec::new(),
-                workspace_path,
                 skills: Vec::new(),
                 status,
                 created_at: now,

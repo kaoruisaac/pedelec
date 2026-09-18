@@ -97,7 +97,7 @@ Creating a session does not necessarily launch a long-running provider process i
 
 ### Workspace ownership
 
-Without `workspace.path`, the desktop runtime creates a temporary managed workspace under `~/.pedelec/workspaces/<threadId>` and owns its cleanup. An application can instead pass an absolute `workspace.path` to select an application-managed workspace. Pedelec creates `.pedelec-runtime/{assets,logs,skills,tmp}/`, preserves existing project content and private data, and never deletes an explicit workspace. Multiple active sessions may share one explicit path; filesystem write coordination remains the application's responsibility. Explicit paths cannot overlap the managed workspace root.
+Sessions created with `pedelec.createSession()` receive a temporary managed Workspace whose physical location and cleanup remain Desktop-owned; the SDK exposes its public `workspace.path` as `null`. An application-managed Workspace is selected with `pedelec.openWorkspace(path)` and used through `workspace.createSession()`. Pedelec initializes `.pedelec-runtime` for Workspace-owned runtime data: assets, logs, and temporary data are Workspace-level, while generated Session skills and Deno Module state are isolated per Thread. Applications should not depend on the private `.pedelec-runtime` subdirectory layout. Pedelec preserves existing project content and private data and never deletes an application-managed Workspace. Multiple active Sessions may share it; filesystem write coordination remains the application's responsibility. Explicit paths cannot overlap the managed Workspace root.
 
 ## What happens during `sendText()`
 

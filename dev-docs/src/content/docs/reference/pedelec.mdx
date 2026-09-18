@@ -58,7 +58,6 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     }
   | {
@@ -66,7 +65,6 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
       model?: string;
       effortLevel?: "default" | "low" | "high";
       skills?: SkillsInput<TTools>;
-      workspace?: CreateSessionWorkspaceInput;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -77,10 +75,9 @@ type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
 - `provider` may be combined with provider-independent `effortLevel` in Desktop profile mode.
 - Explicit model mode uses `model` with optional provider-native `effort`; it must not include `effortLevel`.
 - Model-only explicit mode uses provider-default effort behavior. Omitted `effortLevel` is normalized to `default` only in profile mode.
-- `workspace.path`: optionally use an absolute application-managed workspace instead of a temporary managed workspace.
 - `autoEndOnDisconnect`: defaults to `true`.
 
-An explicit `workspace.path` may be new or existing. Core creates the Pedelec-owned runtime structure `.pedelec-runtime/{skills,assets,logs,tmp}/` without clearing existing project contents. Pedelec never deletes an explicit workspace, and multiple active sessions may share it. The path must not overlap Pedelec's managed workspace root; invalid paths return `WORKSPACE_PATH_INVALID`.
+`createSession()` always uses the managed convenience flow and does not accept Workspace configuration. For an application-managed Workspace, call `openWorkspace()` and then `workspace.createSession()`. See the [PedelecWorkspace reference](../pedelec-workspace/) for the Workspace methods, lifecycle, concurrency, and security boundary.
 
 ### Returns
 
@@ -104,28 +101,25 @@ const session = await pedelec.createSession({
 });
 ```
 
-## `workspaceFolderPicker()`
+## `openWorkspace()`
 
 ```ts
-workspaceFolderPicker(): Promise<WorkspaceFolderPickerResult | null>
+openWorkspace(): Promise<PedelecWorkspace | null>
+openWorkspace(path: string): Promise<PedelecWorkspace>
 ```
 
-Opens the operating system's native directory-only picker through Pedelec Desktop. A selected folder resolves to its path plus a read-only snapshot of whether its root is empty and whether `.pedelec-workspace.json` is a regular file. Closing or cancelling the picker resolves to `null`.
+Opens or initializes a workspace capability. Without a path, Pedelec Desktop opens the native directory picker and cancellation resolves to `null`. An explicit path bypasses the picker. The returned workspace exposes `path`, `createSession()`, `listFiles()`, `listFolders()`, and `run()`.
 
 ```ts
-const folder = await pedelec.workspaceFolderPicker();
-if (!folder) return;
+const workspace = await pedelec.openWorkspace();
+if (!workspace) return;
 
-if (!folder.isEmptyFolder && !folder.hasWorkspaceConfig) {
-  // The application decides whether to warn the user.
-}
-
-const session = await pedelec.createSession({
-  workspace: { path: folder.path },
-});
+const session = await workspace.createSession({ provider: "codex" });
+const files = await workspace.listFiles();
+const result = await workspace.run("console.log('hello');");
 ```
 
-This is a sensitive Desktop API and may trigger the current origin's approval flow. The picker only observes the selected folder: it does not validate or initialize the workspace, create Pedelec workspace directories, parse the marker JSON, or enforce origin/SDK-version compatibility. `hasWorkspaceConfig` only checks for a regular `.pedelec-workspace.json` file, even if its contents are invalid. Existing custom workspace validation remains the responsibility of `createSession()`; after successful initialization it creates `.pedelec-workspace.json` with the SDK version and normalized caller origin. Picker failures reject with `DIRECTORY_PICKER_FAILED`; cancellation is not an error.
+This is a sensitive Desktop API and may trigger the current origin's approval flow. Workspace validation, runtime initialization, and marker handling are performed by Core. The picker overload has no generic SDK bridge timeout while the native picker is open; the explicit-path overload uses the configured bridge timeout. Extension disconnects and explicit bridge errors still reject.
 
 ## `listProviders()`
 
@@ -234,7 +228,7 @@ It resolves structured unavailable states for bridge, Native Host, Core, timeout
 resumeSession(sessionId: string): Promise<PedelecSession<string>>
 ```
 
-Subscribes this SDK client to an existing Core session. This is a reattachment operation, not ended-thread reactivation: if Core reports `ended`, the returned handle remains ended.
+Subscribes this SDK client to an existing Core session and hydrates its associated `workspace`. This is a reattachment operation, not ended-thread reactivation: if Core reports `ended`, the returned handle remains ended. The returned Session already includes `session.workspace`; the application does not need to call `openWorkspace()` separately.
 
 ```ts
 const session = await pedelec.resumeSession(savedSessionId);
