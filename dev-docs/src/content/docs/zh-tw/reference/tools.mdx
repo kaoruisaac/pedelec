@@ -41,7 +41,23 @@ const updateCounter = defineTool<
 
 ## `defineDenoModule()`
 
-Vite 應用可以用預定的 `skills.denoModules` authoring shape 描述 local 或 package-backed Deno module：
+Vite 應用使用同一個 authoring shape 描述 local 或 package-backed Deno module。Minimal declaration 可以給 `workspace.run()` 使用：
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const sceneTools = defineDenoModule({
+  name: "scene-tools",
+  entry: "./deno/scene-tools.ts",
+});
+
+const result = await workspace.run(
+  `import { buildScene } from "scene-tools";\nawait buildScene();`,
+  { denoModules: [sceneTools] },
+);
+```
+
+同一個 declaration 若也要給 `skills.denoModules` 使用，可以加入 Agent metadata：
 
 ```ts
 import { defineDenoModule } from "@kaoruisaac/pedelec";
@@ -61,7 +77,7 @@ const skills = {
 };
 ```
 
-`defineDenoModule()` 保留 authoring description；`pedelecVitePlugin()` 會在 `vite build` 與 `vite dev` 解析 `entry`、打包 self-contained ESM runtime，並 roll-up 獨立的 public declaration artifact。`createSession()` 會自動傳送 prepared artifact，Core 在 session 回傳前建立 immutable、thread-scoped package 與 import map。
+`defineDenoModule()` 保留 concrete declaration shape，包括 optional metadata 是否真的有提供。`pedelecVitePlugin()` 會在 `vite build` 與 `vite dev` 解析 `entry`、打包 self-contained ESM runtime，並 roll-up 獨立的 public declaration artifact。`createSession()` 會自動傳送 prepared artifact，Core 在 session 回傳前建立 immutable、thread-scoped package 與 import map。`workspace.run()` 使用同一種 prepared artifact format，但會按 Workspace 與 authorized SDK origin cache packages，再為每次 run 只對 requested names 建立 exact import map。
 
 只使用 root SDK、從不 import `@kaoruisaac/pedelec/vite` 的應用不需要 Vite；Vite peer 是 optional。使用 plugin 的應用必須安裝支援的 Vite 8：
 
@@ -135,12 +151,18 @@ Return value 必須符合 bridge JSON data model。
 ## `SkillsInput`
 
 ```ts
+type AgentDenoModuleDefinition<TName extends string = string> =
+  DenoModuleDefinition<TName> & {
+    description: string;
+    usage: string;
+  };
+
 type SkillsInput<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
   guidance: string;
   tools: TTools;
-  denoModules?: readonly DenoModuleDefinition[];
+  denoModules?: readonly AgentDenoModuleDefinition[];
 };
 ```
 
@@ -153,7 +175,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` 必須是 string，`tools` 必須是 array。`denoModules` 是 optional；每個 module 都需要 `name`、`description`、`entry`、`usage`。`preferStdinExecution` 是 optional boolean preference。它應包含 Vite-prepared definitions，`createSession()` 會自動完成 transport。
+`guidance` 必須是 string，`tools` 必須是 array。`denoModules` 是 optional；Session/Agent modules 需要 `name`、`description`、`entry`、`usage`，且 Agent metadata 必須是 non-empty。Workspace-only 的 `workspace.run()` declaration 只需要 `name`、`entry` 與 prepared Vite artifact。`preferStdinExecution` 是 optional boolean preference，對 Workspace execution 沒有作用。Session artifacts 會在 `createSession()` transport；Workspace artifacts 在需要時準備，並在 Core runtime cache 有效期間重用。
 
 ## `ToolNameOf`
 

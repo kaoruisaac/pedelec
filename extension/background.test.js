@@ -500,6 +500,106 @@ test("approved open_workspace forwards the origin and projects a Workspace capab
   assert.equal(background.getState().error, null);
 });
 
+test("Workspace Deno Module setup and run requests preserve origin and strip artifacts", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  const uploadNative = new MockPort();
+  const runNative = new MockPort();
+  chrome.nativePortQueue.push(native, uploadNative, runNative);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "workspace_prepare",
+    type: "prepare_workspace_deno_modules",
+    workspaceId: "workspace_custom",
+    moduleNames: ["scene-tools"],
+  });
+  const prepareRequest = await respondToNativeType(
+    background,
+    native,
+    "prepare_workspace_deno_modules",
+    { missingModuleNames: ["scene-tools"] },
+  );
+  assert.deepEqual(
+    {
+      callerOrigin: prepareRequest.callerOrigin,
+      workspaceId: prepareRequest.workspaceId,
+      moduleNames: prepareRequest.moduleNames,
+      runtimeSource: prepareRequest.runtimeSource,
+    },
+    {
+      callerOrigin: "https://app.example.test",
+      workspaceId: "workspace_custom",
+      moduleNames: ["scene-tools"],
+      runtimeSource: undefined,
+    },
+  );
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "workspace_upload",
+    type: "create_workspace_deno_module_upload",
+    workspaceId: "workspace_custom",
+    moduleName: "scene-tools",
+    expectedSizeBytes: 128,
+    runtimeSource: "must-not-forward",
+  });
+  const uploadRequest = await respondToNativeType(
+    background,
+    uploadNative,
+    "create_workspace_deno_module_upload",
+    { uploadId: "dmp_1", uploadUrl: "http://127.0.0.1:1/deno-modules/dmp_1", token: "t" },
+  );
+  assert.deepEqual(
+    {
+      callerOrigin: uploadRequest.callerOrigin,
+      workspaceId: uploadRequest.workspaceId,
+      moduleName: uploadRequest.moduleName,
+      expectedSizeBytes: uploadRequest.expectedSizeBytes,
+      runtimeSource: uploadRequest.runtimeSource,
+    },
+    {
+      callerOrigin: "https://app.example.test",
+      workspaceId: "workspace_custom",
+      moduleName: "scene-tools",
+      expectedSizeBytes: 128,
+      runtimeSource: undefined,
+    },
+  );
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "workspace_run_modules",
+    type: "workspace_run",
+    workspaceId: "workspace_custom",
+    script: "import 'scene-tools';",
+    denoModules: ["scene-tools"],
+  });
+  const runRequest = await respondToNativeType(
+    background,
+    runNative,
+    "workspace_run",
+    { exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false },
+  );
+  assert.deepEqual(
+    {
+      callerOrigin: runRequest.callerOrigin,
+      workspaceId: runRequest.workspaceId,
+      script: runRequest.script,
+      denoModules: runRequest.denoModules,
+    },
+    {
+      callerOrigin: "https://app.example.test",
+      workspaceId: "workspace_custom",
+      script: "import 'scene-tools';",
+      denoModules: ["scene-tools"],
+    },
+  );
+});
+
 test("open_workspace picker cancellation is forwarded as a successful null result", async () => {
   const chrome = createChrome();
   const native = new MockPort();

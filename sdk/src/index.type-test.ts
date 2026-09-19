@@ -28,17 +28,18 @@ const spriteTools = defineDenoModule({
   preferStdinExecution: true,
 });
 
+const workspaceTools = defineDenoModule({
+  name: "workspace-tools",
+  entry: "./workspace/workspace-tools.ts",
+});
+
 const spriteName: "sprite-tools" = spriteTools.name;
 const spriteDefinition: DenoModuleDefinition<"sprite-tools"> = spriteTools;
 void spriteName;
 void spriteDefinition;
 
-// @ts-expect-error Deno Module usage is required by the public authoring API
-defineDenoModule({
-  name: "missing-usage",
-  description: "Missing usage.",
-  entry: "./agent/missing-usage.ts",
-});
+const workspaceName: "workspace-tools" = workspaceTools.name;
+void workspaceName;
 
 // @ts-expect-error Deno Module entry remains required at authoring time
 defineDenoModule({
@@ -164,6 +165,40 @@ async function noSkillsFallsBackToString() {
   const pedelec = new Pedelec();
   const session = await pedelec.createSession({
     provider: "codex",
+  });
+
+  session.workspace.run("console.log('workspace')", { denoModules: [workspaceTools] });
+  session.workspace.run("console.log('workspace')", { denoModules: [spriteTools] });
+
+  await pedelec.createSession({
+    provider: "codex",
+    skills: { guidance: "Use modules.", tools: [],
+      // @ts-expect-error Workspace-only declarations do not satisfy Session metadata requirements
+      denoModules: [workspaceTools] },
+  });
+
+  const descriptionOnly = defineDenoModule({
+    name: "description-only",
+    description: "Missing usage.",
+    entry: "./agent/description-only.ts",
+  });
+  await pedelec.createSession({
+    provider: "codex",
+    skills: { guidance: "Use modules.", tools: [],
+      // @ts-expect-error Session metadata requires usage as well as description
+      denoModules: [descriptionOnly] },
+  });
+
+  const usageOnly = defineDenoModule({
+    name: "usage-only",
+    entry: "./agent/usage-only.ts",
+    usage: 'import "usage-only";',
+  });
+  await pedelec.createSession({
+    provider: "codex",
+    skills: { guidance: "Use modules.", tools: [],
+      // @ts-expect-error Session metadata requires description as well as usage
+      denoModules: [usageOnly] },
   });
 
   session.onTool((name) => {

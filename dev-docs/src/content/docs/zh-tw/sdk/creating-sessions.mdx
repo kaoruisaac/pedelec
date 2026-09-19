@@ -118,6 +118,22 @@ const session = await pedelec.createSession({
 
 `preferStdinExecution` 是 optional。當 module 主要用於短 script 時可設為 `true`；Host Context 會在該 module metadata 提供 stdin `runCommandTemplate`，例如 `@'\n<typescript-source>\n'@ | pedelec-deno --thread-id <thread-id> run -`，讓 Agent 只需替換 TypeScript source placeholder，就能直接執行完整的 stdin command。這是 execution preference，不是限制，file-backed script 仍然有效。省略或設為 `false` 會維持預設行為，也不會改變 module bundling 或 artifact contents。
 
+同一個 `defineDenoModule()` declaration 若只給 `workspace.run()` 使用，可以省略 Agent metadata：
+
+```ts
+const sceneTools = defineDenoModule({
+  name: "scene-tools",
+  entry: "./deno/scene-tools.ts",
+});
+
+const result = await session.workspace.run(
+  `import { buildScene } from "scene-tools";\nawait buildScene();`,
+  { denoModules: [sceneTools] },
+);
+```
+
+Workspace-run setup 是明確且 per-run 的。Vite-prepared artifact 會按 Workspace 與 authorized SDK origin 私下 cache，而每次 run 的 import map 只包含該次要求的 module names。Workspace-run module 不是 Session skill、不會顯示給 Agent，也不會被後續 Session 繼承。
+
 ## Metadata 與 resume
 
 Profile mode 的新 session 與 event context 會提供 normalized `effortLevel`；explicit model mode 的 `effortLevel` 為 `undefined`，因為它沒有選擇 Desktop profile。model 不會新增為 session/event public field；Core 只在 thread 的 `effort_args` 保存最終 snapshot。新建立的 `resumeSession(sessionId)` handle 可能無法恢復 provider 或 effort metadata，但 Core 仍使用已儲存的 command snapshot。

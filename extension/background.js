@@ -2046,7 +2046,7 @@ function createBackground(runtimeChrome, options = {}) {
     };
   }
 
-  function requireSdkWorkspaceRequest(message, { script = false } = {}) {
+  function requireSdkWorkspaceRequest(message, { script = false, moduleNames = false } = {}) {
     if (typeof message.workspaceId !== "string" || !message.workspaceId.trim()) {
       throw { code: "SDK_PROTOCOL_ERROR", message: "workspaceId is required" };
     }
@@ -2055,6 +2055,15 @@ function createBackground(runtimeChrome, options = {}) {
     }
     if (script && typeof message.script !== "string") {
       throw { code: "SDK_PROTOCOL_ERROR", message: "script is required" };
+    }
+    if (moduleNames) {
+      if (!Array.isArray(message.moduleNames) || message.moduleNames.some((name) => typeof name !== "string")) {
+        throw { code: "SDK_PROTOCOL_ERROR", message: "moduleNames must be an array of strings" };
+      }
+    }
+    if (message.denoModules !== undefined &&
+        (!Array.isArray(message.denoModules) || message.denoModules.some((name) => typeof name !== "string"))) {
+      throw { code: "SDK_PROTOCOL_ERROR", message: "denoModules must be an array of strings" };
     }
     if (message.timeoutMs !== undefined &&
         (!Number.isInteger(message.timeoutMs) || message.timeoutMs <= 0)) {
@@ -2223,6 +2232,41 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
+      if (message.type === "prepare_workspace_deno_modules") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        requireSdkWorkspaceRequest(message, { moduleNames: true });
+        const result = await sendSdkNativeRequest(context, "prepare_workspace_deno_modules", {
+          workspaceId: message.workspaceId,
+          moduleNames: message.moduleNames,
+        });
+        postSdkResponse(port, channelId, requestId, true, result);
+        return;
+      }
+
+      if (message.type === "create_workspace_deno_module_upload") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        requireSdkWorkspaceRequest(message);
+        if (typeof message.moduleName !== "string" || !message.moduleName.trim()) {
+          throw { code: "SDK_PROTOCOL_ERROR", message: "moduleName is required" };
+        }
+        if (!Number.isInteger(message.expectedSizeBytes) || message.expectedSizeBytes <= 0) {
+          throw { code: "SDK_PROTOCOL_ERROR", message: "expectedSizeBytes must be a positive integer" };
+        }
+        const result = await sendSdkNativeRequest(context, "create_workspace_deno_module_upload", {
+          workspaceId: message.workspaceId,
+          moduleName: message.moduleName,
+          expectedSizeBytes: message.expectedSizeBytes,
+        });
+        postSdkResponse(port, channelId, requestId, true, result);
+        return;
+      }
+
       if (message.type === "workspace_run") {
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);
@@ -2233,6 +2277,7 @@ function createBackground(runtimeChrome, options = {}) {
           workspaceId: message.workspaceId,
           script: message.script,
           ...(message.timeoutMs === undefined ? {} : { timeoutMs: message.timeoutMs }),
+          ...(message.denoModules === undefined ? {} : { denoModules: message.denoModules }),
         });
         postSdkResponse(port, channelId, requestId, true, result);
         return;

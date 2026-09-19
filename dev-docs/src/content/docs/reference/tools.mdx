@@ -41,7 +41,23 @@ const updateCounter = defineTool<
 
 ## `defineDenoModule()`
 
-Vite applications can describe a local or package-backed Deno module using the intended `skills.denoModules` authoring shape:
+Vite applications can describe a local or package-backed Deno module with one authoring shape. A minimal declaration can be used by `workspace.run()`:
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const sceneTools = defineDenoModule({
+  name: "scene-tools",
+  entry: "./deno/scene-tools.ts",
+});
+
+const result = await workspace.run(
+  `import { buildScene } from "scene-tools";\nawait buildScene();`,
+  { denoModules: [sceneTools] },
+);
+```
+
+The same declaration can include Agent metadata when it is also used by `skills.denoModules`:
 
 ```ts
 import { defineDenoModule } from "@kaoruisaac/pedelec";
@@ -61,7 +77,7 @@ const skills = {
 };
 ```
 
-`defineDenoModule()` preserves the authoring description while `pedelecVitePlugin()` resolves the `entry`, bundles a self-contained ESM runtime, and rolls up a standalone public declaration artifact during `vite build` and `vite dev`. `createSession()` transfers each prepared artifact and Core materializes an immutable, thread-scoped package plus import map before the session is returned.
+`defineDenoModule()` preserves the concrete declaration shape, including whether optional metadata was supplied. `pedelecVitePlugin()` resolves the `entry`, bundles a self-contained ESM runtime, and rolls up a standalone public declaration artifact during `vite build` and `vite dev`. `createSession()` transfers each prepared artifact and Core materializes an immutable, thread-scoped package plus import map before the session is returned. `workspace.run()` uses the same prepared artifact format but caches packages per Workspace and authorized SDK origin, then creates an exact per-run import map for only the requested names.
 
 Root SDK consumers that never import `@kaoruisaac/pedelec/vite` do not need Vite. The Vite peer is optional. Applications that use the plugin must install a supported Vite 8 release:
 
@@ -135,12 +151,18 @@ Return values must be compatible with the bridge's JSON data model.
 ## `SkillsInput`
 
 ```ts
+type AgentDenoModuleDefinition<TName extends string = string> =
+  DenoModuleDefinition<TName> & {
+    description: string;
+    usage: string;
+  };
+
 type SkillsInput<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
   guidance: string;
   tools: TTools;
-  denoModules?: readonly DenoModuleDefinition[];
+  denoModules?: readonly AgentDenoModuleDefinition[];
 };
 ```
 
@@ -153,7 +175,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` must be a string and `tools` must be an array. `denoModules` is optional; each module requires `name`, `description`, `entry`, and `usage`. `preferStdinExecution` is an optional boolean preference. It is populated with Vite-prepared definitions and is transported automatically during `createSession()`.
+`guidance` must be a string and `tools` must be an array. `denoModules` is optional; Session/Agent modules require `name`, `description`, `entry`, and `usage`, with non-empty Agent metadata. A Workspace-only `workspace.run()` declaration requires only `name` and `entry`, plus its prepared Vite artifact. `preferStdinExecution` is an optional boolean preference and has no effect on Workspace execution. Session artifacts are transported during `createSession()`; Workspace artifacts are prepared on demand and reused while the Core runtime cache remains valid.
 
 ## `ToolNameOf`
 

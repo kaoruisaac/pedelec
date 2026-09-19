@@ -292,7 +292,21 @@ The default timeout is 60 seconds; `timeoutMs` must be a positive integer. The r
 
 Several `workspace.run()` calls in one Workspace may execute concurrently. A Workspace run cannot start while any Session in that Workspace has an active Agent/provider operation. Conversely, a Session in that Workspace cannot begin `sendText()` or provider preparation while one or more Workspace runs are active. This rule is Workspace-wide, including operations started through another `PedelecSession` handle; conflicts reject with `WORKSPACE_BUSY`.
 
-Session `skills.denoModules` belong to the Session/Thread that declares them and are available only to Agent-side `pedelec-deno` execution for that Thread. `workspace.run()` does not inherit any Session Deno Modules and the Workspace has no Deno Module registration API. `workspace.run()` is intentionally Workspace-only: it does not choose a Session and does not receive a Session import map.
+Session `skills.denoModules` belong to the Session/Thread that declares them and are available only to Agent-side `pedelec-deno` execution for that Thread. Workspace runs accept the same Vite-prepared declarations explicitly:
+
+```ts
+const sceneTools = defineDenoModule({
+  name: "scene-tools",
+  entry: "./deno/scene-tools.ts",
+});
+
+const result = await workspace.run(
+  `import { buildScene } from "scene-tools";\nawait buildScene();`,
+  { denoModules: [sceneTools] },
+);
+```
+
+`workspace.run()` does not inherit any Session Deno Modules, and Sessions do not inherit modules used by Workspace runs. The Vite-prepared package is cached privately per Workspace and authorized SDK origin; each run receives an import map containing exactly its requested names. A ready module name is immutable for the lifetime of the Core process, and Workspace-run modules never appear in Agent Host Context. The private Workspace-run cache is reset when Core restarts; project files, assets, and Thread module snapshots are preserved.
 
 The Workspace handle outlives an individual Session conceptually. Ending a Session does not close or delete a custom Workspace, and Pedelec does not delete it during app cleanup. Managed Workspaces remain under Desktop cleanup ownership and are not promised to disappear immediately when a Thread ends. The browser capability is runtime-scoped; reopen the custom Workspace after a Desktop/Core restart when necessary. `pedelec.resumeSession(sessionId)` returns a Session that already includes `session.workspace`; the application does not need to call `openWorkspace()` separately. Same-handle `session.resume()` preserves the existing Workspace handle, subject to the existing Core/thread and transport caveats.
 

@@ -62,7 +62,13 @@ listFolders(path?: string): Promise<string[]>
 ## `run(script, options?)`
 
 ```ts
-run(script: string, options?: { timeoutMs?: number }): Promise<WorkspaceRunResult>
+run(
+  script: string,
+  options?: {
+    timeoutMs?: number;
+    denoModules?: readonly DenoModuleDefinition[];
+  },
+): Promise<WorkspaceRunResult>
 ```
 
 在此 Workspace 執行 application 提供的 Deno code。Default timeout 是 60 秒；override 必須是 positive integer。
@@ -79,13 +85,29 @@ if (result.stdoutTruncated || result.stderrTruncated) {
 const value = JSON.parse(result.stdout);
 ```
 
+`denoModules` 會為這一次 run mount Vite-prepared modules。Workspace-only declaration 只需要 logical import name 與 build-time entry：
+
+```ts
+const sceneTools = defineDenoModule({
+  name: "scene-tools",
+  entry: "./deno/scene-tools.ts",
+});
+
+const result = await workspace.run(
+  `import { buildScene } from "scene-tools";\nawait buildScene();`,
+  { denoModules: [sceneTools] },
+);
+```
+
+每個 artifact 都必須先由 Vite plugin 準備好，才能呼叫 `workspace.run()`。`entry` 只由 Vite 解析，不會送到 Desktop/Core。每次 run 都只會收到該次列出的 module names 所組成的 import map，不會繼承 Session 或其他 Workspace run 的 modules。Prepared packages 會按 Workspace 與 authorized SDK origin 私下 cache，後續 run 可以重用 ready module 而不必再次 upload artifact。同一個 Core process lifetime 內，ready logical name 不可替換；要使用不同 implementation 請改用新的 name。
+
 Result 是 raw Deno output：`exitCode`、`stdout`、`stderr`、`stdoutTruncated` 與 `stderrTruncated`。非零 `exitCode` 仍會正常 resolve；如何解讀由 application 決定，需要 function-like value 時再自行 parse `stdout`。Browser response 過大時 reject `WORKSPACE_RUN_OUTPUT_TOO_LARGE`。
 
 ## Security boundary
 
 `workspace.run()` 是 approved Web application 的直接 capability。Deno code 可以讀寫 Workspace，但沒有 network、host environment、subprocess execution、FFI 或 `sys` permission；既有 no-remote、cached-only 與 no-npm runtime restrictions 仍適用。這不是 unrestricted host code execution，也不是 Agent-mediated action。
 
-`skills.denoModules` 屬於宣告它的 Session/Thread，只提供給該 Thread 的 Agent-side `pedelec-deno` execution。`workspace.run()` 不會繼承任何 Session import map，Workspace 目前也沒有 Deno Module registration API。它刻意是 Workspace-only，不會選擇 Session。
+`skills.denoModules` 屬於宣告它的 Session/Thread，只提供給該 Thread 的 Agent-side `pedelec-deno` execution。Workspace-run modules 是分開且明確的 per-run capability：`workspace.run()` 不會繼承 Session import map，`workspace.createSession()` 也不會繼承先前由 `workspace.run()` 使用的 modules。Workspace-run modules 永遠不會出現在 Agent Host Context。Core restart 時會重設 private Workspace-run cache；project files、assets 與 Thread module snapshots 不會被清除。
 
 ## Concurrency 與 lifetime
 

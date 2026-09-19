@@ -80,6 +80,19 @@ try {
 | `DENO_RUNTIME_UNAVAILABLE` | Bundled/cached Deno runtime 找不到或無法啟動 | 修復/重新安裝 Desktop runtime，確認 packaged Deno asset | 修復 runtime 後 |
 | `DENO_PROCESS_SPAWN_FAILED` | Desktop 無法 spawn Deno process | 檢查 Desktop installation、executable permissions 與 runtime logs | 修復 process environment 後 |
 | `DENO_PROCESS_IO_FAILED` | Deno process 的 stdin/stdout/stderr communication 失敗 | 將 operation 視為失敗，查看 runtime logs 並確認 partial writes | transport/runtime 恢復後 |
+| `DENO_MODULE_NAME_INVALID` | Logical Deno Module name 不是支援的 bare 或 scoped package-like specifier | 使用 `scene-tools` 或 `@example/scene-tools` 等有效名稱 | 修正 declaration 後 |
+| `DENO_MODULE_SETUP_INCOMPLETE` | Requested Workspace 或 Session Deno Module 尚未 ready | 先完成 upload/setup handshake；Workspace setup 失敗時可重試 | setup 完成後 |
+| `DENO_MODULE_NOT_FOUND` | Requested module 不在 owning Workspace scope 或 Thread snapshot 的 declaration 中 | 將 module 加入明確的 run/setup request，或建立新的 Session snapshot | 修正 request 後 |
+| `DENO_MODULE_ALREADY_READY` | Ready module package 在目前 Core runtime scope 內不可變更 | 使用既有 package；新 implementation 請使用新的 logical module name | 只在改用新 name 後 |
+| `DENO_MODULE_ARTIFACT_TOO_LARGE` | Prepared runtime/declaration envelope 超過 100 MiB upload limit | 減小 bundled artifact，或拆分 module | artifact 縮小後 |
+| `DENO_MODULE_ARTIFACT_INVALID` | Uploaded Deno Module envelope 或 runtime/declaration sources 無效 | 使用 Vite plugin 重新 build 後重試 | rebuild 後 |
+| `DENO_MODULE_MATERIALIZATION_FAILED` | Core 無法安全 commit 或 validate private module package | 檢查 filesystem/runtime health；不要把 private path 暴露給使用者 | 修復 filesystem/runtime 後 |
+| `DENO_MODULE_UPLOAD_SERVER_UNAVAILABLE` | Local bounded upload endpoint 無法使用 | 重啟或修復 Desktop/Core runtime | upload endpoint ready 後 |
+| `DENO_MODULE_UPLOAD_TICKET_EXPIRED` | Short-lived module upload ticket 已過期 | 重新取得 setup/upload ticket | 使用新 ticket 後 |
+| `DENO_MODULE_UPLOAD_UNAUTHORIZED` | Upload ticket、token、owner 或 module scope 無效 | 不要重用 ticket；從 owning SDK origin 重新開始 setup | fresh authorized setup 後 |
+| `DENO_MODULE_UPLOAD_SIZE_MISMATCH` | Uploaded bytes 與 ticket 的 envelope size 不一致 | 使用完全相同的 prepared artifact body 重試 | 修正 body 後 |
+| `DENO_MODULE_UPLOAD_FAILED` | Module upload 無法 transfer 或 commit | 查看原因後重試 Workspace setup，或重新建立 Session | recovery 後 |
+| `DENO_MODULE_SETUP_FAILED` | Module setup 完成 transport 但沒有產生 ready package | rebuild/retry setup；ready package 不會 hot-swap | 修正 setup 後 |
 
 ## Provider 與 configuration
 

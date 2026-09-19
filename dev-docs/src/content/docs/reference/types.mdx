@@ -293,14 +293,24 @@ type ToolDefinition<
 ```ts
 type DenoModuleDefinition<TName extends string = string> = {
   name: TName;
-  description: string;
   entry: string;
-  usage: string;
+  description?: string;
+  usage?: string;
   preferStdinExecution?: boolean;
 };
 ```
 
-`entry` is a Vite build/dev authoring string. `name` becomes the Agent import specifier and `usage` is required guidance for the common import. `preferStdinExecution` is an optional Agent execution preference; when `true`, Host Context supplies a module-specific stdin `runCommandTemplate` with a `<typescript-source>` placeholder. File-backed execution remains valid, and the preference does not change bundling or artifact contents. Use `pedelecVitePlugin()` to prepare the runtime and declaration artifact.
+`name` and `entry` are the intrinsic fields. `entry` is a Vite build/dev authoring string; it is not a Desktop filesystem instruction. `description` and `usage` are optional Agent-facing metadata, while `preferStdinExecution` is an optional Agent execution preference. When `preferStdinExecution` is `true`, Host Context supplies a module-specific stdin `runCommandTemplate` with a `<typescript-source>` placeholder. File-backed execution remains valid, and the preference does not change bundling or artifact contents. Use `pedelecVitePlugin()` to prepare the runtime and declaration artifact.
+
+Session skills use the stricter shape below: `description` and `usage` must both be non-empty strings. Workspace runs may use the minimal base declaration, but every module must contain a prepared Vite artifact.
+
+```ts
+type AgentDenoModuleDefinition<TName extends string = string> =
+  DenoModuleDefinition<TName> & {
+    description: string;
+    usage: string;
+  };
+```
 
 ### `SkillsInput`
 
@@ -310,7 +320,7 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
-  denoModules?: readonly DenoModuleDefinition[];
+  denoModules?: readonly AgentDenoModuleDefinition[];
 };
 ```
 

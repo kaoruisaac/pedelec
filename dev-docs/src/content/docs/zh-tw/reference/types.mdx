@@ -293,14 +293,24 @@ type ToolDefinition<
 ```ts
 type DenoModuleDefinition<TName extends string = string> = {
   name: TName;
-  description: string;
   entry: string;
-  usage: string;
+  description?: string;
+  usage?: string;
   preferStdinExecution?: boolean;
 };
 ```
 
-`entry` 是 Vite build/dev authoring string。`name` 會成為 Agent 的 import specifier，`usage` 是必要的常見 import guidance。`preferStdinExecution` 是 optional 的 Agent execution preference；設為 `true` 時，Host Context 會提供帶有 `<typescript-source>` placeholder 的 module-specific stdin `runCommandTemplate`。File-backed execution 仍然有效，且此 preference 不會改變 bundling 或 artifact contents。請使用 `pedelecVitePlugin()` 準備 runtime 與 declaration artifact。
+`name` 與 `entry` 是 intrinsic fields。`entry` 是 Vite build/dev authoring string，不是 Desktop filesystem instruction。`description` 與 `usage` 是 optional Agent-facing metadata；`preferStdinExecution` 是 optional Agent execution preference。設為 `true` 時，Host Context 會提供帶有 `<typescript-source>` placeholder 的 module-specific stdin `runCommandTemplate`。File-backed execution 仍然有效，且此 preference 不會改變 bundling 或 artifact contents。請使用 `pedelecVitePlugin()` 準備 runtime 與 declaration artifact。
+
+Session skills 使用較嚴格的 shape：`description` 與 `usage` 都必須是 non-empty string。Workspace run 可以使用 minimal base declaration，但每個 module 都必須包含 prepared Vite artifact。
+
+```ts
+type AgentDenoModuleDefinition<TName extends string = string> =
+  DenoModuleDefinition<TName> & {
+    description: string;
+    usage: string;
+  };
+```
 
 ### `SkillsInput`
 
@@ -310,7 +320,7 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
-  denoModules?: readonly DenoModuleDefinition[];
+  denoModules?: readonly AgentDenoModuleDefinition[];
 };
 ```
 

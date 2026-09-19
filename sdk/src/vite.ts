@@ -20,9 +20,9 @@ const nodeRequire = createRequire(import.meta.url);
 
 type Declaration = {
   name: string;
-  description: string;
+  description?: string;
   entry: string;
-  usage: string;
+  usage?: string;
   callStart: number;
   callEnd: number;
   objectStart: number;
@@ -1271,7 +1271,7 @@ function readDeclaration(node: ts.CallExpression, sourceFile: ts.SourceFile): De
   }
 
   const name = readStringField(values, "name", sourceFile, node);
-  const description = readStringField(values, "description", sourceFile, node);
+  const description = readOptionalStringField(values, "description", sourceFile, node);
   if (values.has("code")) {
     throw declarationError(sourceFile, values.get("code")!, "defineDenoModule() does not support inline code; use a static entry");
   }
@@ -1282,7 +1282,7 @@ function readDeclaration(node: ts.CallExpression, sourceFile: ts.SourceFile): De
   }
   const entry = readStaticString(entryExpression);
   if (entry === null) throw declarationError(sourceFile, entryExpression, "defineDenoModule() entry must be a string literal");
-  const usage = readStringField(values, "usage", sourceFile, node);
+  const usage = readOptionalStringField(values, "usage", sourceFile, node);
   return {
     name,
     description,
@@ -1295,6 +1295,21 @@ function readDeclaration(node: ts.CallExpression, sourceFile: ts.SourceFile): De
     entryStart: entryExpression.getStart(sourceFile),
     entryEnd: entryExpression.end,
   };
+}
+
+function readOptionalStringField(
+  values: Map<string, ts.Expression>,
+  field: string,
+  sourceFile: ts.SourceFile,
+  node: ts.Node,
+): string | undefined {
+  if (!values.has(field)) return undefined;
+  const expression = values.get(field)!;
+  const value = readStaticString(expression);
+  if (value === null) {
+    throw declarationError(sourceFile, expression ?? node, `defineDenoModule() field must be a static string when provided: ${field}`);
+  }
+  return value;
 }
 
 function replaceSourceRange(source: string, start: number, end: number, replacement: string): string {

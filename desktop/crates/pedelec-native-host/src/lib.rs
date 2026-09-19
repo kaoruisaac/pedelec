@@ -247,6 +247,14 @@ fn native_message_to_core_request(
             &object,
             &["threadId", "moduleName", "expectedSizeBytes"],
         ))),
+        "prepare_workspace_deno_modules" => Some(Value::Object(select_fields(
+            &object,
+            &["workspaceId", "moduleNames"],
+        ))),
+        "create_workspace_deno_module_upload" => Some(Value::Object(select_fields(
+            &object,
+            &["workspaceId", "moduleName", "expectedSizeBytes"],
+        ))),
         "abort_session_setup" => Some(Value::Object(select_fields(&object, &["threadId"]))),
         "list_providers" | "get_settings" => Some(Value::Object(object)),
         "open_workspace" => Some(Value::Object(select_fields(&object, &["path"]))),
@@ -256,7 +264,7 @@ fn native_message_to_core_request(
         ))),
         "workspace_run" => Some(Value::Object(select_fields(
             &object,
-            &["workspaceId", "script", "timeoutMs"],
+            &["workspaceId", "script", "timeoutMs", "denoModules"],
         ))),
         // The connectivity probe deliberately has no caller-controlled payload.
         "ping" => Some(serde_json::json!({})),

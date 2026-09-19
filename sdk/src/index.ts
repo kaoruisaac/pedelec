@@ -36,11 +36,17 @@ export type Asset = {
 
 export type DenoModuleDefinition<TName extends string = string> = {
   name: TName;
-  description: string;
+  description?: string;
   entry: string;
-  usage: string;
+  usage?: string;
   preferStdinExecution?: boolean;
 };
+
+type AgentDenoModuleDefinition<TName extends string = string> =
+  DenoModuleDefinition<TName> & {
+    description: string;
+    usage: string;
+  };
 
 function normalizeListAssetsResponse(response: unknown): Asset[] {
   if (!response || typeof response !== "object" || Array.isArray(response)) return invalidListAssetsResponse(response);
@@ -152,7 +158,7 @@ export type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
-  denoModules?: readonly DenoModuleDefinition[];
+  denoModules?: readonly AgentDenoModuleDefinition[];
 };
 
 export type ToolNameOf<TTools extends readonly ToolDefinition[]> = Extract<
@@ -182,6 +188,7 @@ export type SerializableSkillsManifest = {
 
 export type WorkspaceRunOptions = {
   timeoutMs?: number;
+  denoModules?: readonly DenoModuleDefinition[];
 };
 
 export type WorkspaceRunResult = {
@@ -511,9 +518,9 @@ export function defineTool<
   return tool;
 }
 
-export function defineDenoModule<const TName extends string>(
-  module: DenoModuleDefinition<TName>,
-): DenoModuleDefinition<TName> {
+export function defineDenoModule<const TModule extends DenoModuleDefinition>(
+  module: TModule,
+): TModule {
   return module;
 }
 
@@ -528,6 +535,59 @@ type PreparedDenoModuleForSession = {
   runtimeSource: string;
   typesSource: string;
 };
+
+type PreparedWorkspaceDenoModule = {
+  name: string;
+  runtimeSource: string;
+  typesSource: string;
+};
+
+function normalizeWorkspaceDenoModules(value: unknown): PreparedWorkspaceDenoModule[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw makeError("INVALID_INPUT", "options.denoModules must be an array");
+  }
+
+  const seen = new Set<string>();
+  return value.map((module, index) => {
+    if (!module || typeof module !== "object" || Array.isArray(module)) {
+      throw makeError("INVALID_INPUT", "options.denoModules entries must be objects", { index });
+    }
+    const rawModule = module as Partial<DenoModuleDefinition>;
+    if (!isValidDenoModuleName(rawModule.name)) {
+      throw makeError("INVALID_INPUT", "Deno Module name is invalid", {
+        index,
+        moduleName: rawModule.name,
+      });
+    }
+    if (seen.has(rawModule.name)) {
+      throw makeError("INVALID_INPUT", "duplicate Deno Module name", {
+        moduleName: rawModule.name,
+      });
+    }
+    seen.add(rawModule.name);
+    if (rawModule.preferStdinExecution !== undefined && typeof rawModule.preferStdinExecution !== "boolean") {
+      throw makeError("INVALID_INPUT", "Deno Module preferStdinExecution must be a boolean", {
+        moduleName: rawModule.name,
+      });
+    }
+
+    const artifact = getPreparedDenoModuleArtifact(module);
+    if (!artifact) {
+      throw makeError(
+        "INVALID_INPUT",
+        `Deno module "${rawModule.name}" was not prepared. Configure pedelecVitePlugin() in the Vite project.`,
+        { moduleName: rawModule.name },
+      );
+    }
+
+    return {
+      name: rawModule.name,
+      runtimeSource: artifact.runtimeSource,
+      typesSource: artifact.typesSource,
+    };
+  });
+}
 
 function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
   const handlers = new Map<string, ToolSpecificHandler>();
@@ -740,15 +800,46 @@ export class PedelecWorkspace {
       return Promise.reject(makeError("INVALID_INPUT", "timeoutMs must be a positive integer"));
     }
 
-    return this.client.requestWithOptions<unknown>(
-      "workspace_run",
-      {
-        workspaceId: this.workspaceId,
-        script,
-        ...(timeoutMs === undefined ? {} : { timeoutMs }),
-      },
-      { timeoutMs: null },
-    ).then(normalizeWorkspaceRunResponse);
+    let modules: PreparedWorkspaceDenoModule[];
+    try {
+      modules = normalizeWorkspaceDenoModules(options.denoModules);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    const run = async (): Promise<WorkspaceRunResult> => {
+      if (modules.length > 0) {
+        const prepared = await this.client.request<unknown>("prepare_workspace_deno_modules", {
+          workspaceId: this.workspaceId,
+          moduleNames: modules.map(({ name }) => name),
+        });
+        const missingModuleNames = normalizeWorkspaceDenoModulePrepareResponse(
+          prepared,
+          modules.map(({ name }) => name),
+        );
+        const modulesByName = new Map(modules.map((module) => [module.name, module]));
+        for (const name of missingModuleNames) {
+          const module = modulesByName.get(name);
+          if (!module) {
+            throw makeError("SDK_PROTOCOL_ERROR", "prepare_workspace_deno_modules response was inconsistent");
+          }
+          await this.client.uploadWorkspaceDenoModuleArtifact(this.workspaceId, module);
+        }
+      }
+
+      return this.client.requestWithOptions<unknown>(
+        "workspace_run",
+        {
+          workspaceId: this.workspaceId,
+          script,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+          ...(modules.length === 0 ? {} : { denoModules: modules.map(({ name }) => name) }),
+        },
+        { timeoutMs: null },
+      ).then(normalizeWorkspaceRunResponse);
+    };
+
+    return run();
   }
 
   /** @internal */
@@ -886,6 +977,30 @@ export class Pedelec {
     sessionId: string,
     module: PreparedDenoModuleForSession,
   ): Promise<void> {
+    await this.uploadDenoModuleArtifactWithTicket(
+      module,
+      "create_deno_module_upload",
+      { sessionId, moduleName: module.name },
+    );
+  }
+
+  /** @internal */
+  async uploadWorkspaceDenoModuleArtifact(
+    workspaceId: string,
+    module: PreparedWorkspaceDenoModule,
+  ): Promise<void> {
+    await this.uploadDenoModuleArtifactWithTicket(
+      module,
+      "create_workspace_deno_module_upload",
+      { workspaceId, moduleName: module.name },
+    );
+  }
+
+  private async uploadDenoModuleArtifactWithTicket(
+    module: PreparedDenoModuleForSession | PreparedWorkspaceDenoModule,
+    ticketType: "create_deno_module_upload" | "create_workspace_deno_module_upload",
+    ticketPayload: Record<string, unknown>,
+  ): Promise<void> {
     const envelope = JSON.stringify({
       version: 1,
       format: "esm",
@@ -902,9 +1017,8 @@ export class Pedelec {
       );
     }
 
-    const ticket = await this.request<unknown>("create_deno_module_upload", {
-      sessionId,
-      moduleName: module.name,
+    const ticket = await this.request<unknown>(ticketType, {
+      ...ticketPayload,
       expectedSizeBytes,
     });
     if (!isPlainObject(ticket) || typeof ticket.uploadUrl !== "string" || ticket.uploadUrl.length === 0 ||
@@ -2522,6 +2636,24 @@ function normalizeWorkspaceListResponse(value: unknown): string[] {
     throw makeError("SDK_PROTOCOL_ERROR", "workspace list response had an invalid shape");
   }
   return paths as string[];
+}
+
+function normalizeWorkspaceDenoModulePrepareResponse(
+  value: unknown,
+  requestedNames: string[],
+): string[] {
+  if (!isPlainObject(value) || !Array.isArray(value.missingModuleNames)) {
+    throw makeError("SDK_PROTOCOL_ERROR", "prepare_workspace_deno_modules response had an invalid shape");
+  }
+  const requested = new Set(requestedNames);
+  const seen = new Set<string>();
+  for (const name of value.missingModuleNames) {
+    if (typeof name !== "string" || !requested.has(name) || seen.has(name)) {
+      throw makeError("SDK_PROTOCOL_ERROR", "prepare_workspace_deno_modules response had unknown or duplicate modules");
+    }
+    seen.add(name);
+  }
+  return value.missingModuleNames;
 }
 
 function normalizeWorkspaceRunResponse(value: unknown): WorkspaceRunResult {

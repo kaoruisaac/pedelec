@@ -80,6 +80,19 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `DENO_RUNTIME_UNAVAILABLE` | The bundled/cached Deno runtime cannot be located or started | Repair/reinstall the Desktop runtime and verify its packaged Deno asset | After runtime repair |
 | `DENO_PROCESS_SPAWN_FAILED` | Desktop could not spawn the Deno process | Check Desktop installation, executable permissions, and runtime logs | After fixing the process environment |
 | `DENO_PROCESS_IO_FAILED` | Deno process stdin/stdout/stderr communication failed | Treat the operation as failed, inspect runtime logs, and reconcile partial writes | After transport/runtime recovery |
+| `DENO_MODULE_NAME_INVALID` | A logical Deno Module name is not a supported bare or scoped package-like specifier | Use a valid module name such as `scene-tools` or `@example/scene-tools` | After fixing the declaration |
+| `DENO_MODULE_SETUP_INCOMPLETE` | A requested Workspace or Session Deno Module has not reached the ready state | Complete the upload/setup handshake before executing; retry a failed Workspace setup | Yes after setup is complete |
+| `DENO_MODULE_NOT_FOUND` | The requested module was not declared in the owning Workspace scope or Thread snapshot | Include the module in the explicit run/setup request or create a new Session snapshot | After correcting the request |
+| `DENO_MODULE_ALREADY_READY` | A ready module package is immutable for the current Core runtime scope | Use the existing package or choose a new logical module name for a new implementation | Only with a new name |
+| `DENO_MODULE_ARTIFACT_TOO_LARGE` | The prepared runtime/declaration envelope exceeds the 100 MiB upload limit | Reduce the bundled artifact or split the module | After reducing the artifact |
+| `DENO_MODULE_ARTIFACT_INVALID` | The uploaded Deno Module envelope or its runtime/declaration sources are invalid | Rebuild with the Vite plugin and retry | After rebuilding |
+| `DENO_MODULE_MATERIALIZATION_FAILED` | Core could not safely commit or validate the private module package | Inspect filesystem/runtime health without exposing private paths to users | After fixing the filesystem/runtime issue |
+| `DENO_MODULE_UPLOAD_SERVER_UNAVAILABLE` | The local bounded upload endpoint is unavailable | Restart or repair the Desktop/Core runtime | After the upload endpoint is ready |
+| `DENO_MODULE_UPLOAD_TICKET_EXPIRED` | The short-lived module upload ticket expired | Request a fresh setup/upload ticket | Yes with a fresh ticket |
+| `DENO_MODULE_UPLOAD_UNAUTHORIZED` | The upload ticket, token, owner, or module scope is invalid | Do not reuse the ticket; restart setup through the owning SDK origin | Only with a fresh authorized setup |
+| `DENO_MODULE_UPLOAD_SIZE_MISMATCH` | Uploaded bytes differ from the ticketed envelope size | Retry with the exact prepared artifact body | Yes after correcting the body |
+| `DENO_MODULE_UPLOAD_FAILED` | The module upload could not be transferred or committed | Inspect the cause, then retry the Workspace setup or recreate the Session | After recovery |
+| `DENO_MODULE_SETUP_FAILED` | The module setup completed transport but did not produce a ready package | Rebuild/retry the setup; ready packages are not hot-swapped | Yes after correcting the setup |
 
 ## Provider and configuration
 

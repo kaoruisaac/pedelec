@@ -135,6 +135,22 @@ The generated `index.d.ts` describes the Agent-facing public API and omits imple
 
 `preferStdinExecution` is optional. Set it to `true` when a module is primarily used by short scripts; Host Context then supplies that module's stdin `runCommandTemplate`, such as `@'\n<typescript-source>\n'@ | pedelec-deno --thread-id <thread-id> run -`, so the Agent can replace the TypeScript source placeholder and execute the complete stdin command directly. It is an execution preference, not a restriction, so file-backed scripts remain valid. Omit it or set it to `false` for the default behavior. It does not change module bundling or artifact contents.
 
+The same `defineDenoModule()` declaration can be minimal when it is used only by `workspace.run()`:
+
+```ts
+const sceneTools = defineDenoModule({
+  name: "scene-tools",
+  entry: "./deno/scene-tools.ts",
+});
+
+const result = await session.workspace.run(
+  `import { buildScene } from "scene-tools";\nawait buildScene();`,
+  { denoModules: [sceneTools] },
+);
+```
+
+Workspace-run setup is explicit and per run. The Vite-prepared artifact is cached privately for the Workspace and authorized SDK origin, while the run import map contains only the requested module names. A Workspace-run module is not a Session skill, is not shown to the Agent, and is not inherited by a later Session.
+
 ## Ollama
 
 The selected Ollama profile must contain a model in profile mode, so an empty selected profile returns `MODEL_REQUIRED`. Explicit `createSession({ provider: "ollama", model: "qwen3:30b" })` supplies the model directly and is valid; Ollama currently does not accept explicit `effort`. Low and high do not fall back to default.

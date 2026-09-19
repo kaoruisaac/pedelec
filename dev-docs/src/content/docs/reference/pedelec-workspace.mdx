@@ -62,7 +62,13 @@ Has the same root, relative path, separator, sorting, `.pedelec-runtime`, symlin
 ## `run(script, options?)`
 
 ```ts
-run(script: string, options?: { timeoutMs?: number }): Promise<WorkspaceRunResult>
+run(
+  script: string,
+  options?: {
+    timeoutMs?: number;
+    denoModules?: readonly DenoModuleDefinition[];
+  },
+): Promise<WorkspaceRunResult>
 ```
 
 Runs application-supplied Deno code in this Workspace. The default timeout is 60 seconds; an override must be a positive integer.
@@ -79,13 +85,29 @@ if (result.stdoutTruncated || result.stderrTruncated) {
 const value = JSON.parse(result.stdout);
 ```
 
+The `denoModules` option mounts Vite-prepared modules for this run. A Workspace-only declaration only needs the logical import name and build-time entry:
+
+```ts
+const sceneTools = defineDenoModule({
+  name: "scene-tools",
+  entry: "./deno/scene-tools.ts",
+});
+
+const result = await workspace.run(
+  `import { buildScene } from "scene-tools";\nawait buildScene();`,
+  { denoModules: [sceneTools] },
+);
+```
+
+The Vite plugin must prepare each artifact before `workspace.run()` is called. `entry` is resolved only by Vite and is never sent to Desktop/Core. Each run receives an import map containing exactly the listed module names; it does not inherit modules from a Session or other Workspace run. Prepared packages are cached privately per Workspace and authorized SDK origin, so later runs can reuse ready modules without uploading the artifact again. A ready logical name is immutable for the lifetime of the Core process; use a new name for a different implementation.
+
 The result is raw Deno output: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`, and `stderrTruncated`. A non-zero `exitCode` resolves normally; the application decides how to interpret it and parses `stdout` itself when it wants a function-like value. An oversized browser response rejects with `WORKSPACE_RUN_OUTPUT_TOO_LARGE`.
 
 ## Security boundary
 
 `workspace.run()` is a direct capability for the approved Web application. Its Deno code has read and write access to the Workspace, but has no network, host environment, subprocess execution, FFI, or `sys` permission. No-remote, cached-only, and no-npm runtime restrictions continue to apply. This is not unrestricted host code execution and is not an Agent-mediated action.
 
-Session `skills.denoModules` remain owned by the Session/Thread that declared them and are available to Agent-side `pedelec-deno` execution for that Thread. `workspace.run()` does not inherit a Session import map, and Workspace currently has no Deno Module registration API. It is intentionally Workspace-only: it does not choose a Session.
+Session `skills.denoModules` remain owned by the Session/Thread that declared them and are available to Agent-side `pedelec-deno` execution for that Thread. Workspace-run modules are a separate, explicit per-run capability: `workspace.run()` does not inherit a Session import map, and `workspace.createSession()` does not inherit modules previously used by `workspace.run()`. Workspace-run modules never appear in Agent Host Context. Core resets the private Workspace-run cache when its runtime restarts; project files, assets, and Thread module snapshots are not cleared.
 
 ## Concurrency and lifetime
 

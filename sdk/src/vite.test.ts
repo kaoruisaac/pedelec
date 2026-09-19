@@ -261,6 +261,23 @@ describe("pedelecVitePlugin", () => {
     });
   });
 
+  it("prepares a minimal Workspace declaration without Agent metadata", async () => {
+    const directory = await createFixture();
+    await writeFile(
+      join(directory, "main.ts"),
+      `import { defineDenoModule } from "@kaoruisaac/pedelec";\nexport const module = defineDenoModule({ name: "scene-tools", entry: "./agent/module.ts" });\n`,
+    );
+    await withServer(directory, async (server) => {
+      const transformed = await transformFile(server, join(directory, "main.ts"));
+      const artifact = extractArtifact(transformed);
+      expect(artifact.runtimeSource).toContain("!");
+      expect(artifact.typesSource).toContain("PreviewOptions");
+      expect(transformed).toContain('name: "scene-tools"');
+      expect(transformed).toContain("entry = undefined");
+      expect(transformed).not.toContain("./agent/module.ts");
+    });
+  });
+
   it("preserves the module-level stdin preference while removing the authoring entry", async () => {
     const directory = await createFixture();
     await writeFile(

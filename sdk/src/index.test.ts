@@ -273,6 +273,26 @@ function preparedDenoModule(name = "sprite-tools", preferStdinExecution?: boolea
   return module;
 }
 
+function preparedWorkspaceDenoModule(name = "scene-tools"): any {
+  const module = defineDenoModule({
+    name,
+    entry: "./deno/scene-tools.ts",
+  }) as any;
+  Object.defineProperty(module, "__pedelecArtifact", {
+    value: Object.freeze({
+      format: "esm",
+      runtimeSource: "export const buildScene = async () => 'ok';",
+      typesSource: "export declare const buildScene: () => Promise<string>;",
+      contentHash: "ignored-by-workspace-transport",
+    }),
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  module.entry = undefined;
+  return module;
+}
+
 async function startTurn(session: { sendText: (text: string) => Promise<void> }, pageWindow: MockWindow) {
   const send = session.sendText("hello");
   const request = pageWindow.lastSent();
@@ -3264,6 +3284,101 @@ describe("Pedelec SDK", () => {
     });
     await expect(run).resolves.toMatchObject({ exitCode: 3, stdout: "3" });
     await expect(workspace.run("x", { timeoutMs: 0 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("prepares Workspace Deno Modules once and mounts only the requested names per run", async () => {
+    const previousFetch = globalThis.fetch;
+    const fetchCalls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      fetchCalls.push(String(input));
+      if (!(init?.body instanceof Blob)) throw new Error("module upload body was not a Blob");
+      return new Response(JSON.stringify({ moduleName: "scene-tools", ready: true }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    try {
+      const pedelec = new Pedelec({ bridgeTimeoutMs: 1 });
+      const open = pedelec.openWorkspace("C:\\workspace\\project");
+      const openRequest = pageWindow.lastSent();
+      respondOk(pageWindow, openRequest, {
+        workspace: { workspaceId: "workspace_deno_modules", path: "C:\\workspace\\project" },
+      });
+      const workspace = await open;
+      const module = preparedWorkspaceDenoModule();
+
+      const firstRun = workspace.run(
+        `import { buildScene } from "scene-tools";\nawait buildScene();`,
+        { denoModules: [module], timeoutMs: 60_000 },
+      );
+      const prepareRequest = pageWindow.lastSent();
+      expect(prepareRequest).toMatchObject({
+        type: "prepare_workspace_deno_modules",
+        workspaceId: "workspace_deno_modules",
+        moduleNames: ["scene-tools"],
+      });
+      respondOk(pageWindow, prepareRequest, { missingModuleNames: ["scene-tools"] });
+      await nextTick();
+
+      const uploadRequest = pageWindow.lastSent();
+      expect(uploadRequest).toMatchObject({
+        type: "create_workspace_deno_module_upload",
+        workspaceId: "workspace_deno_modules",
+        moduleName: "scene-tools",
+      });
+      respondOk(pageWindow, uploadRequest, {
+        uploadId: "workspace_dmp_test",
+        uploadUrl: "http://127.0.0.1:43123/deno-modules/workspace_dmp_test",
+        token: "test-token",
+        expiresAt: Date.now() + 60_000,
+      });
+      await nextTick();
+
+      const runRequest = pageWindow.lastSent();
+      expect(runRequest).toMatchObject({
+        type: "workspace_run",
+        workspaceId: "workspace_deno_modules",
+        denoModules: ["scene-tools"],
+        timeoutMs: 60_000,
+      });
+      expect(runRequest.denoModules).not.toContain("image-tools");
+      respondOk(pageWindow, runRequest, {
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      });
+      await expect(firstRun).resolves.toMatchObject({ exitCode: 0, stdout: "ok" });
+      expect(fetchCalls).toHaveLength(1);
+
+      const secondRun = workspace.run("import 'scene-tools';", { denoModules: [module] });
+      const secondPrepareRequest = pageWindow.lastSent();
+      expect(secondPrepareRequest).toMatchObject({
+        type: "prepare_workspace_deno_modules",
+        moduleNames: ["scene-tools"],
+      });
+      respondOk(pageWindow, secondPrepareRequest, { missingModuleNames: [] });
+      await nextTick();
+      const secondRunRequest = pageWindow.lastSent();
+      expect(secondRunRequest).toMatchObject({
+        type: "workspace_run",
+        workspaceId: "workspace_deno_modules",
+        denoModules: ["scene-tools"],
+      });
+      respondOk(pageWindow, secondRunRequest, {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      });
+      await expect(secondRun).resolves.toMatchObject({ exitCode: 0 });
+      expect(fetchCalls).toHaveLength(1);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
   });
 
   it("lists assets without changing session state and validates the response", async () => {

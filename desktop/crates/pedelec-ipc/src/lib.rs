@@ -1,9 +1,10 @@
 pub use pedelec_core::DenoRuntimeDispatcher;
 use pedelec_core::{
     error_codes, wait_for_provider_readiness, AbortSessionSetupInput, CreateAssetDownloadInput,
-    CreateAssetUploadInput, CreateDenoModuleUploadInput, CreateThreadInput, DenoExecutionIntent,
-    DenoRunInput, DenoRunOutput, EndThreadInput, ListAssetsInput, PedelecError, PedelecSettings,
-    PersistentRuntimeOperation, PrepareThreadInput, PrepareThreadOutput, ProviderCode,
+    CreateAssetUploadInput, CreateDenoModuleUploadInput, CreateThreadInput,
+    CreateWorkspaceDenoModuleUploadInput, DenoExecutionIntent, DenoRunInput, DenoRunOutput,
+    EndThreadInput, ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation,
+    PrepareThreadInput, PrepareThreadOutput, PrepareWorkspaceDenoModulesInput, ProviderCode,
     ProviderProtocolTraffic, ProviderRuntimeDiagnostic, ResumeThreadInput, SendTextInput,
     SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
     ThreadSubscription, ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration,
@@ -1965,6 +1966,56 @@ fn handle_core_ipc_request_with_services(
         "workspace_list_files" => handle_workspace_list_request(&request, runtime, false),
         "workspace_list_folders" => handle_workspace_list_request(&request, runtime, true),
         "workspace_run" => handle_workspace_run_request(&request, runtime, deno_dispatcher),
+        "prepare_workspace_deno_modules" => {
+            match decode_payload::<PrepareWorkspaceDenoModulesInput>(&request) {
+                Ok(input) => {
+                    let result =
+                        authorize_workspace_request(&runtime, &request, &input.workspace_id)
+                            .and_then(|_| {
+                                let origin = request.caller_origin.as_deref().ok_or_else(|| {
+                                    PedelecError::new(
+                                        error_codes::IPC_UNAUTHORIZED,
+                                        "workspace operation requires an approved caller origin",
+                                    )
+                                })?;
+                                runtime
+                                    .lock()
+                                    .unwrap()
+                                    .prepare_workspace_deno_modules(input, origin)
+                            });
+                    match result {
+                        Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                        Err(error) => error_response(&request.request_id, error),
+                    }
+                }
+                Err(error) => error_response(&request.request_id, error),
+            }
+        }
+        "create_workspace_deno_module_upload" => {
+            match decode_payload::<CreateWorkspaceDenoModuleUploadInput>(&request) {
+                Ok(input) => {
+                    let result =
+                        authorize_workspace_request(&runtime, &request, &input.workspace_id)
+                            .and_then(|_| {
+                                let origin = request.caller_origin.as_deref().ok_or_else(|| {
+                                    PedelecError::new(
+                                        error_codes::IPC_UNAUTHORIZED,
+                                        "workspace operation requires an approved caller origin",
+                                    )
+                                })?;
+                                runtime
+                                    .lock()
+                                    .unwrap()
+                                    .create_workspace_deno_module_upload(input, origin)
+                            });
+                    match result {
+                        Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                        Err(error) => error_response(&request.request_id, error),
+                    }
+                }
+                Err(error) => error_response(&request.request_id, error),
+            }
+        }
         "create_asset_upload" => match decode_payload::<CreateAssetUploadInput>(&request) {
             Ok(input) => match authorize_thread_request(&runtime, &request, &input.thread_id)
                 .and_then(|_| runtime.lock().unwrap().create_asset_upload(input))
@@ -2239,7 +2290,23 @@ fn handle_workspace_run_request(
         return error_response(&request.request_id, error);
     }
 
-    let start = match runtime.lock().unwrap().begin_workspace_run(input) {
+    let caller_origin = match request.caller_origin.as_deref() {
+        Some(origin) => origin,
+        None => {
+            return error_response(
+                &request.request_id,
+                PedelecError::new(
+                    error_codes::IPC_UNAUTHORIZED,
+                    "workspace operation requires an approved caller origin",
+                ),
+            )
+        }
+    };
+    let start = match runtime
+        .lock()
+        .unwrap()
+        .begin_workspace_run_for_origin(input, caller_origin)
+    {
         Ok(start) => start,
         Err(error) => return error_response(&request.request_id, error),
     };
