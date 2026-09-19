@@ -15,6 +15,8 @@ It demonstrates:
 - the managed `Pedelec.createSession()` flow and explicit `PedelecWorkspace.createSession()` flow
 - `session.workspace.path` visibility without exposing a Desktop-managed absolute path
 - `workspace.listFiles()`, `workspace.listFolders()`, and `workspace.run()` with raw output/truncation flags
+- a plain `workspace.run()` demo that creates or overwrites `.pedelec-runtime/assets/workspace-run-demo.txt`; the file records the execution minute and second
+- an explicit `workspace.run(..., { denoModules })` demo that passes the `workspace-inspector` module and prints immediate Workspace files/folders
 
 ## Install
 
@@ -69,6 +71,8 @@ The Create Session panel makes the two public flows explicit:
 - Click Use managed to switch future sessions back to the managed flow. Existing sessions keep their own `session.workspace` handle, so multiple sessions can share one explicit Workspace.
 
 The Workspace API panel exercises the active/selected Workspace directly. Its list path is omitted when empty, and the script result displays `exitCode`, raw `stdout`/`stderr`, and both truncation flags without parsing stdout.
+
+Workspace runs do not inherit the Session's `memory-manager` module. `memory-manager` remains the Session/Agent example, while `workspace-inspector` is supplied only to its direct Workspace run.
 
 ## Common Errors
 

@@ -96,6 +96,30 @@ const emptyArgsSchema = {
   required: [],
 } satisfies ToolArgsSchema;
 
+const defaultWorkspaceScript = `
+await Deno.mkdir(".pedelec-runtime/assets", { recursive: true });
+
+const now = new Date();
+await Deno.writeTextFile(
+  ".pedelec-runtime/assets/workspace-run-demo.txt",
+  \`這個檔案是在 \${now.getMinutes()} 分 \${now.getSeconds()} 秒由 workspace.run 建立的。\`,
+);
+
+console.log("workspace-run-demo.txt created");
+`.trim();
+
+const workspaceInspector = defineDenoModule({
+  name: "workspace-inspector",
+  entry: "./workspace-inspector.ts",
+});
+
+const workspaceInspectorScript = `
+import { inspectWorkspace } from "workspace-inspector";
+
+const result = await inspectWorkspace();
+console.log(JSON.stringify(result, null, 2));
+`.trim();
+
 function createDemoSkills() {
   return {
     guidance:
@@ -166,7 +190,7 @@ export default function App() {
   const [workspaceOperation, setWorkspaceOperation] = createSignal<"idle" | "files" | "folders" | "run">("idle");
   const [workspaceFiles, setWorkspaceFiles] = createSignal<string[]>([]);
   const [workspaceFolders, setWorkspaceFolders] = createSignal<string[]>([]);
-  const [workspaceScript, setWorkspaceScript] = createSignal("console.log(JSON.stringify({ ok: true }));");
+  const [workspaceScript, setWorkspaceScript] = createSignal(defaultWorkspaceScript);
   const [workspaceRunResult, setWorkspaceRunResult] = createSignal<WorkspaceRunResult | null>(null);
   const [resumeId, setResumeId] = createSignal("");
   const [prompt, setPrompt] = createSignal("");
@@ -352,7 +376,7 @@ export default function App() {
 
   async function listWorkspace(kind: "files" | "folders") {
     const workspace = workspaceTarget();
-    if (!workspace) return;
+    if (!workspace || workspaceOperation() !== "idle") return;
 
     setWorkspaceOperation(kind);
     try {
@@ -373,13 +397,37 @@ export default function App() {
 
   async function runWorkspaceScript() {
     const workspace = workspaceTarget();
-    if (!workspace) return;
+    if (!workspace || workspaceOperation() !== "idle") return;
 
     setWorkspaceOperation("run");
     try {
       const result = await workspace.run(workspaceScript(), { timeoutMs: 60_000 });
       setWorkspaceRunResult(result);
       appendGlobalEvent("workspace_run_resolved", {
+        exitCode: result.exitCode,
+        stdoutTruncated: result.stdoutTruncated,
+        stderrTruncated: result.stderrTruncated,
+      });
+    } catch (err) {
+      recordError(toDemoError(err));
+      markExtensionError(err);
+    } finally {
+      setWorkspaceOperation("idle");
+    }
+  }
+
+  async function runWorkspaceModuleDemo() {
+    const workspace = workspaceTarget();
+    if (!workspace || workspaceOperation() !== "idle") return;
+
+    setWorkspaceOperation("run");
+    try {
+      const result = await workspace.run(workspaceInspectorScript, {
+        timeoutMs: 60_000,
+        denoModules: [workspaceInspector],
+      });
+      setWorkspaceRunResult(result);
+      appendGlobalEvent("workspace_run_deno_module_resolved", {
         exitCode: result.exitCode,
         stdoutTruncated: result.stdoutTruncated,
         stderrTruncated: result.stderrTruncated,
@@ -1072,13 +1120,23 @@ export default function App() {
                       onInput={(event) => setWorkspaceScript(event.currentTarget.value)}
                     />
                   </label>
-                  <button
-                    type="button"
-                    disabled={workspaceOperation() !== "idle"}
-                    onClick={() => void runWorkspaceScript()}
-                  >
-                    {workspaceOperation() === "run" ? "Running..." : "Run Workspace script"}
-                  </button>
+                  <div class="workspace-actions">
+                    <button
+                      type="button"
+                      disabled={workspaceOperation() !== "idle"}
+                      onClick={() => void runWorkspaceScript()}
+                    >
+                      {workspaceOperation() === "run" ? "Running..." : "Run Workspace script"}
+                    </button>
+                    <button
+                      type="button"
+                      class="secondary"
+                      disabled={workspaceOperation() !== "idle"}
+                      onClick={() => void runWorkspaceModuleDemo()}
+                    >
+                      {workspaceOperation() === "run" ? "Running..." : "Run Deno Module demo"}
+                    </button>
+                  </div>
                   <Show when={workspaceRunResult()}>
                     {(result) => (
                       <div class="workspace-run-result">
