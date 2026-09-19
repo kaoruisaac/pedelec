@@ -2432,8 +2432,7 @@ impl CoreRuntime {
             })
             .scope_id
             .clone();
-        let modules_root = workspace_deno_workspace_modules_root(&workspace_path, &scope_id);
-        ensure_workspace_deno_scope_root(&workspace_path, &scope_id)?;
+        let roots = ensure_workspace_deno_scope_roots(&workspace_path, &scope_id)?;
 
         let active_uploads = self
             .deno_module_upload_tickets
@@ -2470,7 +2469,7 @@ impl CoreRuntime {
                     ));
                 }
                 Some(DenoModuleSetupState::Pending) | Some(DenoModuleSetupState::Failed) => {
-                    remove_workspace_deno_module_package(&modules_root, module_name)?;
+                    remove_workspace_deno_module_package(&roots, module_name)?;
                     scope
                         .modules
                         .insert(module_name.clone(), DenoModuleSetupState::Pending);
@@ -2777,33 +2776,38 @@ impl CoreRuntime {
     }
 
     pub fn mark_deno_module_upload_failed(&mut self, upload_id: &str) {
-        let Some(ticket) = self.deno_module_upload_tickets.get_mut(upload_id) else {
+        let Some(ticket) = self.deno_module_upload_tickets.get(upload_id).cloned() else {
             return;
         };
         if let DenoModuleUploadOwner::Workspace {
             workspace_id,
             sdk_origin,
             scope_id,
-        } = &ticket.owner
+        } = ticket.owner
         {
             let key = WorkspaceDenoModuleScopeKey {
-                workspace_id: workspace_id.clone(),
-                sdk_origin: sdk_origin.clone(),
+                workspace_id,
+                sdk_origin,
             };
             if let Some(scope) = self.workspace_deno_module_scopes.get_mut(&key) {
                 scope
                     .modules
                     .insert(ticket.module_name.clone(), DenoModuleSetupState::Failed);
-                let modules_root =
-                    workspace_deno_workspace_modules_root(&ticket.workspace_path, scope_id);
-                let _ = remove_workspace_deno_module_package(&modules_root, &ticket.module_name);
             }
-            ticket.state = DenoModuleUploadState::Failed;
+            if let Ok(roots) = ensure_workspace_deno_scope_roots(&ticket.workspace_path, &scope_id)
+            {
+                let _ = remove_workspace_deno_module_package(&roots, &ticket.module_name);
+            }
+            if let Some(ticket) = self.deno_module_upload_tickets.get_mut(upload_id) {
+                ticket.state = DenoModuleUploadState::Failed;
+            }
             return;
         }
         let thread_id = ticket.thread_id.clone();
         let module_name = ticket.module_name.clone();
-        ticket.state = DenoModuleUploadState::Failed;
+        if let Some(ticket) = self.deno_module_upload_tickets.get_mut(upload_id) {
+            ticket.state = DenoModuleUploadState::Failed;
+        }
         if let Some(modules) = self.deno_modules.get_mut(&thread_id) {
             if let Some(module) = modules.iter_mut().find(|module| module.name == module_name) {
                 module.state = DenoModuleSetupState::Failed;
@@ -3045,6 +3049,43 @@ impl CoreRuntime {
             ));
         }
 
+        // The upload ticket only authorizes the transfer.  The Workspace may
+        // have become busy while the HTTP body was in flight, so repeat the
+        // authoritative admission checks immediately before reading or
+        // materializing the artifact.
+        let workspace_path = match self.workspace(&workspace_id) {
+            Ok(workspace) => workspace.canonical_path.clone(),
+            Err(error) => {
+                self.mark_deno_module_upload_failed(upload_id);
+                return Err(error);
+            }
+        };
+        let scope_matches = self
+            .workspace_deno_module_scopes
+            .get(&key)
+            .is_some_and(|scope| scope.scope_id == scope_id);
+        if !scope_matches {
+            let error = PedelecError::new(
+                error_codes::DENO_MODULE_SETUP_INCOMPLETE,
+                "Workspace Deno Module setup scope is no longer available",
+            );
+            self.mark_deno_module_upload_failed(upload_id);
+            return Err(error);
+        }
+        if let Err(error) = self
+            .ensure_workspace_provider_idle(&workspace_id)
+            .and_then(|_| {
+                if self.active_workspace_run_count(&workspace_id) > 0 {
+                    Err(workspace_busy_error(&workspace_id))
+                } else {
+                    Ok(())
+                }
+            })
+        {
+            self.mark_deno_module_upload_failed(upload_id);
+            return Err(error);
+        }
+
         let result = (|| {
             let metadata = fs::metadata(temporary_path).map_err(|err| {
                 PedelecError::with_details(
@@ -3075,18 +3116,8 @@ impl CoreRuntime {
                     )
                 })?;
             validate_deno_module_artifact_envelope(&envelope)?;
-            let canonical_scope_root =
-                ensure_workspace_deno_scope_root(&ticket.workspace_path, &scope_id)?;
-            let canonical_modules_root = canonical_scope_root
-                .join("modules")
-                .canonicalize()
-                .map_err(|err| {
-                    deno_module_materialization_error(
-                        "Workspace Deno Module package root is unavailable",
-                        &canonical_scope_root,
-                        err,
-                    )
-                })?;
+            let roots = ensure_workspace_deno_scope_roots(&workspace_path, &scope_id)?;
+            let canonical_modules_root = roots.canonical_modules_root.clone();
             materialize_deno_module_package_at(
                 &canonical_modules_root,
                 &ticket.module_name,
@@ -3113,9 +3144,9 @@ impl CoreRuntime {
                 })
             }
             Err(error) => {
-                let modules_root =
-                    workspace_deno_workspace_modules_root(&ticket.workspace_path, &scope_id);
-                let _ = remove_workspace_deno_module_package(&modules_root, &ticket.module_name);
+                if let Ok(roots) = ensure_workspace_deno_scope_roots(&workspace_path, &scope_id) {
+                    let _ = remove_workspace_deno_module_package(&roots, &ticket.module_name);
+                }
                 self.mark_deno_module_upload_failed(upload_id);
                 Err(error)
             }
@@ -6299,64 +6330,106 @@ fn validate_deno_module_upload_size(size: u64, module_name: &str) -> Result<(), 
 }
 
 fn reset_workspace_deno_workspace_root(workspace_path: &Path) -> Result<(), PedelecError> {
-    let workspace_root = workspace_path.canonicalize().map_err(|err| {
+    let (canonical_workspace_root, canonical_root) =
+        ensure_workspace_deno_workspace_root(workspace_path).map_err(|err| {
+            deno_module_materialization_error(
+                "cannot establish Workspace Deno Module root",
+                &workspace_deno_workspace_root(workspace_path),
+                err,
+            )
+        })?;
+    let metadata = fs::symlink_metadata(&canonical_root).map_err(|err| {
         deno_module_materialization_error(
             "cannot inspect Workspace Deno Module root",
-            workspace_path,
+            &canonical_root,
             err,
         )
     })?;
-    let root = workspace_deno_workspace_root(workspace_path);
-    match fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err(PedelecError::new(
-                error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
-                "Workspace Deno Module root is not a regular directory",
-            ));
-        }
-        Ok(_) => {
-            if !root
-                .canonicalize()
-                .map_err(|err| {
-                    deno_module_materialization_error(
-                        "cannot inspect Workspace Deno Module root",
-                        &root,
-                        err,
-                    )
-                })?
-                .starts_with(&workspace_root)
-            {
-                return Err(PedelecError::new(
-                    error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
-                    "Workspace Deno Module root escapes the Workspace",
-                ));
-            }
-            fs::remove_dir_all(&root).map_err(|err| {
-                deno_module_materialization_error(
-                    "cannot reset Workspace Deno Module root",
-                    &root,
-                    err,
-                )
-            })?;
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(deno_module_materialization_error(
-                "cannot inspect Workspace Deno Module root",
-                &root,
-                err,
-            ));
-        }
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Workspace Deno Module root is not a regular directory",
+        ));
     }
-    fs::create_dir_all(&root).map_err(|err| {
-        deno_module_materialization_error("cannot create Workspace Deno Module root", &root, err)
-    })
+    let canonical_existing = canonical_root.canonicalize().map_err(|err| {
+        deno_module_materialization_error(
+            "cannot inspect Workspace Deno Module root",
+            &canonical_root,
+            err,
+        )
+    })?;
+    if canonical_existing != canonical_root
+        || !canonical_existing.starts_with(&canonical_workspace_root)
+    {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Workspace Deno Module root escapes the Workspace",
+        ));
+    }
+    // Only reset the Workspace-run tree. The sibling deno/threads tree is
+    // deliberately never traversed or removed here.
+    fs::remove_dir_all(&canonical_root).map_err(|err| {
+        deno_module_materialization_error(
+            "cannot reset Workspace Deno Module root",
+            &canonical_root,
+            err,
+        )
+    })?;
+    fs::create_dir(&canonical_root).map_err(|err| {
+        deno_module_materialization_error(
+            "cannot recreate Workspace Deno Module root",
+            &canonical_root,
+            err,
+        )
+    })?;
+    let recreated = canonical_root.canonicalize().map_err(|err| {
+        deno_module_materialization_error(
+            "cannot inspect recreated Workspace Deno Module root",
+            &canonical_root,
+            err,
+        )
+    })?;
+    if recreated != canonical_root || !recreated.starts_with(&canonical_workspace_root) {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "recreated Workspace Deno Module root is unsafe",
+        ));
+    }
+    Ok(())
 }
 
-fn ensure_workspace_deno_scope_root(
+#[derive(Debug, Clone)]
+struct WorkspaceDenoScopeRoots {
+    canonical_workspace_root: PathBuf,
+    canonical_scope_root: PathBuf,
+    canonical_modules_root: PathBuf,
+    canonical_runs_root: PathBuf,
+}
+
+fn ensure_workspace_deno_workspace_root(workspace_path: &Path) -> io::Result<(PathBuf, PathBuf)> {
+    let metadata = fs::symlink_metadata(workspace_path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Workspace Deno Module workspace is not a regular directory",
+        ));
+    }
+    let canonical_workspace_root = workspace_path.canonicalize()?;
+    let mut current = canonical_workspace_root.clone();
+    for component in [PEDELEC_RUNTIME_DATA_DIR, "deno", "workspace"] {
+        current = ensure_workspace_deno_child_directory(
+            &current,
+            component,
+            &[&canonical_workspace_root],
+        )?;
+    }
+    Ok((canonical_workspace_root, current))
+}
+
+fn ensure_workspace_deno_scope_roots(
     workspace_path: &Path,
     scope_id: &str,
-) -> Result<PathBuf, PedelecError> {
+) -> Result<WorkspaceDenoScopeRoots, PedelecError> {
     validate_deno_module_scope_id(scope_id).map_err(|err| {
         deno_module_materialization_error(
             "Workspace Deno Module scope is invalid",
@@ -6364,31 +6437,106 @@ fn ensure_workspace_deno_scope_root(
             err,
         )
     })?;
-    let workspace_root = workspace_path.canonicalize().map_err(|err| {
+    let (canonical_workspace_root, canonical_workspace_run_root) =
+        ensure_workspace_deno_workspace_root(workspace_path).map_err(|err| {
+            deno_module_materialization_error(
+                "cannot establish Workspace Deno Module root",
+                &workspace_deno_workspace_root(workspace_path),
+                err,
+            )
+        })?;
+    let canonical_scope_root = ensure_workspace_deno_child_directory(
+        &canonical_workspace_run_root,
+        scope_id,
+        &[&canonical_workspace_root, &canonical_workspace_run_root],
+    )
+    .map_err(|err| {
         deno_module_materialization_error(
-            "cannot inspect Workspace Deno Module root",
-            workspace_path,
+            "cannot establish Workspace Deno Module scope",
+            &workspace_deno_workspace_scope_root(workspace_path, scope_id),
             err,
         )
     })?;
-    let root = workspace_deno_workspace_scope_root(workspace_path, scope_id);
-    fs::create_dir_all(root.join("modules")).map_err(|err| {
-        deno_module_materialization_error("cannot create Workspace Deno Module scope", &root, err)
+    let canonical_modules_root = ensure_workspace_deno_child_directory(
+        &canonical_scope_root,
+        "modules",
+        &[&canonical_workspace_root, &canonical_scope_root],
+    )
+    .map_err(|err| {
+        deno_module_materialization_error(
+            "cannot establish Workspace Deno Module package root",
+            &workspace_deno_workspace_modules_root(workspace_path, scope_id),
+            err,
+        )
     })?;
-    let canonical = root.canonicalize().map_err(|err| {
-        deno_module_materialization_error("cannot inspect Workspace Deno Module scope", &root, err)
+    let canonical_runs_root = ensure_workspace_deno_child_directory(
+        &canonical_scope_root,
+        "runs",
+        &[&canonical_workspace_root, &canonical_scope_root],
+    )
+    .map_err(|err| {
+        deno_module_materialization_error(
+            "cannot establish Workspace Deno Module run root",
+            &workspace_deno_workspace_scope_root(workspace_path, scope_id).join("runs"),
+            err,
+        )
     })?;
-    if !canonical.starts_with(&workspace_root)
-        || fs::symlink_metadata(&root)
-            .map(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
-            .unwrap_or(true)
-    {
-        return Err(PedelecError::new(
-            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
-            "Workspace Deno Module scope is unsafe",
+    Ok(WorkspaceDenoScopeRoots {
+        canonical_workspace_root,
+        canonical_scope_root,
+        canonical_modules_root,
+        canonical_runs_root,
+    })
+}
+
+fn ensure_workspace_deno_child_directory(
+    canonical_parent: &Path,
+    component: &str,
+    containment_roots: &[&Path],
+) -> io::Result<PathBuf> {
+    let parent_metadata = fs::symlink_metadata(canonical_parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Workspace Deno Module parent is not a regular directory",
         ));
     }
-    Ok(canonical)
+    if canonical_parent.canonicalize()? != canonical_parent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Workspace Deno Module parent is not canonical",
+        ));
+    }
+    let mut components = Path::new(component).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Workspace Deno Module path component is invalid",
+        ));
+    }
+    let child = canonical_parent.join(component);
+    match fs::symlink_metadata(&child) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Workspace Deno Module path is not a regular directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => fs::create_dir(&child)?,
+        Err(err) => return Err(err),
+    }
+    let canonical_child = child.canonicalize()?;
+    if containment_roots
+        .iter()
+        .any(|root| !canonical_child.starts_with(root))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Workspace Deno Module path escapes its private root",
+        ));
+    }
+    Ok(canonical_child)
 }
 
 fn validate_deno_module_scope_id(scope_id: &str) -> io::Result<()> {
@@ -6409,32 +6557,102 @@ fn validate_deno_module_scope_id(scope_id: &str) -> io::Result<()> {
 }
 
 fn remove_workspace_deno_module_package(
-    modules_root: &Path,
+    roots: &WorkspaceDenoScopeRoots,
     module_name: &str,
 ) -> Result<(), PedelecError> {
     validate_deno_module_name(module_name)?;
-    let mut package_path = modules_root.to_path_buf();
+    validate_canonical_workspace_deno_scope_roots(roots).map_err(|err| {
+        deno_module_materialization_error(
+            "Workspace Deno Module package root is unsafe",
+            &roots.canonical_modules_root,
+            err,
+        )
+    })?;
+
+    let mut package_path = roots.canonical_modules_root.clone();
     for part in module_name.split('/') {
         package_path.push(part);
-    }
-    match fs::symlink_metadata(&package_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+        let metadata = match fs::symlink_metadata(&package_path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(deno_module_materialization_error(
+                    "Workspace Deno Module package cleanup failed",
+                    &package_path,
+                    err,
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(PedelecError::new(
                 error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
                 "Workspace Deno Module package path is unsafe",
             ));
         }
-        Ok(_) => fs::remove_dir_all(&package_path).map_err(|_| {
-            PedelecError::new(
-                error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+        let canonical_component = package_path.canonicalize().map_err(|err| {
+            deno_module_materialization_error(
                 "Workspace Deno Module package cleanup failed",
+                &package_path,
+                err,
             )
-        })?,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => {
+        })?;
+        if !canonical_component.starts_with(&roots.canonical_modules_root)
+            || !canonical_component.starts_with(&roots.canonical_scope_root)
+            || !canonical_component.starts_with(&roots.canonical_workspace_root)
+        {
             return Err(PedelecError::new(
                 error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
-                "Workspace Deno Module package cleanup failed",
+                "Workspace Deno Module package cleanup path is unsafe",
+            ));
+        }
+    }
+    let canonical_package = package_path.canonicalize().map_err(|err| {
+        deno_module_materialization_error(
+            "Workspace Deno Module package cleanup failed",
+            &package_path,
+            err,
+        )
+    })?;
+    fs::remove_dir_all(&canonical_package).map_err(|err| {
+        deno_module_materialization_error(
+            "Workspace Deno Module package cleanup failed",
+            &canonical_package,
+            err,
+        )
+    })
+}
+
+fn validate_canonical_workspace_deno_scope_roots(
+    roots: &WorkspaceDenoScopeRoots,
+) -> io::Result<()> {
+    for (path, parent) in [
+        (
+            roots.canonical_scope_root.as_path(),
+            roots.canonical_workspace_root.as_path(),
+        ),
+        (
+            roots.canonical_modules_root.as_path(),
+            roots.canonical_scope_root.as_path(),
+        ),
+        (
+            roots.canonical_runs_root.as_path(),
+            roots.canonical_scope_root.as_path(),
+        ),
+    ] {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Workspace Deno Module root is not a regular directory",
+            ));
+        }
+        if path.canonicalize()? != path
+            || !path.starts_with(parent)
+            || !path.starts_with(&roots.canonical_workspace_root)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Workspace Deno Module root escapes its private root",
             ));
         }
     }
@@ -6447,7 +6665,6 @@ fn materialize_workspace_deno_run_import_map(
     run_id: &str,
     module_names: &[String],
 ) -> Result<PathBuf, PedelecError> {
-    ensure_workspace_deno_scope_root(workspace_path, scope_id)?;
     validate_deno_module_scope_id(run_id).map_err(|err| {
         deno_module_materialization_error(
             "Workspace Deno Module run is invalid",
@@ -6455,31 +6672,32 @@ fn materialize_workspace_deno_run_import_map(
             err,
         )
     })?;
-    let modules_root = workspace_deno_workspace_modules_root(workspace_path, scope_id)
-        .canonicalize()
-        .map_err(|err| {
-            deno_module_materialization_error(
-                "Workspace Deno Module packages are unavailable",
-                &workspace_deno_workspace_modules_root(workspace_path, scope_id),
-                err,
-            )
-        })?;
+    let roots = ensure_workspace_deno_scope_roots(workspace_path, scope_id)?;
+    let modules_root = roots.canonical_modules_root.clone();
     let mut imports = BTreeMap::new();
     for name in module_names {
         validate_deno_module_name(name)?;
         validate_deno_module_package(&modules_root, scope_id, name)?;
         imports.insert(name.clone(), format!("../../modules/{name}/index.mjs"));
     }
-    let import_map_path =
-        workspace_deno_workspace_import_map_path(workspace_path, scope_id, run_id);
-    let run_root = import_map_path.parent().unwrap();
-    fs::create_dir_all(run_root).map_err(|err| {
+    let canonical_run_root = ensure_workspace_deno_child_directory(
+        &roots.canonical_runs_root,
+        run_id,
+        &[
+            &roots.canonical_workspace_root,
+            &roots.canonical_scope_root,
+            &roots.canonical_runs_root,
+        ],
+    )
+    .map_err(|err| {
         deno_module_materialization_error(
             "cannot create Workspace Deno Module run state",
-            run_root,
+            &roots.canonical_runs_root,
             err,
         )
     })?;
+    let import_map_path = canonical_run_root.join("import-map.json");
+    let run_root = canonical_run_root.as_path();
     let bytes = serde_json::to_vec_pretty(&DenoModuleImportMap { imports }).map_err(|err| {
         PedelecError::with_details(
             error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
@@ -6488,7 +6706,28 @@ fn materialize_workspace_deno_run_import_map(
         )
     })?;
     let temporary_path = run_root.join(".pedelec-import-map.tmp");
-    fs::write(&temporary_path, bytes).map_err(|err| {
+    if fs::symlink_metadata(&temporary_path).is_ok()
+        || fs::symlink_metadata(&import_map_path).is_ok()
+    {
+        return Err(PedelecError::new(
+            error_codes::DENO_MODULE_MATERIALIZATION_FAILED,
+            "Workspace Deno Module run state is already occupied",
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+        .map_err(|err| {
+            deno_module_materialization_error(
+                "cannot write Workspace Deno Module import map",
+                &temporary_path,
+                err,
+            )
+        })?;
+    let write_result = file.write_all(&bytes).and_then(|_| file.sync_all());
+    drop(file);
+    write_result.map_err(|err| {
         deno_module_materialization_error(
             "cannot write Workspace Deno Module import map",
             &temporary_path,

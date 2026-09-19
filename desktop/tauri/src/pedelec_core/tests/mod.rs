@@ -7174,6 +7174,436 @@ mod tests {
         .contains("scene-b"));
     }
 
+    fn workspace_deno_test_fixture(
+        root: &std::path::Path,
+        module_name: &str,
+    ) -> (CoreRuntime, PathBuf, String, String, String) {
+        let workspace_path = root.join("workspace");
+        fs::create_dir_all(&workspace_path).unwrap();
+        let mut runtime = CoreRuntime::new();
+        runtime.asset_upload_port = Some(43127);
+        let origin = "https://workspace-deno.example.test".to_string();
+        let workspace_id = runtime
+            .open_workspace(
+                OpenWorkspaceInput {
+                    path: workspace_path.clone(),
+                },
+                &origin,
+                Some("0.4.0"),
+            )
+            .unwrap()
+            .workspace_id;
+        runtime
+            .prepare_workspace_deno_modules(
+                PrepareWorkspaceDenoModulesInput {
+                    workspace_id: workspace_id.clone(),
+                    module_names: vec![module_name.to_string()],
+                },
+                &origin,
+            )
+            .unwrap();
+        let scope_id = runtime
+            .workspace_deno_module_scopes
+            .get(&WorkspaceDenoModuleScopeKey {
+                workspace_id: workspace_id.clone(),
+                sdk_origin: origin.clone(),
+            })
+            .unwrap()
+            .scope_id
+            .clone();
+        (runtime, workspace_path, workspace_id, origin, scope_id)
+    }
+
+    fn stage_workspace_deno_test_upload(
+        runtime: &mut CoreRuntime,
+        workspace_path: &std::path::Path,
+        workspace_id: &str,
+        origin: &str,
+        module_name: &str,
+    ) -> (String, PathBuf) {
+        let bytes = serde_json::to_vec(&json!({
+            "version": 1,
+            "format": "esm",
+            "runtimeSource": "export const ready = true;",
+            "typesSource": "export declare const ready: boolean;",
+        }))
+        .unwrap();
+        let ticket = runtime
+            .create_workspace_deno_module_upload(
+                CreateWorkspaceDenoModuleUploadInput {
+                    workspace_id: workspace_id.to_string(),
+                    module_name: module_name.to_string(),
+                    expected_size_bytes: bytes.len() as u64,
+                },
+                origin,
+            )
+            .unwrap();
+        runtime
+            .deno_module_upload_tickets
+            .get_mut(&ticket.upload_id)
+            .unwrap()
+            .state = DenoModuleUploadState::Uploading;
+        let temporary_path = workspace_tmp_root(workspace_path)
+            .join(format!("{}.deno-module.upload", ticket.upload_id));
+        fs::create_dir_all(temporary_path.parent().unwrap()).unwrap();
+        fs::write(&temporary_path, bytes).unwrap();
+        (ticket.upload_id, temporary_path)
+    }
+
+    #[test]
+    fn workspace_deno_rejects_file_backed_modules_root_on_all_platforms() {
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let modules_root = workspace_deno_workspace_modules_root(&workspace_path, &scope_id);
+        fs::remove_dir_all(&modules_root).unwrap();
+        fs::write(&modules_root, "not a directory").unwrap();
+
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+        let error = runtime
+            .complete_deno_module_upload(&upload_id, &temporary_path)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_MATERIALIZATION_FAILED);
+        assert_eq!(
+            runtime.deno_module_upload_tickets[&upload_id].state,
+            DenoModuleUploadState::Failed
+        );
+        assert_eq!(
+            runtime.workspace_deno_module_scopes[&WorkspaceDenoModuleScopeKey {
+                workspace_id,
+                sdk_origin: origin,
+            }]
+                .modules[module_name],
+            DenoModuleSetupState::Failed
+        );
+        fs::remove_file(temporary_path).unwrap();
+    }
+
+    #[test]
+    fn workspace_deno_root_reset_does_not_remove_thread_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, _) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let thread_snapshot = workspace_deno_thread_root(&workspace_path, "thread-snapshot")
+            .join("modules/sprite-tools/index.mjs");
+        fs::create_dir_all(thread_snapshot.parent().unwrap()).unwrap();
+        fs::write(&thread_snapshot, "export const preserved = true;").unwrap();
+
+        runtime
+            .workspace_deno_roots_initialized
+            .remove(&workspace_id);
+        let prepared = runtime
+            .prepare_workspace_deno_modules(
+                PrepareWorkspaceDenoModulesInput {
+                    workspace_id,
+                    module_names: vec![module_name.into()],
+                },
+                &origin,
+            )
+            .unwrap();
+        assert_eq!(prepared.missing_module_names, vec![module_name]);
+        assert_eq!(
+            fs::read_to_string(thread_snapshot).unwrap(),
+            "export const preserved = true;"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_deno_rejects_symlinked_modules_root_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let modules_root = workspace_deno_workspace_modules_root(&workspace_path, &scope_id);
+        let outside_modules = temp.path().join("outside-modules");
+        fs::create_dir_all(&outside_modules).unwrap();
+        fs::remove_dir_all(&modules_root).unwrap();
+        symlink(&outside_modules, &modules_root).unwrap();
+
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+        let error = runtime
+            .complete_deno_module_upload(&upload_id, &temporary_path)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_MATERIALIZATION_FAILED);
+        assert!(!outside_modules.join(module_name).exists());
+        fs::remove_file(temporary_path).unwrap();
+    }
+
+    #[test]
+    fn workspace_deno_rejects_file_backed_runs_root_without_writing_outside() {
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+        runtime
+            .complete_deno_module_upload(&upload_id, &temporary_path)
+            .unwrap();
+        fs::remove_file(temporary_path).unwrap();
+
+        let runs_root =
+            workspace_deno_workspace_scope_root(&workspace_path, &scope_id).join("runs");
+        fs::remove_dir_all(&runs_root).unwrap();
+        fs::write(&runs_root, "not a directory").unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        let error = runtime
+            .begin_workspace_run_for_origin(
+                WorkspaceRunInput {
+                    workspace_id: workspace_id.clone(),
+                    script: "import 'sprite-tools';".into(),
+                    timeout_ms: None,
+                    deno_modules: vec![module_name.into()],
+                },
+                &origin,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_MATERIALIZATION_FAILED);
+        assert_eq!(runtime.active_workspace_run_count(&workspace_id), 0);
+        assert!(!outside.join("import-map.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_deno_rejects_symlinked_runs_root_without_reserving_a_run() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+        runtime
+            .complete_deno_module_upload(&upload_id, &temporary_path)
+            .unwrap();
+        fs::remove_file(temporary_path).unwrap();
+
+        let runs_root =
+            workspace_deno_workspace_scope_root(&workspace_path, &scope_id).join("runs");
+        let outside_runs = temp.path().join("outside-runs");
+        fs::create_dir_all(&outside_runs).unwrap();
+        fs::remove_dir_all(&runs_root).unwrap();
+        symlink(&outside_runs, &runs_root).unwrap();
+
+        let error = runtime
+            .begin_workspace_run_for_origin(
+                WorkspaceRunInput {
+                    workspace_id: workspace_id.clone(),
+                    script: "import 'sprite-tools';".into(),
+                    timeout_ms: None,
+                    deno_modules: vec![module_name.into()],
+                },
+                &origin,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_MATERIALIZATION_FAILED);
+        assert_eq!(runtime.active_workspace_run_count(&workspace_id), 0);
+        assert!(fs::read_dir(&outside_runs).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_deno_rejects_symlinked_scoped_package_parent_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "@example/sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let modules_root = workspace_deno_workspace_modules_root(&workspace_path, &scope_id);
+        let outside_scope = temp.path().join("outside-scope");
+        fs::create_dir_all(&outside_scope).unwrap();
+        fs::remove_dir_all(modules_root.join("@example")).unwrap();
+        symlink(&outside_scope, modules_root.join("@example")).unwrap();
+
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+        let error = runtime
+            .complete_deno_module_upload(&upload_id, &temporary_path)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_MODULE_MATERIALIZATION_FAILED);
+        assert_eq!(
+            runtime.deno_module_upload_tickets[&upload_id].state,
+            DenoModuleUploadState::Failed
+        );
+        assert!(!outside_scope.join("sprite-tools").exists());
+        fs::remove_file(temporary_path).unwrap();
+    }
+
+    #[test]
+    fn workspace_deno_upload_commit_rechecks_active_run_and_preserves_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+        let run = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.clone(),
+                script: "console.log('busy');".into(),
+                timeout_ms: None,
+                deno_modules: Vec::new(),
+            })
+            .unwrap();
+
+        let error = runtime
+            .complete_deno_module_upload(&upload_id, &temporary_path)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::WORKSPACE_BUSY);
+        assert_eq!(runtime.active_workspace_run_count(&workspace_id), 1);
+        assert_eq!(
+            runtime.deno_module_upload_tickets[&upload_id].state,
+            DenoModuleUploadState::Failed
+        );
+        assert!(
+            !workspace_deno_workspace_modules_root(&workspace_path, &scope_id)
+                .join(module_name)
+                .exists()
+        );
+        runtime.finish_workspace_run(&workspace_id, &run.run_id);
+        fs::remove_file(temporary_path).unwrap();
+
+        assert_eq!(
+            runtime
+                .prepare_workspace_deno_modules(
+                    PrepareWorkspaceDenoModulesInput {
+                        workspace_id: workspace_id.clone(),
+                        module_names: vec![module_name.into()],
+                    },
+                    &origin,
+                )
+                .unwrap()
+                .missing_module_names,
+            vec![module_name]
+        );
+    }
+
+    #[test]
+    fn workspace_deno_upload_commit_rechecks_provider_busy_and_allows_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+        let now = Utc::now();
+        runtime.thread_manager.insert_thread(
+            ThreadState {
+                thread_id: "workspace-provider-busy".into(),
+                workspace_id: workspace_id.clone(),
+                provider: ProviderCode::Codex,
+                effort_level: Some(EffortLevel::Default),
+                effort_args: Vec::new(),
+                skills: Vec::new(),
+                status: ThreadStatus::Running,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: None,
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: Some("turn-busy".into()),
+            },
+        );
+
+        let error = runtime
+            .complete_deno_module_upload(&upload_id, &temporary_path)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::WORKSPACE_BUSY);
+        assert_eq!(runtime.active_workspace_run_count(&workspace_id), 0);
+        assert_eq!(
+            runtime.deno_module_upload_tickets[&upload_id].state,
+            DenoModuleUploadState::Failed
+        );
+        assert!(
+            !workspace_deno_workspace_modules_root(&workspace_path, &scope_id)
+                .join(module_name)
+                .exists()
+        );
+        let thread = runtime
+            .thread_manager
+            .thread_mut("workspace-provider-busy")
+            .unwrap();
+        thread.status = ThreadStatus::Idle;
+        runtime
+            .thread_manager
+            .provider_state_mut("workspace-provider-busy")
+            .unwrap()
+            .active_provider_turn_id = None;
+        fs::remove_file(temporary_path).unwrap();
+
+        assert_eq!(
+            runtime
+                .prepare_workspace_deno_modules(
+                    PrepareWorkspaceDenoModulesInput {
+                        workspace_id: workspace_id.clone(),
+                        module_names: vec![module_name.into()],
+                    },
+                    &origin,
+                )
+                .unwrap()
+                .missing_module_names,
+            vec![module_name]
+        );
+        let (retry_upload_id, retry_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+        runtime
+            .complete_deno_module_upload(&retry_upload_id, &retry_path)
+            .unwrap();
+        fs::remove_file(retry_path).unwrap();
+    }
+
     fn collect_available_core_events(event_rx: &mpsc::Receiver<ThreadEvent>) -> Vec<ThreadEvent> {
         let mut events = Vec::new();
         while let Ok(event) = event_rx.recv_timeout(Duration::from_millis(50)) {
