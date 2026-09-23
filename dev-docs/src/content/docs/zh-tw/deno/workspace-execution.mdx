@@ -1,0 +1,56 @@
+---
+title: Workspace Deno 執行
+description: 由已核准的 Web App 直接執行確定性的 Workspace 程式碼。
+sidebar:
+  order: 4
+---
+
+`session.sendText(...)` 請 Agent 推理並行動。`workspace.run(...)` 讓 App 執行它已知道要執行的程式碼。對確定性的操作，App 不必只為執行而花費一個 Agent 回合。
+
+```ts
+const result = await workspace.run(`
+  const text = await Deno.readTextFile("data.json");
+  const data = JSON.parse(text);
+  console.log(JSON.stringify({ count: data.items.length }));
+`);
+
+if (result.stdoutTruncated || result.stderrTruncated) {
+  throw new Error("Workspace script output was truncated");
+}
+
+const value = JSON.parse(result.stdout);
+```
+
+結果包含 stdout、stderr、exit code 和截斷旗標。精確的回傳型別、非零 exit、失敗與 timeout 行為請見 [PedelecWorkspace reference](../reference/pedelec-workspace/)。
+
+直接執行適合在使用者按下 Export 後產生檔案、開啟專案時讀取並正規化 metadata、將資料送給 Agent 前先處理、儲存前驗證、已知的本機遷移，或建立衍生 manifest。
+
+## 在單次執行重用 Deno Module
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const projectTools = defineDenoModule({
+  name: "project-tools",
+  entry: "./deno/project-tools.ts",
+});
+
+const result = await workspace.run(
+  `
+    import { buildManifest } from "project-tools";
+    await buildManifest();
+  `,
+  { denoModules: [projectTools] },
+);
+```
+
+僅供 Workspace 使用的宣告不需要 Agent-facing `description` 或 `usage`。每次執行都要明確提供 modules，且只會掛載該次要求的 modules。runtime cache 有效時，Pedelec 可私下重用已準備的 package。這不是公開的 Workspace module registry。
+
+```text
+Session / Thread → skills.denoModules → 僅供 Agent-side pedelec-deno
+Workspace run   → workspace.run({ denoModules }) → 僅供 App 執行
+```
+
+`workspace.run()` 不會繼承 Session Deno Modules。建立 Session 也不會繼承之前 Workspace run 用過的 modules；Workspace-run modules 不會出現在 Agent Host Context。
+
+同一 Workspace 的 Workspace Deno 執行與進行中的 Agent/provider 工作有 admission rules，可能回傳 `WORKSPACE_BUSY`。詳見 [PedelecWorkspace](../reference/pedelec-workspace/) 與 [Error Codes](../reference/error-codes/)。

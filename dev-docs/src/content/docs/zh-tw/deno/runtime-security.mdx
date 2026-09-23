@@ -1,0 +1,18 @@
+---
+title: Deno Runtime 與安全邊界
+description: 了解共用的 Workspace 執行限制。
+sidebar:
+  order: 5
+---
+
+Pedelec Desktop 擁有並內附固定版本的 Deno runtime。App 與 Agent 都不需要主機另行安裝 Deno。Agent 透過 `pedelec-deno` 執行；App 透過 SDK 的 `workspace.run()` 執行。Raw Deno 不是 Agent-facing 介面。
+
+## Workspace 邊界
+
+Script 的讀寫權限侷限於 Workspace，無法任意讀寫 Workspace 外的主機路徑。Pedelec 的私有 runtime 檔案是實作細節；請使用公開 Workspace API 與邏輯 module 名稱，不要依賴其佈局。
+
+Runtime 也禁止 network、host environment、subprocess、FFI 與 `sys` 權限。執行時無法抓取 npm、JSR 或遠端內容。概念上，執行採用 `--no-remote`、`--cached-only`、`--allow-read=<workspace>`、`--allow-write=<workspace>` 等限制；這不是自行啟動 raw Deno 的指示。
+
+Script arguments 無法擴大權限。例如在 script argument separator 後傳入 `--allow-net`，只會讓該字串出現在 `Deno.args`，不會取得網路權限。
+
+`workspace.run()` 是[已核准 Web App](../getting-started/approval-and-connection/)對已開啟 Workspace 直接執行確定性程式碼的能力。它仍在 Pedelec 的受限 Deno sandbox 內，不提供無限制的主機執行。精確的安全與 admission 行為請見 [PedelecWorkspace reference](../reference/pedelec-workspace/)。

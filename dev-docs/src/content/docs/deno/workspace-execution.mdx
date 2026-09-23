@@ -1,0 +1,56 @@
+---
+title: Workspace Deno Execution
+description: Run deterministic Workspace code directly from an approved Web application.
+sidebar:
+  order: 4
+---
+
+`session.sendText(...)` asks an Agent to reason and act. `workspace.run(...)` lets the application execute code it already knows should run. For a deterministic operation, the application need not spend an Agent round merely to execute it.
+
+```ts
+const result = await workspace.run(`
+  const text = await Deno.readTextFile("data.json");
+  const data = JSON.parse(text);
+  console.log(JSON.stringify({ count: data.items.length }));
+`);
+
+if (result.stdoutTruncated || result.stderrTruncated) {
+  throw new Error("Workspace script output was truncated");
+}
+
+const value = JSON.parse(result.stdout);
+```
+
+The result exposes stdout, stderr, exit code, and truncation flags. See the [PedelecWorkspace reference](../reference/pedelec-workspace/) for the precise result type, non-zero exits, failures, and timeouts.
+
+Direct runs fit an Export button that generates files, loading and normalizing project metadata, preprocessing before sending context to an Agent, validation before save, a known local migration, or building a derived manifest.
+
+## Reuse a Deno Module in one run
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const projectTools = defineDenoModule({
+  name: "project-tools",
+  entry: "./deno/project-tools.ts",
+});
+
+const result = await workspace.run(
+  `
+    import { buildManifest } from "project-tools";
+    await buildManifest();
+  `,
+  { denoModules: [projectTools] },
+);
+```
+
+Workspace-only declarations need no Agent-facing `description` or `usage`. Modules are supplied explicitly per run; only requested modules are mounted. Pedelec may privately reuse prepared packages while its runtime cache remains valid. There is no public Workspace module registry.
+
+```text
+Session / Thread → skills.denoModules → Agent-side pedelec-deno only
+Workspace run   → workspace.run({ denoModules }) → application execution only
+```
+
+`workspace.run()` never inherits Session Deno Modules. Session creation never inherits modules from previous Workspace runs, and Workspace-run modules do not appear in Agent Host Context.
+
+Workspace Deno execution and active Agent/provider work in the same Workspace have admission rules and may reject with `WORKSPACE_BUSY`. See [PedelecWorkspace](../reference/pedelec-workspace/) and [Error Codes](../reference/error-codes/).

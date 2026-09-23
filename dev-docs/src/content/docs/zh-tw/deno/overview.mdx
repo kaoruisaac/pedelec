@@ -1,0 +1,33 @@
+---
+title: Pedelec 的 Deno
+description: 選擇在 Workspace 執行 JavaScript 與 TypeScript 的方式。
+sidebar:
+  order: 1
+---
+
+Pedelec 在受限制的 Workspace runtime 執行 JavaScript 與 TypeScript。Agent 或已核准的 Web App 都能主導執行。Deno Module 是可選的、由開發者維護的可重用實作，兩條路徑都能使用。
+
+| 誰主導？ | 實作來源 | 機制 | 常見用途 |
+| --- | --- | --- | --- |
+| Agent | 一般 script | `pedelec-deno` | Agent 臨時撰寫小型轉換 |
+| Agent | Deno Module | `skills.denoModules` 與 `pedelec-deno` | Agent 呼叫穩定的開發者 API |
+| Web App | 一般 script | `workspace.run()` | App 直接執行已知的 Workspace 邏輯 |
+| Web App | Deno Module | `workspace.run(..., { denoModules })` | App 直接呼叫可重用的 Workspace 邏輯 |
+
+## 選擇路徑
+
+工作需要 Agent 推理或動態規劃嗎？讓 Agent 選擇並執行程式碼。如果 App 已知道要做的確定性操作，就直接呼叫 `workspace.run()`。接著判斷短小、一次性的 script 是否足夠；重複或領域專用的實作適合包成 Deno Module。
+
+Agent 可執行一般 script，無須先建立 module。Session module 與 Workspace run 使用的 module 分屬不同範圍。
+
+## Deno Module 還是 App Tool？
+
+針對 Workspace 資料執行 JavaScript/TypeScript 邏輯時，使用 **Deno Module**。若 Agent 需要 UI state、Workspace 外的 App state、使用者互動、browser callback 或 App 專屬 RPC，使用 **App Tool**。Deno Module 不能取代 App Tool。
+
+## 繼續閱讀
+
+- [Agent Deno 執行](./agent-execution/)：一般 Agent script。
+- [Deno Modules](./modules/)：可重用的實作。
+- [Workspace Deno 執行](./workspace-execution/)：由 App 主導的執行。
+- [Deno Runtime 與安全邊界](./runtime-security/)：共用的限制。
+- 精確契約請參閱 [Tools API](../reference/tools/)、[PedelecWorkspace](../reference/pedelec-workspace/) 與 [Error Codes](../reference/error-codes/)。

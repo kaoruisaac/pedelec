@@ -1,0 +1,40 @@
+---
+title: Agent Deno 執行
+description: 讓 Agent 在 Workspace 執行一般 JavaScript 或 TypeScript script。
+sidebar:
+  order: 2
+---
+
+**Agent 不需要 Deno Module，也能執行 JavaScript 或 TypeScript。** Guidance 和使用者任務告訴 Agent 要做什麼；Agent 撰寫或選擇程式碼，再透過 `pedelec-deno` 在 Workspace 執行。
+
+```text
+Guidance / 使用者任務
+        ↓
+      Agent
+        ↓
+撰寫或選擇 JS/TS
+        ↓
+  pedelec-deno
+        ↓
+    Workspace
+```
+
+Pedelec Desktop 內附固定版本的 Deno runtime。使用者不必安裝 Node.js、Bun 或 Deno。`pedelec-deno` 是 Agent 執行 JS/TS 的標準介面。若無法使用，Agent 應回報失敗，不應默默改用 Node.js、Bun、raw Deno 或其他 runtime。執行仍受 [Workspace 安全邊界](./runtime-security/)限制。
+
+## 將 script 保留在 Workspace
+
+```bash
+pedelec-deno --thread-id <thread-id> run scripts/task.ts
+```
+
+多步驟、值得檢查或保留的程式碼，以及既有 Workspace script，適合用檔案執行。例如掃描專案檔案建立 manifest、從範本產生檔案，或執行一次性的檔案遷移。
+
+## 從 stdin 執行短程式碼
+
+```bash
+pedelec-deno --thread-id <thread-id> run -
+```
+
+將 script 傳入 stdin，適合短小的 glue code 或一次性轉換，不需建立暫存原始檔。例如正規化多個 JSON 檔、合併結構化檔案中的選定欄位，或在 Agent 繼續之前驗證資料。實際 shell 範本可能隨 Agent host 而異。
+
+若邏輯會重複使用或包含領域規則，可將實作移入 [Deno Module](./modules/)，讓 Agent 只撰寫編排程式碼。

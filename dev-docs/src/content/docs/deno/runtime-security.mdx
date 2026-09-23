@@ -1,0 +1,18 @@
+---
+title: Deno Runtime & Security
+description: Understand the shared Workspace execution boundary.
+sidebar:
+  order: 5
+---
+
+Pedelec Desktop owns and ships the pinned Deno runtime. Neither the application nor the Agent needs a host-installed Deno. Agent execution uses `pedelec-deno`; application execution uses the SDK's `workspace.run()`. Raw Deno is not the Agent-facing interface.
+
+## Workspace boundary
+
+Scripts have Workspace-scoped read and write access. They cannot read or write arbitrary host paths outside the Workspace. Pedelec's private runtime files are implementation details; use public Workspace APIs and logical module names instead of depending on their layout.
+
+The runtime also denies network, host environment, subprocess, FFI, and `sys` access. Runtime npm, JSR, and remote fetching are unavailable. Conceptually, execution includes restrictions such as `--no-remote`, `--cached-only`, `--allow-read=<workspace>`, and `--allow-write=<workspace>`; these are not instructions to launch raw Deno yourself.
+
+Script arguments cannot increase permissions. For example, passing `--allow-net` after the script argument separator only puts that string in `Deno.args`; it does not grant network access.
+
+`workspace.run()` is a direct capability of an [approved Web application](../getting-started/approval-and-connection/) to run deterministic code against the opened Workspace. It remains inside Pedelec's restricted Deno sandbox and does not provide unrestricted host execution. See the [PedelecWorkspace reference](../reference/pedelec-workspace/) for exact security and admission behavior.

@@ -1,0 +1,40 @@
+---
+title: Agent Deno Execution
+description: Let an Agent run a plain Workspace JavaScript or TypeScript script.
+sidebar:
+  order: 2
+---
+
+**The Agent can execute JavaScript or TypeScript without a Deno Module.** Guidance and the user task tell the Agent what to do; the Agent writes or selects code and runs it through `pedelec-deno` inside the Workspace.
+
+```text
+Guidance / user task
+        ↓
+      Agent
+        ↓
+writes or selects JS/TS
+        ↓
+  pedelec-deno
+        ↓
+    Workspace
+```
+
+Pedelec Desktop ships a pinned Deno runtime. Users need not install Node.js, Bun, or Deno. `pedelec-deno` is the canonical Agent-facing JS/TS runtime. If it is unavailable, the Agent should report the failure instead of silently falling back to Node.js, Bun, raw Deno, or another runtime. Execution stays within the [Workspace security boundary](./runtime-security/).
+
+## Keep a script in the Workspace
+
+```bash
+pedelec-deno --thread-id <thread-id> run scripts/task.ts
+```
+
+A file-backed script fits multi-step work, code worth inspecting or retaining, and existing Workspace scripts. For example, an Agent might scan project files and generate a manifest, generate files from a template, or perform a one-time file migration.
+
+## Run short code from stdin
+
+```bash
+pedelec-deno --thread-id <thread-id> run -
+```
+
+Provide the script on stdin. This suits short glue or one-off transformations without a disposable source file. Examples include normalizing several JSON files, combining selected fields from structured files, or validating data before the Agent continues. The exact shell template can vary by Agent host.
+
+When repeated or domain-specific logic deserves a stable API, move its implementation into a [Deno Module](./modules/) and let the Agent author only orchestration code.

@@ -1,0 +1,48 @@
+---
+title: Deno Modules
+description: Supply reusable developer-owned implementation to Agent or Workspace execution.
+sidebar:
+  order: 3
+---
+
+A plain Agent script leaves implementation to the Agent. A Deno Module puts reusable implementation under developer control: the Agent imports a typed API and writes only the orchestration or glue needed for the task. Applications can use the same authoring model for direct Workspace runs.
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const projectTools = defineDenoModule({
+  name: "project-tools",
+  description: "Utilities for project data processing.",
+  entry: "./agent/project-tools.ts",
+  usage: `import { buildManifest } from "project-tools";`,
+  preferStdinExecution: true,
+});
+
+const session = await pedelec.createSession({
+  skills: {
+    guidance: "Use project-tools for project data tasks.",
+    tools: [],
+    denoModules: [projectTools],
+  },
+});
+```
+
+`name` is the logical import name. `entry` identifies source or a package entry resolved at build time by Vite. `description` tells the Agent what the capability does; `usage` gives a short import or API hint. See the [Tools API](../reference/tools/) for required fields and exact declaration rules.
+
+## Preparation and imports
+
+```text
+entry → pedelecVitePlugin() → bundled runtime implementation
+                           + public index.d.ts → Pedelec
+                                             → import by logical name
+```
+
+Configure `pedelecVitePlugin()` in the Web application's Vite config. It prepares local files or installed package-backed implementations and bundles runtime dependencies before execution. `entry` is build-time information; Desktop/Core does not resolve the original project path. The generated `index.d.ts` is the public API the Agent can inspect when `usage` is insufficient. The implementation bundle is not the normal API reference.
+
+Supported Node built-ins work through Deno's Node compatibility layer, including canonical `node:` imports. This grants no extra permissions. Runtime npm, JSR, or remote package fetching is unavailable. The [Tools API](../reference/tools/) describes exact preparation and type-generation behavior.
+
+## Stdin preference and lifecycle
+
+`preferStdinExecution` is an **Agent authoring hint, not a runtime restriction**. It helps the Agent choose stdin for short glue code instead of creating temporary `.ts` files. File-backed scripts remain valid. The hint does not change artifacts, bundling, or Deno permissions, and has no effect on application-controlled `workspace.run()`.
+
+Session Deno Modules are snapshotted for the Thread. Ending and resuming the same known Thread retains that snapshot; create a new Session when the Agent should consume a rebuilt implementation. For direct application use and its separate module scope, see [Workspace Deno Execution](./workspace-execution/).

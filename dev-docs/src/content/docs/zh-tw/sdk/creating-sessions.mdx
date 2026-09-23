@@ -80,59 +80,37 @@ Profile mode 可搭配 `skills`；application-owned workspace 透過 `openWorksp
 
 ## Deno Modules
 
-先在 Vite 設定 plugin，再在 `skills.denoModules` 宣告 prepared modules：
+先在 Vite 設定 plugin，再透過 `skills.denoModules` 將 module 掛到 Agent Session：
 
 ```ts
 // vite.config.ts
 import { defineConfig } from "vite";
 import { pedelecVitePlugin } from "@kaoruisaac/pedelec/vite";
 
-export default defineConfig({
-  plugins: [pedelecVitePlugin()],
-});
+export default defineConfig({ plugins: [pedelecVitePlugin()] });
 ```
 
 ```ts
 import { defineDenoModule } from "@kaoruisaac/pedelec";
 
-const spriteTools = defineDenoModule({
-  name: "sprite-tools",
-  description: "Sprite authoring and preview utilities.",
-  entry: "./agent/sprite-tools.ts",
-  usage: `import { previewActorSource } from "sprite-tools";`,
+const projectTools = defineDenoModule({
+  name: "project-tools",
+  description: "Utilities for project data processing.",
+  entry: "./agent/project-tools.ts",
+  usage: `import { buildManifest } from "project-tools";`,
   preferStdinExecution: true,
 });
 
 const session = await pedelec.createSession({
   skills: {
-    guidance: "Use sprite-tools for sprite authoring tasks.",
+    guidance: "Use project-tools for project data tasks.",
     tools: [],
-    denoModules: [spriteTools],
+    denoModules: [projectTools],
   },
 });
 ```
 
-`entry` 只在 Vite build/dev 階段解析，不會送到 Desktop。Plugin 會 bundle 一般第三方 dependencies 並產生 public declarations。Node built-ins 由 Deno 的 Node compatibility layer 在 runtime 提供；`node:fs/promises` 與 `fs/promises` 等舊式 bare specifier 都可使用，prepared runtime import 會統一為 `node:` 形式。這不會開放 runtime npm、network resolution 或更廣泛的 filesystem 權限。
-
-產生的 `index.d.ts` 只描述 Agent-facing public API，implementation-only dependency types 會被省略。Module 自有的 exported types 受支援；若 package 在 public API 直接暴露 dependency-owned 或 Node-specific external types，V1 不保證能產生 standalone declaration。Agent 會在 `pedelec-deno` script 內 import `sprite-tools`；需要精確 API 時，Host Context 會指向 `index.d.ts`。Deno Modules 和 `skills.tools` 的 browser/App Tools 不同，後者走 `pedelec-cli` RPC commands。只要 Core 仍知道 thread，session end/resume 會保留同一 immutable snapshot；要使用重建 artifact 請建立新 session。
-
-`preferStdinExecution` 是 optional。當 module 主要用於短 script 時可設為 `true`；Host Context 會在該 module metadata 提供 stdin `runCommandTemplate`，例如 `@'\n<typescript-source>\n'@ | pedelec-deno --thread-id <thread-id> run -`，讓 Agent 只需替換 TypeScript source placeholder，就能直接執行完整的 stdin command。這是 execution preference，不是限制，file-backed script 仍然有效。省略或設為 `false` 會維持預設行為，也不會改變 module bundling 或 artifact contents。
-
-同一個 `defineDenoModule()` declaration 若只給 `workspace.run()` 使用，可以省略 Agent metadata：
-
-```ts
-const sceneTools = defineDenoModule({
-  name: "scene-tools",
-  entry: "./deno/scene-tools.ts",
-});
-
-const result = await session.workspace.run(
-  `import { buildScene } from "scene-tools";\nawait buildScene();`,
-  { denoModules: [sceneTools] },
-);
-```
-
-Workspace-run setup 是明確且 per-run 的。Vite-prepared artifact 會按 Workspace 與 authorized SDK origin 私下 cache，而每次 run 的 import map 只包含該次要求的 module names。Workspace-run module 不是 Session skill、不會顯示給 Agent，也不會被後續 Session 繼承。
+Session Deno Modules 只供該 Thread 的 Agent 使用。[Deno 總覽](../deno/overview/)說明如何選擇執行路徑；[Deno Modules](../deno/modules/)說明準備與使用方式；[Tools API](../reference/tools/)提供精確契約。
 
 ## Metadata 與 resume
 

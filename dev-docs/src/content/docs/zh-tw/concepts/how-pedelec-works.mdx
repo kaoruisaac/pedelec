@@ -71,15 +71,7 @@ Provider 是 session 使用的 agent backend，目前代碼包含 `codex`、`ant
 
 Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 command、加入 Desktop App 能看到的 `PATH`，並完成登入。Ollama session 會使用 Pedelec 內附 agent executable、設定的 Ollama-compatible endpoint（default `http://127.0.0.1:11434`）、非空 API key（本機用 `ollama`）及已安裝的 model。
 
-當 provider 需要執行 guidance、template、agent 產生的 script，或 workspace 既有檔案中的 JavaScript/TypeScript 時，bootstrap 會指定 Pedelec 本機的 `pedelec-deno` helper 為 canonical runtime。是否需要執行由 agent 決定；Web App 與 SDK 只提供 guidance、templates 與 workspace files。Helper 會帶著 session thread id 與 workspace-relative script path 執行，這不是 browser-side code execution，也不是一般 remote-code-execution API。若 helper 不可用，agent 會回報錯誤，不會靜默 fallback 到 Node.js、Bun、raw Deno 或其他 runtime。
-
-Pedelec Desktop 內附固定版本且受權限限制的 Deno runtime，因此使用者不需要預先安裝 Node.js、Bun 或 Deno 才能執行 workspace 內的 script。raw `deno` executable 只作為 Desktop 內部 bundled resource；agent 對外唯一使用的 command 是 `pedelec-deno`：
-
-```text
-pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path> -- <script-args...>
-```
-
-這個隨 Desktop 發佈的 runtime 是 Desktop capability，不是 SDK 或 browser API，也不是任意 remote code execution API。它允許 workspace 內的 JS/TS 執行，但拒絕 network、environment、subprocess、FFI 與 system 權限。
+Pedelec 的 Deno 有兩條路徑：Agent 透過 `pedelec-deno` 執行 JS/TS，Web App 透過 `workspace.run()` 直接執行已知的 Workspace 程式碼。`skills.denoModules` 提供只屬於該 Thread 的 Agent module snapshot；Workspace-run modules 則只供明確指定它們的單次執行使用。兩者不會相互繼承。Desktop 內附受限制的 Deno runtime；完整選擇方式與安全邊界請見 [Deno 總覽](../deno/overview/)。
 
 ## `createSession()` 的資料流
 
@@ -97,7 +89,7 @@ pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script-path
 
 ### Workspace ownership
 
-使用 `pedelec.createSession()` 建立的 session 會取得 temporary managed Workspace；physical location 與 cleanup 由 Desktop 負責，SDK 的 public `workspace.path` 會是 `null`。Application 管理的 Workspace 透過 `pedelec.openWorkspace(path)` 選取，再使用 `workspace.createSession()`。Pedelec 會初始化 `.pedelec-runtime` 來存放 Workspace-owned runtime data：assets 與 logs 位於 Workspace 層級，generated Session skills 與 Deno Module state 按 Thread 隔離，Workspace-run Deno Module packages 則按 Workspace 與 authorized SDK origin 私下 cache。Application 不應依賴 private `.pedelec-runtime` 的子目錄 layout。Pedelec 會保留既有 project content 與 private data，且永遠不會刪除 application-managed Workspace。多個 active Session 可以共用；filesystem write coordination 由 application 負責。Explicit path 不得與 managed Workspace root overlap。Workspace-run modules 只會在明確的 `workspace.run()` call mount，不會被 Session 或 Agent Host Context 繼承。
+使用 `pedelec.createSession()` 建立的 Session 取得 Desktop 管理的 Workspace，公開的 `workspace.path` 為 `null`。App 可透過 `pedelec.openWorkspace(path)` 開啟自有 Workspace，再呼叫 `workspace.createSession()`。多個 Session 可以共用 Workspace；App 負責協調檔案寫入。Pedelec 不會刪除 App 管理的 Workspace。公開的 Workspace 行為請見 [PedelecWorkspace](../reference/pedelec-workspace/)。
 
 ## `sendText()` 的資料流
 

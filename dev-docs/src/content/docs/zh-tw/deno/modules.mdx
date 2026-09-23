@@ -1,0 +1,48 @@
+---
+title: Deno Modules
+description: 提供 Agent 或 Workspace 執行可重用、由開發者維護的實作。
+sidebar:
+  order: 3
+---
+
+一般 Agent script 由 Agent 撰寫實作。Deno Module 則讓開發者維護可重用的實作；Agent 匯入有型別的 API，只撰寫任務所需的編排或 glue code。App 也能以相同宣告方式進行直接的 Workspace run。
+
+```ts
+import { defineDenoModule } from "@kaoruisaac/pedelec";
+
+const projectTools = defineDenoModule({
+  name: "project-tools",
+  description: "Utilities for project data processing.",
+  entry: "./agent/project-tools.ts",
+  usage: `import { buildManifest } from "project-tools";`,
+  preferStdinExecution: true,
+});
+
+const session = await pedelec.createSession({
+  skills: {
+    guidance: "Use project-tools for project data tasks.",
+    tools: [],
+    denoModules: [projectTools],
+  },
+});
+```
+
+`name` 是邏輯 import 名稱。`entry` 指向 Vite 在 build 時解析的原始檔或 package entry。`description` 向 Agent 說明能力，`usage` 提供簡短的 import 或 API 提示。必要欄位與精確宣告規則請見 [Tools API](../reference/tools/)。
+
+## 準備與匯入
+
+```text
+entry → pedelecVitePlugin() → bundled runtime implementation
+                           + public index.d.ts → Pedelec
+                                             → 依邏輯名稱 import
+```
+
+在 Web App 的 Vite config 設定 `pedelecVitePlugin()`。它會在執行前準備本機檔案或已安裝 package 的實作，並 bundle runtime dependencies。`entry` 是 build-time 資訊；Desktop/Core 不會解析原專案路徑。當 `usage` 不夠詳細時，Agent 可查看產生的 `index.d.ts` 公開 API。實作 bundle 不是一般 API reference。
+
+支援的 Node built-ins 可透過 Deno 的 Node compatibility layer 使用，包括標準 `node:` import。這不會擴大執行權限。執行時無法抓取 npm、JSR 或遠端 package。精確的準備與型別產生行為請見 [Tools API](../reference/tools/)。
+
+## Stdin 偏好與生命週期
+
+`preferStdinExecution` 是 **Agent 撰寫方式的提示，不是 runtime 限制**。它引導 Agent 對短小 glue code 使用 stdin，避免建立暫存 `.ts` 檔。仍可使用檔案執行。此提示不會改變 artifact、bundling 或 Deno 權限，也不影響由 App 主導的 `workspace.run()`。
+
+Session Deno Modules 會為 Thread 建立 snapshot。結束後恢復同一個已知 Thread，仍使用原 snapshot；若要讓 Agent 使用重建後的實作，請建立新 Session。直接由 App 使用時的獨立 module 範圍請見 [Workspace Deno 執行](./workspace-execution/)。

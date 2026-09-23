@@ -1,0 +1,33 @@
+---
+title: Deno in Pedelec
+description: Choose how to run JavaScript and TypeScript against a Workspace.
+sidebar:
+  order: 1
+---
+
+Pedelec runs JavaScript and TypeScript in a restricted Workspace runtime. Either the Agent or an approved Web application can orchestrate execution. A Deno Module is optional reusable, developer-owned implementation for either path.
+
+| Who orchestrates? | Implementation | Mechanism | Typical use |
+| --- | --- | --- | --- |
+| Agent | Plain script | `pedelec-deno` | A small transformation the Agent writes when needed |
+| Agent | Deno Module | `skills.denoModules` and `pedelec-deno` | The Agent calls a stable, developer-owned API |
+| Application | Plain script | `workspace.run()` | The application directly runs known Workspace logic |
+| Application | Deno Module | `workspace.run(..., { denoModules })` | The application directly invokes reusable Workspace logic |
+
+## Choose a path
+
+Does the task need Agent reasoning or dynamic planning? Let the Agent choose and run code. If the application already knows the deterministic operation, call `workspace.run()` directly. Then ask whether a short, one-off script is enough. If the implementation is repeated or domain-specific, package it as a Deno Module.
+
+An Agent can run a plain script; creating a module is not a prerequisite. Session modules and modules passed to a Workspace run have separate scopes.
+
+## Deno Module or App Tool?
+
+Use a **Deno Module** for JavaScript/TypeScript logic operating on Workspace data. Use an **App Tool** when the Agent needs UI state, application state outside the Workspace, user interaction, browser callbacks, or application-specific RPC behavior. A Deno Module does not replace an App Tool.
+
+## Continue reading
+
+- [Agent Deno Execution](./agent-execution/) for plain Agent scripts.
+- [Deno Modules](./modules/) for reusable implementation.
+- [Workspace Deno Execution](./workspace-execution/) for application-controlled runs.
+- [Deno Runtime & Security](./runtime-security/) for the shared boundary.
+- [Tools API](../reference/tools/) and [PedelecWorkspace](../reference/pedelec-workspace/) for exact contracts; [Error Codes](../reference/error-codes/) for failures.
