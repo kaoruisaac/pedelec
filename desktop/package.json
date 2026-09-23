@@ -14,20 +14,20 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-opener": "^2.5.4",
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
-    "solid-icons": "^1.2.0",
-    "solid-js": "latest"
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-opener": "2.5.5",
+    "@tauri-apps/plugin-process": "2.3.1",
+    "@tauri-apps/plugin-updater": "2.11.0",
+    "solid-icons": "1.2.0",
+    "solid-js": "1.9.15"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
-    "jsdom": "^29.1.1",
-    "typescript": "latest",
-    "vite": "latest",
-    "vite-plugin-solid": "latest",
-    "vitest": "^4.1.10"
+    "@tauri-apps/cli": "2.11.5",
+    "jsdom": "29.1.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.0",
+    "vite-plugin-solid": "2.11.14",
+    "vitest": "4.1.11"
   },
   "volta": {
     "node": "24.13.0"
