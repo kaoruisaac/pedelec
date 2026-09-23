@@ -3238,6 +3238,7 @@ mod tests {
                     workspace_path: workspace.clone(),
                     effort_level: Some(pedelec_core::EffortLevel::Default),
                     model: None,
+                    cursor_settings: None,
                     reasoning_effort: None,
                     antigravity_reasoning_effort: None,
                     claude_reasoning_effort: None,

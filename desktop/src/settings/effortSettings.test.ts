@@ -86,7 +86,7 @@ describe("effort settings", () => {
     expect(effortSettingsPlaceholder("antigravity")).toBe("--model model-name\n--effort high");
     expect(effortSettingsPlaceholder("claude")).toBe("--model model-name\n--effort high");
     expect(effortSettingsPlaceholder("opencode")).toBe("--model provider/model-name");
-    expect(effortSettingsPlaceholder("cursor")).toBe("--model model-name");
+    expect(effortSettingsPlaceholder("cursor")).toBe("--model model-name\n--effort high\n--fast false");
     expect(effortSettingsPlaceholder("ollama")).toBe("");
   });
 
@@ -100,7 +100,14 @@ describe("effort settings", () => {
     expect(validateEffortArgs("claude", ["--effort", "max"])).toBeUndefined();
     expect(validateEffortArgs("claude", ["--effort", "banana"])).toContain("not supported");
     expect(validateEffortArgs("opencode", ["--effort", "high"])).toContain("not allowed");
-    expect(validateEffortArgs("cursor", ["--effort", "high"])).toContain("not allowed");
+    for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
+      expect(validateEffortArgs("cursor", ["--effort", effort])).toBeUndefined();
+    }
+    expect(validateEffortArgs("cursor", ["--effort", "banana"])).toContain("not supported");
+    expect(validateEffortArgs("cursor", ["--fast", "true"])).toBeUndefined();
+    expect(validateEffortArgs("cursor", ["--fast", "false"])).toBeUndefined();
+    expect(validateEffortArgs("cursor", ["--fast", "sometimes"])).toContain("true or false");
+    expect(validateEffortArgs("cursor", ["--context", "256k"])).toContain("not allowed");
     expect(validateEffortArgs("ollama", ["--effort", "high"])).toContain("not allowed");
   });
 

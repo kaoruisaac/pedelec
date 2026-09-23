@@ -37,6 +37,9 @@ pub struct AcpLaunchConfig {
     pub client_version: String,
     pub provider_label: String,
     pub authentication: AcpAuthentication,
+    /// Provider-specific ACP client capability extensions. Defaults to an
+    /// empty object so generic ACP providers do not inherit extensions.
+    pub client_capabilities: Value,
 }
 
 impl AcpLaunchConfig {
@@ -58,6 +61,7 @@ impl AcpLaunchConfig {
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             provider_label: provider_label.into(),
             authentication: AcpAuthentication::None,
+            client_capabilities: json!({}),
         }
     }
 
@@ -82,6 +86,11 @@ impl AcpLaunchConfig {
 
     pub fn with_authentication(mut self, authentication: AcpAuthentication) -> Self {
         self.authentication = authentication;
+        self
+    }
+
+    pub fn with_client_capabilities(mut self, capabilities: Value) -> Self {
+        self.client_capabilities = capabilities;
         self
     }
 
@@ -523,7 +532,7 @@ impl AcpController {
                 "initialize",
                 json!({
                     "protocolVersion": ACP_PROTOCOL_VERSION,
-                    "clientCapabilities": {},
+                    "clientCapabilities": config.client_capabilities,
                     "clientInfo": {
                         "name": config.client_name,
                         "title": config.client_title,
@@ -2365,6 +2374,12 @@ mod tests {
             Arc::new(AcpWorkspacePermissionPolicy::new(&workspace)),
         )
         .unwrap();
+        let initialize = fixture
+            .frames()
+            .into_iter()
+            .find(|frame| frame["method"] == "initialize")
+            .expect("fake ACP agent should receive initialize");
+        assert_eq!(initialize["params"]["clientCapabilities"], json!({}));
         assert!(controller.supports_load());
         let session_id = controller
             .ensure_session("thread-1", None, &AcpSessionConfig::new(&workspace))

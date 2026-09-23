@@ -1044,16 +1044,16 @@ mod tests {
         let manifest = bundled_effort_wizard_manifest().unwrap();
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.providers.len(), 4);
-        assert_eq!(manifest.providers[&WizardProviderCode::Codex].revision, 2);
-        assert_eq!(manifest.providers[&WizardProviderCode::Claude].revision, 2);
-        assert_eq!(manifest.providers[&WizardProviderCode::Cursor].revision, 3);
+        assert_eq!(manifest.providers[&WizardProviderCode::Codex].revision, 3);
+        assert_eq!(manifest.providers[&WizardProviderCode::Claude].revision, 3);
+        assert_eq!(manifest.providers[&WizardProviderCode::Cursor].revision, 5);
         assert_eq!(
             manifest.providers[&WizardProviderCode::Antigravity].revision,
-            1
+            2
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Codex].profiles.low,
-            vec!["-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"max\""]
+            vec!["-m", "gpt-6-luna", "-c", "model_reasoning_effort=\"max\""]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Codex].profiles.high,
@@ -1068,7 +1068,7 @@ mod tests {
             manifest.providers[&WizardProviderCode::Claude]
                 .profiles
                 .default,
-            vec!["--model", "claude-opus-4-8", "--effort", "medium"]
+            vec!["--model", "claude-opus-5-5", "--effort", "medium"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Claude]
@@ -1078,25 +1078,33 @@ mod tests {
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Cursor].profiles.low,
-            vec!["--model", "composer-2.5"]
+            vec!["--model", "composer-2.5", "--fast", "false"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Cursor]
                 .profiles
                 .default,
-            vec!["--model", "cursor-grok-4.6-high"]
+            vec!["--model", "grok-4.7", "--effort", "high", "--fast", "false"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Cursor]
                 .profiles
                 .high,
-            vec!["--model", "cursor-grok-4.6-xhigh"]
+            vec!["--model", "grok-4.7", "--effort", "xhigh", "--fast", "false"]
+        );
+        assert_eq!(
+            manifest.providers[&WizardProviderCode::Cursor].probes[0].args,
+            vec!["--model", "grok-4.7-xhigh"]
+        );
+        assert_eq!(
+            manifest.providers[&WizardProviderCode::Cursor].probes[1].args,
+            vec!["--model", "composer-2.5"]
         );
         assert_eq!(
             manifest.providers[&WizardProviderCode::Antigravity]
                 .profiles
                 .default,
-            vec!["--model", "gemini-3.7-flash-high", "--effort", "high"]
+            vec!["--model", "gemini-3.8-flash-high", "--effort", "high"]
         );
     }
 
@@ -1360,7 +1368,7 @@ mod tests {
                 .get(&WizardProviderCode::Codex)
                 .unwrap()
                 .applied_preset_revision,
-            Some(2)
+            Some(3)
         );
         assert_eq!(
             read_settings_file(&temp.path().join("settings.json")).unwrap(),
@@ -1404,7 +1412,7 @@ mod tests {
                 .get(&WizardProviderCode::Claude)
                 .unwrap()
                 .applied_preset_revision,
-            Some(2)
+            Some(3)
         );
 
         let before = read_settings_file(&temp.path().join("settings.json")).unwrap();
@@ -1444,11 +1452,11 @@ mod tests {
             .profiles;
         let stale = EffortWizardProviderApplyPatch {
             provider: WizardProviderCode::Codex,
-            preset_revision: 2,
+            preset_revision: 3,
             expected_current_efforts: EffortsArgs::default(),
             confirmed_recommendation: EffortWizardProviderRecommendation {
                 provider: WizardProviderCode::Codex,
-                preset_revision: 2,
+                preset_revision: 3,
                 confirmed: EffortWizardConfirmedProfiles {
                     default: Some(codex_profiles.default.clone()),
                     ..Default::default()
@@ -1466,11 +1474,11 @@ mod tests {
             .profiles;
         let valid = EffortWizardProviderApplyPatch {
             provider: WizardProviderCode::Claude,
-            preset_revision: 2,
+            preset_revision: 3,
             expected_current_efforts: settings.provider_settings.claude.efforts_args.clone(),
             confirmed_recommendation: EffortWizardProviderRecommendation {
                 provider: WizardProviderCode::Claude,
-                preset_revision: 2,
+                preset_revision: 3,
                 confirmed: EffortWizardConfirmedProfiles {
                     default: Some(claude_profiles.default.clone()),
                     ..Default::default()
@@ -1526,7 +1534,7 @@ mod tests {
                 .get(&WizardProviderCode::Cursor)
                 .unwrap()
                 .applied_preset_revision,
-            Some(3)
+            Some(5)
         );
     }
 }

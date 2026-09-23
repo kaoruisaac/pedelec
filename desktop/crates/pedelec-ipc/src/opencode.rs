@@ -192,10 +192,15 @@ impl AcpRuntimeDispatcher {
                     launch = launch
                         .with_env(OPENCODE_CONFIG_CONTENT, config_content)
                         .with_env(OPENCODE_PERMISSION, opencode_permission_overlay());
-                } else if !cursor_pre_authenticated {
-                    launch = launch.with_authentication(AcpAuthentication::MethodId(
-                        "cursor_login".to_string(),
-                    ));
+                } else {
+                    launch = launch.with_client_capabilities(json!({
+                        "_meta": { "parameterizedModelPicker": true }
+                    }));
+                    if !cursor_pre_authenticated {
+                        launch = launch.with_authentication(AcpAuthentication::MethodId(
+                            "cursor_login".to_string(),
+                        ));
+                    }
                 }
                 let path = pedelec_shared::paths::path_value_with_default_pedelec_dir()
                     .map_err(|error| RuntimeRegistryError::Initialization(error.message))?;
@@ -277,9 +282,9 @@ impl AcpRuntimeDispatcher {
             configure_cursor_mode(controller, &provider_id, &session.thread_id)?;
         }
 
-        // ACP providers advertise model selection as a categorized session
-        // config option. The option id itself is intentionally not assumed.
-        if let Some(model) = session.model.as_deref() {
+        if self.provider.is_cursor() {
+            configure_cursor_session_settings(controller, session, &provider_id)?;
+        } else if let Some(model) = session.model.as_deref() {
             let options = controller
                 .session_config_options(&provider_id)
                 .unwrap_or_else(|| json!([]));
@@ -828,6 +833,183 @@ impl PersistentRuntimeDispatcher for CursorRuntimeDispatcher {
     fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
         self.inner.dispatch(operation)
     }
+}
+
+fn configure_cursor_session_settings(
+    controller: &AcpController,
+    session: &PersistentProviderSessionIntent,
+    provider_session_id: &str,
+) -> Result<(), PedelecError> {
+    if let Some(model) = session.model.as_deref() {
+        let options = controller
+            .session_config_options(provider_session_id)
+            .unwrap_or_else(|| json!([]));
+        apply_cursor_config_value(
+            controller,
+            session,
+            provider_session_id,
+            &options,
+            "model",
+            None,
+            model,
+        )?;
+    }
+
+    if let Some(effort) = session
+        .cursor_settings
+        .as_ref()
+        .and_then(|settings| settings.effort.as_deref())
+    {
+        // Model selection can replace the dependent option list. Read the
+        // controller cache again after each successful set_config_option.
+        let options = controller
+            .session_config_options(provider_session_id)
+            .unwrap_or_else(|| json!([]));
+        apply_cursor_config_value(
+            controller,
+            session,
+            provider_session_id,
+            &options,
+            "thought_level",
+            None,
+            effort,
+        )?;
+    }
+
+    if let Some(fast) = session
+        .cursor_settings
+        .as_ref()
+        .and_then(|settings| settings.fast)
+    {
+        let options = controller
+            .session_config_options(provider_session_id)
+            .unwrap_or_else(|| json!([]));
+        apply_cursor_config_value(
+            controller,
+            session,
+            provider_session_id,
+            &options,
+            "model_config",
+            Some("fast"),
+            if fast { "true" } else { "false" },
+        )?;
+    }
+    Ok(())
+}
+
+fn apply_cursor_config_value(
+    controller: &AcpController,
+    session: &PersistentProviderSessionIntent,
+    provider_session_id: &str,
+    options: &Value,
+    category: &str,
+    required_id: Option<&str>,
+    requested: &str,
+) -> Result<(), PedelecError> {
+    let stage = match category {
+        "thought_level" => "effort",
+        "model_config" => "fast",
+        _ => "model",
+    };
+    let option = options.as_array().and_then(|options| {
+        options.iter().find(|option| {
+            option.get("category").and_then(Value::as_str) == Some(category)
+                && required_id.is_none_or(|id| option.get("id").and_then(Value::as_str) == Some(id))
+                && option
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+        })
+    });
+    let Some(option) = option else {
+        return Err(cursor_config_error(
+            controller,
+            session,
+            provider_session_id,
+            stage,
+            requested,
+            error_codes::PROVIDER_PROTOCOL_ERROR,
+            match stage {
+                "effort" => "Cursor did not advertise a thought-level session config option",
+                "fast" => "Cursor did not advertise a compatible Fast session config option",
+                _ => "Cursor did not advertise a model session config option",
+            },
+        ));
+    };
+
+    let advertised = option
+        .get("options")
+        .and_then(Value::as_array)
+        .is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| config_value_id(value) == Some(requested))
+        });
+    if !advertised {
+        return Err(cursor_config_error(
+            controller,
+            session,
+            provider_session_id,
+            stage,
+            requested,
+            error_codes::PROVIDER_REQUEST_FAILED,
+            match stage {
+                "effort" => "the selected Cursor effort is not advertised for this model",
+                "fast" => "the selected Cursor Fast value is not advertised for this model",
+                _ => "the selected Cursor model is not advertised by this session",
+            },
+        ));
+    }
+
+    let config_id = option["id"].as_str().expect("validated config option id");
+    controller
+        .set_config_option(
+            provider_session_id,
+            &AcpConfigOptionUpdate {
+                config_id: config_id.to_string(),
+                value: Value::String(requested.to_string()),
+            },
+        )
+        .map_err(|error| {
+            let mut error = acp_error(
+                error,
+                Some(controller),
+                Some(&session.thread_id),
+                Some(provider_session_id),
+                None,
+                stage,
+                AcpProviderKind::Cursor,
+            );
+            if let Some(details) = error.details.as_mut() {
+                details["requestedValue"] = Value::String(requested.to_string());
+                details[stage] = Value::String(requested.to_string());
+            }
+            error
+        })?;
+    Ok(())
+}
+
+fn cursor_config_error(
+    controller: &AcpController,
+    session: &PersistentProviderSessionIntent,
+    provider_session_id: &str,
+    stage: &str,
+    requested: &str,
+    code: &str,
+    message: &str,
+) -> PedelecError {
+    let mut details = json!({
+        "provider": "cursor",
+        "operation": "session/set_config_option",
+        "stage": stage,
+        "threadId": session.thread_id,
+        "providerSessionId": provider_session_id,
+        "requestedValue": requested,
+        "runtimeGeneration": controller.generation(),
+        "processId": controller.process_id(),
+    });
+    details[stage] = Value::String(requested.to_string());
+    PedelecError::with_details(code, message, details)
 }
 
 fn find_config_option<'a>(options: &'a Value, category: &str) -> Option<&'a Value> {
@@ -2027,6 +2209,260 @@ mod tests {
         .is_err());
     }
 
+    fn run_cursor_config_admission(
+        model: &str,
+        settings: pedelec_core::CursorSessionSettings,
+        config_variant: Option<&str>,
+    ) -> (Result<(), PedelecError>, Vec<Value>, bool) {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let log = temp.path().join("cursor-config-frames.jsonl");
+        let resume = config_variant == Some("resume");
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        {
+            let mut core = runtime.lock().unwrap();
+            core.register_workspace_for_test(
+                "workspace-cursor-config",
+                &workspace,
+                WorkspaceKind::Custom,
+            )
+            .unwrap();
+            core.thread_manager.insert_thread(
+                ThreadState {
+                    thread_id: "thread-cursor-config".into(),
+                    workspace_id: "workspace-cursor-config".into(),
+                    provider: ProviderCode::Cursor,
+                    effort_level: Some(EffortLevel::Default),
+                    effort_args: vec!["--model".into(), model.into()],
+                    skills: vec![],
+                    status: ThreadStatus::Running,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    sdk_origin: None,
+                },
+                ProviderSessionState {
+                    provider_session_id: None,
+                    active_provider_turn_id: None,
+                },
+            );
+            core.pending_provider_operations.insert(
+                "thread-cursor-config".into(),
+                PendingProviderOperation {
+                    operation_id: "cursor-config-test".into(),
+                    kind: PendingProviderOperationKind::Prepare,
+                    started_at: Utc::now(),
+                },
+            );
+        }
+        let owner = ProviderRuntimeOwner::new();
+        let mut dispatcher = CursorRuntimeDispatcher::new(owner.clone(), Arc::clone(&runtime))
+            .with_program_for_test(fake_cursor_program(temp.path()))
+            .with_process_cwd_for_test(temp.path())
+            .with_env_for_test("FAKE_ACP_AUTH", "cursor_login")
+            .with_env_for_test("FAKE_ACP_LOG", log.to_string_lossy())
+            .with_env_for_test("FAKE_ACP_WORKSPACE", workspace.to_string_lossy())
+            .with_env_for_test("FAKE_ACP_PARAMETERIZED_CURSOR", "true")
+            .with_env_for_test("FAKE_ACP_LOAD", if resume { "true" } else { "false" })
+            .with_env_for_test(
+                "FAKE_ACP_LOAD_SESSION_ID",
+                if resume {
+                    "persisted-cursor-session"
+                } else {
+                    ""
+                },
+            );
+        if let Some(config_variant) = config_variant.filter(|variant| *variant != "resume") {
+            dispatcher = dispatcher.with_env_for_test("FAKE_ACP_CURSOR_CONFIG", config_variant);
+        }
+        let mut session = session_intent(
+            &workspace,
+            resume.then(|| "persisted-cursor-session".to_string()),
+        );
+        session.thread_id = "thread-cursor-config".into();
+        session.provider = ProviderCode::Cursor;
+        session.model = Some(model.to_string());
+        session.cursor_settings = Some(settings);
+        let result = dispatcher.dispatch(PersistentRuntimeOperation::EnsureSession { session });
+        let frames = fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect::<Vec<_>>();
+        let ready = runtime
+            .lock()
+            .unwrap()
+            .thread_manager
+            .provider_session_state("thread-cursor-config")
+            .and_then(|state| state.provider_session_id.as_ref())
+            .is_some();
+        let _ = owner.shutdown();
+        (result, frames, ready)
+    }
+
+    #[test]
+    fn cursor_parameterized_settings_apply_in_order_using_refreshed_options() {
+        for (model, settings, expected) in [
+            (
+                "composer-2.5",
+                pedelec_core::CursorSessionSettings {
+                    effort: None,
+                    fast: Some(false),
+                },
+                vec![("model-picker", "composer-2.5"), ("fast", "false")],
+            ),
+            (
+                "grok-4.7",
+                pedelec_core::CursorSessionSettings {
+                    effort: Some("high".into()),
+                    fast: Some(false),
+                },
+                vec![
+                    ("model-picker", "grok-4.7"),
+                    ("reasoning-picker", "high"),
+                    ("fast", "false"),
+                ],
+            ),
+            (
+                "grok-4.7",
+                pedelec_core::CursorSessionSettings {
+                    effort: Some("xhigh".into()),
+                    fast: Some(false),
+                },
+                vec![
+                    ("model-picker", "grok-4.7"),
+                    ("reasoning-picker", "xhigh"),
+                    ("fast", "false"),
+                ],
+            ),
+            (
+                "grok-4.7",
+                pedelec_core::CursorSessionSettings::default(),
+                vec![("model-picker", "grok-4.7")],
+            ),
+        ] {
+            let (result, frames, ready) = run_cursor_config_admission(model, settings, None);
+            result.unwrap();
+            assert!(ready, "Cursor session did not reach ready for {model}");
+            let initialize = frames
+                .iter()
+                .find(|frame| frame["method"] == "initialize")
+                .expect("initialize request should be captured");
+            assert_eq!(
+                initialize["params"]["clientCapabilities"]["_meta"]["parameterizedModelPicker"],
+                true
+            );
+            let applied = frames
+                .iter()
+                .filter(|frame| frame["method"] == "session/set_config_option")
+                .map(|frame| {
+                    (
+                        frame["params"]["configId"].as_str().unwrap(),
+                        frame["params"]["value"].as_str().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(applied, expected);
+            assert!(!frames.iter().any(|frame| {
+                frame["method"] == "session/set_config_option"
+                    && frame["params"]["value"] == "grok-4.7-xhigh"
+            }));
+        }
+
+        let (result, frames, ready) = run_cursor_config_admission(
+            "grok-4.7",
+            pedelec_core::CursorSessionSettings {
+                effort: Some("xhigh".into()),
+                fast: Some(false),
+            },
+            Some("resume"),
+        );
+        result.unwrap();
+        assert!(ready, "resumed Cursor session did not reach ready");
+        assert!(frames.iter().any(|frame| frame["method"] == "session/load"));
+        let settings = frames
+            .iter()
+            .filter(|frame| frame["method"] == "session/set_config_option")
+            .map(|frame| {
+                (
+                    frame["params"]["configId"].as_str().unwrap(),
+                    frame["params"]["value"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            settings,
+            vec![
+                ("model-picker", "grok-4.7"),
+                ("reasoning-picker", "xhigh"),
+                ("fast", "false"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cursor_parameterized_config_rejects_unadvertised_requested_settings() {
+        let cases = [
+            (
+                "grok-4.7",
+                pedelec_core::CursorSessionSettings::default(),
+                Some("unsupported_model"),
+                "model",
+                error_codes::PROVIDER_REQUEST_FAILED,
+            ),
+            (
+                "grok-4.7",
+                pedelec_core::CursorSessionSettings {
+                    effort: Some("xhigh".into()),
+                    fast: None,
+                },
+                Some("unsupported_effort"),
+                "effort",
+                error_codes::PROVIDER_REQUEST_FAILED,
+            ),
+            (
+                "grok-4.7",
+                pedelec_core::CursorSessionSettings {
+                    effort: Some("high".into()),
+                    fast: None,
+                },
+                Some("missing_effort"),
+                "effort",
+                error_codes::PROVIDER_PROTOCOL_ERROR,
+            ),
+            (
+                "composer-2.5",
+                pedelec_core::CursorSessionSettings {
+                    effort: None,
+                    fast: Some(false),
+                },
+                Some("missing_fast"),
+                "fast",
+                error_codes::PROVIDER_PROTOCOL_ERROR,
+            ),
+            (
+                "composer-2.5",
+                pedelec_core::CursorSessionSettings {
+                    effort: None,
+                    fast: Some(false),
+                },
+                Some("unsupported_fast"),
+                "fast",
+                error_codes::PROVIDER_REQUEST_FAILED,
+            ),
+        ];
+        for (model, settings, variant, stage, code) in cases {
+            let (result, _, ready) = run_cursor_config_admission(model, settings, variant);
+            let error = result.unwrap_err();
+            assert_eq!(error.code, code);
+            let details = error.details.as_ref().unwrap();
+            assert_eq!(details["stage"], stage);
+            assert!(details["requestedValue"].is_string());
+            assert!(details[stage].is_string());
+            assert!(!ready);
+        }
+    }
+
     #[test]
     fn cursor_dispatcher_authenticates_maps_mode_and_bootstraps_once() {
         let temp = tempdir().unwrap();
@@ -2159,6 +2595,15 @@ mod tests {
 
         let frames = fs::read_to_string(log).unwrap();
         assert!(frames.contains("\"method\":\"authenticate\""));
+        let initialize: Value = frames
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .find(|frame: &Value| frame["method"] == "initialize")
+            .expect("Cursor initialize request should be captured");
+        assert_eq!(
+            initialize["params"]["clientCapabilities"]["_meta"]["parameterizedModelPicker"],
+            true
+        );
         assert!(frames.contains("\"method\":\"session/set_mode\""));
         assert!(frames.contains("\"method\":\"session/set_config_option\""));
         let prompts = frames
@@ -2594,6 +3039,16 @@ mod tests {
             Some(30)
         );
         let frames = fs::read_to_string(log).unwrap();
+        let initialize: Value = frames
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .find(|frame: &Value| frame["method"] == "initialize")
+            .expect("OpenCode initialize request should be captured");
+        assert_eq!(initialize["params"]["clientCapabilities"], json!({}));
+        assert!(
+            !frames.contains("parameterizedModelPicker"),
+            "OpenCode must not inherit Cursor's ACP extension"
+        );
         let prompts = frames
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -2829,6 +3284,7 @@ mod tests {
             workspace_path: workspace.to_path_buf(),
             effort_level: Some(EffortLevel::Default),
             model: Some("fake/selected".into()),
+            cursor_settings: None,
             reasoning_effort: None,
             antigravity_reasoning_effort: None,
             claude_reasoning_effort: None,

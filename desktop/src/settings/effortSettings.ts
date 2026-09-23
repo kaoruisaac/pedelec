@@ -7,7 +7,7 @@ export const PROVIDER_NATIVE_EFFORT_VALUES: Record<ProviderCode, readonly string
   antigravity: ["low", "medium", "high"],
   claude: ["low", "medium", "high", "xhigh", "max"],
   opencode: [],
-  cursor: [],
+  cursor: ["low", "medium", "high", "xhigh", "max"],
   ollama: [],
 };
 
@@ -16,7 +16,7 @@ const PROVIDER_EFFORT_SETTINGS_PLACEHOLDERS: Record<Exclude<ProviderCode, "ollam
   antigravity: "--model model-name\n--effort high",
   claude: "--model model-name\n--effort high",
   opencode: "--model provider/model-name",
-  cursor: "--model model-name",
+  cursor: "--model model-name\n--effort high\n--fast false",
 };
 
 export function effortSettingsPlaceholder(provider: ProviderCode): string {
@@ -104,11 +104,18 @@ export function validateEffortArgs(
     if (key === modelKey) continue;
 
     if (key === "--effort") {
-      if (provider !== "antigravity" && provider !== "claude") {
+      if (provider !== "antigravity" && provider !== "claude" && provider !== "cursor") {
         return `Setting key ${key} is not allowed for ${provider}.`;
       }
       if (!PROVIDER_NATIVE_EFFORT_VALUES[provider].includes(value)) {
         return `Native effort value ${value} is not supported for ${provider}.`;
+      }
+      continue;
+    }
+
+    if (key === "--fast" && provider === "cursor") {
+      if (value !== "true" && value !== "false") {
+        return `Fast value ${value} must be true or false for cursor.`;
       }
       continue;
     }

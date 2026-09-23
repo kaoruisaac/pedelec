@@ -6,6 +6,15 @@ if [ "$FAKE_ACP_AUTH" = "cursor_login" ]; then
   auth_methods='[{"id":"cursor_login","name":"Cursor Login"}]'
 fi
 modes='{"currentModeId":"agent-mode","availableModes":[{"id":"ask-mode","name":"Ask"},{"id":"plan-mode","name":"Plan"},{"id":"agent-mode","name":"Agent","description":"Full tool access"}]}'
+parameterized_initial='[{"id":"model-picker","category":"model","type":"select","currentValue":"composer-2.5","options":[{"value":"composer-2.5","name":"Composer 2.5"},{"value":"grok-4.7","name":"Grok 4.7"}]}]'
+parameterized_grok='[{"id":"model-picker","category":"model","type":"select","currentValue":"grok-4.7","options":[{"value":"composer-2.5","name":"Composer 2.5"},{"value":"grok-4.7","name":"Grok 4.7"}]},{"id":"reasoning-picker","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"high","name":"High"},{"value":"xhigh","name":"Extra High"}]},{"id":"fast","category":"model_config","type":"select","currentValue":"true","options":[{"value":"true","name":"Fast"},{"value":"false","name":"Off"}]}]'
+parameterized_grok_pre_effort='[{"id":"model-picker","category":"model","type":"select","currentValue":"grok-4.7","options":[{"value":"composer-2.5","name":"Composer 2.5"},{"value":"grok-4.7","name":"Grok 4.7"}]},{"id":"reasoning-picker","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"high","name":"High"},{"value":"xhigh","name":"Extra High"}]},{"id":"fast","category":"model_config","type":"select","currentValue":"true","options":[{"value":"true","name":"Fast"}]}]'
+parameterized_composer='[{"id":"model-picker","category":"model","type":"select","currentValue":"composer-2.5","options":[{"value":"composer-2.5","name":"Composer 2.5"},{"value":"grok-4.7","name":"Grok 4.7"}]},{"id":"fast","category":"model_config","type":"select","currentValue":"true","options":[{"value":"true","name":"Fast"},{"value":"false","name":"Off"}]}]'
+parameterized_grok_high_only='[{"id":"model-picker","category":"model","type":"select","currentValue":"grok-4.7","options":[{"value":"composer-2.5","name":"Composer 2.5"},{"value":"grok-4.7","name":"Grok 4.7"}]},{"id":"reasoning-picker","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"high","name":"High"}]},{"id":"fast","category":"model_config","type":"select","currentValue":"true","options":[{"value":"true","name":"Fast"},{"value":"false","name":"Off"}]}]'
+parameterized_grok_no_effort='[{"id":"model-picker","category":"model","type":"select","currentValue":"grok-4.7","options":[{"value":"composer-2.5","name":"Composer 2.5"},{"value":"grok-4.7","name":"Grok 4.7"}]},{"id":"fast","category":"model_config","type":"select","currentValue":"true","options":[{"value":"true","name":"Fast"},{"value":"false","name":"Off"}]}]'
+parameterized_composer_no_fast='[{"id":"model-picker","category":"model","type":"select","currentValue":"composer-2.5","options":[{"value":"composer-2.5","name":"Composer 2.5"},{"value":"grok-4.7","name":"Grok 4.7"}]}]'
+parameterized_composer_fast_only='[{"id":"model-picker","category":"model","type":"select","currentValue":"composer-2.5","options":[{"value":"composer-2.5","name":"Composer 2.5"},{"value":"grok-4.7","name":"Grok 4.7"}]},{"id":"fast","category":"model_config","type":"select","currentValue":"true","options":[{"value":"true","name":"Fast"}]}]'
+if [ "$FAKE_ACP_CURSOR_CONFIG" = "unsupported_model" ]; then parameterized_initial='[{"id":"model-picker","category":"model","type":"select","currentValue":"composer-2.5","options":[{"value":"composer-2.5","name":"Composer 2.5"}]}]'; fi
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$FAKE_ACP_LOG"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
@@ -15,12 +24,27 @@ while IFS= read -r line; do
     *'"method":"authenticate"'*)
       printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
     *'"method":"session/new"'*)
-      counter=$((counter + 1)); printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"acp-session-%s","configOptions":[{"id":"provider-model","category":"model","type":"select","currentValue":"fake/default","options":[{"value":"fake/default","name":"Fake Default"},{"value":"fake/selected","name":"Fake Selected"}]}],"modes":%s}}\n' "$id" "$counter" "$modes" ;;
+      counter=$((counter + 1)); if [ "$FAKE_ACP_PARAMETERIZED_CURSOR" = "true" ]; then printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"acp-session-%s","configOptions":%s,"modes":%s}}\n' "$id" "$counter" "$parameterized_initial" "$modes"; else printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"acp-session-%s","configOptions":[{"id":"provider-model","category":"model","type":"select","currentValue":"fake/default","options":[{"value":"fake/default","name":"Fake Default"},{"value":"fake/selected","name":"Fake Selected"}]}],"modes":%s}}\n' "$id" "$counter" "$modes"; fi ;;
     *'"method":"session/load"'*)
       load_session_id=""; if [ -n "$FAKE_ACP_LOAD_SESSION_ID" ]; then load_session_id="\"sessionId\":\"$FAKE_ACP_LOAD_SESSION_ID\","; fi
-      printf '{"jsonrpc":"2.0","id":%s,"result":{%s"configOptions":[{"id":"provider-model","category":"model","type":"select","currentValue":"fake/default","options":[{"value":"fake/default","name":"Fake Default"},{"value":"fake/selected","name":"Fake Selected"}]}],"modes":%s}}\n' "$id" "$load_session_id" "$modes" ;;
-    *'"method":"session/set_mode"'*|*'"method":"session/set_config_option"'*)
+      if [ "$FAKE_ACP_PARAMETERIZED_CURSOR" = "true" ]; then printf '{"jsonrpc":"2.0","id":%s,"result":{%s"configOptions":%s,"modes":%s}}\n' "$id" "$load_session_id" "$parameterized_initial" "$modes"; else printf '{"jsonrpc":"2.0","id":%s,"result":{%s"configOptions":[{"id":"provider-model","category":"model","type":"select","currentValue":"fake/default","options":[{"value":"fake/default","name":"Fake Default"},{"value":"fake/selected","name":"Fake Selected"}]}],"modes":%s}}\n' "$id" "$load_session_id" "$modes"; fi ;;
+    *'"method":"session/set_mode"'*)
       printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"session/set_config_option"'*)
+      if [ "$FAKE_ACP_PARAMETERIZED_CURSOR" = "true" ]; then
+        configs="$parameterized_grok_pre_effort"
+        case "$FAKE_ACP_CURSOR_CONFIG" in
+          unsupported_effort) configs="$parameterized_grok_high_only" ;;
+          missing_effort) configs="$parameterized_grok_no_effort" ;;
+        esac
+        case "$line" in
+          *'"configId":"reasoning-picker"'*) configs="$parameterized_grok" ;;
+          *'"value":"composer-2.5"'*) configs="$parameterized_composer"; [ "$FAKE_ACP_CURSOR_CONFIG" = "missing_fast" ] && configs="$parameterized_composer_no_fast"; [ "$FAKE_ACP_CURSOR_CONFIG" = "unsupported_fast" ] && configs="$parameterized_composer_fast_only" ;;
+        esac
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":%s}}\n' "$id" "$configs"
+      else
+        printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      fi ;;
     *'"method":"session/prompt"'*)
       prompt_counter=$((prompt_counter + 1))
       prompt_total=10

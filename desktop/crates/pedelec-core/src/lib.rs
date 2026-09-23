@@ -1507,6 +1507,8 @@ pub struct PersistentProviderSessionIntent {
     #[serde(default)]
     pub effort_level: Option<EffortLevel>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub cursor_settings: Option<CursorSessionSettings>,
     pub reasoning_effort: Option<CodexReasoningEffort>,
     #[serde(default)]
     pub antigravity_reasoning_effort: Option<AntigravityReasoningEffort>,
@@ -1519,6 +1521,16 @@ pub struct PersistentProviderSessionIntent {
     pub core_ipc_runtime_file_path: PathBuf,
     pub tools: Vec<ToolDefinition>,
     pub guidance: Option<String>,
+}
+
+/// Pedelec's semantic Cursor ACP settings. The model remains in the shared
+/// `model` field; ACP-specific dependent settings cross the runtime boundary
+/// as typed values instead of raw CLI-like key/value pairs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorSessionSettings {
+    pub effort: Option<String>,
+    pub fast: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4219,31 +4231,47 @@ impl CoreRuntime {
                 serde_json::json!({ "threadId": thread_id }),
             )
         })?;
-        let (model, reasoning_effort, antigravity_reasoning_effort, claude_reasoning_effort) =
-            match &thread.provider {
-                ProviderCode::Codex => {
-                    let (model, effort) =
-                        parse_codex_session_settings(&thread.effort_args, thread_id)?;
-                    (model, effort, None, None)
-                }
-                ProviderCode::Antigravity => {
-                    let (model, effort) =
-                        parse_antigravity_session_settings(&thread.effort_args, thread_id)?;
-                    (model, None, effort, None)
-                }
-                ProviderCode::Claude => {
-                    let (model, effort) =
-                        parse_claude_session_settings(&thread.effort_args, thread_id)?;
-                    (model, None, None, effort)
-                }
-                ProviderCode::Ollama => (Some(required_ollama_model(&thread)?), None, None, None),
-                _ => (
-                    provider_model_from_effort_args(&thread.provider, &thread.effort_args),
-                    None,
-                    None,
-                    None,
-                ),
-            };
+        let (
+            model,
+            reasoning_effort,
+            antigravity_reasoning_effort,
+            claude_reasoning_effort,
+            cursor_settings,
+        ) = match &thread.provider {
+            ProviderCode::Codex => {
+                let (model, effort) = parse_codex_session_settings(&thread.effort_args, thread_id)?;
+                (model, effort, None, None, None)
+            }
+            ProviderCode::Antigravity => {
+                let (model, effort) =
+                    parse_antigravity_session_settings(&thread.effort_args, thread_id)?;
+                (model, None, effort, None, None)
+            }
+            ProviderCode::Claude => {
+                let (model, effort) =
+                    parse_claude_session_settings(&thread.effort_args, thread_id)?;
+                (model, None, None, effort, None)
+            }
+            ProviderCode::Cursor => {
+                let (model, settings) =
+                    parse_cursor_session_settings(&thread.effort_args, thread_id)?;
+                (model, None, None, None, Some(settings))
+            }
+            ProviderCode::Ollama => (
+                Some(required_ollama_model(&thread)?),
+                None,
+                None,
+                None,
+                None,
+            ),
+            _ => (
+                provider_model_from_effort_args(&thread.provider, &thread.effort_args),
+                None,
+                None,
+                None,
+                None,
+            ),
+        };
         let host_instructions = build_persistent_host_instructions_with_modules(
             &thread,
             &workspace_path,
@@ -4265,6 +4293,7 @@ impl CoreRuntime {
             workspace_path,
             effort_level: thread.effort_level,
             model,
+            cursor_settings,
             reasoning_effort,
             antigravity_reasoning_effort,
             claude_reasoning_effort,
@@ -10050,6 +10079,53 @@ fn provider_model_from_effort_args(provider: &ProviderCode, args: &[String]) -> 
         .filter(|model| !model.trim().is_empty())
 }
 
+fn parse_cursor_session_settings(
+    args: &[String],
+    thread_id: &str,
+) -> Result<(Option<String>, CursorSessionSettings), PedelecError> {
+    validate_effort_tier(&ProviderCode::Cursor, EffortLevel::Default, args).map_err(|error| {
+        PedelecError::with_details(
+            error_codes::INVALID_INPUT,
+            "Cursor settings could not be mapped to typed ACP fields",
+            serde_json::json!({
+                "threadId": thread_id,
+                "provider": "cursor",
+                "error": error,
+                "source": "effort_args",
+            }),
+        )
+    })?;
+
+    let mut model = None;
+    let mut effort = None;
+    let mut fast = None;
+    for pair in args.chunks_exact(2) {
+        match pair[0].as_str() {
+            "--model" => model = Some(pair[1].trim().to_string()),
+            "--effort" => effort = Some(pair[1].trim().to_string()),
+            "--fast" => {
+                fast = Some(match pair[1].trim() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(PedelecError::with_details(
+                            error_codes::INVALID_INPUT,
+                            "Cursor Fast setting must be true or false",
+                            serde_json::json!({
+                                "threadId": thread_id,
+                                "provider": "cursor",
+                                "setting": pair[1],
+                            }),
+                        ))
+                    }
+                })
+            }
+            _ => unreachable!("Cursor effort settings were validated before parsing"),
+        }
+    }
+    Ok((model, CursorSessionSettings { effort, fast }))
+}
+
 fn provider_model_arg_key(provider: &ProviderCode) -> &'static str {
     if *provider == ProviderCode::Codex {
         "-m"
@@ -11207,7 +11283,8 @@ fn resolve_explicit_session_args(
             ProviderCode::Antigravity | ProviderCode::Claude => {
                 args.extend(["--effort".to_string(), effort.to_string()])
             }
-            ProviderCode::OpenCode | ProviderCode::Cursor | ProviderCode::Ollama => {
+            ProviderCode::Cursor => args.extend(["--effort".to_string(), effort.to_string()]),
+            ProviderCode::OpenCode | ProviderCode::Ollama => {
                 unreachable!("unsupported explicit effort was rejected")
             }
         }
@@ -11239,7 +11316,8 @@ fn normalize_explicit_effort<'a>(
         ProviderCode::Codex => is_supported_codex_effort(effort),
         ProviderCode::Antigravity => is_supported_antigravity_effort(effort),
         ProviderCode::Claude => is_supported_claude_effort(effort),
-        ProviderCode::OpenCode | ProviderCode::Cursor | ProviderCode::Ollama => false,
+        ProviderCode::Cursor => is_supported_cursor_effort(effort),
+        ProviderCode::OpenCode | ProviderCode::Ollama => false,
     };
     if supported {
         return Ok(effort);
@@ -11325,7 +11403,12 @@ fn validate_effort_tier(
                     key == "--effort" && is_supported_antigravity_effort(value)
                 }
                 ProviderCode::Claude => key == "--effort" && is_supported_claude_effort(value),
-                ProviderCode::OpenCode | ProviderCode::Cursor | ProviderCode::Ollama => false,
+                ProviderCode::Cursor => match key {
+                    "--effort" => is_supported_cursor_effort(value),
+                    "--fast" => matches!(value, "true" | "false"),
+                    _ => false,
+                },
+                ProviderCode::OpenCode | ProviderCode::Ollama => false,
             }
         };
         if !allowed {
@@ -11368,6 +11451,10 @@ fn is_supported_antigravity_effort(value: &str) -> bool {
 }
 
 fn is_supported_claude_effort(value: &str) -> bool {
+    matches!(value, "low" | "medium" | "high" | "xhigh" | "max")
+}
+
+fn is_supported_cursor_effort(value: &str) -> bool {
     matches!(value, "low" | "medium" | "high" | "xhigh" | "max")
 }
 

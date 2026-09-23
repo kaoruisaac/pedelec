@@ -12,6 +12,42 @@ $modes = @{
         @{ id = 'agent-mode'; name = 'Agent'; description = 'Full tool access' }
     )
 }
+$parameterizedInitial = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'composer-2.5'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }, @{ value = 'grok-4.7'; name = 'Grok 4.7' }) }
+)
+$parameterizedGrok = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'grok-4.7'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }, @{ value = 'grok-4.7'; name = 'Grok 4.7' }) },
+    @{ id = 'reasoning-picker'; category = 'thought_level'; type = 'select'; currentValue = 'high'; options = @(@{ value = 'high'; name = 'High' }, @{ value = 'xhigh'; name = 'Extra High' }) },
+    @{ id = 'fast'; category = 'model_config'; type = 'select'; currentValue = 'true'; options = @(@{ value = 'true'; name = 'Fast' }, @{ value = 'false'; name = 'Off' }) }
+)
+$parameterizedGrokPreEffort = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'grok-4.7'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }, @{ value = 'grok-4.7'; name = 'Grok 4.7' }) },
+    @{ id = 'reasoning-picker'; category = 'thought_level'; type = 'select'; currentValue = 'high'; options = @(@{ value = 'high'; name = 'High' }, @{ value = 'xhigh'; name = 'Extra High' }) },
+    @{ id = 'fast'; category = 'model_config'; type = 'select'; currentValue = 'true'; options = @(@{ value = 'true'; name = 'Fast' }) }
+)
+$parameterizedComposer = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'composer-2.5'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }, @{ value = 'grok-4.7'; name = 'Grok 4.7' }) },
+    @{ id = 'fast'; category = 'model_config'; type = 'select'; currentValue = 'true'; options = @(@{ value = 'true'; name = 'Fast' }, @{ value = 'false'; name = 'Off' }) }
+)
+$parameterizedGrokHighOnly = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'grok-4.7'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }, @{ value = 'grok-4.7'; name = 'Grok 4.7' }) },
+    @{ id = 'reasoning-picker'; category = 'thought_level'; type = 'select'; currentValue = 'high'; options = @(@{ value = 'high'; name = 'High' }) },
+    @{ id = 'fast'; category = 'model_config'; type = 'select'; currentValue = 'true'; options = @(@{ value = 'true'; name = 'Fast' }, @{ value = 'false'; name = 'Off' }) }
+)
+$parameterizedGrokNoEffort = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'grok-4.7'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }, @{ value = 'grok-4.7'; name = 'Grok 4.7' }) },
+    @{ id = 'fast'; category = 'model_config'; type = 'select'; currentValue = 'true'; options = @(@{ value = 'true'; name = 'Fast' }, @{ value = 'false'; name = 'Off' }) }
+)
+$parameterizedComposerNoFast = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'composer-2.5'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }, @{ value = 'grok-4.7'; name = 'Grok 4.7' }) }
+)
+$parameterizedComposerFastOnly = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'composer-2.5'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }, @{ value = 'grok-4.7'; name = 'Grok 4.7' }) },
+    @{ id = 'fast'; category = 'model_config'; type = 'select'; currentValue = 'true'; options = @(@{ value = 'true'; name = 'Fast' }) }
+)
+$parameterizedUnsupportedModel = @(
+    @{ id = 'model-picker'; category = 'model'; type = 'select'; currentValue = 'composer-2.5'; options = @(@{ value = 'composer-2.5'; name = 'Composer 2.5' }) }
+)
 while ($null -ne ($line = [Console]::In.ReadLine())) {
     [System.IO.File]::AppendAllText($env:FAKE_ACP_LOG, $line + [Environment]::NewLine, $utf8NoBom)
     $request = $line | ConvertFrom-Json
@@ -23,11 +59,30 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
     } elseif ($request.method -eq 'session/new') {
         $counter++
-        $result = @{ sessionId = "acp-session-$counter"; configOptions = @(@{ id = 'provider-model'; category = 'model'; type = 'select'; currentValue = 'fake/default'; options = @(@{ value = 'fake/default'; name = 'Fake Default' }, @{ value = 'fake/selected'; name = 'Fake Selected' }) }); modes = $modes }
+        $configOptions = @(@{ id = 'provider-model'; category = 'model'; type = 'select'; currentValue = 'fake/default'; options = @(@{ value = 'fake/default'; name = 'Fake Default' }, @{ value = 'fake/selected'; name = 'Fake Selected' }) })
+        if ($env:FAKE_ACP_PARAMETERIZED_CURSOR -eq 'true') { $configOptions = $parameterizedInitial }
+        if ($env:FAKE_ACP_CURSOR_CONFIG -eq 'unsupported_model') { $configOptions = $parameterizedUnsupportedModel }
+        $result = @{ sessionId = "acp-session-$counter"; configOptions = $configOptions; modes = $modes }
     } elseif ($request.method -eq 'session/load') {
-        $result = @{ configOptions = @(@{ id = 'provider-model'; category = 'model'; type = 'select'; currentValue = 'fake/default'; options = @(@{ value = 'fake/default'; name = 'Fake Default' }, @{ value = 'fake/selected'; name = 'Fake Selected' }) }); modes = $modes }
+        $configOptions = @(@{ id = 'provider-model'; category = 'model'; type = 'select'; currentValue = 'fake/default'; options = @(@{ value = 'fake/default'; name = 'Fake Default' }, @{ value = 'fake/selected'; name = 'Fake Selected' }) })
+        if ($env:FAKE_ACP_PARAMETERIZED_CURSOR -eq 'true') { $configOptions = $parameterizedInitial }
+        if ($env:FAKE_ACP_CURSOR_CONFIG -eq 'unsupported_model') { $configOptions = $parameterizedUnsupportedModel }
+        $result = @{ configOptions = $configOptions; modes = $modes }
         if (-not [string]::IsNullOrWhiteSpace($env:FAKE_ACP_LOAD_SESSION_ID)) {
             $result.sessionId = $env:FAKE_ACP_LOAD_SESSION_ID
+        }
+    } elseif ($request.method -eq 'session/set_config_option') {
+        if ($env:FAKE_ACP_PARAMETERIZED_CURSOR -eq 'true') {
+            $configOptions = $parameterizedGrokPreEffort
+            if ($env:FAKE_ACP_CURSOR_CONFIG -eq 'unsupported_effort') { $configOptions = $parameterizedGrokHighOnly }
+            if ($env:FAKE_ACP_CURSOR_CONFIG -eq 'missing_effort') { $configOptions = $parameterizedGrokNoEffort }
+            if ($request.params.configId -eq 'reasoning-picker') { $configOptions = $parameterizedGrok }
+            if ($request.params.value -eq 'composer-2.5') { $configOptions = $parameterizedComposer }
+            if ($request.params.value -eq 'composer-2.5' -and $env:FAKE_ACP_CURSOR_CONFIG -eq 'missing_fast') { $configOptions = $parameterizedComposerNoFast }
+            if ($request.params.value -eq 'composer-2.5' -and $env:FAKE_ACP_CURSOR_CONFIG -eq 'unsupported_fast') { $configOptions = $parameterizedComposerFastOnly }
+            $result = @{ configOptions = $configOptions }
+        } else {
+            $result = @{}
         }
     } elseif ($request.method -eq 'session/prompt') {
         $promptCounter++

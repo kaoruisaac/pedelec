@@ -272,6 +272,59 @@ mod tests {
     }
 
     #[test]
+    fn cursor_persistent_intent_parses_effort_and_fast_as_typed_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_cursor_typed_settings";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Cursor, None, None);
+        runtime
+            .thread_manager
+            .thread_mut(thread_id)
+            .unwrap()
+            .effort_args = vec![
+            "--model".into(),
+            "grok-4.7".into(),
+            "--effort".into(),
+            "xhigh".into(),
+            "--fast".into(),
+            "false".into(),
+        ];
+
+        let session = runtime.build_persistent_session_intent(thread_id).unwrap();
+        assert_eq!(session.model.as_deref(), Some("grok-4.7"));
+        assert_eq!(
+            session.cursor_settings,
+            Some(CursorSessionSettings {
+                effort: Some("xhigh".into()),
+                fast: Some(false),
+            })
+        );
+        assert_eq!(session.reasoning_effort, None);
+        assert_eq!(session.antigravity_reasoning_effort, None);
+        assert_eq!(session.claude_reasoning_effort, None);
+    }
+
+    #[test]
+    fn cursor_explicit_model_only_does_not_synthesize_effort_or_fast() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_cursor_model_only";
+        let runtime = runtime_with_provider_thread(
+            temp.path(),
+            thread_id,
+            ProviderCode::Cursor,
+            None,
+            Some("composer-2.5".into()),
+        );
+
+        let session = runtime.build_persistent_session_intent(thread_id).unwrap();
+        assert_eq!(session.model.as_deref(), Some("composer-2.5"));
+        assert_eq!(
+            session.cursor_settings,
+            Some(CursorSessionSettings::default())
+        );
+    }
+
+    #[test]
     fn claude_persistent_intent_maps_existing_effort_presets() {
         let temp = tempfile::tempdir().unwrap();
         for (level, model, effort, expected) in [
@@ -283,7 +336,7 @@ mod tests {
             ),
             (
                 EffortLevel::Default,
-                "claude-opus-4-8",
+                "claude-opus-5-5",
                 "medium",
                 ClaudeReasoningEffort::Medium,
             ),
@@ -1135,6 +1188,91 @@ mod tests {
     }
 
     #[test]
+    fn update_settings_accepts_only_supported_cursor_model_effort_and_fast_args() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = CoreRuntime {
+            settings_file_path: Some(temp.path().join("settings.json")),
+            provider_path_value_override: Some(OsString::from("")),
+            ..CoreRuntime::default()
+        };
+        let cursor_args = vec![
+            "--model".into(),
+            "grok-4.7".into(),
+            "--effort".into(),
+            "max".into(),
+            "--fast".into(),
+            "false".into(),
+        ];
+        let saved = runtime
+            .update_settings(UpdateSettingsInput {
+                default_provider: ProviderCode::Ollama,
+                provider_settings: ProviderSettingsInput {
+                    ollama: OllamaProviderSettingsInput {
+                        api_key: Some("ollama".into()),
+                        efforts_args: EffortsArgs {
+                            default: vec!["--model".into(), "qwen3:8b".into()],
+                            ..EffortsArgs::default()
+                        },
+                        ..OllamaProviderSettingsInput::default()
+                    },
+                    cursor: CommonProviderSettingsInput {
+                        efforts_args: EffortsArgs {
+                            default: cursor_args.clone(),
+                            low: vec![
+                                "--model".into(),
+                                "composer-2.5".into(),
+                                "--fast".into(),
+                                "true".into(),
+                            ],
+                            high: vec![
+                                "--model".into(),
+                                "grok-4.7".into(),
+                                "--effort".into(),
+                                "xhigh".into(),
+                            ],
+                        },
+                    },
+                    ..ProviderSettingsInput::default()
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            saved.provider_settings.cursor.efforts_args.default,
+            cursor_args
+        );
+
+        for invalid_cursor_args in [
+            vec!["--fast".into(), "sometimes".into()],
+            vec!["--effort".into(), "ultra".into()],
+            vec!["--context".into(), "256k".into()],
+        ] {
+            let error = runtime
+                .update_settings(UpdateSettingsInput {
+                    default_provider: ProviderCode::Ollama,
+                    provider_settings: ProviderSettingsInput {
+                        ollama: OllamaProviderSettingsInput {
+                            api_key: Some("ollama".into()),
+                            efforts_args: EffortsArgs {
+                                default: vec!["--model".into(), "qwen3:8b".into()],
+                                ..EffortsArgs::default()
+                            },
+                            ..OllamaProviderSettingsInput::default()
+                        },
+                        cursor: CommonProviderSettingsInput {
+                            efforts_args: EffortsArgs {
+                                default: invalid_cursor_args,
+                                ..EffortsArgs::default()
+                            },
+                        },
+                        ..ProviderSettingsInput::default()
+                    },
+                })
+                .unwrap_err();
+            assert_eq!(error.code, error_codes::INVALID_INPUT);
+        }
+    }
+
+    #[test]
     fn update_settings_defaults_blank_base_url_and_missing_timeout() {
         let temp = tempfile::tempdir().unwrap();
         let provider_path = test_provider_path(temp.path(), "pedelec-agent");
@@ -1531,15 +1669,46 @@ mod tests {
         )
         .is_err());
 
-        for provider in [
-            ProviderCode::OpenCode,
-            ProviderCode::Cursor,
-            ProviderCode::Ollama,
-        ] {
+        for provider in [ProviderCode::OpenCode, ProviderCode::Ollama] {
             assert!(normalize_efforts_args(
                 provider,
                 EffortsArgs {
                     default: vec!["--effort".into(), "high".into()],
+                    ..EffortsArgs::default()
+                },
+            )
+            .is_err());
+        }
+
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            assert!(normalize_efforts_args(
+                ProviderCode::Cursor,
+                EffortsArgs {
+                    default: vec!["--effort".into(), effort.into()],
+                    ..EffortsArgs::default()
+                },
+            )
+            .is_ok());
+        }
+        for fast in ["true", "false"] {
+            assert!(normalize_efforts_args(
+                ProviderCode::Cursor,
+                EffortsArgs {
+                    default: vec!["--fast".into(), fast.into()],
+                    ..EffortsArgs::default()
+                },
+            )
+            .is_ok());
+        }
+        for invalid in [
+            vec!["--fast".into(), "sometimes".into()],
+            vec!["--effort".into(), "ultra".into()],
+            vec!["--context".into(), "256k".into()],
+        ] {
+            assert!(normalize_efforts_args(
+                ProviderCode::Cursor,
+                EffortsArgs {
+                    default: invalid,
                     ..EffortsArgs::default()
                 },
             )
@@ -1741,6 +1910,51 @@ mod tests {
     }
 
     #[test]
+    fn create_thread_explicit_cursor_model_and_effort_maps_to_acp_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(
+                temp.path().join("workspaces"),
+            ),
+            ..CoreRuntime::default()
+        };
+
+        let output = runtime
+            .create_sdk_thread(
+                CreateThreadInput {
+                    provider: ProviderCode::Cursor,
+                    effort_level: None,
+                    model: Some("grok-4.7".into()),
+                    effort: Some("high".into()),
+                    skills: None,
+                    workspace_id: None,
+                },
+                "https://cursor-test.example",
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .thread_manager
+                .thread(&output.thread_id)
+                .unwrap()
+                .effort_args,
+            vec!["--model", "grok-4.7", "--effort", "high"]
+        );
+        let session = runtime
+            .build_persistent_session_intent(&output.thread_id)
+            .unwrap();
+        assert_eq!(session.model.as_deref(), Some("grok-4.7"));
+        assert_eq!(
+            session.cursor_settings,
+            Some(CursorSessionSettings {
+                effort: Some("high".into()),
+                fast: None,
+            })
+        );
+    }
+
+    #[test]
     fn create_thread_rejects_invalid_explicit_mode_combinations_and_efforts() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = CoreRuntime {
@@ -1780,6 +1994,14 @@ mod tests {
                 effort_level: None,
                 model: Some("agy-model".into()),
                 effort: Some("max".into()),
+                skills: None,
+                workspace_id: None,
+            },
+            CreateThreadInput {
+                provider: ProviderCode::Cursor,
+                effort_level: None,
+                model: Some("grok-4.7".into()),
+                effort: Some("unbounded".into()),
                 skills: None,
                 workspace_id: None,
             },
