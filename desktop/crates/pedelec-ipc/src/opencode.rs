@@ -1138,12 +1138,68 @@ fn resolve_workspace_permission(
         .ok()
         .and_then(|paths| paths.get(&request.pedelec_thread_id).cloned())
         .map(|workspace| {
+            if is_pedelec_helper_execution(&request.tool_call) {
+                return AcpPermissionDecision::AllowOnce;
+            }
             pedelec_runtime::AcpPermissionResolver::resolve(
                 &AcpWorkspacePermissionPolicy::new(workspace),
                 request,
             )
         })
         .unwrap_or(AcpPermissionDecision::RejectOnce)
+}
+
+fn is_pedelec_helper_execution(tool_call: &Value) -> bool {
+    // ACP providers may omit rawInput.command from permission requests. Cursor
+    // keeps the command in title and sometimes in nested content text instead.
+    if tool_call
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "execute")
+    {
+        return false;
+    }
+
+    let mut descriptions = Vec::new();
+    collect_command_descriptions(tool_call, &mut descriptions);
+    descriptions.into_iter().any(|description| {
+        ["pedelec-deno", "pedelec-cli"]
+            .iter()
+            .any(|helper| contains_helper_name(description, helper))
+    })
+}
+
+fn collect_command_descriptions<'a>(value: &'a Value, descriptions: &mut Vec<&'a str>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "command" | "title" | "text") {
+                    if let Some(description) = value.as_str() {
+                        descriptions.push(description);
+                    }
+                } else if matches!(key.as_str(), "rawInput" | "content") {
+                    collect_command_descriptions(value, descriptions);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_command_descriptions(value, descriptions);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn contains_helper_name(description: &str, helper: &str) -> bool {
+    description.match_indices(helper).any(|(start, _)| {
+        let before = description[..start].chars().next_back();
+        let after = description[start + helper.len()..].chars().next();
+        let name_char =
+            |character: char| character.is_ascii_alphanumeric() || matches!(character, '_' | '-');
+        before.is_none_or(|character| !name_char(character))
+            && after.is_none_or(|character| !name_char(character))
+    })
 }
 
 fn opencode_permission_overlay() -> String {
@@ -1778,6 +1834,74 @@ mod tests {
         );
         assert_eq!(
             resolve_workspace_permission(&workspaces, &request("detached", json!("src/lib.rs"))),
+            AcpPermissionDecision::RejectOnce
+        );
+    }
+
+    #[test]
+    fn workspace_permission_allows_pedelec_helpers_from_provider_tool_calls() {
+        let workspace = tempdir().unwrap();
+        let workspaces = Mutex::new(HashMap::from([(
+            "thread-a".to_string(),
+            workspace.path().to_path_buf(),
+        )]));
+        let request = |thread: &str, tool_call: Value| AcpPermissionRequest {
+            pedelec_thread_id: thread.into(),
+            provider_session_id: "session-a".into(),
+            tool_call,
+            options: json!([]),
+        };
+
+        let cursor_stdin = json!({
+            "kind": "execute",
+            "status": "pending",
+            "title": "`@'\nimport { writeNote } from \"memory-manager\";\nawait writeNote(\"hello\");\n'@ | pedelec-deno --thread-id t000004 run -`",
+            "content": [{
+                "type": "content",
+                "content": {
+                    "type": "text",
+                    "text": "Not in allowlist: @' ... '@, pedelec-deno"
+                }
+            }]
+        });
+        assert_eq!(
+            resolve_workspace_permission(&workspaces, &request("thread-a", cursor_stdin)),
+            AcpPermissionDecision::AllowOnce
+        );
+
+        for tool_call in [
+            json!({ "kind": "execute", "rawInput": { "command": "pedelec-deno --thread-id t000004 run scripts/task.ts" } }),
+            json!({ "kind": "execute", "command": "pedelec-deno --thread-id t000004 run -" }),
+            json!({ "kind": "execute", "title": "pedelec-cli --thread-id t000004 tool-spec ask_user" }),
+            json!({ "kind": "execute", "command": "pedelec-cli --thread-id t000004 tool-call ask_user '{}'" }),
+            json!({ "kind": "execute", "content": [{ "content": { "text": "Not in allowlist: pedelec-cli" } }] }),
+        ] {
+            assert_eq!(
+                resolve_workspace_permission(&workspaces, &request("thread-a", tool_call)),
+                AcpPermissionDecision::AllowOnce
+            );
+        }
+
+        for tool_call in [
+            json!({ "kind": "execute", "command": "some-random-command --foo" }),
+            json!({ "kind": "execute", "command": "other-pedelec-deno --foo" }),
+            json!({ "kind": "execute", "command": "pedelec-deno-extra --foo" }),
+            json!({ "kind": "read", "title": "pedelec-deno" }),
+            json!({ "kind": "execute", "message": "pedelec-deno" }),
+        ] {
+            assert_eq!(
+                resolve_workspace_permission(&workspaces, &request("thread-a", tool_call)),
+                AcpPermissionDecision::RejectOnce
+            );
+        }
+        assert_eq!(
+            resolve_workspace_permission(
+                &workspaces,
+                &request(
+                    "detached",
+                    json!({ "kind": "execute", "command": "pedelec-deno run -" })
+                )
+            ),
             AcpPermissionDecision::RejectOnce
         );
     }
