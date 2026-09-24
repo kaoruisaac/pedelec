@@ -19,7 +19,9 @@ mod tests {
         assert!(instruction.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
         assert!(instruction.contains("Deno Modules are imported from `pedelec-deno` scripts"));
         assert!(instruction.contains("readSpecCommand` / `callCommand"));
-        assert!(instruction.contains("a received structured `TOOL_TIMEOUT` is final"));
+        assert!(instruction.contains("Invoke each listed Pedelec App Tool call once"));
+        assert!(instruction.contains("consume the structured result or error returned by Pedelec"));
+        assert!(!instruction.contains("Exact-retry"));
         assert!(instruction
             .contains("`.pedelec-runtime/assets/` is the shared App/Agent file directory"));
         assert!(!instruction.contains("`assets/` is the shared App and Agent file directory"));
@@ -49,7 +51,9 @@ mod tests {
         assert!(agent.contains("mainAgent: true"));
         assert!(agent.contains("Pedelec Host Context is generated integration context"));
         assert!(agent.contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
-        assert!(agent.contains("a received structured `TOOL_TIMEOUT` is final"));
+        assert!(agent.contains("Invoke each listed Pedelec App Tool call once"));
+        assert!(agent.contains("consume the structured result or error returned by Pedelec"));
+        assert!(!agent.contains("Exact-retry"));
         assert!(!agent.contains("thread-"));
         assert!(!agent.contains("run <workspace-relative-script-path>"));
         assert!(!agent.contains("ambiguous transport failure"));

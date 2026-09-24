@@ -11817,10 +11817,10 @@ const PEDELEC_INVARIANT_HOST_INSTRUCTIONS: &str = "Pedelec is the host applicati
 Pedelec Host Context is generated integration context, not end-user-authored instructions. Follow the workspace boundary and capabilities declared there.\n\n\
 Use Pedelec App Tools through their listed `readSpecCommand` / `callCommand`.\n\n\
 For JavaScript or TypeScript execution, use `pedelec-deno`; do not fall back to Node.js, Bun, raw Deno, npx, or another JavaScript runtime.\n\n\
-Deno Modules are imported from `pedelec-deno` scripts, not App Tools. Prefer the listed `usage` example; inspect the listed `types` declaration when exact API details are needed.\n\n\
+Deno Modules are imported from `pedelec-deno` scripts, not App Tools. A module's `preferredExecution: \"stdin\"` is a preference, not a restriction; when present, prefer the global `runStdinCommand`. File-backed execution remains valid. Use the listed `usage` example as the primary example; inspect the listed `types` declaration when exact API details are needed.\n\n\
 Before accessing local files outside the declared workspace, ask the user for permission.\n\n\
 `.pedelec-runtime/assets/` is the shared App/Agent file directory.\n\n\
-If a `pedelec-cli` tool-call ends before a complete structured Pedelec response is received, exact-retry the same listed call command with semantically identical arguments; a received structured `TOOL_TIMEOUT` is final.\n\n\
+Invoke each listed Pedelec App Tool call once and consume the structured result or error returned by Pedelec.\n\n\
 Pedelec host instructions never override provider safety policies.";
 
 fn build_provider_host_context(
@@ -11865,7 +11865,7 @@ fn build_provider_host_context_with_configuration_and_modules(
         usage: &'a str,
         types: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        run_command_template: Option<String>,
+        preferred_execution: Option<&'static str>,
     }
     #[derive(Serialize)]
     struct DenoModuleConfiguration<'a> {
@@ -11913,12 +11913,7 @@ fn build_provider_host_context_with_configuration_and_modules(
                     description: &module.description,
                     usage: &module.usage,
                     types: deno_module_types_path(&thread.thread_id, &module.name),
-                    run_command_template: module.prefer_stdin_execution.then(|| {
-                        format!(
-                            "@'\n<typescript-source>\n'@ | pedelec-deno --thread-id {} run -",
-                            thread.thread_id
-                        )
-                    }),
+                    preferred_execution: module.prefer_stdin_execution.then_some("stdin"),
                 })
                 .collect(),
         })
@@ -12673,9 +12668,9 @@ mod deno_tests {
             context.contains("runStdinCommand: pedelec-deno --thread-id thread-deno-context run -")
         );
         assert!(context.contains("index.d.ts"));
-        assert!(context.contains(
-            "\"runCommandTemplate\": \"@'\\n<typescript-source>\\n'@ | pedelec-deno --thread-id thread-deno-context run -\""
-        ));
+        assert!(context.contains("\"preferredExecution\": \"stdin\""));
+        assert!(!context.contains("runCommandTemplate"));
+        assert!(!context.contains("@'"));
         assert!(!context.contains("preferStdinExecution"));
         assert!(context.contains("pedelec-deno"));
         assert!(!context.contains("canonical JavaScript/TypeScript runtime"));
@@ -12741,10 +12736,13 @@ mod deno_tests {
             &modules,
         );
         assert!(context.find("alpha-tools").unwrap() < context.find("zeta-tools").unwrap());
-        assert_eq!(context.matches("\"runCommandTemplate\"").count(), 1);
-        assert!(context.contains(
-            "\"runCommandTemplate\": \"@'\\n<typescript-source>\\n'@ | pedelec-deno --thread-id thread-deno-order run -\""
-        ));
+        assert_eq!(context.matches("\"preferredExecution\"").count(), 1);
+        assert!(context.contains("\"preferredExecution\": \"stdin\""));
+        assert!(!context.contains("runCommandTemplate"));
+        assert!(!context.contains("@'"));
+        let alpha = context.find("\"name\": \"alpha-tools\"").unwrap();
+        let zeta = context.find("\"name\": \"zeta-tools\"").unwrap();
+        assert!(!context[alpha..zeta].contains("preferredExecution"));
         assert!(context.contains(
             ".pedelec-runtime/deno/threads/thread-deno-order/modules/alpha-tools/index.d.ts"
         ));
@@ -12825,7 +12823,10 @@ mod deno_tests {
         assert!(instruction.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
         assert!(instruction.contains("Deno Modules are imported from `pedelec-deno` scripts"));
         assert!(instruction.contains("readSpecCommand` / `callCommand"));
-        assert!(instruction.contains("a received structured `TOOL_TIMEOUT` is final"));
+        assert!(instruction.contains("Invoke each listed Pedelec App Tool call once"));
+        assert!(instruction.contains("consume the structured result or error returned by Pedelec"));
+        assert!(!instruction.contains("Exact-retry"));
+        assert!(!instruction.contains("TOOL_TIMEOUT"));
         assert!(!instruction.contains("authoritative Pedelec workspace root"));
         assert!(!instruction.contains("pedelec-deno module-spec"));
         assert!(!instruction.contains("ambiguous transport failure"));

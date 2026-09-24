@@ -9,6 +9,7 @@ use crate::{
     ProviderRuntimeController, RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent,
     RpcServerRequest, RuntimeControllerError, RuntimeEvent,
 };
+use pedelec_shared::paths::path_for_external_use;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -714,7 +715,7 @@ impl AcpController {
 
         self.transport
             .register_protocol_log(pedelec_thread_id, &self.provider_label, &config.cwd);
-        let cwd = config.cwd.to_string_lossy();
+        let cwd = path_for_external_use(&config.cwd);
         let (method, params) = match persisted_provider_session_id {
             Some(session_id) => {
                 if !self.supports_load() {
@@ -2573,6 +2574,57 @@ mod tests {
             frame["method"] == "session/load" && frame["params"]["sessionId"] == "persisted-session"
         }));
         controller.shutdown().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn session_new_and_load_externalize_verbatim_workspace_paths() {
+        let expected = PathBuf::from(r"C:\workspace\project");
+        let verbatim = PathBuf::from(r"\\?\C:\workspace\project");
+
+        let new_fixture = FakeAcpAgent::new(true);
+        let new_controller = AcpController::spawn(
+            new_fixture.launch(),
+            Arc::new(|_: &AcpPermissionRequest| AcpPermissionDecision::RejectOnce),
+        )
+        .unwrap();
+        new_controller
+            .ensure_session("thread-new", None, &AcpSessionConfig::new(&verbatim))
+            .unwrap();
+        let new_request = new_fixture
+            .frames()
+            .into_iter()
+            .find(|frame| frame["method"] == "session/new")
+            .unwrap();
+        assert_eq!(
+            new_request["params"]["cwd"],
+            expected.to_string_lossy().as_ref()
+        );
+        new_controller.shutdown().unwrap();
+
+        let load_fixture = FakeAcpAgent::new(true);
+        let load_controller = AcpController::spawn(
+            load_fixture.launch(),
+            Arc::new(|_: &AcpPermissionRequest| AcpPermissionDecision::RejectOnce),
+        )
+        .unwrap();
+        load_controller
+            .ensure_session(
+                "thread-load",
+                Some("persisted-session"),
+                &AcpSessionConfig::new(&verbatim),
+            )
+            .unwrap();
+        let load_request = load_fixture
+            .frames()
+            .into_iter()
+            .find(|frame| frame["method"] == "session/load")
+            .unwrap();
+        assert_eq!(
+            load_request["params"]["cwd"],
+            expected.to_string_lossy().as_ref()
+        );
+        load_controller.shutdown().unwrap();
     }
 
     #[test]

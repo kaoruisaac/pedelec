@@ -112,11 +112,11 @@ Design handlers to settle before the deadline and implement application-side can
 
 ### Provider command timeout versus App Tool timeout
 
-A provider shell or terminal can stop waiting for `pedelec-cli --thread-id <pedelec_thread_id> tool-call` before Core's `timeoutMs` deadline. That provider command timeout is an ambiguous transport failure; it does not prove that the App Tool failed. If the agent did not receive a complete structured Pedelec response, it may retry with the exact same tool name and semantically identical arguments. Core can join the still-running invocation or replay a recently completed result whose delivery was not confirmed. Do not change the arguments or retry indefinitely.
+A provider shell or terminal can stop waiting for `pedelec-cli --thread-id <pedelec_thread_id> tool-call` before Core's `timeoutMs` deadline. That provider command timeout is an ambiguous transport failure; it does not prove that the App Tool failed. If `pedelec-cli` itself observes an IPC/transport failure before receiving a structured Core response, it automatically makes one immediate retry with the same request identity and payload. Core can join the still-running invocation or replay a recently completed result whose delivery was not confirmed, so this recovery does not intentionally dispatch a second invocation with different semantics. It cannot recover if the provider forcibly terminates the `pedelec-cli` process before the CLI can make its internal retry.
 
-When `pedelec-cli` detects an IPC/transport failure for a `tool-call`, its structured error includes concise guidance to exact-retry the same listed call command with semantically identical arguments. Successful calls, normal structured App Tool errors, and formal `TOOL_TIMEOUT` responses do not receive this transport-retry guidance.
+Structured Core responses are final for that CLI invocation, including `TOOL_TIMEOUT` and other App Tool/Core errors. Agents should consume the returned structured result or error; Host Context no longer asks them to exact-retry an incomplete `pedelec-cli` call.
 
-When Core reaches the App Tool's `timeoutMs`, it returns the formal `TOOL_TIMEOUT` structured error. A received `TOOL_TIMEOUT` means the original invocation has ended; it is not an instruction to continue the same invocation. A result whose IPC delivery was not confirmed may be replayed briefly, but a successfully delivered result is not retained as a general deduplication cache.
+When Core reaches the App Tool's `timeoutMs`, it returns the formal `TOOL_TIMEOUT` structured error. A received `TOOL_TIMEOUT` means the original invocation has ended; it is not retried by the CLI and is not an instruction to continue the same invocation. A result whose IPC delivery was not confirmed may be replayed briefly, but a successfully delivered result is not retained as a general deduplication cache.
 
 ## Serialization failures
 
@@ -181,8 +181,9 @@ session.onTool("move_shape", (raw) => {
 | User cancelled | No unless user explicitly requests again |
 | Handler threw before any side effect | Possibly, if operation is known idempotent |
 | Result submission failed after mutation | Usually no; reconcile state first |
-| Ambiguous provider command/transport timeout before a complete Pedelec response | An exact retry is allowed; Core joins or replays the same logical invocation |
-| Received formal `TOOL_TIMEOUT` | Do not treat it as an in-flight retry; reconcile possible side effects |
+| Ambiguous Core IPC/transport failure observed by `pedelec-cli` before a structured response | The CLI makes one immediate internal retry with the same request; Core can join or replay the invocation |
+| Provider forcibly terminates `pedelec-cli` before its internal retry | The CLI cannot recover; handle the incomplete command result as ambiguous |
+| Received structured `TOOL_TIMEOUT` or another Core/App Tool error | The CLI does not retry it; reconcile possible side effects where applicable |
 | Stale UI lifecycle | No; agent should read current state first |
 
 Include idempotency keys or expected-version fields in tools that can safely support retries.

@@ -20,7 +20,7 @@ use pedelec_runtime::{
 use pedelec_shared::paths::path_for_external_use;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -30,11 +30,11 @@ use std::net::{TcpListener, TcpStream};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 #[cfg(test)]
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -58,6 +58,10 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub const CORE_IPC_PROTOCOL: &str = "pedelec-core-ipc-v1";
 pub const CORE_IPC_HOST: &str = "127.0.0.1";
 pub const MAX_CORE_IPC_MESSAGE_BYTES: usize = 1024 * 1024;
+const TOOL_CALL_REQUEST_IDEMPOTENCY_WINDOW: Duration = Duration::from_secs(10);
+const TOOL_CALL_REQUEST_IDEMPOTENCY_MAX_ENTRIES: usize = 256;
+const TOOL_CALL_REQUEST_IDEMPOTENCY_MAX_BYTES: usize = 16 * MAX_CORE_IPC_MESSAGE_BYTES;
+const TOOL_CALL_REQUEST_IDEMPOTENCY_DELIVERY_ID_RESERVE_BYTES: usize = 256;
 
 /// The IPC layer owns dispatch orchestration, while the desktop runtime owns
 /// the persistent provider implementation. Implementations must enqueue or
@@ -1356,9 +1360,233 @@ struct RawCoreIpcRequest {
     caller_sdk_version: Option<String>,
 }
 
+#[derive(Clone)]
 struct HandledCoreIpcResponse {
     response: CoreIpcResponse,
     tool_delivery_request_id: Option<String>,
+}
+
+#[derive(Default)]
+struct CoreIpcToolCallRequestCache {
+    inner: Mutex<CoreIpcToolCallRequestCacheInner>,
+}
+
+#[derive(Default)]
+struct CoreIpcToolCallRequestCacheInner {
+    entries: HashMap<String, Arc<CoreIpcToolCallRequestCacheEntry>>,
+    reserved_bytes: usize,
+}
+
+struct CoreIpcToolCallRequestCacheEntry {
+    request_identity: Vec<u8>,
+    request_id_bytes: usize,
+    reserved_bytes: AtomicUsize,
+    state: Mutex<CoreIpcToolCallRequestCacheEntryState>,
+    ready: Condvar,
+}
+
+enum CoreIpcToolCallRequestCacheEntryState {
+    Pending,
+    Ready {
+        response: Vec<u8>,
+        tool_delivery_request_id: Option<String>,
+        completed_at: Instant,
+    },
+}
+
+enum CoreIpcToolCallRequestCacheClaim {
+    Owner(Arc<CoreIpcToolCallRequestCacheEntry>),
+    Existing(Arc<CoreIpcToolCallRequestCacheEntry>),
+}
+
+impl CoreIpcToolCallRequestCache {
+    fn acquire(
+        &self,
+        request: &CoreIpcRequest,
+    ) -> Result<Option<CoreIpcToolCallRequestCacheClaim>, PedelecError> {
+        let mut inner = self.inner.lock().unwrap();
+        Self::purge_expired(&mut inner, Instant::now());
+
+        if let Some(entry) = inner.entries.get(&request.request_id).cloned() {
+            let request_identity = serde_json::to_vec(request)
+                .map_err(|_| Self::cache_capacity_error(&request.request_id))?;
+            if entry.request_identity != request_identity {
+                return Err(Self::request_id_collision_error(&request.request_id));
+            }
+            if request.r#type != "tool_call" {
+                return Err(Self::request_id_collision_error(&request.request_id));
+            }
+            return Ok(Some(CoreIpcToolCallRequestCacheClaim::Existing(entry)));
+        }
+
+        if request.r#type != "tool_call" {
+            return Ok(None);
+        }
+
+        let request_identity = serde_json::to_vec(request)
+            .map_err(|_| Self::cache_capacity_error(&request.request_id))?;
+        let reserved_bytes = request_identity
+            .len()
+            .saturating_add(request.request_id.len())
+            .saturating_add(MAX_CORE_IPC_MESSAGE_BYTES)
+            .saturating_add(TOOL_CALL_REQUEST_IDEMPOTENCY_DELIVERY_ID_RESERVE_BYTES);
+        if reserved_bytes > TOOL_CALL_REQUEST_IDEMPOTENCY_MAX_BYTES {
+            return Err(Self::cache_capacity_error(&request.request_id));
+        }
+
+        while inner.entries.len() >= TOOL_CALL_REQUEST_IDEMPOTENCY_MAX_ENTRIES
+            || inner.reserved_bytes.saturating_add(reserved_bytes)
+                > TOOL_CALL_REQUEST_IDEMPOTENCY_MAX_BYTES
+        {
+            let oldest_completed_id = inner
+                .entries
+                .iter()
+                .filter_map(|(request_id, entry)| {
+                    Self::completed_at(entry).map(|completed_at| (request_id.clone(), completed_at))
+                })
+                .min_by_key(|(_, completed_at)| *completed_at)
+                .map(|(request_id, _)| request_id);
+            let Some(oldest_completed_id) = oldest_completed_id else {
+                return Err(Self::cache_capacity_error(&request.request_id));
+            };
+            Self::remove_entry(&mut inner, &oldest_completed_id);
+        }
+
+        let entry = Arc::new(CoreIpcToolCallRequestCacheEntry {
+            request_identity,
+            request_id_bytes: request.request_id.len(),
+            reserved_bytes: AtomicUsize::new(reserved_bytes),
+            state: Mutex::new(CoreIpcToolCallRequestCacheEntryState::Pending),
+            ready: Condvar::new(),
+        });
+        inner.reserved_bytes += reserved_bytes;
+        inner
+            .entries
+            .insert(request.request_id.clone(), Arc::clone(&entry));
+        Ok(Some(CoreIpcToolCallRequestCacheClaim::Owner(entry)))
+    }
+
+    fn complete(
+        &self,
+        entry: &CoreIpcToolCallRequestCacheEntry,
+        handled: HandledCoreIpcResponse,
+    ) -> Result<(), PedelecError> {
+        let response = serde_json::to_vec(&handled.response).map_err(|_| {
+            PedelecError::new(
+                error_codes::IPC_UNAVAILABLE,
+                "Core IPC tool-call response could not be cached",
+            )
+        })?;
+        let mut inner = self.inner.lock().unwrap();
+        let mut state = entry.state.lock().unwrap();
+        let retained_bytes = entry
+            .request_identity
+            .len()
+            .saturating_add(entry.request_id_bytes)
+            .saturating_add(response.len())
+            .saturating_add(
+                handled
+                    .tool_delivery_request_id
+                    .as_ref()
+                    .map_or(0, String::len),
+            );
+        let reserved_bytes = entry.reserved_bytes.load(Ordering::Relaxed);
+        if retained_bytes <= reserved_bytes {
+            inner.reserved_bytes = inner
+                .reserved_bytes
+                .saturating_sub(reserved_bytes - retained_bytes);
+            entry
+                .reserved_bytes
+                .store(retained_bytes, Ordering::Relaxed);
+        }
+        *state = CoreIpcToolCallRequestCacheEntryState::Ready {
+            response,
+            tool_delivery_request_id: handled.tool_delivery_request_id,
+            completed_at: Instant::now(),
+        };
+        entry.ready.notify_all();
+        Ok(())
+    }
+
+    fn wait_for_result(
+        entry: &CoreIpcToolCallRequestCacheEntry,
+    ) -> Result<HandledCoreIpcResponse, PedelecError> {
+        let mut state = entry.state.lock().unwrap();
+        loop {
+            match &*state {
+                CoreIpcToolCallRequestCacheEntryState::Pending => {
+                    state = entry.ready.wait(state).unwrap();
+                }
+                CoreIpcToolCallRequestCacheEntryState::Ready {
+                    response,
+                    tool_delivery_request_id,
+                    ..
+                } => {
+                    let response = serde_json::from_slice(response).map_err(|_| {
+                        PedelecError::new(
+                            error_codes::IPC_UNAVAILABLE,
+                            "cached Core IPC tool-call response was invalid",
+                        )
+                    })?;
+                    return Ok(HandledCoreIpcResponse {
+                        response,
+                        tool_delivery_request_id: tool_delivery_request_id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn purge_expired(inner: &mut CoreIpcToolCallRequestCacheInner, now: Instant) {
+        let expired_ids = inner
+            .entries
+            .iter()
+            .filter_map(|(request_id, entry)| {
+                Self::completed_at(entry)
+                    .filter(|completed_at| {
+                        now.saturating_duration_since(*completed_at)
+                            >= TOOL_CALL_REQUEST_IDEMPOTENCY_WINDOW
+                    })
+                    .map(|_| request_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for request_id in expired_ids {
+            Self::remove_entry(inner, &request_id);
+        }
+    }
+
+    fn completed_at(entry: &CoreIpcToolCallRequestCacheEntry) -> Option<Instant> {
+        match &*entry.state.lock().unwrap() {
+            CoreIpcToolCallRequestCacheEntryState::Pending => None,
+            CoreIpcToolCallRequestCacheEntryState::Ready { completed_at, .. } => {
+                Some(*completed_at)
+            }
+        }
+    }
+
+    fn remove_entry(inner: &mut CoreIpcToolCallRequestCacheInner, request_id: &str) {
+        if let Some(entry) = inner.entries.remove(request_id) {
+            inner.reserved_bytes = inner
+                .reserved_bytes
+                .saturating_sub(entry.reserved_bytes.load(Ordering::Relaxed));
+        }
+    }
+
+    fn request_id_collision_error(request_id: &str) -> PedelecError {
+        PedelecError::with_details(
+            error_codes::IPC_UNAVAILABLE,
+            "Core IPC requestId was reused for a different request",
+            serde_json::json!({ "requestId": bounded_response_request_id(request_id) }),
+        )
+    }
+
+    fn cache_capacity_error(request_id: &str) -> PedelecError {
+        PedelecError::with_details(
+            error_codes::IPC_UNAVAILABLE,
+            "Core IPC tool-call idempotency capacity is temporarily full",
+            serde_json::json!({ "requestId": bounded_response_request_id(request_id) }),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1516,6 +1744,7 @@ pub fn start_core_ipc_server_with_runtime_path_services_dispatchers(
         .unwrap()
         .set_core_ipc_runtime(runtime_file.endpoint.clone(), runtime_file_path.clone());
 
+    let tool_call_request_cache = Arc::new(CoreIpcToolCallRequestCache::default());
     thread::spawn(move || {
         for incoming in listener.incoming() {
             let Ok(stream) = incoming else {
@@ -1525,6 +1754,7 @@ pub fn start_core_ipc_server_with_runtime_path_services_dispatchers(
             let platform_services = Arc::clone(&platform_services);
             let persistent_dispatcher = Arc::clone(&persistent_dispatcher);
             let deno_dispatcher = Arc::clone(&deno_dispatcher);
+            let tool_call_request_cache = Arc::clone(&tool_call_request_cache);
             thread::spawn(move || {
                 let _ = handle_core_ipc_connection(
                     stream,
@@ -1532,6 +1762,7 @@ pub fn start_core_ipc_server_with_runtime_path_services_dispatchers(
                     platform_services,
                     persistent_dispatcher,
                     deno_dispatcher,
+                    tool_call_request_cache,
                 );
             });
         }
@@ -1670,6 +1901,7 @@ fn handle_core_ipc_connection(
     platform_services: Arc<dyn CoreIpcPlatformServices>,
     persistent_dispatcher: Arc<dyn PersistentRuntimeDispatcher>,
     deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
+    tool_call_request_cache: Arc<CoreIpcToolCallRequestCache>,
 ) -> io::Result<()> {
     let reader_stream = stream.try_clone()?;
     let mut reader = BufReader::new(reader_stream);
@@ -1720,6 +1952,16 @@ fn handle_core_ipc_connection(
             }
         };
 
+        let tool_call_claim = match tool_call_request_cache.acquire(&request) {
+            Ok(claim) => claim,
+            Err(err) => {
+                let response = error_response(&request.request_id, err);
+                let mut writer = writer.lock().unwrap();
+                write_core_ipc_response(&mut *writer, &response, Some(&request.r#type))?;
+                continue;
+            }
+        };
+
         if request.r#type == "subscribe_thread" {
             let (response, subscription) = handle_subscribe_thread(&request, &runtime);
             {
@@ -1734,7 +1976,44 @@ fn handle_core_ipc_connection(
 
         let request_type = request.r#type.clone();
         let handled = if request.r#type == "tool_call" {
-            handle_tool_call_request_with_metadata(&request, Arc::clone(&runtime))
+            match tool_call_claim {
+                Some(CoreIpcToolCallRequestCacheClaim::Owner(entry)) => {
+                    let mut handled =
+                        handle_tool_call_request_with_metadata(&request, Arc::clone(&runtime));
+                    handled.response =
+                        bounded_core_ipc_response(&handled.response, Some(&request_type));
+                    match tool_call_request_cache.complete(&entry, handled.clone()) {
+                        Ok(()) => handled,
+                        Err(err) => {
+                            let fallback = HandledCoreIpcResponse {
+                                response: error_response(&request.request_id, err),
+                                tool_delivery_request_id: None,
+                            };
+                            let _ = tool_call_request_cache.complete(&entry, fallback.clone());
+                            fallback
+                        }
+                    }
+                }
+                Some(CoreIpcToolCallRequestCacheClaim::Existing(entry)) => {
+                    match CoreIpcToolCallRequestCache::wait_for_result(&entry) {
+                        Ok(handled) => handled,
+                        Err(err) => HandledCoreIpcResponse {
+                            response: error_response(&request.request_id, err),
+                            tool_delivery_request_id: None,
+                        },
+                    }
+                }
+                None => HandledCoreIpcResponse {
+                    response: error_response(
+                        &request.request_id,
+                        PedelecError::new(
+                            error_codes::IPC_UNAVAILABLE,
+                            "Core IPC tool-call request could not be registered",
+                        ),
+                    ),
+                    tool_delivery_request_id: None,
+                },
+            }
         } else {
             HandledCoreIpcResponse {
                 response: handle_core_ipc_request_with_services(
@@ -1794,11 +2073,22 @@ fn write_core_ipc_response<W: Write>(
     response: &CoreIpcResponse,
     request_type: Option<&str>,
 ) -> io::Result<()> {
-    let payload = serde_json::to_vec(response)?;
-    if payload.len() <= MAX_CORE_IPC_MESSAGE_BYTES {
-        writer.write_all(&payload)?;
-        writer.write_all(b"\n")?;
-        return writer.flush();
+    let bounded_response = bounded_core_ipc_response(response, request_type);
+    let payload = serde_json::to_vec(&bounded_response)?;
+    writer.write_all(&payload)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+fn bounded_core_ipc_response(
+    response: &CoreIpcResponse,
+    request_type: Option<&str>,
+) -> CoreIpcResponse {
+    let payload_too_large = serde_json::to_vec(response)
+        .map(|payload| payload.len() > MAX_CORE_IPC_MESSAGE_BYTES)
+        .unwrap_or(true);
+    if !payload_too_large {
+        return response.clone();
     }
 
     let error = match request_type {
@@ -1815,21 +2105,21 @@ fn write_core_ipc_response<W: Write>(
             "Core IPC response exceeds size limit",
         ),
     };
-    let mut fallback = error_response(&bounded_response_request_id(&response.request_id), error);
-    let mut fallback_payload = serde_json::to_vec(&fallback)?;
-    if fallback_payload.len() > MAX_CORE_IPC_MESSAGE_BYTES {
-        fallback = error_response(
-            "",
-            PedelecError::new(
-                error_codes::MESSAGE_TOO_LARGE,
-                "Core IPC response exceeds size limit",
-            ),
-        );
-        fallback_payload = serde_json::to_vec(&fallback)?;
+    let fallback = error_response(&bounded_response_request_id(&response.request_id), error);
+    if serde_json::to_vec(&fallback)
+        .map(|payload| payload.len() <= MAX_CORE_IPC_MESSAGE_BYTES)
+        .unwrap_or(false)
+    {
+        return fallback;
     }
-    writer.write_all(&fallback_payload)?;
-    writer.write_all(b"\n")?;
-    writer.flush()
+
+    error_response(
+        "",
+        PedelecError::new(
+            error_codes::MESSAGE_TOO_LARGE,
+            "Core IPC response exceeds size limit",
+        ),
+    )
 }
 
 fn bounded_response_request_id(request_id: &str) -> String {

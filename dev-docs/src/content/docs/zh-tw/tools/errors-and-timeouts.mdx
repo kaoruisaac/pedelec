@@ -102,11 +102,11 @@ Handler 應在 deadline 前 settle，並自行實作 cancellation/cleanup。
 
 ### Provider command timeout 與 App Tool formal timeout
 
-Provider 的 shell 或 terminal 可能在 Core 的 `timeoutMs` deadline 前停止等待 `pedelec-cli --thread-id <pedelec_thread_id> tool-call`。這是 ambiguous transport failure，不代表 App Tool 已失敗。若 Agent 沒有收到完整 structured Pedelec response，可以用完全相同的 tool name 與語意完全相同的 arguments exact retry；Core 會 join 仍在執行的 invocation，或 replay 最近完成但尚未確認 delivery 的 result。不要改 arguments，也不要無限 retry。
+Provider 的 shell 或 terminal 可能在 Core 的 `timeoutMs` deadline 前停止等待 `pedelec-cli --thread-id <pedelec_thread_id> tool-call`。這是 ambiguous transport failure，不代表 App Tool 已失敗。若 `pedelec-cli` 本身在收到 structured Core response 前偵測到 IPC/transport failure，會自動使用相同 request identity 與 payload 立即 retry 一次。Core 可 join 仍在執行的 invocation，或 replay 最近完成但尚未確認 delivery 的 result，因此 recovery 不會刻意以不同語意 dispatch 第二個 invocation。若 provider 在 CLI 執行內部 retry 前強制終止 `pedelec-cli` process，則無法透過此機制恢復。
 
-當 `pedelec-cli` 偵測到 `tool-call` 的 IPC/transport failure 時，回傳的 structured error 會附上簡短指示，要求對同一個 listed call command 使用語意完全相同的 arguments exact retry。成功呼叫、一般 structured App Tool error 與正式的 `TOOL_TIMEOUT` response 不會附加這個 transport-retry 指示。
+Structured Core response 對該次 CLI invocation 都是 final，包括 `TOOL_TIMEOUT` 及其他 App Tool/Core error。Agent 應使用回傳的 structured result 或 error；Host Context 不再要求 Agent 對未完整收到的 `pedelec-cli` call exact retry。
 
-Core 到達 App Tool 的 `timeoutMs` 時，會回傳正式的 `TOOL_TIMEOUT` structured error。收到 `TOOL_TIMEOUT` 代表原 invocation 已結束，不是繼續同一 invocation 的 in-flight retry 指示。只有 IPC delivery 未確認的 result 可能在短時間內 replay；成功 delivery 的 result 不會作為一般 deduplication cache 保留。
+Core 到達 App Tool 的 `timeoutMs` 時，會回傳正式的 `TOOL_TIMEOUT` structured error。收到 `TOOL_TIMEOUT` 代表原 invocation 已結束；CLI 不會 retry 這個 structured response，也不能把它當成繼續同一 invocation 的指示。只有 IPC delivery 未確認的 result 可能在短時間內 replay；成功 delivery 的 result 不會作為一般 deduplication cache 保留。
 
 ## Serialization failures
 
@@ -171,8 +171,9 @@ session.onTool("move_shape", (raw) => {
 | User cancelled | 除非使用者重新要求，否則不可 |
 | Handler 在 side effect 前 throw | Operation 已知 idempotent 時可能可以 |
 | Mutation 後 result submission failed | 通常不可；先 reconcile state |
-| 收到完整 Pedelec response 前的 ambiguous provider command/transport timeout | 可以 exact retry；Core 會 join 或 replay 同一 logical invocation |
-| 已收到正式 `TOOL_TIMEOUT` | 不要當成 in-flight retry；先 reconcile 可能的 side effect |
+| `pedelec-cli` 在收到 structured response 前偵測到 ambiguous Core IPC/transport failure | CLI 使用相同 request 立即內部 retry 一次；Core 可 join 或 replay 該 invocation |
+| Provider 在 CLI 內部 retry 前強制終止 `pedelec-cli` | CLI 無法恢復；將未完成的 command result 視為 ambiguous |
+| 已收到 structured `TOOL_TIMEOUT` 或其他 Core/App Tool error | CLI 不會 retry；適用時先 reconcile 可能的 side effect |
 | Stale UI lifecycle | 不可；agent 應先讀 current state |
 
 需要安全 retry 的 tool 可加入 idempotency key 或 expected-version field。

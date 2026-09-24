@@ -105,7 +105,7 @@ Plugin 會在轉換後的 module object 上附加 private、non-enumerable 的 r
 
 Agent 會在以 `pedelec-deno` 執行的 JavaScript/TypeScript script 中，以 logical `name` import module，不會以 private filesystem path 執行 module。Host Context 會列出 name、description、usage，以及 workspace-relative 的 `index.d.ts` pointer，供精確 API discovery；generated `index.mjs` 是 implementation fallback，不是一般 API reference。
 
-`preferStdinExecution` 是主要用於短 script 的 optional boolean preference。設為 `true` 時，Host Context 會加入 module-specific `runCommandTemplate`，例如 `@'\n<typescript-source>\n'@ | pedelec-deno --thread-id <thread-id> run -`，讓 Agent 只需要替換 TypeScript source placeholder，不必自行決定如何序列化 stdin；raw preference flag 不會暴露在 Agent-facing object。這不是限制，file-backed execution 仍然有效；省略或設為 `false` 會維持預設行為，也不會影響 bundling 或 artifact contents。
+`preferStdinExecution` 是主要用於短 script 的公開 optional authoring metadata。設為 `true` 時，Host Context 會以 `preferredExecution: "stdin"` 表示；Agent 應優先使用全域 `runStdinCommand`。Host Context 不會暴露 raw authoring flag，共用 contract 也不包含 provider-specific shell syntax。這是 preference 而非限制，file-backed execution 仍然有效；省略或設為 `false` 時不會出現 `preferredExecution`，也不會影響 bundling 或 artifact contents。
 
 `entry` 支援 local relative file、Vite alias，以及已安裝的 bare/package `exports` specifier。它只在 build-time 使用；Desktop 不會解析它，runtime 也不能 fetch npm、JSR 或 network。Imported module 和 Agent script 共用相同受限制的 Pedelec Deno permissions。
 

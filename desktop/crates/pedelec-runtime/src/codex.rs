@@ -8,6 +8,7 @@ use crate::{
     PersistentProcessSpec, PersistentRuntimeController, ProtocolTrafficRecord, RpcDisconnectReason,
     RpcError, RpcEvent, RuntimeControllerError, RuntimeEvent,
 };
+use pedelec_shared::paths::path_for_external_use;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -1257,7 +1258,7 @@ fn build_thread_start_params(config: &CodexSessionConfig) -> Value {
     params.insert("model".to_string(), optional_string(&config.model));
     params.insert(
         "cwd".to_string(),
-        Value::String(config.cwd.to_string_lossy().into_owned()),
+        Value::String(path_for_external_use(&config.cwd)),
     );
     params.insert(
         "approvalPolicy".to_string(),
@@ -1307,7 +1308,7 @@ fn build_turn_start_params(provider_thread_id: &str, config: &CodexTurnConfig) -
     );
     params.insert(
         "cwd".to_string(),
-        Value::String(config.cwd.to_string_lossy().into_owned()),
+        Value::String(path_for_external_use(&config.cwd)),
     );
     params.insert("model".to_string(), optional_string(&config.model));
     params.insert(
@@ -2093,6 +2094,39 @@ done
         );
         assert!(!params.to_string().contains("exec"));
         assert!(!params.to_string().contains("-c"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_cwd_wire_params_externalize_verbatim_paths() {
+        let verbatim = PathBuf::from(r"\\?\C:\workspace\project");
+        let expected = json!(r"C:\workspace\project");
+        let session_config = CodexSessionConfig {
+            model: None,
+            effort: None,
+            cwd: verbatim.clone(),
+            approval_policy: CodexApprovalPolicy::Never,
+            sandbox: CodexSandboxMode::ReadOnly,
+            developer_instructions: String::new(),
+            config: HashMap::new(),
+        };
+        assert_eq!(build_thread_start_params(&session_config)["cwd"], expected);
+        assert_eq!(
+            build_thread_resume_params("codex-thread", &session_config)["cwd"],
+            expected
+        );
+        let turn_params = build_turn_start_params(
+            "codex-thread",
+            &CodexTurnConfig {
+                input: "hello".into(),
+                cwd: verbatim,
+                model: None,
+                effort: None,
+                approval_policy: CodexApprovalPolicy::Never,
+                sandbox_policy: CodexTurnSandboxPolicy::DangerFullAccess,
+            },
+        );
+        assert_eq!(turn_params["cwd"], expected);
     }
 
     #[test]

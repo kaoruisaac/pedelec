@@ -9,6 +9,7 @@ use crate::{
     ProviderRuntimeController, RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent,
     RuntimeControllerError, RuntimeEvent,
 };
+use pedelec_shared::paths::path_for_external_use;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -1125,7 +1126,7 @@ fn session_open_params(
         "threadId": pedelec_thread_id,
         "sessionId": persisted_session_id,
         "model": config.model,
-        "workspacePath": config.workspace.to_string_lossy(),
+        "workspacePath": path_for_external_use(&config.workspace),
     });
     if let Some(host_instructions) = &config.host_instructions {
         params["hostInstructions"] = json!(host_instructions);
@@ -1786,6 +1787,22 @@ mod tests {
             workspace: workspace.to_path_buf(),
             host_instructions: Some("stay local".into()),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn session_open_workspace_path_externalizes_verbatim_path() {
+        let params = session_open_params(
+            "thread-path-test",
+            None,
+            &PedelecAgentSessionConfig {
+                model: "qwen3:8b".into(),
+                workspace: PathBuf::from(r"\\?\C:\workspace\project"),
+                host_instructions: None,
+            },
+        );
+
+        assert_eq!(params["workspacePath"], r"C:\workspace\project");
     }
 
     fn session_meta() -> SessionMeta {

@@ -1168,6 +1168,129 @@ mod tests {
     }
 
     #[test]
+    fn ipc_successfully_delivered_request_id_is_idempotent_and_new_id_dispatches() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        let runtime_path = temp.path().join("runtime.json");
+        start_core_ipc_server_with_runtime_path(Arc::clone(&runtime), &runtime_path).unwrap();
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_ipc_request_idempotency",
+            ThreadStatus::Running,
+            1000,
+        );
+        let event_rx = runtime
+            .lock()
+            .unwrap()
+            .event_bus
+            .subscribe("thread_ipc_request_idempotency");
+
+        let request_a = tool_call_request(
+            "request-a",
+            "thread_ipc_request_idempotency",
+            "update_counter",
+            json!({ "delta": 1 }),
+        );
+        let first_path = runtime_path.clone();
+        let first_request = request_a.clone();
+        let first = thread::spawn(move || {
+            send_core_ipc_request_with_runtime_path(&first_request, first_path).unwrap()
+        });
+        let first_tool_request_id = next_tool_call_request_id(&event_rx);
+
+        let pending_retry_path = runtime_path.clone();
+        let pending_retry_request = request_a.clone();
+        let pending_retry = thread::spawn(move || {
+            send_core_ipc_request_with_runtime_path(&pending_retry_request, pending_retry_path)
+                .unwrap()
+        });
+        submit_tool_result_over_ipc(
+            &runtime_path,
+            "submit-request-a",
+            "thread_ipc_request_idempotency",
+            &first_tool_request_id,
+            json!({ "value": 123 }),
+        );
+        let first_response = first.join().unwrap();
+        let pending_retry_response = pending_retry.join().unwrap();
+        assert!(first_response.ok);
+        assert_eq!(first_response.result, Some(json!({ "value": 123 })));
+        assert_eq!(pending_retry_response, first_response);
+        assert_replay_candidate_count_eventually(&runtime, 0);
+
+        // The successful response write acknowledges the broker result. A
+        // later retransmission must still return the cached IPC response.
+        let repeated_response =
+            send_core_ipc_request_with_runtime_path(&request_a, &runtime_path).unwrap();
+        assert_eq!(repeated_response, first_response);
+        assert_eq!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+                .count(),
+            0
+        );
+
+        // A new Core IPC request ID remains a new logical invocation, even
+        // when the thread, tool, and arguments are identical.
+        let second = spawn_tool_call(
+            runtime_path.clone(),
+            "request-b",
+            "thread_ipc_request_idempotency",
+            "update_counter",
+            json!({ "delta": 1 }),
+        );
+        let second_tool_request_id = next_tool_call_request_id(&event_rx);
+        assert_ne!(second_tool_request_id, first_tool_request_id);
+        submit_tool_result_over_ipc(
+            &runtime_path,
+            "submit-request-b",
+            "thread_ipc_request_idempotency",
+            &second_tool_request_id,
+            json!({ "value": 456 }),
+        );
+        let second_response = second.join().unwrap().unwrap();
+        assert_eq!(second_response.result, Some(json!({ "value": 456 })));
+
+        let changed_payload = tool_call_request(
+            "request-a",
+            "thread_ipc_request_idempotency",
+            "update_counter",
+            json!({ "delta": 2 }),
+        );
+        let collision_response =
+            send_core_ipc_request_with_runtime_path(&changed_payload, &runtime_path).unwrap();
+        assert!(!collision_response.ok);
+        assert_eq!(
+            collision_response.error.unwrap().code,
+            error_codes::IPC_UNAVAILABLE
+        );
+
+        let changed_type = CoreIpcRequest {
+            request_id: "request-a".into(),
+            r#type: "submit_tool_result".into(),
+            caller_origin: None,
+            caller_sdk_version: None,
+            payload: Some(json!({})),
+        };
+        let type_collision_response =
+            send_core_ipc_request_with_runtime_path(&changed_type, &runtime_path).unwrap();
+        assert!(!type_collision_response.ok);
+        assert_eq!(
+            type_collision_response.error.unwrap().code,
+            error_codes::IPC_UNAVAILABLE
+        );
+        assert_eq!(
+            event_rx
+                .try_iter()
+                .filter(|event| matches!(event, ThreadEvent::ToolCall { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn ipc_failed_first_delivery_replays_completed_result_and_acknowledges_retry() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(Mutex::new(CoreRuntime::default()));

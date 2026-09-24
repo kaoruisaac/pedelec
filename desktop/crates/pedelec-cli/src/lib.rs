@@ -72,14 +72,16 @@ fn send_cli_request(request: CoreIpcRequest, runtime_file_path: Option<&Path>) -
 fn send_cli_request_with<F>(
     request: CoreIpcRequest,
     runtime_file_path: Option<&Path>,
-    send_request: F,
+    mut send_request: F,
 ) -> ToolCliResponse
 where
-    F: FnOnce(&CoreIpcRequest, Option<&Path>) -> Result<CoreIpcResponse, PedelecError>,
+    F: FnMut(&CoreIpcRequest, Option<&Path>) -> Result<CoreIpcResponse, PedelecError>,
 {
-    let response = match runtime_file_path {
-        Some(path) => send_request(&request, Some(path)),
-        None => send_request(&request, None),
+    let response = send_request(&request, runtime_file_path);
+    let response = if request.r#type == "tool_call" && response.is_err() {
+        send_request(&request, runtime_file_path)
+    } else {
+        response
     };
     match response {
         Ok(response) if response.ok => ToolCliResponse {
@@ -90,10 +92,7 @@ where
         Ok(response) => {
             let error = match response.error {
                 Some(error) => error,
-                None => tool_call_transport_error(
-                    &request,
-                    PedelecError::new(error_codes::IPC_UNAVAILABLE, "Core IPC request failed"),
-                ),
+                None => PedelecError::new(error_codes::IPC_UNAVAILABLE, "Core IPC request failed"),
             };
             ToolCliResponse {
                 ok: false,
@@ -104,48 +103,9 @@ where
         Err(err) => ToolCliResponse {
             ok: false,
             result: None,
-            error: Some(tool_call_transport_error(&request, err)),
+            error: Some(err),
         },
     }
-}
-
-fn tool_call_transport_error(request: &CoreIpcRequest, mut error: PedelecError) -> PedelecError {
-    if request.r#type != "tool_call" || error.code == error_codes::TOOL_TIMEOUT {
-        return error;
-    }
-
-    error.message = format!(
-        "{} No complete structured Pedelec response was received. Exact-retry the same listed call command with semantically identical arguments. A received structured TOOL_TIMEOUT is final.",
-        error.message
-    );
-
-    let mut details = match error.details.take() {
-        Some(Value::Object(details)) => details,
-        Some(source) => {
-            let mut details = serde_json::Map::new();
-            details.insert("source".to_string(), source);
-            details
-        }
-        None => serde_json::Map::new(),
-    };
-    details.insert(
-        "retry".to_string(),
-        serde_json::json!({
-            "safe": true,
-            "arguments": "semantically identical",
-            "reason": "no complete structured Pedelec response was received"
-        }),
-    );
-    if let Some(input) = request
-        .payload
-        .clone()
-        .and_then(|payload| serde_json::from_value::<ToolCallInput>(payload).ok())
-    {
-        details.insert("threadId".to_string(), Value::String(input.thread_id));
-        details.insert("toolName".to_string(), Value::String(input.tool_name));
-    }
-    error.details = Some(Value::Object(details));
-    error
 }
 
 fn runtime_file_path_from_env() -> Option<PathBuf> {
@@ -358,46 +318,76 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_transport_failure_returns_structured_retry_guidance() {
-        let response =
-            send_cli_request_with(tool_call_request(), None, |_request, _runtime_path| {
-                Err(PedelecError::with_details(
+    fn tool_call_retries_transport_failure_once_with_the_same_request() {
+        let request = tool_call_request();
+        let mut calls = 0;
+        let mut attempted_requests = Vec::new();
+        let response = send_cli_request_with(request.clone(), None, |attempt, _runtime_path| {
+            calls += 1;
+            attempted_requests.push(attempt.clone());
+            if calls == 1 {
+                Err(PedelecError::new(
                     error_codes::IPC_UNAVAILABLE,
                     "Core IPC connection closed",
-                    serde_json::json!({ "stage": "read" }),
                 ))
-            });
+            } else {
+                Ok(CoreIpcResponse {
+                    request_id: attempt.request_id.clone(),
+                    ok: true,
+                    result: Some(serde_json::json!({ "id": "image-1" })),
+                    error: None,
+                })
+            }
+        });
 
+        assert_eq!(calls, 2);
+        assert_eq!(attempted_requests, vec![request.clone(), request]);
+        assert!(response.ok);
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({ "id": "image-1" }))
+        );
+    }
+
+    #[test]
+    fn second_tool_call_transport_failure_returns_plain_structured_error() {
+        let request = tool_call_request();
+        let mut calls = 0;
+        let response = send_cli_request_with(request, None, |_attempt, _runtime_path| {
+            calls += 1;
+            Err(PedelecError::with_details(
+                error_codes::IPC_UNAVAILABLE,
+                format!("Core IPC failure {calls}"),
+                serde_json::json!({ "attempt": calls }),
+            ))
+        });
+
+        assert_eq!(calls, 2);
         let error = response.error.unwrap();
         assert_eq!(error.code, error_codes::IPC_UNAVAILABLE);
-        assert!(error
-            .message
-            .contains("No complete structured Pedelec response"));
-        assert!(error.message.contains("Exact-retry"));
-        assert_eq!(error.details.as_ref().unwrap()["retry"]["safe"], true);
-        assert_eq!(
-            error.details.as_ref().unwrap()["threadId"],
-            "thread-cli-test"
-        );
-        assert_eq!(
-            error.details.as_ref().unwrap()["toolName"],
-            "generate_image"
-        );
-        assert_eq!(error.details.as_ref().unwrap()["stage"], "read");
+        assert_eq!(error.message, "Core IPC failure 2");
+        let details = error.details.unwrap();
+        assert_eq!(details["attempt"], 2);
+        assert!(details.get("retry").is_none());
+        assert!(!error.message.contains("Exact-retry"));
+        assert!(!error.message.contains("agent"));
     }
 
     #[test]
     fn successful_tool_call_does_not_emit_retry_guidance() {
+        let mut calls = 0;
         let response =
-            send_cli_request_with(tool_call_request(), None, |_request, _runtime_path| {
+            send_cli_request_with(tool_call_request(), None, |request, _runtime_path| {
+                calls += 1;
                 Ok(CoreIpcResponse {
-                    request_id: "cli-test".into(),
+                    request_id: request.request_id.clone(),
                     ok: true,
                     result: Some(serde_json::json!({ "id": "image-1" })),
                     error: None,
                 })
             });
 
+        assert_eq!(calls, 1);
         assert!(response.ok);
         assert!(response.error.is_none());
         assert_eq!(
@@ -408,14 +398,17 @@ mod tests {
 
     #[test]
     fn structured_tool_timeout_is_final_and_not_retry_guidance() {
+        let mut calls = 0;
         let response =
             send_cli_request_with(tool_call_request(), None, |_request, _runtime_path| {
+                calls += 1;
                 Ok(structured_error_response(PedelecError::new(
                     error_codes::TOOL_TIMEOUT,
                     "tool timeout",
                 )))
             });
 
+        assert_eq!(calls, 1);
         let error = response.error.unwrap();
         assert_eq!(error.code, error_codes::TOOL_TIMEOUT);
         assert_eq!(error.message, "tool timeout");
@@ -424,17 +417,45 @@ mod tests {
 
     #[test]
     fn structured_app_tool_error_keeps_normal_error_semantics() {
+        let mut calls = 0;
         let response =
             send_cli_request_with(tool_call_request(), None, |_request, _runtime_path| {
+                calls += 1;
                 Ok(structured_error_response(PedelecError::new(
                     error_codes::TOOL_NOT_FOUND,
                     "tool was not found in registry",
                 )))
             });
 
+        assert_eq!(calls, 1);
         let error = response.error.unwrap();
         assert_eq!(error.code, error_codes::TOOL_NOT_FOUND);
         assert_eq!(error.message, "tool was not found in registry");
         assert!(error.details.is_none());
+    }
+
+    #[test]
+    fn tool_spec_does_not_retry_transport_failures() {
+        let request = CoreIpcRequest {
+            request_id: "cli-spec-test".into(),
+            r#type: "tool_spec".into(),
+            caller_origin: None,
+            caller_sdk_version: None,
+            payload: Some(serde_json::json!({
+                "threadId": "thread-cli-test",
+                "toolName": "generate_image"
+            })),
+        };
+        let mut calls = 0;
+        let response = send_cli_request_with(request, None, |_request, _runtime_path| {
+            calls += 1;
+            Err(PedelecError::new(
+                error_codes::IPC_UNAVAILABLE,
+                "Core IPC connection closed",
+            ))
+        });
+
+        assert_eq!(calls, 1);
+        assert_eq!(response.error.unwrap().code, error_codes::IPC_UNAVAILABLE);
     }
 }

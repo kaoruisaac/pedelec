@@ -300,7 +300,7 @@ type DenoModuleDefinition<TName extends string = string> = {
 };
 ```
 
-`name` and `entry` are the intrinsic fields. `entry` is a Vite build/dev authoring string; it is not a Desktop filesystem instruction. `description` and `usage` are optional Agent-facing metadata, while `preferStdinExecution` is an optional Agent execution preference. When `preferStdinExecution` is `true`, Host Context supplies a module-specific stdin `runCommandTemplate` with a `<typescript-source>` placeholder. File-backed execution remains valid, and the preference does not change bundling or artifact contents. Use `pedelecVitePlugin()` to prepare the runtime and declaration artifact.
+`name` and `entry` are the intrinsic fields. `entry` is a Vite build/dev authoring string; it is not a Desktop filesystem instruction. `description` and `usage` are optional Agent-facing metadata, while `preferStdinExecution` remains a public authoring preference. When it is `true`, Host Context represents the preference as `preferredExecution: "stdin"`; the Agent should prefer the global `runStdinCommand`. File-backed execution remains valid, and no provider-specific shell syntax is part of the shared Host Context contract. The preference does not change bundling or artifact contents. Use `pedelecVitePlugin()` to prepare the runtime and declaration artifact.
 
 Session skills use the stricter shape below: `description` and `usage` must both be non-empty strings. Workspace runs may use the minimal base declaration, but every module must contain a prepared Vite artifact.
 

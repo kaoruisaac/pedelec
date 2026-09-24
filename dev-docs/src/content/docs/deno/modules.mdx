@@ -43,6 +43,6 @@ Supported Node built-ins work through Deno's Node compatibility layer, including
 
 ## Stdin preference and lifecycle
 
-`preferStdinExecution` is an **Agent authoring hint, not a runtime restriction**. It helps the Agent choose stdin for short glue code instead of creating temporary `.ts` files. File-backed scripts remain valid. The hint does not change artifacts, bundling, or Deno permissions, and has no effect on application-controlled `workspace.run()`.
+`preferStdinExecution` is an **Agent authoring hint, not a runtime restriction**. Host Context represents `true` as `preferredExecution: "stdin"`, and the Agent should prefer the global `runStdinCommand` for short glue code. File-backed scripts remain valid. The shared Host Context contract includes no provider-specific shell syntax. The hint does not change artifacts, bundling, or Deno permissions, and has no effect on application-controlled `workspace.run()`.
 
 Session Deno Modules are snapshotted for the Thread. Ending and resuming the same known Thread retains that snapshot; create a new Session when the Agent should consume a rebuilt implementation. For direct application use and its separate module scope, see [Workspace Deno Execution](./workspace-execution/).
