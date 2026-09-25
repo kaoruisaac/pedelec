@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
@@ -3802,7 +3802,10 @@ impl CoreRuntime {
         }
         let path_value = self.resolve_provider_path_value();
         self.provider_resolved_path = Some(path_value.clone());
-        self.provider_scan = scan_external_providers(Some(path_value));
+        self.provider_scan = scan_external_providers_with_cache_policy(
+            Some(path_value),
+            ProviderScanCachePolicy::ForceFull,
+        );
         if is_initial_scan {
             self.provider_readiness.mark_ready();
         }
@@ -5593,7 +5596,10 @@ pub fn start_initial_provider_scan(runtime: SharedCoreRuntime) {
     if let Err(error) = std::thread::Builder::new()
         .name("pedelec-provider-initial-scan".to_string())
         .spawn(move || {
-            let _ = refresh_shared_providers(&worker_runtime);
+            let _ = refresh_shared_providers_with_policy(
+                &worker_runtime,
+                ProviderScanCachePolicy::CacheAware,
+            );
         })
     {
         let failure = PedelecError::with_details(
@@ -5610,12 +5616,23 @@ pub fn start_initial_provider_scan(runtime: SharedCoreRuntime) {
 /// Scans provider CLIs without holding the shared runtime lock. The completed
 /// scan is installed atomically, so readers see either the prior complete scan
 /// or the new complete scan, never partial results.
-pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo> {
-    let (wait_for_initial, path_override) = {
+pub fn refresh_shared_providers_force(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo> {
+    refresh_shared_providers_with_policy(runtime, ProviderScanCachePolicy::ForceFull)
+}
+
+fn refresh_shared_providers_with_policy(
+    runtime: &SharedCoreRuntime,
+    cache_policy: ProviderScanCachePolicy,
+) -> Vec<ProviderInfo> {
+    let (wait_for_initial, wait_for_active_refresh, path_override) = {
         let mut runtime_guard = runtime.lock().unwrap();
         if runtime_guard.provider_refresh_in_progress {
             if runtime_guard.provider_readiness.is_initial_scanning() {
-                (true, None)
+                if cache_policy == ProviderScanCachePolicy::ForceFull {
+                    (false, true, None)
+                } else {
+                    (true, false, None)
+                }
             } else {
                 return runtime_guard.list_providers();
             }
@@ -5624,9 +5641,23 @@ pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo
             if runtime_guard.provider_readiness.is_uninitialized() {
                 runtime_guard.provider_readiness.mark_initial_scanning();
             }
-            (false, runtime_guard.provider_path_value_override.clone())
+            (
+                false,
+                false,
+                runtime_guard.provider_path_value_override.clone(),
+            )
         }
     };
+
+    if wait_for_active_refresh {
+        loop {
+            let refresh_in_progress = runtime.lock().unwrap().provider_refresh_in_progress;
+            if !refresh_in_progress {
+                return refresh_shared_providers_with_policy(runtime, cache_policy);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     if wait_for_initial {
         let _ = wait_for_provider_readiness(runtime);
@@ -5637,7 +5668,8 @@ pub fn refresh_shared_providers(runtime: &SharedCoreRuntime) -> Vec<ProviderInfo
     // profile is user-controlled and may take several seconds to finish.
     let scan_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let path_value = path_override.unwrap_or_else(resolve_provider_path_value);
-        let provider_scan = scan_external_providers(Some(path_value.clone()));
+        let provider_scan =
+            scan_external_providers_with_cache_policy(Some(path_value.clone()), cache_policy);
         (path_value, provider_scan)
     }));
 
@@ -10333,21 +10365,131 @@ pub(crate) struct ProviderCli {
     path: Option<PathBuf>,
     version: Option<ProviderVersion>,
     error: Option<String>,
-    /// `Some(false)` means the executable was found and versioned, but it
-    /// cannot satisfy Pedelec's App Server-only Codex execution contract.
+    /// `Some(false)` means Codex is unavailable for this scan because its
+    /// required capability is missing or the capability probe failed. Probe
+    /// failures are represented this way in memory but are not cached as false.
     /// `None` is retained for synthetic/test snapshots created before the
     /// capability probe existed.
     app_server_capability: Option<bool>,
-    /// `Some(false)` means the provider lacks the required persistent ACP entrypoint.
+    /// `Some(false)` means the provider is unavailable for this scan because
+    /// the required ACP capability is missing or its probe failed.
     acp_capability: Option<bool>,
-    /// `Some(false)` means a persistent stream-json provider was found and
-    /// versioned but does not expose the bidirectional stream-json transport
-    /// required by Pedelec. Used by Antigravity and Claude.
+    /// `Some(false)` means the provider is unavailable for this scan because
+    /// its required stream-json capability is missing or its probe failed.
+    /// Used by Antigravity and Claude.
     stream_json_capability: Option<bool>,
 }
 
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
 struct ProviderVersion(Vec<u64>);
+
+const PROVIDER_SCAN_CACHE_SCHEMA_VERSION: u32 = 2;
+const PROVIDER_SCAN_CACHE_FILE_NAME: &str = "provider-scan-cache.json";
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ProviderScanCachePolicy {
+    CacheAware,
+    ForceFull,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderScanCache {
+    schema_version: u32,
+    app_version_line: String,
+    providers: HashMap<ProviderCode, Vec<CachedProviderCandidate>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CachedProviderCandidate {
+    path: PathBuf,
+    fingerprint: ProviderCandidateFingerprint,
+    version_probe: CachedProviderVersionProbe,
+    capabilities: ProviderCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderCandidateFingerprint {
+    path_identity: String,
+    target_identity: String,
+    file_size: u64,
+    modified_seconds: u64,
+    modified_nanos: u32,
+    link_size: u64,
+    link_modified_seconds: u64,
+    link_modified_nanos: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "status", content = "version", rename_all = "camelCase")]
+enum CachedProviderVersionProbe {
+    Recognized(ProviderVersion),
+    Unrecognized,
+}
+
+#[derive(Debug, Clone)]
+enum ProviderVersionProbeOutcome {
+    Recognized(ProviderVersion),
+    Unrecognized,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+enum ProviderCapabilityProbeOutcome {
+    Conclusive(ProviderCapabilities),
+    Failed,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderCapabilities {
+    app_server: Option<bool>,
+    acp: Option<bool>,
+    stream_json: Option<bool>,
+}
+
+struct ScannedProviderCandidate {
+    path: PathBuf,
+    fingerprint: Option<ProviderCandidateFingerprint>,
+    version_probe: ProviderVersionProbeOutcome,
+    capabilities: ProviderCapabilities,
+    capability_probe_failed: bool,
+}
+
+impl ProviderCapabilities {
+    fn is_valid_for(&self, provider: &ProviderCode) -> bool {
+        match provider {
+            ProviderCode::Codex => self.acp.is_none() && self.stream_json.is_none(),
+            ProviderCode::OpenCode | ProviderCode::Cursor => {
+                self.app_server.is_none() && self.stream_json.is_none()
+            }
+            ProviderCode::Antigravity | ProviderCode::Claude => {
+                self.app_server.is_none() && self.acp.is_none()
+            }
+            ProviderCode::Ollama => false,
+        }
+    }
+
+    fn is_complete_for(&self, provider: &ProviderCode) -> bool {
+        match provider {
+            ProviderCode::Codex => self.app_server.is_some(),
+            ProviderCode::OpenCode | ProviderCode::Cursor => self.acp.is_some(),
+            ProviderCode::Antigravity | ProviderCode::Claude => self.stream_json.is_some(),
+            ProviderCode::Ollama => false,
+        }
+    }
+
+    fn mark_required_capability_unavailable(&mut self, provider: &ProviderCode) {
+        match provider {
+            ProviderCode::Codex => self.app_server = Some(false),
+            ProviderCode::OpenCode | ProviderCode::Cursor => self.acp = Some(false),
+            ProviderCode::Antigravity | ProviderCode::Claude => self.stream_json = Some(false),
+            ProviderCode::Ollama => {}
+        }
+    }
+}
 
 fn provider_version_display(version: &ProviderVersion) -> String {
     version
@@ -10667,14 +10809,7 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
             ..Default::default()
         };
     };
-    let path_dirs = env::split_paths(path_value).collect::<Vec<_>>();
-    let mut candidates = provider_binary_lookup_candidates(program, &path_dirs);
-    candidates.sort();
-    candidates.dedup();
-    let executable_candidates = candidates
-        .into_iter()
-        .filter(|path| is_provider_executable(path))
-        .collect::<Vec<_>>();
+    let executable_candidates = discover_provider_candidates(program, path_value);
     let has_executable = !executable_candidates.is_empty();
     let recognized = executable_candidates
         .into_iter()
@@ -10686,73 +10821,8 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
         });
     match recognized {
         Some((path, version)) => {
-            let app_server_capability = if program == provider_program_name(&ProviderCode::Codex) {
-                Some(probe_codex_app_server_capability(&path, Some(path_value)))
-            } else {
-                None
-            };
-            let acp_capability = if program == provider_program_name(&ProviderCode::OpenCode)
-                || program == provider_program_name(&ProviderCode::Cursor)
-            {
-                Some(probe_acp_capability(&path, Some(path_value)))
-            } else {
-                None
-            };
-            let stream_json_capability =
-                if program == provider_program_name(&ProviderCode::Antigravity) {
-                    Some(probe_antigravity_stream_json_capability(
-                        &path,
-                        Some(path_value),
-                    ))
-                } else if program == provider_program_name(&ProviderCode::Claude) {
-                    Some(probe_claude_persistent_stream_capability(
-                        &path,
-                        Some(path_value),
-                    ))
-                } else {
-                    None
-                };
-            let mut error = match (
-                app_server_capability,
-                acp_capability,
-                stream_json_capability,
-            ) {
-                (Some(false), _, _) => Some(
-                    "Codex executable does not expose the required `app-server` capability"
-                        .to_string(),
-                ),
-                (_, Some(false), _) => Some(format!(
-                    "{program} executable does not expose the required `acp` capability"
-                )),
-                (_, _, Some(false)) if program == provider_program_name(&ProviderCode::Claude) => {
-                    Some(
-                        "claude executable does not expose the required persistent `stream-json` capability"
-                            .to_string(),
-                    )
-                }
-                (_, _, Some(false)) => Some(
-                    "agy executable does not expose the required bidirectional `stream-json` capability"
-                        .to_string(),
-                ),
-                _ => None,
-            };
-            if error.is_none()
-                && program == provider_program_name(&ProviderCode::Antigravity)
-                && !antigravity_custom_agent_version_supported(&version)
-            {
-                error = Some(
-                    "agy executable version does not support the required workspace custom agent capability"
-                        .to_string(),
-                );
-            }
-            ProviderCli {
-                path: Some(path),
-                version: Some(version),
-                error,
-                app_server_capability,
-                acp_capability,
-                stream_json_capability,
-            }
+            let capabilities = probe_provider_capabilities(program, &path, Some(path_value));
+            provider_cli_from_selected_candidate(program, path, version, capabilities)
         }
         None => ProviderCli {
             path: None,
@@ -10769,56 +10839,560 @@ fn scan_provider_cli(program: &str, path_value: Option<&OsString>) -> ProviderCl
     }
 }
 
-fn probe_codex_app_server_capability(path: &Path, path_value: Option<&OsString>) -> bool {
+fn discover_provider_candidates(program: &str, path_value: &OsString) -> Vec<PathBuf> {
+    let path_dirs = env::split_paths(path_value).collect::<Vec<_>>();
+    let candidates =
+        deduplicate_provider_candidates(provider_binary_lookup_candidates(program, &path_dirs));
+    candidates
+        .into_iter()
+        .filter(|path| is_provider_executable(path))
+        .collect()
+}
+
+fn deduplicate_provider_candidates(mut candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    candidates.sort();
+    candidates.dedup();
+    #[cfg(windows)]
+    {
+        let mut identities = HashSet::new();
+        candidates.retain(|path| {
+            normalized_provider_candidate_identity(path)
+                .map_or(true, |identity| identities.insert(identity))
+        });
+    }
+    candidates
+}
+
+fn probe_provider_capabilities(
+    program: &str,
+    path: &Path,
+    path_value: Option<&OsString>,
+) -> ProviderCapabilities {
+    match probe_provider_capabilities_detailed(program, path, path_value) {
+        ProviderCapabilityProbeOutcome::Conclusive(capabilities) => capabilities,
+        ProviderCapabilityProbeOutcome::Failed => {
+            let mut capabilities = ProviderCapabilities::default();
+            if let Some(provider) = external_provider_codes()
+                .into_iter()
+                .find(|provider| provider_program_name(provider) == program)
+            {
+                capabilities.mark_required_capability_unavailable(&provider);
+            }
+            capabilities
+        }
+    }
+}
+
+fn probe_provider_capabilities_detailed(
+    program: &str,
+    path: &Path,
+    path_value: Option<&OsString>,
+) -> ProviderCapabilityProbeOutcome {
+    let (provider, result) = if program == provider_program_name(&ProviderCode::Codex) {
+        (
+            ProviderCode::Codex,
+            probe_codex_app_server_capability(path, path_value),
+        )
+    } else if program == provider_program_name(&ProviderCode::OpenCode) {
+        (
+            ProviderCode::OpenCode,
+            probe_acp_capability(path, path_value),
+        )
+    } else if program == provider_program_name(&ProviderCode::Cursor) {
+        (ProviderCode::Cursor, probe_acp_capability(path, path_value))
+    } else if program == provider_program_name(&ProviderCode::Antigravity) {
+        (
+            ProviderCode::Antigravity,
+            probe_antigravity_stream_json_capability(path, path_value),
+        )
+    } else if program == provider_program_name(&ProviderCode::Claude) {
+        (
+            ProviderCode::Claude,
+            probe_claude_persistent_stream_capability(path, path_value),
+        )
+    } else {
+        return ProviderCapabilityProbeOutcome::Failed;
+    };
+
+    match result {
+        Ok(supported) => {
+            let mut capabilities = ProviderCapabilities::default();
+            match provider {
+                ProviderCode::Codex => capabilities.app_server = Some(supported),
+                ProviderCode::OpenCode | ProviderCode::Cursor => capabilities.acp = Some(supported),
+                ProviderCode::Antigravity | ProviderCode::Claude => {
+                    capabilities.stream_json = Some(supported)
+                }
+                ProviderCode::Ollama => unreachable!("Ollama is not externally scanned"),
+            }
+            ProviderCapabilityProbeOutcome::Conclusive(capabilities)
+        }
+        Err(()) => ProviderCapabilityProbeOutcome::Failed,
+    }
+}
+
+fn provider_cli_from_selected_candidate(
+    program: &str,
+    path: PathBuf,
+    version: ProviderVersion,
+    capabilities: ProviderCapabilities,
+) -> ProviderCli {
+    let app_server_capability = capabilities.app_server;
+    let acp_capability = capabilities.acp;
+    let stream_json_capability = capabilities.stream_json;
+    let mut error = match (
+        app_server_capability,
+        acp_capability,
+        stream_json_capability,
+    ) {
+        (Some(false), _, _) => Some(
+            "Codex executable does not expose the required `app-server` capability".to_string(),
+        ),
+        (_, Some(false), _) => Some(format!(
+            "{program} executable does not expose the required `acp` capability"
+        )),
+        (_, _, Some(false)) if program == provider_program_name(&ProviderCode::Claude) => Some(
+            "claude executable does not expose the required persistent `stream-json` capability"
+                .to_string(),
+        ),
+        (_, _, Some(false)) => Some(
+            "agy executable does not expose the required bidirectional `stream-json` capability"
+                .to_string(),
+        ),
+        _ => None,
+    };
+    if error.is_none()
+        && program == provider_program_name(&ProviderCode::Antigravity)
+        && !antigravity_custom_agent_version_supported(&version)
+    {
+        error = Some(
+            "agy executable version does not support the required workspace custom agent capability"
+                .to_string(),
+        );
+    }
+    ProviderCli {
+        path: Some(path),
+        version: Some(version),
+        error,
+        app_server_capability,
+        acp_capability,
+        stream_json_capability,
+    }
+}
+
+fn scan_external_providers_with_cache_policy(
+    path_value: Option<OsString>,
+    cache_policy: ProviderScanCachePolicy,
+) -> HashMap<ProviderCode, ProviderCli> {
+    let cache_path: Option<PathBuf> = {
+        #[cfg(test)]
+        {
+            None
+        }
+        #[cfg(not(test))]
+        {
+            pedelec_shared::paths::pedelec_home_dir()
+                .ok()
+                .map(|home| home.join(PROVIDER_SCAN_CACHE_FILE_NAME))
+        }
+    };
+    scan_external_providers_with_cache_at(
+        path_value,
+        cache_policy,
+        cache_path.as_deref(),
+        env!("CARGO_PKG_VERSION"),
+        |program, path_value| discover_provider_candidates(program, path_value),
+        |_, path, path_value| provider_cli_version_probe(path, path_value),
+        probe_provider_capabilities_detailed,
+    )
+}
+
+fn scan_external_providers_with_cache_at<D, V, C>(
+    path_value: Option<OsString>,
+    cache_policy: ProviderScanCachePolicy,
+    cache_path: Option<&Path>,
+    app_version: &str,
+    mut discover_candidates: D,
+    mut probe_version: V,
+    mut probe_capabilities: C,
+) -> HashMap<ProviderCode, ProviderCli>
+where
+    D: FnMut(&str, &OsString) -> Vec<PathBuf>,
+    V: FnMut(&str, &Path, Option<&OsString>) -> ProviderVersionProbeOutcome,
+    C: FnMut(&str, &Path, Option<&OsString>) -> ProviderCapabilityProbeOutcome,
+{
+    let Some(app_version_line) = app_version_compatibility_line(app_version) else {
+        return scan_external_providers(path_value);
+    };
+    let mut cache = if cache_policy == ProviderScanCachePolicy::CacheAware {
+        cache_path.and_then(|path| load_compatible_provider_scan_cache(path, &app_version_line))
+    } else {
+        None
+    }
+    .unwrap_or_else(|| ProviderScanCache {
+        schema_version: PROVIDER_SCAN_CACHE_SCHEMA_VERSION,
+        app_version_line: app_version_line.clone(),
+        providers: HashMap::new(),
+    });
+    cache.schema_version = PROVIDER_SCAN_CACHE_SCHEMA_VERSION;
+    cache.app_version_line = app_version_line;
+
+    let Some(path_value) = path_value else {
+        return external_provider_codes()
+            .into_iter()
+            .map(|provider| {
+                (
+                    provider,
+                    ProviderCli {
+                        error: Some("PATH was not available".to_string()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+    };
+
+    let mut provider_scan = HashMap::new();
+    let mut refreshed_entries = HashMap::new();
+    for provider in external_provider_codes() {
+        let program = provider_program_name(&provider);
+        let candidates = deduplicate_provider_candidates(discover_candidates(program, &path_value));
+
+        let mut prior_by_identity = cache
+            .providers
+            .remove(&provider)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| (entry.fingerprint.path_identity.clone(), entry))
+            .collect::<HashMap<_, _>>();
+        let mut scanned = Vec::with_capacity(candidates.len());
+        for path in candidates {
+            let fingerprint = provider_candidate_fingerprint(&path);
+            let prior = fingerprint
+                .as_ref()
+                .and_then(|fingerprint| prior_by_identity.remove(&fingerprint.path_identity));
+            let cache_hit = prior
+                .as_ref()
+                .is_some_and(|entry| fingerprint.as_ref() == Some(&entry.fingerprint));
+            let (version_probe, capabilities) = if cache_hit {
+                let prior = prior.expect("cache hit must have a matching entry");
+                (
+                    match prior.version_probe {
+                        CachedProviderVersionProbe::Recognized(version) => {
+                            ProviderVersionProbeOutcome::Recognized(version)
+                        }
+                        CachedProviderVersionProbe::Unrecognized => {
+                            ProviderVersionProbeOutcome::Unrecognized
+                        }
+                    },
+                    prior.capabilities,
+                )
+            } else {
+                (
+                    probe_version(program, &path, Some(&path_value)),
+                    ProviderCapabilities::default(),
+                )
+            };
+            scanned.push(ScannedProviderCandidate {
+                path,
+                fingerprint,
+                version_probe,
+                capabilities,
+                capability_probe_failed: false,
+            });
+        }
+
+        let selected_index = scanned
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| match &candidate.version_probe {
+                ProviderVersionProbeOutcome::Recognized(version) => {
+                    Some((index, &candidate.path, version))
+                }
+                ProviderVersionProbeOutcome::Unrecognized | ProviderVersionProbeOutcome::Failed => {
+                    None
+                }
+            })
+            .max_by(|(_, left_path, left), (_, right_path, right)| {
+                left.cmp(right).then_with(|| left_path.cmp(right_path))
+            })
+            .map(|(index, _, _)| index);
+
+        let provider_result = if let Some(index) = selected_index {
+            let candidate = &mut scanned[index];
+            if !candidate.capabilities.is_complete_for(&provider) {
+                match probe_capabilities(program, &candidate.path, Some(&path_value)) {
+                    ProviderCapabilityProbeOutcome::Conclusive(capabilities)
+                        if capabilities.is_complete_for(&provider) =>
+                    {
+                        candidate.capabilities = capabilities;
+                    }
+                    ProviderCapabilityProbeOutcome::Conclusive(_)
+                    | ProviderCapabilityProbeOutcome::Failed => {
+                        candidate.capability_probe_failed = true;
+                    }
+                }
+            }
+            let ProviderVersionProbeOutcome::Recognized(version) = &candidate.version_probe else {
+                unreachable!("selected provider candidate must have a recognized version");
+            };
+            let mut effective_capabilities = candidate.capabilities.clone();
+            if candidate.capability_probe_failed {
+                effective_capabilities.mark_required_capability_unavailable(&provider);
+            }
+            provider_cli_from_selected_candidate(
+                program,
+                candidate.path.clone(),
+                version.clone(),
+                effective_capabilities,
+            )
+        } else {
+            ProviderCli {
+                path: None,
+                version: None,
+                error: Some(if scanned.is_empty() {
+                    format!("{program} executable was not found in PATH")
+                } else {
+                    format!("{program} executable version was unrecognized")
+                }),
+                app_server_capability: None,
+                acp_capability: None,
+                stream_json_capability: None,
+            }
+        };
+
+        refreshed_entries.insert(
+            provider.clone(),
+            scanned
+                .into_iter()
+                .filter_map(|candidate| {
+                    let version_probe = match candidate.version_probe {
+                        ProviderVersionProbeOutcome::Recognized(version) => {
+                            CachedProviderVersionProbe::Recognized(version)
+                        }
+                        ProviderVersionProbeOutcome::Unrecognized => {
+                            CachedProviderVersionProbe::Unrecognized
+                        }
+                        ProviderVersionProbeOutcome::Failed => return None,
+                    };
+                    Some(CachedProviderCandidate {
+                        path: candidate.path,
+                        fingerprint: candidate.fingerprint?,
+                        version_probe,
+                        capabilities: candidate.capabilities,
+                    })
+                })
+                .collect(),
+        );
+        provider_scan.insert(provider, provider_result);
+    }
+    cache.providers = refreshed_entries;
+    if let Some(cache_path) = cache_path {
+        if let Err(error) = write_provider_scan_cache_atomically(cache_path, &cache) {
+            let _ = fs::remove_file(cache_path);
+            eprintln!("provider scan cache could not be written: {error}");
+        }
+    }
+    provider_scan
+}
+
+fn app_version_compatibility_line(version: &str) -> Option<String> {
+    let mut components = version.split('.');
+    let major = components.next()?;
+    let minor = components.next()?;
+    let patch = components.next()?;
+    if major.is_empty()
+        || minor.is_empty()
+        || patch.is_empty()
+        || !is_canonical_version_component(major)
+        || !is_canonical_version_component(minor)
+    {
+        return None;
+    }
+    Some(format!("{major}.{minor}"))
+}
+
+fn is_valid_app_version_line(version_line: &str) -> bool {
+    let mut components = version_line.split('.');
+    let Some(major) = components.next() else {
+        return false;
+    };
+    let Some(minor) = components.next() else {
+        return false;
+    };
+    !major.is_empty()
+        && !minor.is_empty()
+        && components.next().is_none()
+        && is_canonical_version_component(major)
+        && is_canonical_version_component(minor)
+}
+
+fn is_canonical_version_component(component: &str) -> bool {
+    !component.is_empty()
+        && component.bytes().all(|byte| byte.is_ascii_digit())
+        && (component == "0" || !component.starts_with('0'))
+}
+
+fn load_compatible_provider_scan_cache(
+    path: &Path,
+    current_app_version_line: &str,
+) -> Option<ProviderScanCache> {
+    let cache: ProviderScanCache = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    if cache.schema_version != PROVIDER_SCAN_CACHE_SCHEMA_VERSION
+        || !is_valid_app_version_line(&cache.app_version_line)
+        || cache.app_version_line != current_app_version_line
+    {
+        return None;
+    }
+    for (provider, candidates) in &cache.providers {
+        if !external_provider_codes().contains(provider) {
+            return None;
+        }
+        let mut identities = HashSet::new();
+        for candidate in candidates {
+            let Some(path_identity) = normalized_provider_candidate_identity(&candidate.path)
+            else {
+                return None;
+            };
+            if candidate.fingerprint.path_identity != path_identity
+                || candidate.fingerprint.target_identity.is_empty()
+                || !identities.insert(candidate.fingerprint.path_identity.clone())
+                || matches!(
+                    &candidate.version_probe,
+                    CachedProviderVersionProbe::Recognized(ProviderVersion(version)) if version.is_empty()
+                )
+                || !candidate.capabilities.is_valid_for(provider)
+            {
+                return None;
+            }
+        }
+    }
+    Some(cache)
+}
+
+fn provider_candidate_fingerprint(path: &Path) -> Option<ProviderCandidateFingerprint> {
+    let path_identity = normalized_provider_candidate_identity(path)?;
+    let target_identity = normalized_provider_candidate_identity(&fs::canonicalize(path).ok()?)?;
+    let file_metadata = fs::metadata(path).ok()?;
+    let link_metadata = fs::symlink_metadata(path).ok()?;
+    let (modified_seconds, modified_nanos) = metadata_modified_time(&file_metadata)?;
+    let (link_modified_seconds, link_modified_nanos) = metadata_modified_time(&link_metadata)?;
+    Some(ProviderCandidateFingerprint {
+        path_identity,
+        target_identity,
+        file_size: file_metadata.len(),
+        modified_seconds,
+        modified_nanos,
+        link_size: link_metadata.len(),
+        link_modified_seconds,
+        link_modified_nanos,
+    })
+}
+
+fn metadata_modified_time(metadata: &fs::Metadata) -> Option<(u64, u32)> {
+    let elapsed = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some((elapsed.as_secs(), elapsed.subsec_nanos()))
+}
+
+fn normalized_provider_candidate_identity(path: &Path) -> Option<String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir().ok()?.join(path)
+    };
+    let identity = absolute.to_str()?;
+    #[cfg(windows)]
+    {
+        Some(identity.replace('/', "\\").to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        Some(identity.to_string())
+    }
+}
+
+fn write_provider_scan_cache_atomically(path: &Path, cache: &ProviderScanCache) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cache path has no parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let temporary_path = parent.join(format!(
+        ".{PROVIDER_SCAN_CACHE_FILE_NAME}.{}-{}.tmp",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let write_result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)?;
+        serde_json::to_writer_pretty(&mut file, cache)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        file.flush()?;
+        file.sync_all()?;
+        fs::rename(&temporary_path, path)
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    write_result
+}
+
+fn probe_codex_app_server_capability(
+    path: &Path,
+    path_value: Option<&OsString>,
+) -> Result<bool, ()> {
     let output = run_bounded_provider_probe({
         let mut command = provider_version_command(path, path_value);
         command.arg("app-server").arg("--help");
         command
-    });
-    let Some(output) = output else {
-        return false;
-    };
+    })
+    .map_err(|_| ())?;
     if !output.status.success() {
-        return false;
+        return Err(());
     }
     let text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    text.contains("app-server")
+    Ok(text.contains("app-server"))
 }
 
-fn probe_acp_capability(path: &Path, path_value: Option<&OsString>) -> bool {
+fn probe_acp_capability(path: &Path, path_value: Option<&OsString>) -> Result<bool, ()> {
     let output = run_bounded_provider_probe({
         let mut command = provider_version_command(path, path_value);
         command.arg("acp").arg("--help");
         command
-    });
-    let Some(output) = output else {
-        return false;
-    };
-    output.status.success()
-        && format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .to_ascii_lowercase()
-        .contains("acp")
+    })
+    .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    Ok(format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_ascii_lowercase()
+    .contains("acp"))
 }
 
-fn probe_antigravity_stream_json_capability(path: &Path, path_value: Option<&OsString>) -> bool {
+fn probe_antigravity_stream_json_capability(
+    path: &Path,
+    path_value: Option<&OsString>,
+) -> Result<bool, ()> {
     let output = run_bounded_provider_probe({
         let mut command = provider_version_command(path, path_value);
         command.arg("--help");
         command
-    });
-    let Some(output) = output else {
-        return false;
-    };
+    })
+    .map_err(|_| ())?;
     if !output.status.success() {
-        return false;
+        return Err(());
     }
     let text = format!(
         "{}\n{}",
@@ -10826,22 +11400,23 @@ fn probe_antigravity_stream_json_capability(path: &Path, path_value: Option<&OsS
         String::from_utf8_lossy(&output.stderr)
     )
     .to_ascii_lowercase();
-    text.contains("--input-format")
+    Ok(text.contains("--input-format")
         && text.contains("--output-format")
-        && text.contains("stream-json")
+        && text.contains("stream-json"))
 }
 
-fn probe_claude_persistent_stream_capability(path: &Path, path_value: Option<&OsString>) -> bool {
+fn probe_claude_persistent_stream_capability(
+    path: &Path,
+    path_value: Option<&OsString>,
+) -> Result<bool, ()> {
     let output = run_bounded_provider_probe({
         let mut command = provider_version_command(path, path_value);
         command.arg("--help");
         command
-    });
-    let Some(output) = output else {
-        return false;
-    };
+    })
+    .map_err(|_| ())?;
     if !output.status.success() {
-        return false;
+        return Err(());
     }
     let text = format!(
         "{}\n{}",
@@ -10849,11 +11424,11 @@ fn probe_claude_persistent_stream_capability(path: &Path, path_value: Option<&Os
         String::from_utf8_lossy(&output.stderr)
     )
     .to_ascii_lowercase();
-    text.contains("--input-format")
+    Ok(text.contains("--input-format")
         && text.contains("--output-format")
         && text.contains("stream-json")
         && text.contains("--include-partial-messages")
-        && text.contains("--append-system-prompt")
+        && text.contains("--append-system-prompt"))
 }
 
 fn is_provider_executable(path: &Path) -> bool {
@@ -10873,84 +11448,116 @@ fn is_provider_executable(path: &Path) -> bool {
 }
 
 fn provider_cli_version(path: &Path, path_value: Option<&OsString>) -> Option<ProviderVersion> {
+    match provider_cli_version_probe(path, path_value) {
+        ProviderVersionProbeOutcome::Recognized(version) => Some(version),
+        ProviderVersionProbeOutcome::Unrecognized | ProviderVersionProbeOutcome::Failed => None,
+    }
+}
+
+fn provider_cli_version_probe(
+    path: &Path,
+    path_value: Option<&OsString>,
+) -> ProviderVersionProbeOutcome {
     let output = run_bounded_provider_probe({
         let mut command = provider_version_command(path, path_value);
         command.arg("--version");
         command
     });
-    let output = output?;
+    let Ok(output) = output else {
+        return ProviderVersionProbeOutcome::Failed;
+    };
     if !output.status.success() {
-        return None;
+        return ProviderVersionProbeOutcome::Failed;
     }
     let text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let parsed = parse_provider_version(&text);
-    parsed
+    match parse_provider_version(&text) {
+        Some(version) => ProviderVersionProbeOutcome::Recognized(version),
+        None => ProviderVersionProbeOutcome::Unrecognized,
+    }
 }
 
 /// Run a provider discovery command with both a time and output bound. A
 /// provider executable is user-controlled and may be a wrapper that starts a
 /// long-lived process, so normal scans must never wait indefinitely or retain
 /// an unbounded help/version response.
-fn run_bounded_provider_probe(mut command: Command) -> Option<Output> {
+fn run_bounded_provider_probe(mut command: Command) -> Result<Output, ()> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().ok()?;
-    let stdout = child.stdout.take()?;
-    let stderr = child.stderr.take()?;
+    let mut child = command.spawn().map_err(|_| ())?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(());
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(());
+    };
     let (stdout_sender, stdout_receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut output = Vec::new();
-        let _ = stdout
-            .take(PROVIDER_PROBE_MAX_OUTPUT_BYTES)
-            .read_to_end(&mut output);
-        let _ = stdout_sender.send(output);
+        let result = read_bounded_provider_probe_output(stdout);
+        let _ = stdout_sender.send(result);
     });
     let (stderr_sender, stderr_receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut output = Vec::new();
-        let _ = stderr
-            .take(PROVIDER_PROBE_MAX_OUTPUT_BYTES)
-            .read_to_end(&mut output);
-        let _ = stderr_sender.send(output);
+        let result = read_bounded_provider_probe_output(stderr);
+        let _ = stderr_sender.send(result);
     });
 
     let deadline = Instant::now() + PROVIDER_PROBE_TIMEOUT;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break None;
+                break Err(());
             }
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break None;
+                break Err(());
             }
         }
     }?;
 
     let stdout = stdout_receiver
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .ok()?;
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
     let stderr = stderr_receiver
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .ok()?;
-    Some(Output {
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
+    Ok(Output {
         status,
         stdout,
         stderr,
     })
+}
+
+fn read_bounded_provider_probe_output(reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    reader
+        .take(PROVIDER_PROBE_MAX_OUTPUT_BYTES.saturating_add(1))
+        .read_to_end(&mut output)?;
+    if output.len() as u64 > PROVIDER_PROBE_MAX_OUTPUT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "provider probe output exceeded the collection limit",
+        ));
+    }
+    Ok(output)
 }
 
 fn provider_version_command(path: &Path, path_value: Option<&OsString>) -> Command {

@@ -666,7 +666,7 @@ where
 mod tests {
     use super::*;
     use pedelec_core::{
-        error_codes, refresh_shared_providers, CoreRuntime, ProviderCode, SharedCoreRuntime,
+        error_codes, refresh_shared_providers_force, CoreRuntime, ProviderCode, SharedCoreRuntime,
     };
     use pedelec_ipc::start_core_ipc_server_with_runtime_path;
     use serde_json::json;
@@ -1339,7 +1339,7 @@ mod tests {
             .recv_timeout(Duration::from_millis(100))
             .is_err());
 
-        refresh_shared_providers(&runtime);
+        refresh_shared_providers_force(&runtime);
 
         let response = response_rx
             .recv_timeout(Duration::from_secs(2))

@@ -18,7 +18,7 @@ use crate::provider_terminal::{
     open as open_provider_terminal_window, OpenProviderTerminalInput, OpenProviderTerminalOutput,
 };
 use pedelec_core::{
-    error_codes, refresh_shared_providers, start_initial_provider_scan,
+    error_codes, refresh_shared_providers_force, start_initial_provider_scan,
     wait_for_provider_readiness, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
     CoreRuntimeOwner, CreateThreadInput, CreateThreadOutput, DenoRuntimeDispatcher, EndThreadInput,
     ListOllamaModelsInput, OllamaModelOption, PedelecError, PedelecSettings, PrepareThreadInput,
@@ -541,11 +541,11 @@ async fn refresh_providers(
 ) -> Result<Vec<ProviderInfo>, PedelecError> {
     let shared_runtime = state.runtime();
     let fallback_runtime = shared_runtime.clone();
-    Ok(
-        tauri::async_runtime::spawn_blocking(move || refresh_shared_providers(&shared_runtime))
-            .await
-            .unwrap_or_else(|_| fallback_runtime.lock().unwrap().list_providers()),
-    )
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        refresh_shared_providers_force(&shared_runtime)
+    })
+    .await
+    .unwrap_or_else(|_| fallback_runtime.lock().unwrap().list_providers()))
 }
 
 #[tauri::command]

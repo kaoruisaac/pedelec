@@ -120,7 +120,7 @@ mod tests {
         let previous_snapshot = runtime.lock().unwrap().list_providers();
         runtime.lock().unwrap().provider_refresh_in_progress = true;
 
-        let during_refresh = refresh_shared_providers(&runtime);
+        let during_refresh = refresh_shared_providers_force(&runtime);
 
         assert_eq!(during_refresh, previous_snapshot);
     }
@@ -617,6 +617,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provider_probe_output_overflow_is_not_a_complete_result() {
+        let exact_limit = vec![0; PROVIDER_PROBE_MAX_OUTPUT_BYTES as usize];
+        assert_eq!(
+            read_bounded_provider_probe_output(std::io::Cursor::new(exact_limit.clone())).unwrap(),
+            exact_limit
+        );
+
+        let oversized = vec![0; PROVIDER_PROBE_MAX_OUTPUT_BYTES as usize + 1];
+        assert!(read_bounded_provider_probe_output(std::io::Cursor::new(oversized)).is_err());
+    }
+
     #[cfg(windows)]
     #[test]
     fn merged_provider_path_preserves_paths_usable_by_cmd_scripts() {
@@ -812,6 +824,635 @@ mod tests {
 
         assert_eq!(scan.path, Some(provider));
         assert_eq!(scan.version, Some(ProviderVersion(vec![9, 8, 7])));
+    }
+
+    fn provider_cache_candidate(temp: &tempfile::TempDir, name: &str, version: &str) -> PathBuf {
+        let path = temp.path().join(name);
+        fs::write(&path, version).unwrap();
+        path
+    }
+
+    fn provider_cache_fixture_scan(
+        candidates: Vec<PathBuf>,
+        cache_path: &Path,
+        app_version: &str,
+        policy: ProviderScanCachePolicy,
+        version_probes: &mut Vec<PathBuf>,
+        capability_probes: &mut Vec<PathBuf>,
+    ) -> HashMap<ProviderCode, ProviderCli> {
+        scan_external_providers_with_cache_at(
+            Some(OsString::from("fixture-path")),
+            policy,
+            Some(cache_path),
+            app_version,
+            move |program, _| {
+                if program == "codex" {
+                    candidates.clone()
+                } else {
+                    Vec::new()
+                }
+            },
+            |_, path, _| {
+                version_probes.push(path.to_path_buf());
+                match fs::read_to_string(path)
+                    .ok()
+                    .and_then(|text| parse_provider_version(&text))
+                {
+                    Some(version) => ProviderVersionProbeOutcome::Recognized(version),
+                    None => ProviderVersionProbeOutcome::Unrecognized,
+                }
+            },
+            |program, path, _| {
+                capability_probes.push(path.to_path_buf());
+                let mut capabilities = ProviderCapabilities::default();
+                capabilities.app_server = (program == "codex").then_some(true);
+                ProviderCapabilityProbeOutcome::Conclusive(capabilities)
+            },
+        )
+    }
+
+    fn run_provider_cache_fixture_scan(
+        candidates: Vec<PathBuf>,
+        cache_path: &Path,
+        app_version: &str,
+        policy: ProviderScanCachePolicy,
+    ) -> (
+        HashMap<ProviderCode, ProviderCli>,
+        Vec<PathBuf>,
+        Vec<PathBuf>,
+    ) {
+        let mut version_probes = Vec::new();
+        let mut capability_probes = Vec::new();
+        let scan = provider_cache_fixture_scan(
+            candidates,
+            cache_path,
+            app_version,
+            policy,
+            &mut version_probes,
+            &mut capability_probes,
+        );
+        (scan, version_probes, capability_probes)
+    }
+
+    fn run_provider_cache_fixture_scan_with_outcomes<V, C>(
+        candidates: Vec<PathBuf>,
+        cache_path: &Path,
+        app_version: &str,
+        policy: ProviderScanCachePolicy,
+        mut version_probe: V,
+        mut capability_probe: C,
+    ) -> (
+        HashMap<ProviderCode, ProviderCli>,
+        Vec<PathBuf>,
+        Vec<PathBuf>,
+    )
+    where
+        V: FnMut(&Path) -> ProviderVersionProbeOutcome,
+        C: FnMut(&str, &Path) -> ProviderCapabilityProbeOutcome,
+    {
+        let mut version_probes = Vec::new();
+        let mut capability_probes = Vec::new();
+        let scan = scan_external_providers_with_cache_at(
+            Some(OsString::from("fixture-path")),
+            policy,
+            Some(cache_path),
+            app_version,
+            move |program, _| {
+                if program == "codex" {
+                    candidates.clone()
+                } else {
+                    Vec::new()
+                }
+            },
+            |_, path, _| {
+                version_probes.push(path.to_path_buf());
+                version_probe(path)
+            },
+            |program, path, _| {
+                capability_probes.push(path.to_path_buf());
+                capability_probe(program, path)
+            },
+        );
+        (scan, version_probes, capability_probes)
+    }
+
+    #[test]
+    fn provider_scan_cache_reuses_unchanged_version_and_capability_probes() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = provider_cache_candidate(&temp, "codex-a", "1.2.3");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+
+        let (first, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(version_probes, vec![candidate.clone()]);
+        assert_eq!(capability_probes, vec![candidate.clone()]);
+        assert_eq!(
+            first[&ProviderCode::Codex].version,
+            Some(ProviderVersion(vec![1, 2, 3]))
+        );
+        assert!(cache_path.is_file());
+
+        let cache: ProviderScanCache =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(cache.schema_version, PROVIDER_SCAN_CACHE_SCHEMA_VERSION);
+        assert_eq!(cache.app_version_line, "0.4");
+        assert_eq!(cache.providers[&ProviderCode::Codex].len(), 1);
+
+        let (second, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate.clone()],
+            &cache_path,
+            "0.4.9",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert!(version_probes.is_empty());
+        assert!(capability_probes.is_empty());
+        assert_eq!(second[&ProviderCode::Codex].path, Some(candidate));
+        assert_eq!(
+            second[&ProviderCode::Codex].app_server_capability,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn provider_scan_cache_retries_transient_version_failure_for_unchanged_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = provider_cache_candidate(&temp, "codex-a", "fixture");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+
+        let (first, version_probes, capability_probes) =
+            run_provider_cache_fixture_scan_with_outcomes(
+                vec![candidate.clone()],
+                &cache_path,
+                "0.4.0",
+                ProviderScanCachePolicy::CacheAware,
+                |_| ProviderVersionProbeOutcome::Failed,
+                |_, _| unreachable!("failed version must not probe capabilities"),
+            );
+        assert_eq!(version_probes, vec![candidate.clone()]);
+        assert!(capability_probes.is_empty());
+        assert!(first[&ProviderCode::Codex].version.is_none());
+        assert!(first[&ProviderCode::Codex].path.is_none());
+        let cache: ProviderScanCache =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert!(cache.providers[&ProviderCode::Codex].is_empty());
+
+        let (second, version_probes, capability_probes) =
+            run_provider_cache_fixture_scan_with_outcomes(
+                vec![candidate.clone()],
+                &cache_path,
+                "0.4.0",
+                ProviderScanCachePolicy::CacheAware,
+                |_| ProviderVersionProbeOutcome::Recognized(ProviderVersion(vec![4, 5, 6])),
+                |program, _| {
+                    let mut capabilities = ProviderCapabilities::default();
+                    capabilities.app_server = (program == "codex").then_some(true);
+                    ProviderCapabilityProbeOutcome::Conclusive(capabilities)
+                },
+            );
+        assert_eq!(version_probes, vec![candidate.clone()]);
+        assert_eq!(capability_probes, vec![candidate.clone()]);
+        assert_eq!(
+            second[&ProviderCode::Codex].version,
+            Some(ProviderVersion(vec![4, 5, 6]))
+        );
+        assert!(second[&ProviderCode::Codex].error.is_none());
+
+        let (third, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert!(version_probes.is_empty());
+        assert!(capability_probes.is_empty());
+        assert!(third[&ProviderCode::Codex].error.is_none());
+    }
+
+    #[test]
+    fn provider_scan_cache_retries_only_transient_capability_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = provider_cache_candidate(&temp, "codex-a", "fixture");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+
+        let (first, version_probes, capability_probes) =
+            run_provider_cache_fixture_scan_with_outcomes(
+                vec![candidate.clone()],
+                &cache_path,
+                "0.4.0",
+                ProviderScanCachePolicy::CacheAware,
+                |_| ProviderVersionProbeOutcome::Recognized(ProviderVersion(vec![7, 8, 9])),
+                |_, _| ProviderCapabilityProbeOutcome::Failed,
+            );
+        assert_eq!(version_probes, vec![candidate.clone()]);
+        assert_eq!(capability_probes, vec![candidate.clone()]);
+        assert_eq!(
+            first[&ProviderCode::Codex].version,
+            Some(ProviderVersion(vec![7, 8, 9]))
+        );
+        assert_eq!(
+            first[&ProviderCode::Codex].app_server_capability,
+            Some(false)
+        );
+        assert!(first[&ProviderCode::Codex].error.is_some());
+        let cache: ProviderScanCache =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(
+            cache.providers[&ProviderCode::Codex][0].version_probe,
+            CachedProviderVersionProbe::Recognized(ProviderVersion(vec![7, 8, 9]))
+        );
+        assert!(cache.providers[&ProviderCode::Codex][0]
+            .capabilities
+            .app_server
+            .is_none());
+
+        let (second, version_probes, capability_probes) =
+            run_provider_cache_fixture_scan_with_outcomes(
+                vec![candidate.clone()],
+                &cache_path,
+                "0.4.0",
+                ProviderScanCachePolicy::CacheAware,
+                |_| panic!("cached recognized version must not be reprobed"),
+                |program, _| {
+                    let mut capabilities = ProviderCapabilities::default();
+                    capabilities.app_server = (program == "codex").then_some(true);
+                    ProviderCapabilityProbeOutcome::Conclusive(capabilities)
+                },
+            );
+        assert!(version_probes.is_empty());
+        assert_eq!(capability_probes, vec![candidate.clone()]);
+        assert!(second[&ProviderCode::Codex].error.is_none());
+        assert_eq!(
+            second[&ProviderCode::Codex].app_server_capability,
+            Some(true)
+        );
+
+        let (third, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert!(version_probes.is_empty());
+        assert!(capability_probes.is_empty());
+        assert!(third[&ProviderCode::Codex].error.is_none());
+    }
+
+    #[test]
+    fn provider_scan_cache_reuses_conclusive_unsupported_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = provider_cache_candidate(&temp, "codex-a", "fixture");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+        let (first, version_probes, capability_probes) =
+            run_provider_cache_fixture_scan_with_outcomes(
+                vec![candidate.clone()],
+                &cache_path,
+                "0.4.0",
+                ProviderScanCachePolicy::CacheAware,
+                |_| ProviderVersionProbeOutcome::Recognized(ProviderVersion(vec![1, 0, 0])),
+                |_, _| {
+                    let mut capabilities = ProviderCapabilities::default();
+                    capabilities.app_server = Some(false);
+                    ProviderCapabilityProbeOutcome::Conclusive(capabilities)
+                },
+            );
+        assert_eq!(version_probes, vec![candidate.clone()]);
+        assert_eq!(capability_probes, vec![candidate.clone()]);
+        assert_eq!(
+            first[&ProviderCode::Codex].app_server_capability,
+            Some(false)
+        );
+        assert!(first[&ProviderCode::Codex].error.is_some());
+
+        let (second, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert!(version_probes.is_empty());
+        assert!(capability_probes.is_empty());
+        assert_eq!(
+            second[&ProviderCode::Codex].app_server_capability,
+            Some(false)
+        );
+        assert!(second[&ProviderCode::Codex].error.is_some());
+    }
+
+    #[test]
+    fn provider_scan_cache_discovers_new_candidates_and_selects_highest_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate_a = provider_cache_candidate(&temp, "codex-a", "2.0.0");
+        let candidate_b = provider_cache_candidate(&temp, "codex-b", "3.0.0");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+        let (_, _, _) = run_provider_cache_fixture_scan(
+            vec![candidate_a.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+
+        let (scan, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate_b.clone(), candidate_a.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(version_probes, vec![candidate_b.clone()]);
+        assert_eq!(capability_probes, vec![candidate_b.clone()]);
+        assert_eq!(scan[&ProviderCode::Codex].path, Some(candidate_b.clone()));
+        assert_eq!(
+            scan[&ProviderCode::Codex].version,
+            Some(ProviderVersion(vec![3]))
+        );
+
+        let cache: ProviderScanCache =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(cache.providers[&ProviderCode::Codex].len(), 2);
+        assert!(cache.providers[&ProviderCode::Codex]
+            .iter()
+            .any(|entry| entry.path == candidate_a));
+    }
+
+    #[test]
+    fn provider_scan_cache_preserves_path_tie_break_and_caches_unrecognized_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate_a = provider_cache_candidate(&temp, "codex-a", "2.0.0");
+        let candidate_z = provider_cache_candidate(&temp, "codex-z", "2.0.0");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+        let (scan, _, capabilities) = run_provider_cache_fixture_scan(
+            vec![candidate_z.clone(), candidate_a.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(scan[&ProviderCode::Codex].path, Some(candidate_z.clone()));
+        assert_eq!(capabilities, vec![candidate_z]);
+
+        let unrecognized = provider_cache_candidate(&temp, "codex-unrecognized", "codex-dev");
+        let other_cache_path = temp.path().join("unrecognized-cache.json");
+        let (scan, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![unrecognized.clone()],
+            &other_cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(version_probes, vec![unrecognized.clone()]);
+        assert!(capability_probes.is_empty());
+        assert!(scan[&ProviderCode::Codex]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("version was unrecognized"));
+        let cache: ProviderScanCache =
+            serde_json::from_slice(&fs::read(&other_cache_path).unwrap()).unwrap();
+        assert!(matches!(
+            &cache.providers[&ProviderCode::Codex][0].version_probe,
+            &CachedProviderVersionProbe::Unrecognized
+        ));
+
+        let (_, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![unrecognized],
+            &other_cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert!(version_probes.is_empty());
+        assert!(capability_probes.is_empty());
+    }
+
+    #[test]
+    fn lower_new_or_changed_candidate_does_not_reprobe_selected_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate_a = provider_cache_candidate(&temp, "codex-a", "2.0.0");
+        let candidate_b = provider_cache_candidate(&temp, "codex-b", "1.0.0");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+        let (first, _, first_capabilities) = run_provider_cache_fixture_scan(
+            vec![candidate_a.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(first[&ProviderCode::Codex].path, Some(candidate_a.clone()));
+        assert_eq!(first_capabilities, vec![candidate_a.clone()]);
+
+        let (second, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate_b.clone(), candidate_a.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(version_probes, vec![candidate_b.clone()]);
+        assert!(capability_probes.is_empty());
+        assert_eq!(second[&ProviderCode::Codex].path, Some(candidate_a.clone()));
+
+        fs::write(&candidate_b, "1.0.0-changed").unwrap();
+        let (third, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate_a.clone(), candidate_b.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(version_probes, vec![candidate_b]);
+        assert!(capability_probes.is_empty());
+        assert_eq!(third[&ProviderCode::Codex].path, Some(candidate_a));
+    }
+
+    #[test]
+    fn removed_selected_provider_candidate_is_dropped_and_reselected() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate_a = provider_cache_candidate(&temp, "codex-a", "1.0.0");
+        let candidate_b = provider_cache_candidate(&temp, "codex-b", "2.0.0");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+        let (_, _, capabilities) = run_provider_cache_fixture_scan(
+            vec![candidate_a.clone(), candidate_b.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(capabilities, vec![candidate_b.clone()]);
+        fs::remove_file(&candidate_b).unwrap();
+
+        let (scan, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate_a.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert!(version_probes.is_empty());
+        assert_eq!(capability_probes, vec![candidate_a.clone()]);
+        assert_eq!(scan[&ProviderCode::Codex].path, Some(candidate_a.clone()));
+        let cache: ProviderScanCache =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(cache.providers[&ProviderCode::Codex].len(), 1);
+        assert_eq!(cache.providers[&ProviderCode::Codex][0].path, candidate_a);
+    }
+
+    #[test]
+    fn changed_selected_candidate_is_reprobed_and_capabilities_are_refreshed() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = provider_cache_candidate(&temp, "codex-a", "1.0.0");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+        let (_, _, _) = run_provider_cache_fixture_scan(
+            vec![candidate.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        fs::write(&candidate, "12.0.0-changed").unwrap();
+
+        let (scan, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(version_probes, vec![candidate.clone()]);
+        assert_eq!(capability_probes, vec![candidate.clone()]);
+        assert_eq!(
+            scan[&ProviderCode::Codex].version,
+            Some(ProviderVersion(vec![12]))
+        );
+    }
+
+    #[test]
+    fn app_version_line_schema_and_corrupt_cache_invalidate_provider_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = provider_cache_candidate(&temp, "codex-a", "1.0.0");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+        let (_, _, _) = run_provider_cache_fixture_scan(
+            vec![candidate.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        let (_, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate.clone()],
+            &cache_path,
+            "0.4.9",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert!(version_probes.is_empty());
+        assert!(capability_probes.is_empty());
+
+        for app_version in ["0.5.0", "1.0.0"] {
+            let (_, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+                vec![candidate.clone()],
+                &cache_path,
+                app_version,
+                ProviderScanCachePolicy::CacheAware,
+            );
+            assert_eq!(version_probes, vec![candidate.clone()]);
+            assert_eq!(capability_probes, vec![candidate.clone()]);
+        }
+
+        for invalid_cache in [
+            b"not json".to_vec(),
+            {
+                let mut cache: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+                cache["schemaVersion"] = json!(1);
+                serde_json::to_vec(&cache).unwrap()
+            },
+            {
+                let mut cache: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+                cache["schemaVersion"] = json!(999);
+                serde_json::to_vec(&cache).unwrap()
+            },
+            {
+                let mut cache: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+                cache["appVersionLine"] = json!("not-a-version");
+                serde_json::to_vec(&cache).unwrap()
+            },
+        ] {
+            fs::write(&cache_path, invalid_cache).unwrap();
+            let (_, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+                vec![candidate.clone()],
+                &cache_path,
+                "1.0.0",
+                ProviderScanCachePolicy::CacheAware,
+            );
+            assert_eq!(version_probes, vec![candidate.clone()]);
+            assert_eq!(capability_probes, vec![candidate.clone()]);
+        }
+    }
+
+    #[test]
+    fn manual_provider_refresh_ignores_cache_and_rebuilds_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate_a = provider_cache_candidate(&temp, "codex-a", "1.0.0");
+        let candidate_b = provider_cache_candidate(&temp, "codex-b", "2.0.0");
+        let cache_path = temp.path().join("provider-scan-cache.json");
+        let (_, _, _) = run_provider_cache_fixture_scan(
+            vec![candidate_a.clone(), candidate_b.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        fs::write(&candidate_b, "5.0.0-updated").unwrap();
+
+        let (scan, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate_a.clone(), candidate_b.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::ForceFull,
+        );
+        assert_eq!(version_probes, vec![candidate_a, candidate_b.clone()]);
+        assert_eq!(capability_probes, vec![candidate_b.clone()]);
+        assert_eq!(scan[&ProviderCode::Codex].path, Some(candidate_b.clone()));
+        assert_eq!(
+            scan[&ProviderCode::Codex].version,
+            Some(ProviderVersion(vec![5]))
+        );
+
+        let (_, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate_b],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert!(version_probes.is_empty());
+        assert!(capability_probes.is_empty());
+    }
+
+    #[test]
+    fn provider_cache_write_failure_keeps_successful_scan_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = provider_cache_candidate(&temp, "codex-a", "1.0.0");
+        let not_a_directory = temp.path().join("cache-parent");
+        fs::write(&not_a_directory, "file blocks cache directory creation").unwrap();
+        let cache_path = not_a_directory.join("provider-scan-cache.json");
+
+        let (scan, version_probes, capability_probes) = run_provider_cache_fixture_scan(
+            vec![candidate.clone()],
+            &cache_path,
+            "0.4.0",
+            ProviderScanCachePolicy::CacheAware,
+        );
+        assert_eq!(version_probes, vec![candidate.clone()]);
+        assert_eq!(capability_probes, vec![candidate.clone()]);
+        assert_eq!(scan[&ProviderCode::Codex].path, Some(candidate));
+        assert!(scan[&ProviderCode::Codex].error.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_cache_candidate_identity_is_case_insensitive_on_windows() {
+        let lower = Path::new(r"C:\Users\Person\codex.exe");
+        let upper = Path::new(r"c:\users\person\CODEX.EXE");
+        assert_eq!(
+            normalized_provider_candidate_identity(lower),
+            normalized_provider_candidate_identity(upper)
+        );
+        assert_eq!(
+            deduplicate_provider_candidates(vec![lower.to_path_buf(), upper.to_path_buf()]).len(),
+            1
+        );
     }
 
     #[test]
