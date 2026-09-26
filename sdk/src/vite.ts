@@ -17,6 +17,8 @@ const DECLARATION_LIKE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs
 const LEGACY_NODE_BUILTIN_MODULES = new Set(builtinModules.filter((specifier) => !specifier.startsWith("node:")));
 const NODE_BUILTIN_MODULES = new Set(builtinModules.map((specifier) => specifier.replace(/^node:/, "")));
 const nodeRequire = createRequire(import.meta.url);
+type HostResolver = ReturnType<ResolvedConfig["createResolver"]>;
+const ssrResolvers = new WeakMap<ResolvedConfig, HostResolver>();
 
 type Declaration = {
   name: string;
@@ -153,7 +155,7 @@ async function prepareDeclaration(
   resolveModule: ResolveModule,
   config: ResolvedConfig | undefined,
 ): Promise<PreparedDeclaration> {
-  const entry = await resolveEntry(declaration, importer, resolveModule);
+  const entry = await resolveEntry(declaration, importer, resolveModule, config);
   const diagnosticPrefix = `Deno module "${declaration.name}" entry "${declaration.entry}" imported by "${importer}"`;
 
   let runtimeBundle: RuntimeBundle;
@@ -204,6 +206,7 @@ async function resolveEntry(
   declaration: Declaration,
   importer: string,
   resolveModule: ResolveModule,
+  config: ResolvedConfig | undefined,
 ): Promise<string> {
   if (isRemoteOrSchemeEntry(declaration.entry)) {
     throw new Error(
@@ -213,7 +216,7 @@ async function resolveEntry(
 
   let result: { id: string; external?: boolean | "absolute" } | null;
   try {
-    result = await resolveHostModule(declaration.entry, importer, resolveModule);
+    result = await resolveHostModule(declaration.entry, importer, resolveModule, config);
   } catch (error) {
     throw new Error(
       `could not resolve entry "${declaration.entry}" for Deno module "${declaration.name}" from "${importer}": ${formatError(error)}`,
@@ -241,7 +244,7 @@ async function bundleRuntime(
       const builtin = canonicalBuiltinSpecifier(source);
       if (builtin) return { id: builtin, external: true };
       if (!importer || source.startsWith("\0")) return null;
-      const resolved = await resolveHostModule(source, importer, resolveModule);
+      const resolved = await resolveHostModule(source, importer, resolveModule, config);
       if (!resolved) {
         throw new Error(`unresolved runtime dependency "${source}" from "${importer}"`);
       }
@@ -345,7 +348,12 @@ async function bundleRuntime(
   return { source: entryChunk.code, files };
 }
 
-async function resolveHostModule(source: string, importer: string, resolveModule: ResolveModule): Promise<{ id: string; external?: boolean | "absolute" } | null> {
+async function resolveHostModule(
+  source: string,
+  importer: string,
+  resolveModule: ResolveModule,
+  config: ResolvedConfig | undefined,
+): Promise<{ id: string; external?: boolean | "absolute" } | null> {
   const resolved = await resolveModule(source, importer, { skipSelf: true });
   const resolvedFile = resolved ? stripQueryAndHash(resolved.id) : null;
   const needsPackageFallback = Boolean(
@@ -354,6 +362,22 @@ async function resolveHostModule(source: string, importer: string, resolveModule
       (isOptimizedDependencyPath(resolved.id) || resolved.external || !ts.sys.fileExists(resolvedFile!)),
   );
   if (!needsPackageFallback) return resolved;
+
+  if (config) {
+    try {
+      let resolver = ssrResolvers.get(config);
+      if (!resolver) {
+        resolver = config.createResolver();
+        ssrResolvers.set(config, resolver);
+      }
+      const serverResolved = await resolver(source, importer, false, true);
+      if (serverResolved) return { id: serverResolved };
+    } catch {
+      // Fall through to the legacy Node resolver. Custom Vite plugins can still
+      // return a usable outer resolution even when Vite's internal SSR resolver
+      // cannot resolve the specifier.
+    }
+  }
 
   try {
     return { id: nodeRequire.resolve(source, { paths: [dirname(importer)] }) };
@@ -430,6 +454,7 @@ async function bundleDeclarations(
         options,
         host,
         resolveModule,
+        config,
       );
       if (!resolved) {
         throw new Error(
@@ -639,13 +664,14 @@ async function resolveDeclarationDependency(
   options: ts.CompilerOptions,
   host: ts.CompilerHost,
   resolveModule: ResolveModule,
+  config: ResolvedConfig | undefined,
 ): Promise<string | null> {
   const fromTypeScript = ts.resolveModuleName(specifier, importer, options, host).resolvedModule?.resolvedFileName;
   if (fromTypeScript && !isTypeScriptLib(fromTypeScript) && isDeclarationLikePath(fromTypeScript)) {
     return normalizeFile(fromTypeScript);
   }
 
-  const viteResolved = await resolveHostModule(specifier, importer, resolveModule);
+  const viteResolved = await resolveHostModule(specifier, importer, resolveModule, config);
   if (!viteResolved || viteResolved.external) return null;
   const resolvedId = stripQueryAndHash(viteResolved.id);
   if (!isDeclarationLikePath(resolvedId)) return null;

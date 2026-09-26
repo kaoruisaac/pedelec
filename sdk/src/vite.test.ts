@@ -542,6 +542,80 @@ describe("pedelecVitePlugin", () => {
     });
   });
 
+  it("re-resolves client-optimized import-only packages with SSR semantics", async () => {
+    const directory = await createFixture();
+    const packageDirectory = join(directory, "node_modules", "import-only-dynamic-builtin");
+    const optimizedDirectory = join(directory, "node_modules", ".vite", "deps");
+    const optimizedEntry = join(optimizedDirectory, "import-only-dynamic-builtin.js");
+    await mkdir(packageDirectory, { recursive: true });
+    await mkdir(optimizedDirectory, { recursive: true });
+    await writeFile(
+      join(packageDirectory, "package.json"),
+      JSON.stringify({
+        name: "import-only-dynamic-builtin",
+        type: "module",
+        exports: {
+          ".": {
+            import: {
+              types: "./index.d.ts",
+              default: "./index.js",
+            },
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(packageDirectory, "index.js"),
+      `export async function loadModuleBuiltin() { return await import("node:module"); }\n`,
+    );
+    await writeFile(
+      join(packageDirectory, "index.d.ts"),
+      `export declare function loadModuleBuiltin(): Promise<unknown>;\n`,
+    );
+    await writeFile(
+      optimizedEntry,
+      `export async function loadModuleBuiltin() { return await import("./browser-external_node_module.js"); }\n`,
+    );
+    await writeFile(
+      join(optimizedDirectory, "browser-external_node_module.js"),
+      `export default new Proxy({}, { get() { throw new Error("browser external"); } });\n`,
+    );
+    await writeFile(
+      join(directory, "agent", "module.ts"),
+      `import { loadModuleBuiltin } from "import-only-dynamic-builtin";\nexport async function preview() { return await loadModuleBuiltin(); }\n`,
+    );
+
+    const optimizerFixture: Plugin = {
+      name: "fixture-client-dependency-optimizer",
+      enforce: "pre",
+      resolveId(source) {
+        return source === "import-only-dynamic-builtin" ? optimizedEntry : null;
+      },
+    };
+    const server = await createServer({
+      configFile: false,
+      root: directory,
+      plugins: [optimizerFixture, pedelecVitePlugin()],
+      resolve: { alias: { "@kaoruisaac/pedelec": join(sdkDist, "index.js") } },
+      server: { middlewareMode: true },
+    });
+    try {
+      const clientResolved = await server.pluginContainer.resolveId(
+        "import-only-dynamic-builtin",
+        join(directory, "agent", "module.ts"),
+      );
+      expect(clientResolved?.id.replace(/\\/g, "/")).toBe(optimizedEntry.replace(/\\/g, "/"));
+
+      const artifact = extractArtifact(await transformFile(server, join(directory, "main.ts")));
+      expect(artifact.runtimeSource).toContain("node:module");
+      expect(artifact.runtimeSource).not.toContain("browser-external_node_module");
+      expect(artifact.runtimeSource).not.toContain("browser external");
+      expect(artifact.runtimeSource).not.toMatch(/import\s*\(\s*["'][^"']*index(?:-[^"']*)?\.mjs["']\s*\)/);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("rejects an unresolved runtime dependency", async () => {
     const directory = await createFixture();
     await writeFile(
