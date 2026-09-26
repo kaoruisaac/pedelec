@@ -1,2 +1,2 @@
 // Generated from sdk/package.json. Do not edit manually.
-export const SDK_VERSION = "0.4.0";
+export const SDK_VERSION = "0.4.2";
