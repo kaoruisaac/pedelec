@@ -515,6 +515,33 @@ describe("pedelecVitePlugin", () => {
     });
   });
 
+  it("preserves dynamic canonical Node built-in imports from bundled packages", async () => {
+    const directory = await createFixture();
+    const packageDirectory = join(directory, "node_modules", "dynamic-builtin-dep");
+    await mkdir(packageDirectory, { recursive: true });
+    await writeFile(
+      join(packageDirectory, "package.json"),
+      `{"name":"dynamic-builtin-dep","type":"module","main":"index.js"}`,
+    );
+    await writeFile(
+      join(packageDirectory, "index.js"),
+      `export async function loadModuleBuiltin() { return await import("node:module"); }\n`,
+    );
+    await writeFile(
+      join(directory, "agent", "module.ts"),
+      `import { loadModuleBuiltin } from "dynamic-builtin-dep";\nexport async function preview() { return await loadModuleBuiltin(); }\n`,
+    );
+
+    await withServer(directory, async (server) => {
+      const artifact = extractArtifact(await transformFile(server, join(directory, "main.ts")));
+      expect(artifact.format).toBe("esm");
+      expect(artifact.runtimeSource).toContain("node:module");
+      expect(artifact.runtimeSource).not.toContain("__vite-browser-external");
+      expect(artifact.runtimeSource).not.toMatch(/import\s*\(\s*["'][^"']*index(?:-[^"']*)?\.mjs["']\s*\)/);
+      expect(artifact.runtimeSource).not.toContain("dynamic-builtin-dep");
+    });
+  });
+
   it("rejects an unresolved runtime dependency", async () => {
     const directory = await createFixture();
     await writeFile(

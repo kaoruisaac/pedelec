@@ -264,6 +264,10 @@ async function bundleRuntime(
       conditions: config?.resolve.conditions,
       mainFields: config?.resolve.mainFields,
     },
+    ssr: {
+      noExternal: true,
+      target: "node",
+    },
     build: {
       write: false,
       emptyOutDir: false,
@@ -271,12 +275,8 @@ async function bundleRuntime(
       target: "esnext",
       sourcemap: false,
       cssCodeSplit: false,
-      lib: {
-        entry,
-        formats: ["es"],
-        fileName: () => "index.mjs",
-      },
-      rollupOptions: {
+      ssr: true,
+      rolldownOptions: {
         input: entry,
         output: {
           format: "es",
