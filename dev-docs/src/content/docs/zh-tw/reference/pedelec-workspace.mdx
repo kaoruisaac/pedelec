@@ -113,7 +113,7 @@ Result 是 raw Deno output：`exitCode`、`stdout`、`stderr`、`stdoutTruncated
 
 ## Concurrency 與 lifetime
 
-同一個 Workspace 的多個 `workspace.run()` 可以 concurrent 執行。只要該 Workspace 中任一 Session 有 active Agent/provider operation，就不能開始 Workspace run。反過來，只要一個或多個 Workspace runs active，該 Workspace 中的 Session 也不能開始 `sendText()` 或 provider preparation。這是 Workspace-wide 規則，即使 active operation 來自另一個 `PedelecSession` handle 也一樣；衝突會 reject `WORKSPACE_BUSY`。
+同一個 Workspace 裡，多個 Session、Agent/provider operation 與 `workspace.run()` 可以同時進行。同一個 Session 在 busy 時，第二次 turn 仍會被拒絕。Pedelec 不提供 concurrent Workspace actors 之間的 filesystem locking、snapshots、transactions 或 conflict resolution。需要這些保證時，由 application 自行協調共用檔案存取。
 
 Custom Workspace 是明確開啟的，可以由多個 Session 共用，也會在 Session 結束或 app cleanup 時由 Pedelec 保留、不刪除。Managed Workspace 由 `Pedelec.createSession()` 自動建立，cleanup 由 Desktop 負責；Thread 結束不代表會立即刪除。Browser capability 受 runtime scope 限制，Desktop/Core restart 後需要時請重新開啟 custom Workspace。
 

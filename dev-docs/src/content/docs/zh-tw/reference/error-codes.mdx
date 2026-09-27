@@ -67,7 +67,6 @@ try {
 | `WORKSPACE_OPEN_FAILED` | Desktop 無法開啟已驗證的 Workspace folder | 檢查 folder 與 OS opener integration | 修復 opener 問題後 |
 | `WORKSPACE_NOT_FOUND` | Workspace capability 或記錄的 directory 已不存在 | 重新開啟 custom Workspace 或建立新的 Session；不要只用 path 重建 handle | Workspace 恢復後 |
 | `WORKSPACE_ACCESS_DENIED` | Process 無法讀取、寫入或初始化指定 Workspace path | 檢查 OS permissions、ownership、locks 與 application access grant | 修正 permissions 後 |
-| `WORKSPACE_BUSY` | Workspace-wide admission rule 阻擋 operation：`workspace.run()` 遇到 active Agent/provider operation，或 Session 在 Workspace run active 時嘗試開始 provider work | 等待該 Workspace 的衝突 operation 全部結束；只檢查目前 Session 不足夠 | Workspace idle 後 |
 | `SDK_TRANSPORT_ERROR` | Generic bridge failure | 查看 message/details，驗證 Extension/native/Core | 視 operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape 或 request type 不相容 | 對齊 component versions，回報 reproducible mismatch | 通常修復前不可 |
 
@@ -81,7 +80,7 @@ try {
 | `DENO_PROCESS_SPAWN_FAILED` | Desktop 無法 spawn Deno process | 檢查 Desktop installation、executable permissions 與 runtime logs | 修復 process environment 後 |
 | `DENO_PROCESS_IO_FAILED` | Deno process 的 stdin/stdout/stderr communication 失敗 | 將 operation 視為失敗，查看 runtime logs 並確認 partial writes | transport/runtime 恢復後 |
 | `DENO_MODULE_NAME_INVALID` | Logical Deno Module name 不是支援的 bare 或 scoped package-like specifier | 使用 `scene-tools` 或 `@example/scene-tools` 等有效名稱 | 修正 declaration 後 |
-| `DENO_MODULE_SETUP_INCOMPLETE` | Requested Workspace 或 Session Deno Module 尚未 ready | 先完成 upload/setup handshake；Workspace setup 失敗時可重試 | setup 完成後 |
+| `DENO_MODULE_SETUP_INCOMPLETE` | Requested Workspace 或 Session Deno Module 尚未 ready，或同一個 module identity 的 setup/upload 仍在 pending | 完成或重試該 module 的 setup。其他 Workspace 活動不會阻擋它 | 該 module setup 完成後 |
 | `DENO_MODULE_NOT_FOUND` | Requested module 不在 owning Workspace scope 或 Thread snapshot 的 declaration 中 | 將 module 加入明確的 run/setup request，或建立新的 Session snapshot | 修正 request 後 |
 | `DENO_MODULE_ALREADY_READY` | Ready module package 在目前 Core runtime scope 內不可變更 | 使用既有 package；新 implementation 請使用新的 logical module name | 只在改用新 name 後 |
 | `DENO_MODULE_ARTIFACT_TOO_LARGE` | Prepared runtime/declaration envelope 超過 100 MiB upload limit | 減小 bundled artifact，或拆分 module | artifact 縮小後 |

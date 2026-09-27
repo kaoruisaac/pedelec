@@ -53,4 +53,4 @@ Workspace run   → workspace.run({ denoModules }) → 僅供 App 執行
 
 `workspace.run()` 不會繼承 Session Deno Modules。建立 Session 也不會繼承之前 Workspace run 用過的 modules；Workspace-run modules 不會出現在 Agent Host Context。
 
-同一 Workspace 的 Workspace Deno 執行與進行中的 Agent/provider 工作有 admission rules，可能回傳 `WORKSPACE_BUSY`。詳見 [PedelecWorkspace](../reference/pedelec-workspace/) 與 [Error Codes](../reference/error-codes/)。
+同一個 Workspace 裡，Workspace Deno 執行可以與 Agent/provider 工作以及其他 `workspace.run()` 同時進行。Pedelec 不會替這些 actors 協調 filesystem conflicts。詳見 [PedelecWorkspace](../reference/pedelec-workspace/)。

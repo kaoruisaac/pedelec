@@ -8113,8 +8113,161 @@ mod tests {
         }
     }
 
+    fn insert_idle_provider_thread(runtime: &mut CoreRuntime, workspace_id: &str, thread_id: &str) {
+        let now = Utc::now();
+        runtime.thread_manager.insert_thread(
+            ThreadState {
+                thread_id: thread_id.into(),
+                workspace_id: workspace_id.into(),
+                provider: ProviderCode::Codex,
+                effort_level: Some(EffortLevel::Default),
+                effort_args: Vec::new(),
+                skills: Vec::new(),
+                status: ThreadStatus::Idle,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: None,
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+        runtime
+            .tool_registry
+            .insert(thread_id, ToolRegistry::default());
+    }
+
     #[test]
-    fn workspace_run_reservation_is_workspace_wide_and_does_not_use_thread_modules() {
+    fn same_workspace_provider_threads_and_runs_are_admitted_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_a = "thread_same_ws_a";
+        let thread_b = "thread_same_ws_b";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_a, ProviderCode::Codex, None, None);
+        let workspace_id = runtime
+            .thread_manager
+            .thread(thread_a)
+            .unwrap()
+            .workspace_id
+            .clone();
+        insert_idle_provider_thread(&mut runtime, &workspace_id, thread_b);
+
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_a.into(),
+                message: "a".into(),
+                operation_id: None,
+            })
+            .unwrap();
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_b.into(),
+                message: "b".into(),
+                operation_id: None,
+            })
+            .unwrap();
+        assert_eq!(runtime.thread_status(thread_a), Some(ThreadStatus::Running));
+        assert_eq!(runtime.thread_status(thread_b), Some(ThreadStatus::Running));
+
+        let same_thread = runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_a.into(),
+                message: "duplicate".into(),
+                operation_id: None,
+            })
+            .unwrap_err();
+        assert_eq!(same_thread.code, error_codes::THREAD_BUSY);
+
+        let run_a = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.clone(),
+                script: "console.log('a')".into(),
+                timeout_ms: Some(1_000),
+                deno_modules: vec![],
+            })
+            .unwrap();
+        let run_b = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.clone(),
+                script: "console.log('b')".into(),
+                timeout_ms: None,
+                deno_modules: vec![],
+            })
+            .unwrap();
+        assert_ne!(run_a.run_id, run_b.run_id);
+        assert_eq!(run_a.intent.timeout_ms, 1_000);
+        assert!(matches!(
+            run_a.intent.owner,
+            DenoExecutionOwner::Workspace { .. }
+        ));
+        assert!(matches!(
+            run_b.intent.owner,
+            DenoExecutionOwner::Workspace { .. }
+        ));
+        runtime.finish_workspace_run(&workspace_id, &run_a.run_id);
+        runtime.finish_workspace_run(&workspace_id, &run_b.run_id);
+        assert!(runtime.workspace_run_import_maps.is_empty());
+    }
+
+    #[test]
+    fn provider_send_and_prepare_are_admitted_while_workspace_runs_are_active() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_a = "thread_run_then_send";
+        let thread_b = "thread_run_then_prepare";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_a, ProviderCode::Codex, None, None);
+        let workspace_id = runtime
+            .thread_manager
+            .thread(thread_a)
+            .unwrap()
+            .workspace_id
+            .clone();
+        insert_idle_provider_thread(&mut runtime, &workspace_id, thread_b);
+
+        let run_a = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.clone(),
+                script: "console.log('one')".into(),
+                timeout_ms: None,
+                deno_modules: vec![],
+            })
+            .unwrap();
+        let run_b = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.clone(),
+                script: "console.log('two')".into(),
+                timeout_ms: None,
+                deno_modules: vec![],
+            })
+            .unwrap();
+        assert_ne!(run_a.run_id, run_b.run_id);
+
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_a.into(),
+                message: "after run".into(),
+                operation_id: None,
+            })
+            .unwrap();
+        let prepare = runtime
+            .begin_prepare_thread_intent(PrepareThreadInput {
+                thread_id: thread_b.into(),
+                operation_id: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            prepare.intent,
+            Some(PersistentRuntimeOperation::EnsureSession { .. })
+        ));
+        assert_eq!(runtime.thread_status(thread_a), Some(ThreadStatus::Running));
+        assert_eq!(runtime.thread_status(thread_b), Some(ThreadStatus::Running));
+        runtime.finish_workspace_run(&workspace_id, &run_a.run_id);
+        runtime.finish_workspace_run(&workspace_id, &run_b.run_id);
+    }
+
+    #[test]
+    fn workspace_runs_ignore_incomplete_thread_module_snapshots() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -8124,28 +8277,24 @@ mod tests {
             .register_workspace_for_test(workspace_id, &workspace, WorkspaceKind::Custom)
             .unwrap();
         let now = Utc::now();
-        for thread_id in ["thread-a", "thread-b"] {
-            runtime.thread_manager.insert_thread(
-                ThreadState {
-                    thread_id: thread_id.into(),
-                    workspace_id: workspace_id.into(),
-                    provider: ProviderCode::Codex,
-                    effort_level: Some(EffortLevel::Default),
-                    effort_args: Vec::new(),
-                    skills: Vec::new(),
-                    status: ThreadStatus::Idle,
-                    created_at: now,
-                    updated_at: now,
-                    sdk_origin: None,
-                },
-                ProviderSessionState {
-                    provider_session_id: None,
-                    active_provider_turn_id: None,
-                },
-            );
-        }
-        // A Thread module snapshot, including an incomplete setup, must not
-        // affect Workspace.run admission or synthesize an import map.
+        runtime.thread_manager.insert_thread(
+            ThreadState {
+                thread_id: "thread-a".into(),
+                workspace_id: workspace_id.into(),
+                provider: ProviderCode::Codex,
+                effort_level: Some(EffortLevel::Default),
+                effort_args: Vec::new(),
+                skills: Vec::new(),
+                status: ThreadStatus::Running,
+                created_at: now,
+                updated_at: now,
+                sdk_origin: None,
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: Some("turn-a".into()),
+            },
+        );
         runtime.deno_modules.insert(
             "thread-a".into(),
             vec![DenoModuleState {
@@ -8157,7 +8306,7 @@ mod tests {
             }],
         );
 
-        let first = runtime
+        let run = runtime
             .begin_workspace_run(WorkspaceRunInput {
                 workspace_id: workspace_id.into(),
                 script: "console.log('one')".into(),
@@ -8165,56 +8314,14 @@ mod tests {
                 deno_modules: vec![],
             })
             .unwrap();
-        let second = runtime
-            .begin_workspace_run(WorkspaceRunInput {
-                workspace_id: workspace_id.into(),
-                script: "console.log('two')".into(),
-                timeout_ms: None,
-                deno_modules: vec![],
-            })
-            .unwrap();
-        assert_ne!(first.run_id, second.run_id);
-        assert_eq!(runtime.active_workspace_run_count(workspace_id), 2);
-        assert_eq!(first.intent.import_map_path, None);
+        assert_eq!(run.intent.import_map_path, None);
+        assert_eq!(run.intent.timeout_ms, 1_000);
         assert!(matches!(
-            first.intent.owner,
+            run.intent.owner,
             DenoExecutionOwner::Workspace { .. }
         ));
-        assert_eq!(first.intent.timeout_ms, 1_000);
-
-        let provider_busy = runtime
-            .begin_send_text_intent(SendTextInput {
-                thread_id: "thread-a".into(),
-                message: "blocked".into(),
-                operation_id: None,
-            })
-            .unwrap_err();
-        assert_eq!(provider_busy.code, error_codes::WORKSPACE_BUSY);
-
-        runtime.finish_workspace_run(workspace_id, &first.run_id);
-        assert_eq!(runtime.active_workspace_run_count(workspace_id), 1);
-        runtime.finish_workspace_run(workspace_id, &second.run_id);
-        assert_eq!(runtime.active_workspace_run_count(workspace_id), 0);
-
-        runtime
-            .thread_manager
-            .thread_mut("thread-a")
-            .unwrap()
-            .status = ThreadStatus::Running;
-        runtime
-            .thread_manager
-            .provider_state_mut("thread-a")
-            .unwrap()
-            .active_provider_turn_id = Some("turn-a".into());
-        let provider_active = runtime
-            .begin_workspace_run(WorkspaceRunInput {
-                workspace_id: workspace_id.into(),
-                script: String::new(),
-                timeout_ms: None,
-                deno_modules: vec![],
-            })
-            .unwrap_err();
-        assert_eq!(provider_active.code, error_codes::WORKSPACE_BUSY);
+        runtime.finish_workspace_run(workspace_id, &run.run_id);
+        assert!(runtime.workspace_run_import_maps.is_empty());
     }
 
     #[test]
@@ -8596,13 +8703,16 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_MODULE_MATERIALIZATION_FAILED);
-        assert_eq!(runtime.active_workspace_run_count(&workspace_id), 0);
+        assert!(!runtime
+            .workspace_run_import_maps
+            .keys()
+            .any(|(candidate_workspace_id, _)| candidate_workspace_id == &workspace_id));
         assert!(!outside.join("import-map.json").exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn workspace_deno_rejects_symlinked_runs_root_without_reserving_a_run() {
+    fn workspace_deno_rejects_symlinked_runs_root_without_writing_outside() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
@@ -8640,7 +8750,10 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, error_codes::DENO_MODULE_MATERIALIZATION_FAILED);
-        assert_eq!(runtime.active_workspace_run_count(&workspace_id), 0);
+        assert!(!runtime
+            .workspace_run_import_maps
+            .keys()
+            .any(|(candidate_workspace_id, _)| candidate_workspace_id == &workspace_id));
         assert!(fs::read_dir(&outside_runs).unwrap().next().is_none());
     }
 
@@ -8679,76 +8792,15 @@ mod tests {
     }
 
     #[test]
-    fn workspace_deno_upload_commit_rechecks_active_run_and_preserves_it() {
+    fn workspace_deno_provisioning_proceeds_during_provider_activity_and_unrelated_run() {
         let temp = tempfile::tempdir().unwrap();
         let module_name = "sprite-tools";
         let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
             workspace_deno_test_fixture(temp.path(), module_name);
-        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
-            &mut runtime,
-            &workspace_path,
-            &workspace_id,
-            &origin,
-            module_name,
-        );
-        let run = runtime
-            .begin_workspace_run(WorkspaceRunInput {
-                workspace_id: workspace_id.clone(),
-                script: "console.log('busy');".into(),
-                timeout_ms: None,
-                deno_modules: Vec::new(),
-            })
-            .unwrap();
-
-        let error = runtime
-            .complete_deno_module_upload(&upload_id, &temporary_path)
-            .unwrap_err();
-        assert_eq!(error.code, error_codes::WORKSPACE_BUSY);
-        assert_eq!(runtime.active_workspace_run_count(&workspace_id), 1);
-        assert_eq!(
-            runtime.deno_module_upload_tickets[&upload_id].state,
-            DenoModuleUploadState::Failed
-        );
-        assert!(
-            !workspace_deno_workspace_modules_root(&workspace_path, &scope_id)
-                .join(module_name)
-                .exists()
-        );
-        runtime.finish_workspace_run(&workspace_id, &run.run_id);
-        fs::remove_file(temporary_path).unwrap();
-
-        assert_eq!(
-            runtime
-                .prepare_workspace_deno_modules(
-                    PrepareWorkspaceDenoModulesInput {
-                        workspace_id: workspace_id.clone(),
-                        module_names: vec![module_name.into()],
-                    },
-                    &origin,
-                )
-                .unwrap()
-                .missing_module_names,
-            vec![module_name]
-        );
-    }
-
-    #[test]
-    fn workspace_deno_upload_commit_rechecks_provider_busy_and_allows_retry() {
-        let temp = tempfile::tempdir().unwrap();
-        let module_name = "sprite-tools";
-        let (mut runtime, workspace_path, workspace_id, origin, scope_id) =
-            workspace_deno_test_fixture(temp.path(), module_name);
-        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
-            &mut runtime,
-            &workspace_path,
-            &workspace_id,
-            &origin,
-            module_name,
-        );
         let now = Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
-                thread_id: "workspace-provider-busy".into(),
+                thread_id: "workspace-provider-active".into(),
                 workspace_id: workspace_id.clone(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
@@ -8761,50 +8813,30 @@ mod tests {
             },
             ProviderSessionState {
                 provider_session_id: None,
-                active_provider_turn_id: Some("turn-busy".into()),
+                active_provider_turn_id: Some("turn-active".into()),
             },
         );
-
-        let error = runtime
-            .complete_deno_module_upload(&upload_id, &temporary_path)
-            .unwrap_err();
-        assert_eq!(error.code, error_codes::WORKSPACE_BUSY);
-        assert_eq!(runtime.active_workspace_run_count(&workspace_id), 0);
-        assert_eq!(
-            runtime.deno_module_upload_tickets[&upload_id].state,
-            DenoModuleUploadState::Failed
-        );
-        assert!(
-            !workspace_deno_workspace_modules_root(&workspace_path, &scope_id)
-                .join(module_name)
-                .exists()
-        );
-        let thread = runtime
-            .thread_manager
-            .thread_mut("workspace-provider-busy")
+        let run = runtime
+            .begin_workspace_run(WorkspaceRunInput {
+                workspace_id: workspace_id.clone(),
+                script: "console.log('unrelated');".into(),
+                timeout_ms: None,
+                deno_modules: Vec::new(),
+            })
             .unwrap();
-        thread.status = ThreadStatus::Idle;
-        runtime
-            .thread_manager
-            .provider_state_mut("workspace-provider-busy")
-            .unwrap()
-            .active_provider_turn_id = None;
-        fs::remove_file(temporary_path).unwrap();
 
-        assert_eq!(
-            runtime
-                .prepare_workspace_deno_modules(
-                    PrepareWorkspaceDenoModulesInput {
-                        workspace_id: workspace_id.clone(),
-                        module_names: vec![module_name.into()],
-                    },
-                    &origin,
-                )
-                .unwrap()
-                .missing_module_names,
-            vec![module_name]
-        );
-        let (retry_upload_id, retry_path) = stage_workspace_deno_test_upload(
+        let prepared = runtime
+            .prepare_workspace_deno_modules(
+                PrepareWorkspaceDenoModulesInput {
+                    workspace_id: workspace_id.clone(),
+                    module_names: vec!["scene-tools".into()],
+                },
+                &origin,
+            )
+            .unwrap();
+        assert_eq!(prepared.missing_module_names, vec!["scene-tools"]);
+
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
             &mut runtime,
             &workspace_path,
             &workspace_id,
@@ -8812,9 +8844,95 @@ mod tests {
             module_name,
         );
         runtime
-            .complete_deno_module_upload(&retry_upload_id, &retry_path)
+            .complete_deno_module_upload(&upload_id, &temporary_path)
             .unwrap();
-        fs::remove_file(retry_path).unwrap();
+        fs::remove_file(temporary_path).unwrap();
+        assert_eq!(
+            runtime.deno_module_upload_tickets[&upload_id].state,
+            DenoModuleUploadState::Completed
+        );
+        assert_eq!(
+            runtime.workspace_deno_module_scopes[&WorkspaceDenoModuleScopeKey {
+                workspace_id: workspace_id.clone(),
+                sdk_origin: origin,
+            }]
+                .modules[module_name],
+            DenoModuleSetupState::Ready
+        );
+        assert!(
+            workspace_deno_workspace_modules_root(&workspace_path, &scope_id)
+                .join(module_name)
+                .join("index.mjs")
+                .is_file()
+        );
+        assert_eq!(
+            runtime.thread_status("workspace-provider-active"),
+            Some(ThreadStatus::Running)
+        );
+        runtime.finish_workspace_run(&workspace_id, &run.run_id);
+        assert!(runtime.workspace_run_import_maps.is_empty());
+    }
+
+    #[test]
+    fn workspace_deno_same_module_setup_rejects_a_second_in_progress_upload() {
+        let temp = tempfile::tempdir().unwrap();
+        let module_name = "sprite-tools";
+        let (mut runtime, workspace_path, workspace_id, origin, _) =
+            workspace_deno_test_fixture(temp.path(), module_name);
+        let (upload_id, temporary_path) = stage_workspace_deno_test_upload(
+            &mut runtime,
+            &workspace_path,
+            &workspace_id,
+            &origin,
+            module_name,
+        );
+
+        let upload_error = runtime
+            .create_workspace_deno_module_upload(
+                CreateWorkspaceDenoModuleUploadInput {
+                    workspace_id: workspace_id.clone(),
+                    module_name: module_name.into(),
+                    expected_size_bytes: 1,
+                },
+                &origin,
+            )
+            .unwrap_err();
+        assert_eq!(upload_error.code, error_codes::DENO_MODULE_SETUP_INCOMPLETE);
+        assert_eq!(
+            upload_error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("moduleName"))
+                .and_then(Value::as_str),
+            Some(module_name)
+        );
+
+        let prepare_error = runtime
+            .prepare_workspace_deno_modules(
+                PrepareWorkspaceDenoModulesInput {
+                    workspace_id: workspace_id.clone(),
+                    module_names: vec![module_name.into()],
+                },
+                &origin,
+            )
+            .unwrap_err();
+        assert_eq!(
+            prepare_error.code,
+            error_codes::DENO_MODULE_SETUP_INCOMPLETE
+        );
+        assert_eq!(
+            prepare_error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("moduleName"))
+                .and_then(Value::as_str),
+            Some(module_name)
+        );
+        assert_eq!(
+            runtime.deno_module_upload_tickets[&upload_id].state,
+            DenoModuleUploadState::Uploading
+        );
+        fs::remove_file(temporary_path).unwrap();
     }
 
     fn collect_available_core_events(event_rx: &mpsc::Receiver<ThreadEvent>) -> Vec<ThreadEvent> {

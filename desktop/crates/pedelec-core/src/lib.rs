@@ -2086,10 +2086,8 @@ pub struct CoreRuntime {
     /// Operation identities already included in the normalized total.
     pub session_usage_operations: HashSet<(String, String)>,
     pub provider_usage: HashMap<String, Value>,
-    /// Workspace-owned Deno reservations. Multiple run IDs may be active in
-    /// one Workspace, while provider admission is excluded for the whole
-    /// Workspace until every reservation is released.
-    pub active_workspace_runs: HashMap<String, HashSet<String>>,
+    /// Per-run temporary import maps for Workspace Deno Module executions.
+    /// Completion removes the matching directory. This is not an admission lock.
     pub workspace_run_import_maps: HashMap<(String, String), PathBuf>,
     /// Threads in this set have restored ended-thread diagnostic resources
     /// and are waiting for the trusted dispatch boundary to admit the turn.
@@ -2162,13 +2160,6 @@ impl CoreRuntime {
             .map(|workspace| workspace.canonical_path.clone())
     }
 
-    /// Returns all currently registered Threads bound to a Workspace without
-    /// scanning its filesystem.
-    pub fn threads_in_workspace(&self, workspace_id: &str) -> Result<Vec<String>, PedelecError> {
-        self.workspace(workspace_id)?;
-        Ok(self.thread_manager.threads_in_workspace(workspace_id))
-    }
-
     /// Authorizes a normalized SDK origin for a Workspace capability.
     pub fn authorize_workspace_access(
         &self,
@@ -2224,53 +2215,9 @@ impl CoreRuntime {
         self.list_folders(input)
     }
 
-    /// Verifies that no provider operation is active in any Thread bound to a
-    /// Workspace. This is deliberately Workspace-wide so the caller never
-    /// has to pick an arbitrary Thread to report as busy.
-    pub fn ensure_workspace_provider_idle(&self, workspace_id: &str) -> Result<(), PedelecError> {
-        self.workspace(workspace_id)?;
-        for thread_id in self.thread_manager.threads_in_workspace(workspace_id) {
-            let provider_turn_active = self
-                .thread_manager
-                .provider_state(&thread_id)
-                .and_then(|state| state.active_provider_turn_id.as_deref())
-                .is_some_and(|turn_id| !turn_id.trim().is_empty());
-            let pending_operation = self.pending_provider_operations.contains_key(&thread_id);
-            let provider_status_active = self
-                .thread_manager
-                .thread(&thread_id)
-                .map(|thread| {
-                    matches!(
-                        thread.status,
-                        ThreadStatus::Starting
-                            | ThreadStatus::Running
-                            | ThreadStatus::WaitingToolResult
-                            | ThreadStatus::Stopping
-                    )
-                })
-                .unwrap_or(false);
-            if provider_turn_active || pending_operation || provider_status_active {
-                return Err(workspace_busy_error(workspace_id));
-            }
-        }
-        Ok(())
-    }
-
-    fn ensure_workspace_runs_idle_for_thread(&self, thread_id: &str) -> Result<(), PedelecError> {
-        let workspace_id = self.thread_manager.thread(thread_id)?.workspace_id.clone();
-        if self
-            .active_workspace_runs
-            .get(&workspace_id)
-            .is_some_and(|runs| !runs.is_empty())
-        {
-            return Err(workspace_busy_error(&workspace_id));
-        }
-        Ok(())
-    }
-
-    /// Atomically admits a Workspace-owned Deno execution and reserves its
-    /// run ID. No Thread status, provider session, or Thread Deno modules are
-    /// consulted by this operation.
+    /// Allocates a Workspace-owned Deno execution. No Thread status, provider
+    /// session, or Thread Deno modules are consulted, and other work in the
+    /// same Workspace does not block admission.
     pub fn begin_workspace_run(
         &mut self,
         input: WorkspaceRunInput,
@@ -2310,22 +2257,8 @@ impl CoreRuntime {
                 &input.deno_modules,
             )?)
         };
-        self.ensure_workspace_provider_idle(&input.workspace_id)?;
         let workspace_path = resolve_workspace_root(&workspace)?;
-        let run_id = loop {
-            let candidate = format!("wr_{}", Uuid::new_v4().simple());
-            let occupied = self
-                .active_workspace_runs
-                .get(&input.workspace_id)
-                .is_some_and(|runs| runs.contains(&candidate));
-            if !occupied {
-                break candidate;
-            }
-        };
-        self.active_workspace_runs
-            .entry(input.workspace_id.clone())
-            .or_default()
-            .insert(run_id.clone());
+        let run_id = format!("wr_{}", Uuid::new_v4().simple());
 
         let import_map_path = match scope_id.as_deref() {
             Some(scope_id) => match materialize_workspace_deno_run_import_map(
@@ -2339,10 +2272,7 @@ impl CoreRuntime {
                         .insert((input.workspace_id.clone(), run_id.clone()), path.clone());
                     Some(path)
                 }
-                Err(error) => {
-                    self.finish_workspace_run(&input.workspace_id, &run_id);
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             },
             None => None,
         };
@@ -2367,8 +2297,8 @@ impl CoreRuntime {
         })
     }
 
-    /// Releases a Workspace run reservation. It is intentionally idempotent
-    /// so dispatch/error cleanup can use a finally-style path safely.
+    /// Removes the per-run temporary import map for a Workspace Deno execution.
+    /// Idempotent so dispatch and error paths can use a finally-style cleanup.
     pub fn finish_workspace_run(&mut self, workspace_id: &str, run_id: &str) {
         if let Some(path) = self
             .workspace_run_import_maps
@@ -2378,22 +2308,6 @@ impl CoreRuntime {
                 let _ = fs::remove_dir_all(parent);
             }
         }
-        let remove_workspace = if let Some(runs) = self.active_workspace_runs.get_mut(workspace_id)
-        {
-            runs.remove(run_id);
-            runs.is_empty()
-        } else {
-            false
-        };
-        if remove_workspace {
-            self.active_workspace_runs.remove(workspace_id);
-        }
-    }
-
-    pub fn active_workspace_run_count(&self, workspace_id: &str) -> usize {
-        self.active_workspace_runs
-            .get(workspace_id)
-            .map_or(0, HashSet::len)
     }
 
     /// Opens (or reuses) a custom Workspace capability after the selected
@@ -2515,7 +2429,6 @@ impl CoreRuntime {
         self.workspace_deno_roots_initialized.remove(workspace_id);
         self.workspace_deno_module_scopes
             .retain(|key, _| key.workspace_id != workspace_id);
-        self.active_workspace_runs.remove(workspace_id);
         self.workspace_run_import_maps
             .retain(|(candidate_workspace_id, _), _| candidate_workspace_id != workspace_id);
         self.deno_module_upload_tickets.retain(|_, ticket| {
@@ -2553,11 +2466,6 @@ impl CoreRuntime {
                 missing_module_names: Vec::new(),
             });
         }
-        self.ensure_workspace_provider_idle(&input.workspace_id)?;
-        if self.active_workspace_run_count(&input.workspace_id) > 0 {
-            return Err(workspace_busy_error(&input.workspace_id));
-        }
-
         let workspace_path = self.workspace(&input.workspace_id)?.canonical_path.clone();
         if !self
             .workspace_deno_roots_initialized
@@ -2612,9 +2520,12 @@ impl CoreRuntime {
                 Some(DenoModuleSetupState::Ready) => {}
                 Some(DenoModuleSetupState::Pending) if active_uploads.contains(module_name) => {
                     return Err(PedelecError::with_details(
-                        error_codes::WORKSPACE_BUSY,
-                        "Workspace Deno Module setup is already in progress",
-                        serde_json::json!({ "workspaceId": input.workspace_id, "moduleName": module_name }),
+                        error_codes::DENO_MODULE_SETUP_INCOMPLETE,
+                        "Workspace Deno Module setup is still pending or uploading",
+                        serde_json::json!({
+                            "workspaceId": input.workspace_id,
+                            "moduleName": module_name,
+                        }),
                     ));
                 }
                 Some(DenoModuleSetupState::Pending) | Some(DenoModuleSetupState::Failed) => {
@@ -2647,10 +2558,6 @@ impl CoreRuntime {
         self.authorize_workspace_access(&input.workspace_id, &caller_origin)?;
         validate_deno_module_name(&input.module_name)?;
         validate_deno_module_upload_size(input.expected_size_bytes, &input.module_name)?;
-        self.ensure_workspace_provider_idle(&input.workspace_id)?;
-        if self.active_workspace_run_count(&input.workspace_id) > 0 {
-            return Err(workspace_busy_error(&input.workspace_id));
-        }
         let workspace = self.workspace(&input.workspace_id)?.clone();
         if !self
             .workspace_deno_roots_initialized
@@ -2701,9 +2608,13 @@ impl CoreRuntime {
             ) && ticket.module_name == input.module_name
                 && matches!(ticket.state, DenoModuleUploadState::Pending | DenoModuleUploadState::Uploading)
         }) {
-            return Err(PedelecError::new(
-                error_codes::WORKSPACE_BUSY,
-                "a Workspace Deno Module upload is already in progress",
+            return Err(PedelecError::with_details(
+                error_codes::DENO_MODULE_SETUP_INCOMPLETE,
+                "Workspace Deno Module upload is still pending or uploading",
+                serde_json::json!({
+                    "workspaceId": input.workspace_id,
+                    "moduleName": input.module_name,
+                }),
             ));
         }
         let port = self.asset_upload_port.ok_or_else(|| {
@@ -3198,10 +3109,9 @@ impl CoreRuntime {
             ));
         }
 
-        // The upload ticket only authorizes the transfer.  The Workspace may
-        // have become busy while the HTTP body was in flight, so repeat the
-        // authoritative admission checks immediately before reading or
-        // materializing the artifact.
+        // The upload ticket only authorizes the transfer. Re-check that the
+        // Workspace and module scope still exist immediately before reading
+        // or materializing the artifact.
         let workspace_path = match self.workspace(&workspace_id) {
             Ok(workspace) => workspace.canonical_path.clone(),
             Err(error) => {
@@ -3218,19 +3128,6 @@ impl CoreRuntime {
                 error_codes::DENO_MODULE_SETUP_INCOMPLETE,
                 "Workspace Deno Module setup scope is no longer available",
             );
-            self.mark_deno_module_upload_failed(upload_id);
-            return Err(error);
-        }
-        if let Err(error) = self
-            .ensure_workspace_provider_idle(&workspace_id)
-            .and_then(|_| {
-                if self.active_workspace_run_count(&workspace_id) > 0 {
-                    Err(workspace_busy_error(&workspace_id))
-                } else {
-                    Ok(())
-                }
-            })
-        {
             self.mark_deno_module_upload_failed(upload_id);
             return Err(error);
         }
@@ -4248,7 +4145,6 @@ impl CoreRuntime {
     }
 
     fn validate_normal_send_text_status(&self, thread_id: &str) -> Result<(), PedelecError> {
-        self.ensure_workspace_runs_idle_for_thread(thread_id)?;
         self.ensure_deno_module_setup_ready(thread_id)?;
         let thread = self.thread_manager.thread(thread_id)?;
         match thread.status {
@@ -4279,7 +4175,6 @@ impl CoreRuntime {
     }
 
     fn validate_debug_send_text_status(&self, thread_id: &str) -> Result<bool, PedelecError> {
-        self.ensure_workspace_runs_idle_for_thread(thread_id)?;
         self.ensure_deno_module_setup_ready(thread_id)?;
         let thread = self.thread_manager.thread(thread_id)?;
         match thread.status {
@@ -4461,7 +4356,6 @@ impl CoreRuntime {
         &mut self,
         input: PrepareThreadInput,
     ) -> Result<PrepareExecutionStart, PedelecError> {
-        self.ensure_workspace_runs_idle_for_thread(&input.thread_id)?;
         self.ensure_deno_module_setup_ready(&input.thread_id)?;
         {
             let thread = self.thread_manager.thread(&input.thread_id)?;
@@ -6176,7 +6070,6 @@ impl ProviderProtocolTrafficBus {
 pub struct ThreadManager {
     threads: HashMap<String, ThreadState>,
     provider_sessions: HashMap<String, ProviderSessionState>,
-    workspace_threads: HashMap<String, HashSet<String>>,
     next_thread_number: u64,
 }
 
@@ -6215,25 +6108,7 @@ impl ThreadManager {
 
     pub fn insert_thread(&mut self, state: ThreadState, provider_session: ProviderSessionState) {
         let thread_id = state.thread_id.clone();
-        let workspace_id = state.workspace_id.clone();
-        if let Some(previous) = self.threads.insert(thread_id.clone(), state) {
-            if previous.workspace_id != workspace_id {
-                let remove_previous_index =
-                    if let Some(threads) = self.workspace_threads.get_mut(&previous.workspace_id) {
-                        threads.remove(&thread_id);
-                        threads.is_empty()
-                    } else {
-                        false
-                    };
-                if remove_previous_index {
-                    self.workspace_threads.remove(&previous.workspace_id);
-                }
-            }
-        }
-        self.workspace_threads
-            .entry(workspace_id)
-            .or_default()
-            .insert(thread_id.clone());
+        self.threads.insert(thread_id.clone(), state);
         self.provider_sessions.insert(thread_id, provider_session);
     }
 
@@ -6242,16 +6117,6 @@ impl ThreadManager {
         thread_id: &str,
     ) -> Option<(ThreadState, ProviderSessionState)> {
         let state = self.threads.remove(thread_id)?;
-        let remove_workspace_index =
-            if let Some(threads) = self.workspace_threads.get_mut(&state.workspace_id) {
-                threads.remove(thread_id);
-                threads.is_empty()
-            } else {
-                false
-            };
-        if remove_workspace_index {
-            self.workspace_threads.remove(&state.workspace_id);
-        }
         let provider_session =
             self.provider_sessions
                 .remove(thread_id)
@@ -6301,18 +6166,6 @@ impl ThreadManager {
     /// Shorthand accessor for provider session state.
     pub fn provider_state_mut(&mut self, thread_id: &str) -> Option<&mut ProviderSessionState> {
         self.provider_session_state_mut(thread_id)
-    }
-
-    pub fn threads_in_workspace(&self, workspace_id: &str) -> Vec<String> {
-        let mut thread_ids = self
-            .workspace_threads
-            .get(workspace_id)
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
-        thread_ids.sort();
-        thread_ids
     }
 }
 
@@ -10104,14 +9957,6 @@ fn workspace_list_too_large_error(
     )
 }
 
-fn workspace_busy_error(workspace_id: &str) -> PedelecError {
-    PedelecError::with_details(
-        error_codes::WORKSPACE_BUSY,
-        "workspace has an active provider or Workspace run",
-        serde_json::json!({ "workspaceId": workspace_id }),
-    )
-}
-
 fn invalid_sdk_origin_error() -> PedelecError {
     PedelecError::new(error_codes::THREAD_ACCESS_DENIED, "invalid caller origin")
 }
@@ -10399,7 +10244,6 @@ pub mod error_codes {
     pub const WORKSPACE_OPEN_FAILED: &str = "WORKSPACE_OPEN_FAILED";
     pub const WORKSPACE_NOT_FOUND: &str = "WORKSPACE_NOT_FOUND";
     pub const WORKSPACE_ACCESS_DENIED: &str = "WORKSPACE_ACCESS_DENIED";
-    pub const WORKSPACE_BUSY: &str = "WORKSPACE_BUSY";
     pub const WORKSPACE_LIST_TOO_LARGE: &str = "WORKSPACE_LIST_TOO_LARGE";
     pub const WORKSPACE_RUN_OUTPUT_TOO_LARGE: &str = "WORKSPACE_RUN_OUTPUT_TOO_LARGE";
     pub const DIRECTORY_PICKER_FAILED: &str = "DIRECTORY_PICKER_FAILED";

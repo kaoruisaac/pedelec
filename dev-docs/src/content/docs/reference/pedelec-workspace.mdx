@@ -113,7 +113,7 @@ Session `skills.denoModules` remain owned by the Session/Thread that declared th
 
 ## Concurrency and lifetime
 
-Several `workspace.run()` calls in one Workspace may execute concurrently. A Workspace run cannot begin while any Session in that Workspace has an active Agent/provider operation. A Session in that Workspace cannot begin `sendText()` or provider preparation while one or more Workspace runs are active. This exclusion is Workspace-wide, including different `PedelecSession` handles, and conflicts reject with `WORKSPACE_BUSY`.
+Multiple Sessions, Agent/provider operations, and `workspace.run()` executions may operate concurrently in the same Workspace. A second turn on the same Session is still rejected while that Session is busy. Pedelec does not provide filesystem-level locking, snapshots, transactions, or conflict resolution between concurrent Workspace actors. Applications are responsible for coordinating shared file access when required.
 
 Custom Workspaces are opened explicitly, can outlive and be shared by multiple Sessions, and are never deleted by Pedelec when a Session ends or during app cleanup. Managed Workspaces are created by `Pedelec.createSession()` and remain under Desktop cleanup ownership; Thread end does not imply immediate deletion. The browser capability is runtime-scoped, so reopen a custom Workspace after a Desktop/Core restart when needed.
 

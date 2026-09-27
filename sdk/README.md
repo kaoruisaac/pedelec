@@ -304,7 +304,7 @@ The default timeout is 60 seconds; `timeoutMs` must be a positive integer. The r
 
 `workspace.run()` has read and write access to the Workspace, but no network, host environment, subprocess execution, FFI, or `sys` permission. The existing no-remote, cached-only, and no-npm runtime restrictions still apply. This is a direct deterministic capability for an approved Web application to read and modify the opened Workspace; it is not unrestricted host code execution and is not mediated by an Agent.
 
-Several `workspace.run()` calls in one Workspace may execute concurrently. A Workspace run cannot start while any Session in that Workspace has an active Agent/provider operation. Conversely, a Session in that Workspace cannot begin `sendText()` or provider preparation while one or more Workspace runs are active. This rule is Workspace-wide, including operations started through another `PedelecSession` handle; conflicts reject with `WORKSPACE_BUSY`.
+Multiple Sessions, Agent/provider operations, and `workspace.run()` executions may operate concurrently in the same Workspace. A second turn on the same Session is still rejected while that Session is busy. Pedelec does not provide filesystem-level locking, snapshots, transactions, or conflict resolution between concurrent Workspace actors. Applications are responsible for coordinating shared file access when required.
 
 Session `skills.denoModules` belong to the Session/Thread that declares them and are available only to Agent-side `pedelec-deno` execution for that Thread. Workspace runs accept the same Vite-prepared declarations explicitly:
 

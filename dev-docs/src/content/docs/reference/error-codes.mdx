@@ -67,7 +67,6 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `WORKSPACE_OPEN_FAILED` | Desktop could not open the validated Workspace folder | Check the folder and OS opener integration | After fixing the opener issue |
 | `WORKSPACE_NOT_FOUND` | The Workspace capability or its recorded directory no longer exists | Reopen the custom Workspace or create a new Session; do not reconstruct a handle from only a path | After the Workspace exists again |
 | `WORKSPACE_ACCESS_DENIED` | The process cannot read, write, or initialize the requested Workspace path | Check OS permissions, ownership, locks, and the application's access grant | After permissions are corrected |
-| `WORKSPACE_BUSY` | A Workspace-wide admission rule prevents the operation: an Agent/provider operation is active during `workspace.run()`, or a Session tries to begin provider work while a Workspace run is active | Wait for all conflicting operations in that Workspace to finish; checking only the current Session is insufficient | Yes, after the Workspace is idle |
 | `SDK_TRANSPORT_ERROR` | Generic bridge request failure | Inspect `message/details`; verify Extension/native/Core | Depends on operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape or request type did not match SDK expectations | Align component versions; report reproducible mismatch | Usually not until versions/config fixed |
 
@@ -81,7 +80,7 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `DENO_PROCESS_SPAWN_FAILED` | Desktop could not spawn the Deno process | Check Desktop installation, executable permissions, and runtime logs | After fixing the process environment |
 | `DENO_PROCESS_IO_FAILED` | Deno process stdin/stdout/stderr communication failed | Treat the operation as failed, inspect runtime logs, and reconcile partial writes | After transport/runtime recovery |
 | `DENO_MODULE_NAME_INVALID` | A logical Deno Module name is not a supported bare or scoped package-like specifier | Use a valid module name such as `scene-tools` or `@example/scene-tools` | After fixing the declaration |
-| `DENO_MODULE_SETUP_INCOMPLETE` | A requested Workspace or Session Deno Module has not reached the ready state | Complete the upload/setup handshake before executing; retry a failed Workspace setup | Yes after setup is complete |
+| `DENO_MODULE_SETUP_INCOMPLETE` | A requested Workspace or Session Deno Module is not ready, or setup/upload for that same module identity is still pending | Finish or retry that module's setup. Other Workspace activity does not block it | Yes after that module's setup is complete |
 | `DENO_MODULE_NOT_FOUND` | The requested module was not declared in the owning Workspace scope or Thread snapshot | Include the module in the explicit run/setup request or create a new Session snapshot | After correcting the request |
 | `DENO_MODULE_ALREADY_READY` | A ready module package is immutable for the current Core runtime scope | Use the existing package or choose a new logical module name for a new implementation | Only with a new name |
 | `DENO_MODULE_ARTIFACT_TOO_LARGE` | The prepared runtime/declaration envelope exceeds the 100 MiB upload limit | Reduce the bundled artifact or split the module | After reducing the artifact |

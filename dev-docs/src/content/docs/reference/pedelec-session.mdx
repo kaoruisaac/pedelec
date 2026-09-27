@@ -53,7 +53,7 @@ Normalized Desktop profile level selected for this session. It is `undefined` fo
 readonly workspace: PedelecWorkspace
 ```
 
-The shared Workspace capability for this Session. Managed sessions receive a managed Workspace handle; sessions created from `workspace.createSession()` retain that exact Workspace object. The handle remains available after `session.end()`. See the [PedelecWorkspace reference](../pedelec-workspace/) for direct filesystem methods and Workspace-wide admission rules.
+The shared Workspace capability for this Session. Managed sessions receive a managed Workspace handle; sessions created from `workspace.createSession()` retain that exact Workspace object. The handle remains available after `session.end()`. See the [PedelecWorkspace reference](../pedelec-workspace/) for direct filesystem methods and concurrent Workspace use.
 
 ### `sessionCreatedAt`
 

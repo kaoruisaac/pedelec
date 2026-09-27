@@ -53,7 +53,7 @@ readonly effortLevel?: "default" | "low" | "high"
 readonly workspace: PedelecWorkspace
 ```
 
-這個 Session 共用的 Workspace capability。Managed session 會取得 managed Workspace handle；由 `workspace.createSession()` 建立的 session 會保留同一個 Workspace object。`session.end()` 後這個 handle 仍然存在。直接 filesystem methods 與 Workspace-wide admission rules 請見 [PedelecWorkspace reference](../pedelec-workspace/)。
+這個 Session 共用的 Workspace capability。Managed session 會取得 managed Workspace handle；由 `workspace.createSession()` 建立的 session 會保留同一個 Workspace object。`session.end()` 後這個 handle 仍然存在。直接 filesystem methods 與 concurrent Workspace 使用方式請見 [PedelecWorkspace reference](../pedelec-workspace/)。
 
 ### `sessionCreatedAt`
 

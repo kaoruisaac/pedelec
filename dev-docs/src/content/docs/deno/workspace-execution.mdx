@@ -53,4 +53,4 @@ Workspace run   → workspace.run({ denoModules }) → application execution onl
 
 `workspace.run()` never inherits Session Deno Modules. Session creation never inherits modules from previous Workspace runs, and Workspace-run modules do not appear in Agent Host Context.
 
-Workspace Deno execution and active Agent/provider work in the same Workspace have admission rules and may reject with `WORKSPACE_BUSY`. See [PedelecWorkspace](../reference/pedelec-workspace/) and [Error Codes](../reference/error-codes/).
+Workspace Deno execution may run concurrently with Agent/provider work and other `workspace.run()` calls in the same Workspace. Pedelec does not coordinate filesystem conflicts between those actors. See [PedelecWorkspace](../reference/pedelec-workspace/).
