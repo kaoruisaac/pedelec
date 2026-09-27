@@ -5,9 +5,11 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
+base64.workspace = true
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 pedelec-core.workspace = true
 pedelec-shared.workspace = true
 pedelec-runtime.workspace = true

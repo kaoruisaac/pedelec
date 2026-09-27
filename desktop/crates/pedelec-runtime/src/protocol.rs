@@ -22,6 +22,46 @@ pub struct ProtocolTrafficLogger {
     writers: Arc<Mutex<HashMap<String, std::fs::File>>>,
 }
 
+fn redact_provider_artifact_ingress(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if fields.get("type").and_then(Value::as_str) == Some("imageGeneration") {
+                fields.remove("result");
+                fields.remove("savedPath");
+            }
+            if fields.get("type").and_then(Value::as_str) == Some("image") {
+                fields.remove("data");
+                fields.remove("uri");
+                if let Some(source) = fields.get_mut("source").and_then(Value::as_object_mut) {
+                    source.remove("data");
+                    source.remove("uri");
+                }
+            }
+            if fields.get("type").and_then(Value::as_str) == Some("resource") {
+                if let Some(resource) = fields.get_mut("resource").and_then(Value::as_object_mut) {
+                    resource.remove("blob");
+                    resource.remove("uri");
+                }
+            }
+            if fields.get("method").and_then(Value::as_str) == Some("cursor/generate_image") {
+                if let Some(params) = fields.get_mut("params").and_then(Value::as_object_mut) {
+                    params.remove("filePath");
+                    params.remove("referenceImagePaths");
+                }
+            }
+            for child in fields.values_mut() {
+                redact_provider_artifact_ingress(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_provider_artifact_ingress(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl ProtocolTrafficLogger {
     pub fn register_protocol_log(&self, owner: &str, provider: &str, workspace: &Path) {
         if self
@@ -71,12 +111,14 @@ impl ProtocolTrafficLogger {
     ) -> ProtocolTrafficRecord {
         let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let thread_id = owner.map(str::to_string);
+        let mut safe_message = message.clone();
+        redact_provider_artifact_ingress(&mut safe_message);
         let record = ProtocolTrafficRecord {
             ts: ts.clone(),
             direction: direction.to_string(),
             kind: kind.to_string(),
             thread_id: thread_id.clone(),
-            message: message.clone(),
+            message: safe_message.clone(),
             unmatched,
         };
 
@@ -88,7 +130,7 @@ impl ProtocolTrafficLogger {
             "direction": direction,
             "kind": kind,
             "threadId": owner,
-            "message": message,
+            "message": safe_message,
         });
         let Ok(mut bytes) = serde_json::to_vec(&jsonl_record) else {
             return record;
@@ -101,5 +143,75 @@ impl ProtocolTrafficLogger {
         let _ = writer.write_all(&bytes);
         let _ = writer.flush();
         record
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+
+    #[test]
+    fn generated_image_payload_and_private_path_do_not_enter_protocol_records() {
+        let logger = ProtocolTrafficLogger::default();
+        let record = logger.capture(
+            "in",
+            "notification",
+            &json!({
+                "method":"turn/completed", "params":{"turn":{"items":[
+                    {"type":"imageGeneration", "id":"image-1", "result":"secret-base64",
+                     "savedPath":"C:/private/image.png"},
+                    {"type":"agentMessage", "text":"visible"}
+                ]}}
+            }),
+            None,
+            false,
+        );
+        let encoded = serde_json::to_string(&record.message).unwrap();
+        assert!(!encoded.contains("secret-base64"));
+        assert!(!encoded.contains("C:/private"));
+        assert!(encoded.contains("visible"));
+        assert!(encoded.contains("image-1"));
+    }
+
+    #[test]
+    fn acp_artifact_payloads_and_cursor_paths_do_not_enter_protocol_records() {
+        let logger = ProtocolTrafficLogger::default();
+        let record = logger.capture(
+            "in",
+            "notification",
+            &json!({
+                "method":"session/update",
+                "params":{"update":{"content":[
+                    {"type":"image","data":"acp-inline-secret","mimeType":"image/png","uri":"file:///private/image.png"},
+                    {"type":"resource","resource":{"blob":"embedded-secret","mimeType":"application/pdf","uri":"file:///private/report.pdf"}}
+                ]}}
+            }),
+            None,
+            false,
+        );
+        let encoded = serde_json::to_string(&record.message).unwrap();
+        assert!(!encoded.contains("acp-inline-secret"));
+        assert!(!encoded.contains("embedded-secret"));
+        assert!(!encoded.contains("file:///private"));
+        assert!(encoded.contains("image/png"));
+
+        let cursor = logger.capture(
+            "in",
+            "notification",
+            &json!({
+                "method":"cursor/generate_image",
+                "params":{
+                    "toolCallId":"cursor-tool-1",
+                    "description":"generated image",
+                    "filePath":"C:/private/generated.png",
+                    "referenceImagePaths":["C:/private/reference.png"]
+                }
+            }),
+            None,
+            false,
+        );
+        let encoded = serde_json::to_string(&cursor.message).unwrap();
+        assert!(!encoded.contains("C:/private"));
+        assert!(encoded.contains("cursor-tool-1"));
     }
 }

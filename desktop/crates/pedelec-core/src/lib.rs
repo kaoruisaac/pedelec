@@ -43,6 +43,8 @@ const CODEX_FEATURES_PLUGINS_KEY: &str = "features.plugins";
 const CODEX_FEATURES_APPS_KEY: &str = "features.apps";
 const PEDELEC_ANTIGRAVITY_AGENT_DIR: &str = ".agents/agents/pedelec-runtime";
 const PEDELEC_ANTIGRAVITY_AGENT_FILE: &str = "agent.md";
+const PEDELEC_ANTIGRAVITY_HOOKS_FILE: &str = ".agents/hooks.json";
+const PEDELEC_ANTIGRAVITY_HOOK_KEY: &str = "pedelec-provider-artifacts";
 pub const PEDELEC_RUNTIME_DATA_DIR: &str = ".pedelec-runtime";
 pub const PEDELEC_WORKSPACE_FILE: &str = ".pedelec-workspace.json";
 const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
@@ -66,6 +68,72 @@ pub fn workspace_runtime_data_root(workspace_path: &Path) -> PathBuf {
 /// Returns the physical root used for App/Agent-shared assets.
 pub fn workspace_assets_root(workspace_path: &Path) -> PathBuf {
     workspace_runtime_data_root(workspace_path).join("assets")
+}
+
+/// Commit a staged asset after checking every destination directory. Provider
+/// artifacts use `replace = false`; browser uploads retain replacement support.
+pub fn finalize_asset_write(
+    tmp: &Path,
+    asset_root: &Path,
+    relative: &Path,
+    replace: bool,
+    write_id: &str,
+) -> io::Result<()> {
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(io::Error::other("asset path is unsafe"));
+    }
+    fs::create_dir_all(asset_root)?;
+    let canonical_root = asset_root.canonicalize()?;
+    let mut parent = asset_root.to_path_buf();
+    for component in relative
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .components()
+    {
+        parent.push(component);
+        if parent.exists() {
+            let metadata = fs::symlink_metadata(&parent)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(io::Error::other("asset parent is unsafe"));
+            }
+        } else {
+            fs::create_dir(&parent)?;
+        }
+        if !parent.canonicalize()?.starts_with(&canonical_root) {
+            return Err(io::Error::other("asset parent escapes root"));
+        }
+    }
+    let target = asset_root.join(relative);
+    if !replace {
+        // A hard link commits atomically and fails if the target already exists.
+        // The staging file is created on the same asset filesystem.
+        fs::hard_link(tmp, &target)?;
+        fs::remove_file(tmp)?;
+        return Ok(());
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(io::Error::other("asset target is not a regular file"));
+        }
+        let backup = target.with_file_name(format!(".pedelec-{write_id}.backup"));
+        fs::rename(&target, &backup)?;
+        match fs::rename(tmp, &target) {
+            Ok(()) => {
+                let _ = fs::remove_file(backup);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::rename(&backup, &target);
+                Err(error)
+            }
+        }
+    } else {
+        fs::rename(tmp, target)
+    }
 }
 
 /// Returns the legacy workspace-global skills root for callers inspecting
@@ -1051,6 +1119,68 @@ pub struct SkillFile {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderArtifactKind {
+    Image,
+    Audio,
+    Video,
+    File,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderArtifactSource {
+    ImageGeneration,
+    ToolResult,
+    ProviderArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderArtifact {
+    pub id: String,
+    pub provider: ProviderCode,
+    pub path: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub kind: ProviderArtifactKind,
+    pub source: ProviderArtifactSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+pub enum ProviderArtifactPayload<'a> {
+    Bytes(&'a [u8]),
+    File(&'a Path),
+}
+
+pub struct ProviderArtifactInput<'a> {
+    pub thread_id: &'a str,
+    pub provider: ProviderCode,
+    pub provider_turn_id: Option<&'a str>,
+    pub kind: ProviderArtifactKind,
+    pub source: ProviderArtifactSource,
+    pub provider_artifact_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub suggested_filename: &'a str,
+    pub mime_type: &'a str,
+    pub payload: ProviderArtifactPayload<'a>,
+}
+
+/// Core identity for the single active Antigravity user turn associated with
+/// a provider conversation. Hook ingress uses this instead of storing a
+/// Pedelec thread id in a Workspace-shared hooks.json file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveProviderArtifactOperation {
+    pub thread_id: String,
+    pub operation_id: String,
+    pub provider_turn_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "type",
@@ -1082,6 +1212,12 @@ pub enum ThreadEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         operation_id: Option<String>,
         text: String,
+    },
+    ProviderArtifact {
+        seq: u64,
+        thread_id: String,
+        operation_id: String,
+        artifact: ProviderArtifact,
     },
     ToolCall {
         seq: u64,
@@ -1142,6 +1278,7 @@ impl ThreadEvent {
             | ThreadEvent::StatusChanged { seq, .. }
             | ThreadEvent::AssistantDelta { seq, .. }
             | ThreadEvent::AssistantMessage { seq, .. }
+            | ThreadEvent::ProviderArtifact { seq, .. }
             | ThreadEvent::ToolCall { seq, .. }
             | ThreadEvent::ToolResult { seq, .. }
             | ThreadEvent::ProviderSessionIdUpdated { seq, .. }
@@ -3165,6 +3302,188 @@ impl CoreRuntime {
         }
     }
 
+    pub fn materialize_provider_artifact(
+        &mut self,
+        input: ProviderArtifactInput<'_>,
+    ) -> Result<ProviderArtifact, PedelecError> {
+        let details = serde_json::json!({
+            "provider": input.provider,
+            "threadId": input.thread_id,
+            "providerTurnId": input.provider_turn_id,
+            "providerArtifactId": input.provider_artifact_id,
+            "toolCallId": input.tool_call_id,
+        });
+        let stage_details = |stage: &str| {
+            let mut value = details.clone();
+            value["stage"] = Value::String(stage.to_string());
+            value
+        };
+        let invalid = |stage: &str, message: &str| {
+            PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_INVALID,
+                message,
+                stage_details(stage),
+            )
+        };
+        let failed = |stage: &str, error: &dyn std::fmt::Display| {
+            let mut detail = stage_details(stage);
+            detail["reason"] = Value::String(error.to_string());
+            PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_MATERIALIZATION_FAILED,
+                "provider artifact could not be imported",
+                detail,
+            )
+        };
+        self.validate_runtime_turn(input.thread_id, input.provider_turn_id)?;
+        if self
+            .pending_provider_operations
+            .get(input.thread_id)
+            .is_none_or(|operation| operation.kind() != PendingProviderOperationKind::UserTurn)
+        {
+            return Err(invalid(
+                "operation",
+                "provider artifact requires an active user turn",
+            ));
+        }
+        let thread = self.thread_manager.thread(input.thread_id)?;
+        if thread.provider != input.provider {
+            return Err(invalid(
+                "provider",
+                "provider artifact belongs to another provider",
+            ));
+        }
+        if input.mime_type.trim().is_empty() || input.mime_type.contains(['\r', '\n']) {
+            return Err(invalid(
+                "metadata",
+                "provider artifact MIME type is invalid",
+            ));
+        }
+        let size = match input.payload {
+            ProviderArtifactPayload::Bytes(bytes) => bytes.len() as u64,
+            ProviderArtifactPayload::File(path) => {
+                if !path.is_absolute() {
+                    return Err(invalid(
+                        "source",
+                        "provider artifact source path must be absolute",
+                    ));
+                }
+                let metadata =
+                    fs::symlink_metadata(path).map_err(|error| failed("source", &error))?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(invalid(
+                        "source",
+                        "provider artifact source is not a regular file",
+                    ));
+                }
+                metadata.len()
+            }
+        };
+        if size == 0 {
+            return Err(invalid("payload", "provider artifact is empty"));
+        }
+        if size > MAX_ASSET_UPLOAD_BYTES {
+            let mut detail = stage_details("size");
+            detail["maxSizeBytes"] = Value::from(MAX_ASSET_UPLOAD_BYTES);
+            detail["actualSizeBytes"] = Value::from(size);
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_INVALID,
+                "provider artifact exceeds the 100 MiB limit",
+                detail,
+            ));
+        }
+        let workspace = &self.thread_workspace(input.thread_id)?.canonical_path;
+        let root = workspace_assets_root(workspace);
+        let mut ancestor = workspace.to_path_buf();
+        for part in [PEDELEC_RUNTIME_DATA_DIR, "assets"] {
+            ancestor.push(part);
+            if let Ok(metadata) = fs::symlink_metadata(&ancestor) {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(invalid("destination", "asset root has an unsafe parent"));
+                }
+            }
+        }
+        if root.exists()
+            && fs::symlink_metadata(&root)
+                .map_err(|error| failed("destination", &error))?
+                .file_type()
+                .is_symlink()
+        {
+            return Err(invalid("destination", "asset root is a symlink"));
+        }
+        fs::create_dir_all(&root).map_err(|error| failed("destination", &error))?;
+        if !root
+            .canonicalize()
+            .map_err(|error| failed("destination", &error))?
+            .starts_with(
+                workspace
+                    .canonicalize()
+                    .map_err(|error| failed("destination", &error))?,
+            )
+        {
+            return Err(invalid("destination", "asset root escapes the workspace"));
+        }
+        let id = format!("art_{}", Uuid::new_v4().simple());
+        let provider_name = serde_json::to_value(&input.provider)
+            .expect("provider serializes")
+            .as_str()
+            .unwrap()
+            .to_string();
+        let name = safe_asset_filename(input.suggested_filename);
+        let relative = PathBuf::from("provider-artifacts")
+            .join(provider_name)
+            .join(input.thread_id)
+            .join(format!("{id}-{name}"));
+        let tmp = root.join(format!(".{id}.tmp"));
+        let write_result = (|| -> io::Result<()> {
+            let mut output = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            match input.payload {
+                ProviderArtifactPayload::Bytes(bytes) => output.write_all(bytes)?,
+                ProviderArtifactPayload::File(path) => {
+                    let mut source = OpenOptions::new().read(true).open(path)?;
+                    io::copy(&mut source, &mut output)?;
+                }
+            }
+            output.flush()?;
+            if output.metadata()?.len() != size {
+                return Err(io::Error::other(
+                    "provider artifact size changed while copying",
+                ));
+            }
+            drop(output);
+            finalize_asset_write(&tmp, &root, &relative, false, &id)
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&tmp);
+            return Err(failed("write", &error));
+        }
+        let final_path = root.join(&relative);
+        let metadata = fs::symlink_metadata(&final_path).map_err(|error| failed("stat", &error))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(invalid(
+                "stat",
+                "materialized artifact is not a regular file",
+            ));
+        }
+        let artifact = ProviderArtifact {
+            id,
+            provider: input.provider,
+            path: format!("/{}", relative.to_string_lossy().replace('\\', "/")),
+            name,
+            mime_type: input.mime_type.to_string(),
+            size_bytes: metadata.len(),
+            kind: input.kind,
+            source: input.source,
+            provider_artifact_id: input.provider_artifact_id,
+            tool_call_id: input.tool_call_id,
+        };
+        let operation_id = self
+            .active_operation_id(input.thread_id)
+            .expect("validated operation");
+        self.event_bus
+            .emit_provider_artifact(input.thread_id, &operation_id, artifact.clone());
+        Ok(artifact)
+    }
+
     pub fn create_asset_upload(
         &mut self,
         input: CreateAssetUploadInput,
@@ -3790,6 +4109,7 @@ impl CoreRuntime {
         &self,
         workspace_path: &Path,
     ) -> Result<(), PedelecError> {
+        ensure_antigravity_provider_artifact_hook(workspace_path)?;
         ensure_antigravity_custom_agent(workspace_path)
     }
 
@@ -4915,6 +5235,64 @@ impl CoreRuntime {
     /// operation whose contribution is being accounted.
     pub fn current_operation_id(&self, thread_id: &str) -> Option<String> {
         self.active_operation_id(thread_id)
+    }
+
+    /// Resolves a provider conversation only when it identifies exactly one
+    /// active Antigravity user turn. Prepare operations and inactive threads
+    /// are deliberately excluded from hook artifact imports.
+    pub fn active_antigravity_artifact_operation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<ActiveProviderArtifactOperation, PedelecError> {
+        if conversation_id.trim().is_empty() {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_INVALID,
+                "Antigravity hook is missing its conversation id",
+                serde_json::json!({"provider":"antigravity", "stage":"conversation"}),
+            ));
+        }
+        let mut matches = self
+            .thread_manager
+            .thread_ids()
+            .into_iter()
+            .filter_map(|thread_id| {
+                let thread = self.thread_manager.thread(&thread_id).ok()?;
+                if thread.provider != ProviderCode::Antigravity {
+                    return None;
+                }
+                let session = self.thread_manager.provider_session_state(&thread_id)?;
+                if session.provider_session_id.as_deref() != Some(conversation_id) {
+                    return None;
+                }
+                let operation = self.pending_provider_operations.get(&thread_id)?;
+                if operation.kind() != PendingProviderOperationKind::UserTurn
+                    || !matches!(
+                        thread.status,
+                        ThreadStatus::Running | ThreadStatus::WaitingToolResult
+                    )
+                {
+                    return None;
+                }
+                let provider_turn_id = session.active_provider_turn_id.clone()?;
+                Some(ActiveProviderArtifactOperation {
+                    thread_id,
+                    operation_id: operation.operation_id.clone(),
+                    provider_turn_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_INVALID,
+                "Antigravity hook conversation does not resolve to one active user turn",
+                serde_json::json!({
+                    "provider":"antigravity",
+                    "stage":"conversation",
+                    "matchCount":matches.len(),
+                }),
+            ));
+        }
+        Ok(matches.remove(0))
     }
 
     fn update_provider_session_id_for_operation(
@@ -9138,6 +9516,24 @@ impl EventBus {
         );
     }
 
+    pub fn emit_provider_artifact(
+        &mut self,
+        thread_id: &str,
+        operation_id: &str,
+        artifact: ProviderArtifact,
+    ) {
+        let seq = self.next_seq(thread_id);
+        self.emit(
+            thread_id,
+            ThreadEvent::ProviderArtifact {
+                seq,
+                thread_id: thread_id.to_string(),
+                operation_id: operation_id.to_string(),
+                artifact,
+            },
+        );
+    }
+
     pub fn emit_tool_call(
         &mut self,
         thread_id: &str,
@@ -9946,6 +10342,7 @@ fn asset_mime_type(path: &Path) -> String {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
+        "gif" => "image/gif",
         "glb" => "model/gltf-binary",
         _ => "application/octet-stream",
     }
@@ -9978,6 +10375,9 @@ pub mod error_codes {
     pub const PROVIDER_RUNTIME_START_FAILED: &str = "PROVIDER_RUNTIME_START_FAILED";
     pub const PROVIDER_RUNTIME_DISCONNECTED: &str = "PROVIDER_RUNTIME_DISCONNECTED";
     pub const PROVIDER_PROTOCOL_ERROR: &str = "PROVIDER_PROTOCOL_ERROR";
+    pub const PROVIDER_ARTIFACT_INVALID: &str = "PROVIDER_ARTIFACT_INVALID";
+    pub const PROVIDER_ARTIFACT_MATERIALIZATION_FAILED: &str =
+        "PROVIDER_ARTIFACT_MATERIALIZATION_FAILED";
     pub const PROVIDER_REQUEST_FAILED: &str = "PROVIDER_REQUEST_FAILED";
     pub const PROVIDER_INSTALL_UNSUPPORTED: &str = "PROVIDER_INSTALL_UNSUPPORTED";
     pub const PROVIDER_INSTALLER_LAUNCH_FAILED: &str = "PROVIDER_INSTALLER_LAUNCH_FAILED";
@@ -12425,7 +12825,7 @@ Pedelec Host Context is generated integration context, not end-user-authored ins
 Use Pedelec App Tools through their listed `readSpecCommand` / `callCommand`.\n\n\
 For JavaScript or TypeScript execution, use `pedelec-deno`; do not fall back to Node.js, Bun, raw Deno, npx, or another JavaScript runtime.\n\n\
 Deno Modules are imported from `pedelec-deno` scripts, not App Tools. A module's `preferredExecution: \"stdin\"` is a preference, not a restriction; when present, prefer the global `runStdinCommand`. File-backed execution remains valid. Use the listed `usage` example as the primary example; inspect the listed `types` declaration when exact API details are needed.\n\n\
-Before accessing local files outside the declared workspace, ask the user for permission.\n\n\
+Before accessing local files outside the declared workspace, ask the user for permission. An exact artifact the provider generated and returned in the current turn may be read solely to import it into the workspace without asking again; this does not permit browsing its directory or other external files.\n\n\
 `.pedelec-runtime/assets/` is the shared App/Agent file directory.\n\n\
 Invoke each listed Pedelec App Tool call once and consume the structured result or error returned by Pedelec.\n\n\
 Pedelec host instructions never override provider safety policies.";
@@ -12551,6 +12951,195 @@ fn insert_antigravity_custom_agent_body(bootstrap: &str) -> String {
     format!(
         "---\nname: pedelec-runtime\ndescription: Pedelec host integration bootstrap for Pedelec-managed agent sessions.\nmainAgent: true\nsubagent: false\n---\n\n# System Prompt\n\n{bootstrap}\n"
     )
+}
+
+/// Workspace hook commands. PreToolUse runs the CLI `before` stage, which
+/// prints `{"decision":"allow"}` only after the Core snapshot succeeds.
+/// That decision is returned by the hook process and is not stored here.
+fn antigravity_provider_artifact_hook_config() -> Value {
+    serde_json::json!({
+        "PreToolUse": [{
+            "matcher": "generate_image",
+            "hooks": [{
+                "type": "command",
+                "command": "pedelec-cli provider-artifact-hook antigravity before",
+                "timeout": 30
+            }]
+        }],
+        "PostToolUse": [{
+            "matcher": "generate_image",
+            "hooks": [{
+                "type": "command",
+                "command": "pedelec-cli provider-artifact-hook antigravity after",
+                "timeout": 30
+            }]
+        }]
+    })
+}
+
+fn ensure_antigravity_provider_artifact_hook(workspace_path: &Path) -> Result<(), PedelecError> {
+    let agents_dir = workspace_path.join(".agents");
+    if let Ok(metadata) = fs::symlink_metadata(&agents_dir) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(antigravity_hook_bootstrap_error(
+                &agents_dir,
+                "Antigravity hooks directory is not a regular directory",
+            ));
+        }
+    }
+    fs::create_dir_all(&agents_dir).map_err(|error| {
+        antigravity_hook_bootstrap_error(
+            &agents_dir,
+            &format!("failed to create Antigravity hooks directory: {error}"),
+        )
+    })?;
+
+    let hooks_path = workspace_path.join(PEDELEC_ANTIGRAVITY_HOOKS_FILE);
+    let original = match fs::symlink_metadata(&hooks_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(antigravity_hook_bootstrap_error(
+                    &hooks_path,
+                    "Antigravity hooks.json is not a regular file",
+                ));
+            }
+            Some(fs::read(&hooks_path).map_err(|error| {
+                antigravity_hook_bootstrap_error(
+                    &hooks_path,
+                    &format!("failed to read Antigravity hooks.json: {error}"),
+                )
+            })?)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(antigravity_hook_bootstrap_error(
+                &hooks_path,
+                &format!("failed to inspect Antigravity hooks.json: {error}"),
+            ));
+        }
+    };
+    let mut hooks = match original.as_deref() {
+        Some(bytes) => serde_json::from_slice::<Value>(bytes).map_err(|error| {
+            antigravity_hook_bootstrap_error(
+                &hooks_path,
+                &format!("Antigravity hooks.json contains malformed JSON: {error}"),
+            )
+        })?,
+        None => serde_json::json!({}),
+    };
+    let Some(hook_map) = hooks.as_object_mut() else {
+        return Err(antigravity_hook_bootstrap_error(
+            &hooks_path,
+            "Antigravity hooks.json must contain a JSON object",
+        ));
+    };
+    let expected = antigravity_provider_artifact_hook_config();
+    if hook_map.get(PEDELEC_ANTIGRAVITY_HOOK_KEY) == Some(&expected) {
+        return Ok(());
+    }
+    hook_map.insert(PEDELEC_ANTIGRAVITY_HOOK_KEY.to_string(), expected);
+    let serialized = serde_json::to_vec_pretty(&hooks).map_err(|error| {
+        antigravity_hook_bootstrap_error(
+            &hooks_path,
+            &format!("failed to encode Antigravity hooks.json: {error}"),
+        )
+    })?;
+    write_antigravity_hooks_atomically(&hooks_path, original.as_deref(), &serialized).map_err(
+        |error| {
+            antigravity_hook_bootstrap_error(
+                &hooks_path,
+                &format!("failed to atomically update Antigravity hooks.json: {error}"),
+            )
+        },
+    )
+}
+
+fn antigravity_hook_bootstrap_error(path: &Path, message: &str) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::PROVIDER_BOOTSTRAP_ASSET_FAILED,
+        message,
+        serde_json::json!({
+            "provider":"antigravity",
+            "asset":"hooks.json",
+            "path":path_for_external_use(path),
+        }),
+    )
+}
+
+fn write_antigravity_hooks_atomically(
+    path: &Path,
+    expected_existing: Option<&[u8]>,
+    contents: &[u8],
+) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("Antigravity hooks path has no parent"))?;
+    let temp = parent.join(format!("hooks.json.{}.tmp", Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        output.write_all(contents)?;
+        output.sync_all()?;
+        drop(output);
+
+        let current = match fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if current.as_deref() != expected_existing {
+            return Err(io::Error::other(
+                "Antigravity hooks.json changed during update",
+            ));
+        }
+        replace_file_atomically(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let success = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if success == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Materializes the static Antigravity workspace agent required by the

@@ -1,14 +1,15 @@
 use crate::{record_protocol_traffic, PersistentRuntimeDispatcher};
 use pedelec_core::{
     build_persistent_user_prompt_with_bootstrap, error_codes, PedelecError,
-    PersistentProviderSessionIntent, PersistentRuntimeOperation, ProviderCode,
+    PersistentProviderSessionIntent, PersistentRuntimeOperation, ProviderArtifactInput,
+    ProviderArtifactKind, ProviderArtifactPayload, ProviderArtifactSource, ProviderCode,
     ProviderRuntimeDiagnostic, ProviderRuntimeEvent, SharedCoreRuntime,
 };
 use pedelec_runtime::{
-    AcpAuthentication, AcpConfigOptionUpdate, AcpController, AcpExtensionRequestHandler,
-    AcpPermissionDecision, AcpPermissionRequest, AcpRuntimeError, AcpRuntimeEvent,
-    AcpSessionConfig, AcpTurnStatus, AcpWorkspacePermissionPolicy, ProviderRuntimeController,
-    ProviderRuntimeOwner, RpcServerRequest, RuntimeRegistryError,
+    AcpArtifactSource, AcpAuthentication, AcpConfigOptionUpdate, AcpController,
+    AcpExtensionRequestHandler, AcpPermissionDecision, AcpPermissionRequest, AcpRuntimeError,
+    AcpRuntimeEvent, AcpSessionConfig, AcpTurnStatus, AcpWorkspacePermissionPolicy,
+    ProviderRuntimeController, ProviderRuntimeOwner, RpcServerRequest, RuntimeRegistryError,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -1401,6 +1402,254 @@ fn opencode_permission_overlay() -> String {
     Value::Object(value).to_string()
 }
 
+fn acp_artifact_invalid(
+    provider: AcpProviderKind,
+    thread_id: &str,
+    turn_id: &str,
+    provider_artifact_id: Option<&str>,
+    tool_call_id: Option<&str>,
+    stage: &str,
+    message: &str,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::PROVIDER_ARTIFACT_INVALID,
+        message,
+        json!({
+            "provider": provider.code(),
+            "threadId": thread_id,
+            "providerTurnId": turn_id,
+            "providerArtifactId": provider_artifact_id,
+            "toolCallId": tool_call_id,
+            "stage": stage,
+        }),
+    )
+}
+
+fn artifact_kind_from_mime(mime_type: &str) -> ProviderArtifactKind {
+    let mime = mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if mime.starts_with("image/") {
+        ProviderArtifactKind::Image
+    } else if mime.starts_with("audio/") {
+        ProviderArtifactKind::Audio
+    } else if mime.starts_with("video/") {
+        ProviderArtifactKind::Video
+    } else {
+        ProviderArtifactKind::File
+    }
+}
+
+fn materialize_acp_artifact(
+    runtime: &SharedCoreRuntime,
+    provider: AcpProviderKind,
+    thread_id: &str,
+    turn_id: &str,
+    provider_artifact_id: Option<String>,
+    tool_call_id: Option<String>,
+    source: AcpArtifactSource,
+    suggested_filename: &str,
+    mime_type: Option<&str>,
+    payload: Result<Vec<u8>, String>,
+) -> Result<(), PedelecError> {
+    let mime_type = mime_type
+        .filter(|mime| !mime.trim().is_empty() && !mime.contains(['\r', '\n']))
+        .ok_or_else(|| {
+            acp_artifact_invalid(
+                provider,
+                thread_id,
+                turn_id,
+                provider_artifact_id.as_deref(),
+                tool_call_id.as_deref(),
+                "metadata",
+                "ACP artifact MIME type is missing or invalid",
+            )
+        })?;
+    let bytes = payload.map_err(|reason| {
+        acp_artifact_invalid(
+            provider,
+            thread_id,
+            turn_id,
+            provider_artifact_id.as_deref(),
+            tool_call_id.as_deref(),
+            "decode",
+            &reason,
+        )
+    })?;
+    let core_source = match source {
+        AcpArtifactSource::ProviderArtifact => ProviderArtifactSource::ProviderArtifact,
+        AcpArtifactSource::ToolResult => ProviderArtifactSource::ToolResult,
+    };
+    runtime
+        .lock()
+        .map_err(|_| mutex_error("ACP artifact Core runtime"))?
+        .materialize_provider_artifact(ProviderArtifactInput {
+            thread_id,
+            provider: provider.provider_code(),
+            provider_turn_id: Some(turn_id),
+            kind: artifact_kind_from_mime(mime_type),
+            source: core_source,
+            provider_artifact_id,
+            tool_call_id,
+            suggested_filename,
+            mime_type,
+            payload: ProviderArtifactPayload::Bytes(&bytes),
+        })?;
+    Ok(())
+}
+
+fn cursor_image_file_details(path: &Path) -> (String, String) {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime_type = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    };
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty() && *name != "." && *name != "..")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            let extension = match mime_type {
+                "image/png" => "png",
+                "image/jpeg" => "jpg",
+                "image/webp" => "webp",
+                "image/gif" => "gif",
+                _ => "bin",
+            };
+            format!("generated-image.{extension}")
+        });
+    (filename, mime_type.to_string())
+}
+
+fn materialize_cursor_generated_image(
+    runtime: &SharedCoreRuntime,
+    thread_id: &str,
+    turn_id: &str,
+    params: &Value,
+) -> Result<(), PedelecError> {
+    let Some(file_path) = params.get("filePath") else {
+        return Ok(());
+    };
+    let Some(file_path) = file_path.as_str() else {
+        return Err(acp_artifact_invalid(
+            AcpProviderKind::Cursor,
+            thread_id,
+            turn_id,
+            params.get("toolCallId").and_then(Value::as_str),
+            params.get("toolCallId").and_then(Value::as_str),
+            "source",
+            "Cursor generated image filePath must be a string",
+        ));
+    };
+    if file_path.trim().is_empty() {
+        return Ok(());
+    }
+    let tool_call_id = params
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            acp_artifact_invalid(
+                AcpProviderKind::Cursor,
+                thread_id,
+                turn_id,
+                None,
+                None,
+                "metadata",
+                "Cursor generated image toolCallId is missing",
+            )
+        })?;
+    let path = PathBuf::from(file_path);
+    if !path.is_absolute() {
+        return Err(acp_artifact_invalid(
+            AcpProviderKind::Cursor,
+            thread_id,
+            turn_id,
+            Some(tool_call_id),
+            Some(tool_call_id),
+            "source",
+            "Cursor generated image filePath must be absolute",
+        ));
+    }
+    let (suggested_filename, mime_type) = cursor_image_file_details(&path);
+    runtime
+        .lock()
+        .map_err(|_| mutex_error("Cursor artifact Core runtime"))?
+        .materialize_provider_artifact(ProviderArtifactInput {
+            thread_id,
+            provider: ProviderCode::Cursor,
+            provider_turn_id: Some(turn_id),
+            kind: ProviderArtifactKind::Image,
+            source: ProviderArtifactSource::ImageGeneration,
+            provider_artifact_id: Some(tool_call_id.to_string()),
+            tool_call_id: Some(tool_call_id.to_string()),
+            suggested_filename: &suggested_filename,
+            mime_type: &mime_type,
+            payload: ProviderArtifactPayload::File(&path),
+        })?;
+    Ok(())
+}
+
+fn fail_acp_artifact_operation(
+    runtime: &SharedCoreRuntime,
+    provider: AcpProviderKind,
+    thread_id: &str,
+    turn_id: &str,
+    error: PedelecError,
+) {
+    if let Ok(mut core) = runtime.lock() {
+        let _ = core.reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
+            thread_id: thread_id.to_string(),
+            provider_turn_id: Some(turn_id.to_string()),
+            error: error.clone(),
+        });
+    }
+    record(
+        runtime,
+        ProviderRuntimeDiagnostic::ProviderRuntimeError {
+            provider: provider.provider_code(),
+            runtime_generation: None,
+            process_id: None,
+            thread_id: Some(thread_id.to_string()),
+            provider_thread_id: None,
+            provider_turn_id: Some(turn_id.to_string()),
+            code: error.code.clone(),
+            message: error.message.clone(),
+            details: error.details.clone(),
+        },
+    );
+}
+
+fn handle_provider_notification(
+    runtime: &SharedCoreRuntime,
+    provider: AcpProviderKind,
+    method: &str,
+    params: &Value,
+    thread_id: Option<&str>,
+    turn_id: Option<&str>,
+) {
+    if provider != AcpProviderKind::Cursor || method != "cursor/generate_image" {
+        return;
+    }
+    let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
+        return;
+    };
+    if let Err(error) = materialize_cursor_generated_image(runtime, thread_id, turn_id, params) {
+        fail_acp_artifact_operation(runtime, provider, thread_id, turn_id, error);
+    }
+}
+
 fn handle_event(
     runtime: &SharedCoreRuntime,
     controller: &AcpController,
@@ -1435,6 +1684,38 @@ fn handle_event(
                 text,
             },
         ),
+        AcpRuntimeEvent::ProviderArtifact {
+            pedelec_thread_id,
+            local_turn_id,
+            provider_artifact_id,
+            tool_call_id,
+            source,
+            suggested_filename,
+            mime_type,
+            payload,
+            ..
+        } => {
+            if let Err(error) = materialize_acp_artifact(
+                runtime,
+                provider,
+                &pedelec_thread_id,
+                &local_turn_id,
+                provider_artifact_id,
+                tool_call_id,
+                source,
+                &suggested_filename,
+                mime_type.as_deref(),
+                payload,
+            ) {
+                fail_acp_artifact_operation(
+                    runtime,
+                    provider,
+                    &pedelec_thread_id,
+                    &local_turn_id,
+                    error,
+                );
+            }
+        }
         AcpRuntimeEvent::UsageUpdated {
             pedelec_thread_id,
             local_turn_id,
@@ -1509,7 +1790,20 @@ fn handle_event(
                 },
             );
         }
-        AcpRuntimeEvent::Notification { .. } => {}
+        AcpRuntimeEvent::Notification {
+            method,
+            params,
+            pedelec_thread_id,
+            local_turn_id,
+            ..
+        } => handle_provider_notification(
+            runtime,
+            provider,
+            &method,
+            &params,
+            pedelec_thread_id.as_deref(),
+            local_turn_id.as_deref(),
+        ),
         AcpRuntimeEvent::PermissionResolved { .. } => {}
         AcpRuntimeEvent::Stderr { text } => record(
             runtime,
@@ -1827,6 +2121,7 @@ fn mark_stopped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use chrono::Utc;
     use pedelec_core::{
         EffortLevel, PendingProviderOperation, PendingProviderOperationKind,
@@ -1835,6 +2130,15 @@ mod tests {
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    const TEST_PNG_BASE64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jFZ0AAAAASUVORK5CYII=";
+
+    fn test_png_bytes() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(TEST_PNG_BASE64)
+            .unwrap()
+    }
 
     #[test]
     fn opencode_usage_parser_accepts_only_native_prompt_total() {
@@ -2809,6 +3113,426 @@ mod tests {
     }
 
     #[test]
+    fn cursor_generated_image_imports_only_file_path_and_preserves_call_identity() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let generated = temp.path().join("generated.png");
+        let reference = temp.path().join("reference.png");
+        fs::write(&generated, test_png_bytes()).unwrap();
+        fs::write(&reference, test_png_bytes()).unwrap();
+        let runtime = active_artifact_runtime(
+            ProviderCode::Cursor,
+            &workspace,
+            "thread-cursor-artifact",
+            "turn-cursor-artifact",
+        );
+        let events = runtime
+            .lock()
+            .unwrap()
+            .subscribe_thread(pedelec_core::SubscribeThreadInput {
+                thread_id: "thread-cursor-artifact".into(),
+            })
+            .unwrap();
+
+        handle_provider_notification(
+            &runtime,
+            AcpProviderKind::Cursor,
+            "cursor/generate_image",
+            &json!({
+                "toolCallId":"cursor-tool-42",
+                "description":"Create a small icon",
+                "filePath":generated,
+                "referenceImagePaths":[reference]
+            }),
+            Some("thread-cursor-artifact"),
+            Some("turn-cursor-artifact"),
+        );
+
+        let artifact_event = events.recv_timeout(Duration::from_secs(1)).unwrap();
+        let artifact = match artifact_event {
+            pedelec_core::ThreadEvent::ProviderArtifact { artifact, .. } => artifact,
+            other => panic!("expected ProviderArtifact, got {other:?}"),
+        };
+        assert_eq!(artifact.provider, ProviderCode::Cursor);
+        assert_eq!(artifact.source, ProviderArtifactSource::ImageGeneration);
+        assert_eq!(artifact.tool_call_id.as_deref(), Some("cursor-tool-42"));
+        assert_eq!(
+            artifact.provider_artifact_id.as_deref(),
+            Some("cursor-tool-42")
+        );
+        let copied = workspace.join(".pedelec-runtime").join("assets").join(
+            artifact
+                .path
+                .trim_start_matches('/')
+                .split('/')
+                .collect::<PathBuf>(),
+        );
+        assert_eq!(fs::read(copied).unwrap(), test_png_bytes());
+        let artifact_dir = workspace
+            .join(".pedelec-runtime")
+            .join("assets")
+            .join("provider-artifacts")
+            .join("cursor")
+            .join("thread-cursor-artifact");
+        assert_eq!(fs::read_dir(artifact_dir).unwrap().count(), 1);
+        assert!(reference.exists());
+    }
+
+    #[test]
+    fn cursor_generate_image_without_session_id_materializes_through_the_acp_turn() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let generated = temp.path().join("generated.png");
+        fs::write(&generated, test_png_bytes()).unwrap();
+        let log = temp.path().join("cursor-image-frames.jsonl");
+        let thread_id = "thread-cursor-live-image";
+        let turn_id = "turn-cursor-live-image";
+        let runtime = active_artifact_runtime(ProviderCode::Cursor, &workspace, thread_id, turn_id);
+        let events = runtime
+            .lock()
+            .unwrap()
+            .subscribe_thread(pedelec_core::SubscribeThreadInput {
+                thread_id: thread_id.into(),
+            })
+            .unwrap();
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher = CursorRuntimeDispatcher::new(owner.clone(), Arc::clone(&runtime))
+            .with_program_for_test(fake_cursor_program(temp.path()))
+            .with_process_cwd_for_test(temp.path())
+            .with_env_for_test("CURSOR_API_KEY", "test-token")
+            .with_env_for_test("FAKE_ACP_LOG", log.to_string_lossy())
+            .with_env_for_test("FAKE_ACP_WORKSPACE", workspace.to_string_lossy())
+            .with_env_for_test("FAKE_ACP_LOAD", "true")
+            .with_env_for_test("FAKE_ACP_GENERATED_IMAGE", generated.to_string_lossy());
+        let mut session = session_intent(&workspace, Some("provider-session".into()));
+        session.thread_id = thread_id.into();
+        session.provider = ProviderCode::Cursor;
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::StartTurn {
+                turn: PersistentProviderTurnIntent {
+                    thread_id: thread_id.into(),
+                    local_turn_id: turn_id.into(),
+                    provider_session_id: Some("provider-session".into()),
+                    message: "cursor-generate-image".into(),
+                    session,
+                },
+            })
+            .unwrap();
+
+        let mut seen_events = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = events.recv_timeout(remaining).unwrap();
+            let completed = matches!(event, pedelec_core::ThreadEvent::OperationCompleted { .. });
+            seen_events.push(event);
+            if completed {
+                break;
+            }
+        }
+        let artifact_index = seen_events
+            .iter()
+            .position(|event| matches!(event, pedelec_core::ThreadEvent::ProviderArtifact { .. }))
+            .expect("Cursor should materialize the generated image");
+        let artifact = match &seen_events[artifact_index] {
+            pedelec_core::ThreadEvent::ProviderArtifact { artifact, .. } => artifact,
+            _ => unreachable!(),
+        };
+        assert_eq!(artifact.provider, ProviderCode::Cursor);
+        assert_eq!(artifact.source, ProviderArtifactSource::ImageGeneration);
+        assert_eq!(artifact.tool_call_id.as_deref(), Some("call-image-1"));
+        let copied = workspace.join(".pedelec-runtime").join("assets").join(
+            artifact
+                .path
+                .trim_start_matches('/')
+                .split('/')
+                .collect::<PathBuf>(),
+        );
+        assert_eq!(fs::read(copied).unwrap(), test_png_bytes());
+        let _ = owner.shutdown();
+    }
+
+    #[test]
+    fn cursor_generated_image_without_file_path_is_non_fatal() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let runtime = active_artifact_runtime(
+            ProviderCode::Cursor,
+            &workspace,
+            "thread-cursor-no-image",
+            "turn-cursor-no-image",
+        );
+        handle_provider_notification(
+            &runtime,
+            AcpProviderKind::Cursor,
+            "cursor/generate_image",
+            &json!({"toolCallId":"cursor-tool-no-path","description":"No generated file"}),
+            Some("thread-cursor-no-image"),
+            Some("turn-cursor-no-image"),
+        );
+        let core = runtime.lock().unwrap();
+        assert_eq!(
+            core.thread_status("thread-cursor-no-image"),
+            Some(ThreadStatus::Running)
+        );
+        assert!(!workspace
+            .join(".pedelec-runtime/assets/provider-artifacts/cursor/thread-cursor-no-image")
+            .exists());
+    }
+
+    #[test]
+    fn cursor_invalid_generated_paths_fail_the_active_operation() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let missing = temp.path().join("missing.png");
+        let directory = temp.path().join("directory.png");
+        fs::create_dir_all(&directory).unwrap();
+        let mut paths = vec![missing, directory];
+        let symlink_target = temp.path().join("target.png");
+        let symlink = temp.path().join("link.png");
+        fs::write(&symlink_target, b"target").unwrap();
+        #[cfg(unix)]
+        let symlink_created = std::os::unix::fs::symlink(&symlink_target, &symlink).is_ok();
+        #[cfg(windows)]
+        let symlink_created = std::os::windows::fs::symlink_file(&symlink_target, &symlink).is_ok();
+        if symlink_created {
+            paths.push(symlink);
+        }
+
+        for (index, path) in paths.into_iter().enumerate() {
+            let thread_id = format!("thread-cursor-invalid-{index}");
+            let turn_id = format!("turn-cursor-invalid-{index}");
+            let runtime =
+                active_artifact_runtime(ProviderCode::Cursor, &workspace, &thread_id, &turn_id);
+            handle_provider_notification(
+                &runtime,
+                AcpProviderKind::Cursor,
+                "cursor/generate_image",
+                &json!({"toolCallId":"bad-path","filePath":path}),
+                Some(&thread_id),
+                Some(&turn_id),
+            );
+            let core = runtime.lock().unwrap();
+            assert_eq!(core.thread_status(&thread_id), Some(ThreadStatus::Error));
+            assert!(core.current_operation_id(&thread_id).is_none());
+        }
+    }
+
+    #[test]
+    fn open_code_does_not_interpret_cursor_generated_image_notifications() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let generated = temp.path().join("generated.png");
+        fs::write(&generated, test_png_bytes()).unwrap();
+        let runtime = active_artifact_runtime(
+            ProviderCode::OpenCode,
+            &workspace,
+            "thread-open-no-cursor-extension",
+            "turn-open-no-cursor-extension",
+        );
+        handle_provider_notification(
+            &runtime,
+            AcpProviderKind::OpenCode,
+            "cursor/generate_image",
+            &json!({"toolCallId":"not-cursor","filePath":generated}),
+            Some("thread-open-no-cursor-extension"),
+            Some("turn-open-no-cursor-extension"),
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_status("thread-open-no-cursor-extension"),
+            Some(ThreadStatus::Running)
+        );
+        assert!(!workspace
+            .join(".pedelec-runtime/assets/provider-artifacts")
+            .exists());
+    }
+
+    #[test]
+    fn opencode_inline_image_is_materialized_before_the_turn_completes() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let log = temp.path().join("inline-image-frames.jsonl");
+        let runtime = active_artifact_runtime(
+            ProviderCode::OpenCode,
+            &workspace,
+            "thread-open-inline-image",
+            "turn-open-inline-image",
+        );
+        let events = runtime
+            .lock()
+            .unwrap()
+            .subscribe_thread(pedelec_core::SubscribeThreadInput {
+                thread_id: "thread-open-inline-image".into(),
+            })
+            .unwrap();
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher = OpenCodeRuntimeDispatcher::new(owner.clone(), Arc::clone(&runtime))
+            .with_program_for_test(fake_opencode_program(temp.path()))
+            .with_process_cwd_for_test(temp.path())
+            .with_env_for_test("FAKE_ACP_LOG", log.to_string_lossy())
+            .with_env_for_test("FAKE_ACP_WORKSPACE", workspace.to_string_lossy())
+            .with_env_for_test("FAKE_ACP_LOAD", "true");
+        let mut session = session_intent(&workspace, Some("provider-session".into()));
+        session.thread_id = "thread-open-inline-image".into();
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::StartTurn {
+                turn: PersistentProviderTurnIntent {
+                    thread_id: "thread-open-inline-image".into(),
+                    local_turn_id: "turn-open-inline-image".into(),
+                    provider_session_id: Some("provider-session".into()),
+                    message: "inline-image".into(),
+                    session,
+                },
+            })
+            .unwrap();
+
+        let mut seen_events = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = events.recv_timeout(remaining).unwrap();
+            let completed = matches!(event, pedelec_core::ThreadEvent::OperationCompleted { .. });
+            seen_events.push(event);
+            if completed {
+                break;
+            }
+        }
+        let artifact_index = seen_events
+            .iter()
+            .position(|event| matches!(event, pedelec_core::ThreadEvent::ProviderArtifact { .. }))
+            .expect("OpenCode should materialize the inline ACP image");
+        let completion_index = seen_events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    pedelec_core::ThreadEvent::OperationCompleted { success: true, .. }
+                )
+            })
+            .expect("the provider turn should complete successfully");
+        assert!(artifact_index < completion_index);
+        let artifact = match &seen_events[artifact_index] {
+            pedelec_core::ThreadEvent::ProviderArtifact { artifact, .. } => artifact,
+            _ => unreachable!(),
+        };
+        assert_eq!(artifact.provider, ProviderCode::OpenCode);
+        assert_eq!(artifact.mime_type, "image/png");
+        let artifact_file = workspace.join(".pedelec-runtime/assets").join(
+            artifact
+                .path
+                .trim_start_matches('/')
+                .split('/')
+                .collect::<PathBuf>(),
+        );
+        assert_eq!(fs::read(artifact_file).unwrap(), test_png_bytes());
+        let _ = owner.shutdown();
+    }
+
+    #[test]
+    fn failed_acp_artifact_cannot_be_revived_by_terminal_success() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let runtime = active_artifact_runtime(
+            ProviderCode::OpenCode,
+            &workspace,
+            "thread-open-bad-artifact",
+            "turn-open-bad-artifact",
+        );
+        let events = runtime
+            .lock()
+            .unwrap()
+            .subscribe_thread(pedelec_core::SubscribeThreadInput {
+                thread_id: "thread-open-bad-artifact".into(),
+            })
+            .unwrap();
+        let controller = AcpController::spawn(
+            pedelec_runtime::AcpLaunchConfig::new(
+                "artifact-failure-test",
+                fake_opencode_program(temp.path()),
+                temp.path(),
+            )
+            .with_env(
+                "FAKE_ACP_LOG",
+                temp.path()
+                    .join("failure.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .with_env(
+                "FAKE_ACP_WORKSPACE",
+                workspace.to_string_lossy().into_owned(),
+            )
+            .with_env("FAKE_ACP_LOAD", "true"),
+            Arc::new(|_: &AcpPermissionRequest| AcpPermissionDecision::RejectOnce),
+        )
+        .unwrap();
+
+        handle_event(
+            &runtime,
+            &controller,
+            AcpProviderKind::OpenCode,
+            AcpRuntimeEvent::ProviderArtifact {
+                pedelec_thread_id: "thread-open-bad-artifact".into(),
+                provider_session_id: "provider-session".into(),
+                local_turn_id: "turn-open-bad-artifact".into(),
+                provider_artifact_id: Some("bad-image".into()),
+                tool_call_id: None,
+                source: AcpArtifactSource::ProviderArtifact,
+                suggested_filename: "artifact.png".into(),
+                mime_type: Some("image/png".into()),
+                payload: Err("ACP binary content is malformed base64".into()),
+            },
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_status("thread-open-bad-artifact"),
+            Some(ThreadStatus::Error)
+        );
+
+        handle_event(
+            &runtime,
+            &controller,
+            AcpProviderKind::OpenCode,
+            AcpRuntimeEvent::TurnCompleted {
+                pedelec_thread_id: "thread-open-bad-artifact".into(),
+                provider_session_id: "provider-session".into(),
+                local_turn_id: "turn-open-bad-artifact".into(),
+                status: AcpTurnStatus::Completed,
+                stop_reason: "end_turn".into(),
+                error: None,
+            },
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .thread_status("thread-open-bad-artifact"),
+            Some(ThreadStatus::Error)
+        );
+        let emitted = events.try_iter().collect::<Vec<_>>();
+        assert!(!emitted
+            .iter()
+            .any(|event| matches!(event, pedelec_core::ThreadEvent::ProviderArtifact { .. })));
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            pedelec_core::ThreadEvent::OperationCompleted { success: false, .. }
+        )));
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
     fn cursor_auth_detection_accepts_provider_native_token_without_ui() {
         assert!(cursor_auth_available(&[(
             "CURSOR_API_KEY".into(),
@@ -3271,6 +3995,47 @@ mod tests {
         );
         assert_eq!(prompts[1]["params"]["prompt"][0]["text"], "-    /foo");
         let _ = owner.shutdown();
+    }
+
+    fn active_artifact_runtime(
+        provider: ProviderCode,
+        workspace: &Path,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> SharedCoreRuntime {
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let mut core = runtime.lock().unwrap();
+        let workspace_id = format!("workspace-{thread_id}");
+        core.register_workspace_for_test(&workspace_id, workspace, WorkspaceKind::Custom)
+            .unwrap();
+        core.thread_manager.insert_thread(
+            ThreadState {
+                thread_id: thread_id.to_string(),
+                workspace_id,
+                provider,
+                effort_level: Some(EffortLevel::Default),
+                effort_args: vec![],
+                skills: vec![],
+                status: ThreadStatus::Running,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                sdk_origin: None,
+            },
+            ProviderSessionState {
+                provider_session_id: Some("provider-session".into()),
+                active_provider_turn_id: Some(turn_id.to_string()),
+            },
+        );
+        core.pending_provider_operations.insert(
+            thread_id.to_string(),
+            PendingProviderOperation {
+                operation_id: format!("operation-{turn_id}"),
+                kind: PendingProviderOperationKind::UserTurn,
+                started_at: Utc::now(),
+            },
+        );
+        drop(core);
+        runtime
     }
 
     fn session_intent(

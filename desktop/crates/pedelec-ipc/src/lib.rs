@@ -1,12 +1,14 @@
+use base64::Engine;
 pub use pedelec_core::DenoRuntimeDispatcher;
 use pedelec_core::{
     error_codes, wait_for_provider_readiness, AbortSessionSetupInput, CreateAssetDownloadInput,
     CreateAssetUploadInput, CreateDenoModuleUploadInput, CreateThreadInput,
     CreateWorkspaceDenoModuleUploadInput, DenoExecutionIntent, DenoRunInput, DenoRunOutput,
     EndThreadInput, ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation,
-    PrepareThreadInput, PrepareThreadOutput, PrepareWorkspaceDenoModulesInput, ProviderCode,
-    ProviderProtocolTraffic, ProviderRuntimeDiagnostic, ResumeThreadInput, SendTextInput,
-    SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
+    PrepareThreadInput, PrepareThreadOutput, PrepareWorkspaceDenoModulesInput,
+    ProviderArtifactInput, ProviderArtifactKind, ProviderArtifactPayload, ProviderArtifactSource,
+    ProviderCode, ProviderProtocolTraffic, ProviderRuntimeDiagnostic, ResumeThreadInput,
+    SendTextInput, SharedCoreRuntime, SubmitToolResultInput, SubscribeThreadInput, ThreadEvent,
     ThreadSubscription, ToolCallInput, ToolInvocationOutcome, ToolInvocationRegistration,
     ToolInvocationWait, ToolSpecInput, UpdateSettingsInput, WorkspaceListInput, WorkspaceRunInput,
 };
@@ -44,6 +46,113 @@ mod opencode;
 mod pedelec_agent;
 pub use antigravity::AntigravityRuntimeDispatcher;
 pub use claude::ClaudeRuntimeDispatcher;
+
+fn codex_image_format(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("image/png", "image.png"))
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some(("image/jpeg", "image.jpg"))
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(("image/webp", "image.webp"))
+    } else {
+        None
+    }
+}
+
+fn materialize_codex_image(
+    core: &mut pedelec_core::CoreRuntime,
+    thread_id: &str,
+    provider_turn_id: Option<&str>,
+    item_id: &str,
+    result: Option<&str>,
+    saved_path: Option<&Path>,
+    declared_mime_type: Option<&str>,
+) -> Result<(), PedelecError> {
+    let invalid = |stage: &str, message: &str| {
+        PedelecError::with_details(
+            error_codes::PROVIDER_ARTIFACT_INVALID,
+            message,
+            serde_json::json!({"provider":"codex", "threadId":thread_id,
+            "providerTurnId":provider_turn_id, "providerArtifactId":item_id, "stage":stage}),
+        )
+    };
+    if item_id.is_empty() {
+        return Err(invalid(
+            "metadata",
+            "Codex image generation item id is missing",
+        ));
+    }
+    let decoded = if let Some(encoded) = result {
+        if encoded.len() as u64 > ((pedelec_core::MAX_ASSET_UPLOAD_BYTES + 2) / 3) * 4 {
+            return Err(invalid("size", "Codex image exceeds the 100 MiB limit"));
+        }
+        Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| invalid("decode", "Codex image result is malformed base64"))?,
+        )
+    } else {
+        None
+    };
+    let (payload, format) = if let Some(bytes) = decoded.as_deref() {
+        (
+            ProviderArtifactPayload::Bytes(bytes),
+            codex_image_format(bytes),
+        )
+    } else if let Some(path) = saved_path {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_MATERIALIZATION_FAILED,
+                "Codex generated image could not be opened",
+                serde_json::json!({"provider":"codex", "threadId":thread_id,
+                "providerTurnId":provider_turn_id, "providerArtifactId":item_id,
+                "stage":"source", "reason":error.to_string()}),
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(invalid(
+                "source",
+                "Codex generated image source is not a regular file",
+            ));
+        }
+        let mut file = fs::File::open(path)
+            .map_err(|_| invalid("source", "Codex generated image could not be read"))?;
+        let mut header = [0u8; 12];
+        let count = file
+            .read(&mut header)
+            .map_err(|_| invalid("source", "Codex generated image could not be read"))?;
+        (
+            ProviderArtifactPayload::File(path),
+            codex_image_format(&header[..count]),
+        )
+    } else {
+        return Err(invalid(
+            "payload",
+            "Codex image generation returned no image",
+        ));
+    };
+    let (mime_type, filename) =
+        format.ok_or_else(|| invalid("format", "Codex image format is unsupported"))?;
+    if declared_mime_type.is_some_and(|declared| !declared.eq_ignore_ascii_case(mime_type)) {
+        return Err(invalid(
+            "metadata",
+            "Codex image MIME type does not match its content",
+        ));
+    }
+    core.materialize_provider_artifact(ProviderArtifactInput {
+        thread_id,
+        provider: ProviderCode::Codex,
+        provider_turn_id,
+        kind: ProviderArtifactKind::Image,
+        source: ProviderArtifactSource::ImageGeneration,
+        provider_artifact_id: Some(item_id.to_string()),
+        tool_call_id: None,
+        suggested_filename: filename,
+        mime_type,
+        payload,
+    })?;
+    Ok(())
+}
 pub use opencode::{
     AcpProviderKind, AcpRuntimeDispatcher, CursorRuntimeDispatcher, OpenCodeRuntimeDispatcher,
     CURSOR_RUNTIME_KEY, OPENCODE_RUNTIME_KEY,
@@ -68,6 +177,20 @@ const TOOL_CALL_REQUEST_IDEMPOTENCY_DELIVERY_ID_RESERVE_BYTES: usize = 256;
 /// otherwise accept the semantic operation without requiring the Core mutex.
 pub trait PersistentRuntimeDispatcher: Send + Sync + 'static {
     fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError>;
+
+    /// Trusted provider lifecycle hooks share Core IPC with normal runtime
+    /// requests but never identify a Pedelec thread in the Workspace file.
+    fn handle_provider_artifact_hook(
+        &self,
+        _provider: &str,
+        _stage: &str,
+        _payload: Value,
+    ) -> Result<(), PedelecError> {
+        Err(PedelecError::new(
+            error_codes::PROVIDER_UNSUPPORTED,
+            "provider artifact hook ingress is unavailable",
+        ))
+    }
 }
 
 /// Production provider router sharing one desktop-owned runtime registry.
@@ -198,6 +321,22 @@ impl PersistentRuntimeDispatcher for ProviderRuntimeDispatcher {
             pedelec_core::ProviderCode::Claude => self.claude.dispatch(operation),
             pedelec_core::ProviderCode::Ollama => self.pedelec_agent_ollama.dispatch(operation),
         }
+    }
+
+    fn handle_provider_artifact_hook(
+        &self,
+        provider: &str,
+        stage: &str,
+        payload: Value,
+    ) -> Result<(), PedelecError> {
+        if provider != "antigravity" {
+            return Err(PedelecError::new(
+                error_codes::PROVIDER_UNSUPPORTED,
+                "provider artifact hook only supports Antigravity",
+            ));
+        }
+        self.antigravity
+            .handle_provider_artifact_hook(stage, payload)
     }
 }
 
@@ -506,6 +645,35 @@ impl CodexRuntimeDispatcher {
                                     text,
                                 },
                             );
+                        }
+                    }
+                    CodexRuntimeEvent::ImageGeneration {
+                        pedelec_thread_id,
+                        provider_turn_id,
+                        item_id,
+                        result,
+                        saved_path,
+                        mime_type,
+                        ..
+                    } => {
+                        if let Ok(mut core) = runtime.lock() {
+                            if let Err(error) = materialize_codex_image(
+                                &mut core,
+                                &pedelec_thread_id,
+                                provider_turn_id.as_deref(),
+                                &item_id,
+                                result.as_deref(),
+                                saved_path.as_deref(),
+                                mime_type.as_deref(),
+                            ) {
+                                let _ = core.reduce_provider_runtime_event(
+                                    pedelec_core::ProviderRuntimeEvent::ProviderError {
+                                        thread_id: pedelec_thread_id,
+                                        provider_turn_id,
+                                        error,
+                                    },
+                                );
+                            }
                         }
                     }
                     CodexRuntimeEvent::UsageUpdated {
@@ -2396,6 +2564,9 @@ fn handle_core_ipc_request_with_services(
             Err(err) => error_response(&request.request_id, err),
         },
         "tool_call" => handle_tool_call_request(&request, runtime),
+        "provider_artifact_hook" => {
+            handle_provider_artifact_hook_request(&request, persistent_dispatcher.as_ref())
+        }
         "tool_spec" => match decode_payload::<ToolSpecInput>(&request) {
             Ok(input) => match runtime.lock().unwrap().tool_spec(input) {
                 Ok(spec) => ok_response(&request.request_id, serde_json::json!(spec)),
@@ -2770,6 +2941,61 @@ fn handle_tool_call_request_with_metadata(
     HandledCoreIpcResponse {
         response,
         tool_delivery_request_id,
+    }
+}
+
+fn handle_provider_artifact_hook_request(
+    request: &CoreIpcRequest,
+    dispatcher: &dyn PersistentRuntimeDispatcher,
+) -> CoreIpcResponse {
+    if request.caller_origin.is_some() {
+        return error_response(
+            &request.request_id,
+            PedelecError::new(
+                error_codes::IPC_UNAUTHORIZED,
+                "provider artifact hook ingress is reserved for provider processes",
+            ),
+        );
+    }
+    let Some(payload) = request.payload.as_ref().and_then(Value::as_object) else {
+        return error_response(
+            &request.request_id,
+            PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "provider artifact hook payload must be an object",
+            ),
+        );
+    };
+    let Some(provider) = payload.get("provider").and_then(Value::as_str) else {
+        return error_response(
+            &request.request_id,
+            PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "provider artifact hook provider is missing",
+            ),
+        );
+    };
+    let Some(stage) = payload.get("stage").and_then(Value::as_str) else {
+        return error_response(
+            &request.request_id,
+            PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "provider artifact hook stage is missing",
+            ),
+        );
+    };
+    let Some(hook_payload) = payload.get("hookPayload").cloned() else {
+        return error_response(
+            &request.request_id,
+            PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "provider artifact hook lifecycle payload is missing",
+            ),
+        );
+    };
+    match dispatcher.handle_provider_artifact_hook(provider, stage, hook_payload) {
+        Ok(()) => ok_response(&request.request_id, serde_json::json!({})),
+        Err(error) => error_response(&request.request_id, error),
     }
 }
 
@@ -3438,6 +3664,46 @@ mod tests {
     use serde_json::json;
     use std::sync::{mpsc, Barrier};
     use std::time::Duration;
+
+    #[test]
+    fn codex_image_ingress_rejects_malformed_inline_data_before_path_fallback() {
+        let mut core = pedelec_core::CoreRuntime::new();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("image.png");
+        fs::write(&path, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let error = materialize_codex_image(
+            &mut core,
+            "thread",
+            Some("turn"),
+            "image-1",
+            Some("invalid base64"),
+            Some(&path),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_ARTIFACT_INVALID);
+        assert_eq!(error.details.unwrap()["stage"], "decode");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nrest");
+        let error = materialize_codex_image(
+            &mut core,
+            "thread",
+            Some("turn"),
+            "image-2",
+            Some(&encoded),
+            None,
+            Some("image/jpeg"),
+        )
+        .unwrap_err();
+        assert_eq!(error.details.unwrap()["stage"], "metadata");
+        assert_eq!(
+            codex_image_format(b"\x89PNG\r\n\x1a\nrest"),
+            Some(("image/png", "image.png"))
+        );
+        assert_eq!(
+            codex_image_format(b"\xff\xd8\xffrest"),
+            Some(("image/jpeg", "image.jpg"))
+        );
+    }
 
     #[test]
     fn codex_runtime_stderr_diagnostic_preserves_runtime_identity() {

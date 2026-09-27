@@ -23,8 +23,8 @@ pub use antigravity::{
     DEFAULT_ANTIGRAVITY_MAX_FRAME_BYTES,
 };
 pub use claude::{
-    ClaudeReasoningEffort, ClaudeRuntimeError, ClaudeRuntimeEvent, ClaudeRuntimeLaunchConfig,
-    ClaudeStreamController, DEFAULT_CLAUDE_MAX_FRAME_BYTES,
+    ClaudeArtifactSource, ClaudeReasoningEffort, ClaudeRuntimeError, ClaudeRuntimeEvent,
+    ClaudeRuntimeLaunchConfig, ClaudeStreamController, DEFAULT_CLAUDE_MAX_FRAME_BYTES,
 };
 pub use codex::{
     CodexAppServerController, CodexApprovalPolicy, CodexReasoningEffort, CodexRuntimeError,
@@ -974,8 +974,9 @@ mod tests {
     }
 }
 pub use acp::{
-    AcpAuthentication, AcpConfigOptionUpdate, AcpController, AcpExtensionRequestHandler,
-    AcpLaunchConfig, AcpPermissionDecision, AcpPermissionRequest, AcpPermissionResolver,
-    AcpRuntimeError, AcpRuntimeEvent, AcpSessionAttachment, AcpSessionConfig, AcpSessionOrigin,
-    AcpTurnStatus, AcpWorkspacePermissionPolicy, ACP_PROTOCOL_VERSION,
+    AcpArtifactSource, AcpAuthentication, AcpConfigOptionUpdate, AcpController,
+    AcpExtensionRequestHandler, AcpLaunchConfig, AcpPermissionDecision, AcpPermissionRequest,
+    AcpPermissionResolver, AcpRuntimeError, AcpRuntimeEvent, AcpSessionAttachment,
+    AcpSessionConfig, AcpSessionOrigin, AcpTurnStatus, AcpWorkspacePermissionPolicy,
+    ACP_PROTOCOL_VERSION,
 };

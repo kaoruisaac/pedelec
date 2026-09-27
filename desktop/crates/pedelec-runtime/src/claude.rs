@@ -5,7 +5,10 @@ use crate::persistent_process::{
     ProcessExitKind, ProcessGeneration,
 };
 use crate::protocol::{ProtocolTrafficLogger, ProtocolTrafficRecord};
+use base64::Engine;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
@@ -177,6 +180,14 @@ pub enum ClaudeRuntimeEvent {
         local_turn_id: String,
         text: String,
     },
+    ProviderArtifact {
+        local_turn_id: String,
+        identity: String,
+        tool_call_id: Option<String>,
+        source: ClaudeArtifactSource,
+        mime_type: String,
+        payload: Result<Vec<u8>, String>,
+    },
     UsageUpdated {
         local_turn_id: Option<String>,
         usage: Value,
@@ -200,6 +211,12 @@ pub enum ClaudeRuntimeEvent {
         pid: u32,
         reason: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeArtifactSource {
+    ToolResult,
+    ProviderArtifact,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +262,7 @@ enum ActiveOperationKind {
 struct ActiveOperation {
     kind: ActiveOperationKind,
     local_turn_id: Option<String>,
+    seen_artifacts: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -380,6 +398,7 @@ impl ClaudeStreamController {
             state.active = Some(ActiveOperation {
                 kind,
                 local_turn_id: local_turn_id.clone(),
+                seen_artifacts: HashSet::new(),
             });
         }
 
@@ -511,6 +530,268 @@ fn extract_assistant_text(message: &Value) -> Option<String> {
     } else {
         Some(parts.concat())
     }
+}
+
+#[derive(Debug)]
+struct ClaudeImageCandidate {
+    identity: String,
+    tool_call_id: Option<String>,
+    source: ClaudeArtifactSource,
+    mime_type: String,
+    payload: Result<Vec<u8>, String>,
+}
+
+fn collect_frame_images(
+    frame_type: &str,
+    object: &Map<String, Value>,
+) -> Vec<ClaudeImageCandidate> {
+    let mut candidates = Vec::new();
+    match frame_type {
+        "assistant" => {
+            if let Some(message) = object.get("message") {
+                collect_image_blocks(
+                    message,
+                    true,
+                    ClaudeArtifactSource::ProviderArtifact,
+                    None,
+                    Vec::new(),
+                    &mut candidates,
+                );
+            }
+        }
+        "user" => {
+            // Claude CLI uses a user envelope for tool results. Only descend
+            // into explicitly typed tool_result blocks; top-level user image
+            // blocks are inputs and must not be imported.
+            if let Some(message) = object.get("message") {
+                collect_image_blocks(
+                    message,
+                    false,
+                    ClaudeArtifactSource::ToolResult,
+                    None,
+                    Vec::new(),
+                    &mut candidates,
+                );
+            }
+        }
+        "stream_event" => {
+            if let Some(event) = object.get("event") {
+                collect_image_blocks(
+                    event,
+                    true,
+                    ClaudeArtifactSource::ProviderArtifact,
+                    None,
+                    Vec::new(),
+                    &mut candidates,
+                );
+            }
+        }
+        "result" => {
+            for key in ["message", "content", "result"] {
+                if let Some(content) = object.get(key) {
+                    collect_image_blocks(
+                        content,
+                        true,
+                        ClaudeArtifactSource::ProviderArtifact,
+                        None,
+                        Vec::new(),
+                        &mut candidates,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+    candidates
+}
+
+fn collect_image_blocks(
+    value: &Value,
+    allow_direct_images: bool,
+    source: ClaudeArtifactSource,
+    tool_call_id: Option<String>,
+    position: Vec<usize>,
+    output: &mut Vec<ClaudeImageCandidate>,
+) {
+    match value {
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                let mut item_position = position.clone();
+                item_position.push(index);
+                collect_image_blocks(
+                    item,
+                    allow_direct_images,
+                    source,
+                    tool_call_id.clone(),
+                    item_position,
+                    output,
+                );
+            }
+        }
+        Value::Object(object) => match object.get("type").and_then(Value::as_str) {
+            Some("image") => {
+                if allow_direct_images {
+                    output.push(parse_claude_image_block(
+                        object,
+                        source,
+                        tool_call_id,
+                        &position,
+                    ));
+                }
+            }
+            Some("tool_result") => {
+                let id = ["tool_use_id", "toolUseId", "tool_call_id", "toolCallId"]
+                    .iter()
+                    .find_map(|field| object.get(*field).and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or(tool_call_id);
+                if let Some(content) = object.get("content") {
+                    collect_image_blocks(
+                        content,
+                        true,
+                        ClaudeArtifactSource::ToolResult,
+                        id,
+                        Vec::new(),
+                        output,
+                    );
+                }
+            }
+            _ => {
+                for field in ["message", "content", "result", "event", "content_block"] {
+                    if let Some(child) = object.get(field) {
+                        collect_image_blocks(
+                            child,
+                            allow_direct_images,
+                            source,
+                            tool_call_id.clone(),
+                            position.clone(),
+                            output,
+                        );
+                    }
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
+fn parse_claude_image_block(
+    block: &Map<String, Value>,
+    source_kind: ClaudeArtifactSource,
+    tool_call_id: Option<String>,
+    position: &[usize],
+) -> ClaudeImageCandidate {
+    let block_id = block
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let source = block.get("source").and_then(Value::as_object);
+    let mime_type = source
+        .and_then(|source| source.get("media_type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let encoded = source
+        .and_then(|source| source.get("data"))
+        .and_then(Value::as_str);
+
+    let payload = match source {
+        None => Err("Claude image block is missing source metadata".to_string()),
+        Some(source) if source.get("type").and_then(Value::as_str) != Some("base64") => {
+            Err("Claude image source is not base64 encoded".to_string())
+        }
+        Some(_) if mime_type.is_empty() || !mime_type.starts_with("image/") => {
+            Err("Claude image media_type is missing or invalid".to_string())
+        }
+        Some(_) if encoded.is_none() => Err("Claude image source is missing data".to_string()),
+        Some(_) => {
+            let encoded = encoded.unwrap_or_default();
+            let max_encoded_bytes = ((pedelec_core::MAX_ASSET_UPLOAD_BYTES + 2) / 3) * 4;
+            if encoded.len() as u64 > max_encoded_bytes {
+                Err("Claude image exceeds the 100 MiB limit".to_string())
+            } else {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| "Claude image data is malformed base64".to_string())
+            }
+        }
+    };
+
+    let position = position
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(".");
+    let identity = if let Some(block_id) = block_id {
+        match tool_call_id.as_deref() {
+            Some(tool_call_id) => format!("tool:{tool_call_id}:block:{block_id}"),
+            None => format!("block:{block_id}"),
+        }
+    } else if let Some(tool_call_id) = tool_call_id.as_deref() {
+        format!("tool:{tool_call_id}:position:{position}")
+    } else {
+        let mut fingerprint = Sha256::new();
+        fingerprint.update(mime_type.as_bytes());
+        fingerprint.update([0]);
+        fingerprint.update(position.as_bytes());
+        fingerprint.update([0]);
+        match &payload {
+            Ok(bytes) => fingerprint.update(bytes),
+            Err(_) => fingerprint.update(encoded.unwrap_or_default().as_bytes()),
+        }
+        let fingerprint = format!("{:x}", fingerprint.finalize());
+        format!("content:{position}:{}:{fingerprint}", mime_type)
+    };
+
+    ClaudeImageCandidate {
+        identity,
+        tool_call_id,
+        source: source_kind,
+        mime_type,
+        payload,
+    }
+}
+
+fn emit_claude_image_candidates(
+    context: &StreamLoopContext,
+    candidates: Vec<ClaudeImageCandidate>,
+) -> Result<(), String> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let mut state = context
+        .state
+        .lock()
+        .map_err(|_| "Claude controller state mutex poisoned".to_string())?;
+    let active = state
+        .active
+        .as_mut()
+        .ok_or_else(|| "Claude image output arrived without an active operation".to_string())?;
+    if active.kind == ActiveOperationKind::Prepare {
+        return Ok(());
+    }
+    let local_turn_id = active
+        .local_turn_id
+        .clone()
+        .ok_or_else(|| "Claude user turn is missing local turn id".to_string())?;
+    for candidate in candidates {
+        if !active.seen_artifacts.insert(candidate.identity.clone()) {
+            continue;
+        }
+        let _ = context.event_tx.send(ClaudeRuntimeEvent::ProviderArtifact {
+            local_turn_id: local_turn_id.clone(),
+            identity: candidate.identity,
+            tool_call_id: candidate.tool_call_id,
+            source: candidate.source,
+            mime_type: candidate.mime_type,
+            payload: candidate.payload,
+        });
+    }
+    Ok(())
 }
 
 fn extract_stream_text_delta(object: &Map<String, Value>) -> Option<String> {
@@ -670,6 +951,7 @@ fn handle_stdout_frame(context: &StreamLoopContext, frame: Value) -> Result<(), 
         "system" => handle_system(context, object),
         "stream_event" => handle_stream_event(context, object),
         "assistant" => handle_assistant(context, object),
+        "user" => handle_user(context, object),
         "result" => handle_result(context, object),
         _ => Ok(()),
     }
@@ -729,6 +1011,7 @@ fn handle_stream_event(
     if active.kind == ActiveOperationKind::Prepare {
         return Ok(());
     }
+    emit_claude_image_candidates(context, collect_frame_images("stream_event", object))?;
     let Some(text) = extract_stream_text_delta(object) else {
         return Ok(());
     };
@@ -758,6 +1041,7 @@ fn handle_assistant(
     if active.kind == ActiveOperationKind::Prepare {
         return Ok(());
     }
+    emit_claude_image_candidates(context, collect_frame_images("assistant", object))?;
     let Some(text) = object.get("message").and_then(extract_assistant_text) else {
         return Ok(());
     };
@@ -771,7 +1055,25 @@ fn handle_assistant(
     Ok(())
 }
 
+fn handle_user(context: &StreamLoopContext, object: &Map<String, Value>) -> Result<(), String> {
+    let active = {
+        let state = context
+            .state
+            .lock()
+            .map_err(|_| "Claude controller state mutex poisoned".to_string())?;
+        state
+            .active
+            .clone()
+            .ok_or_else(|| "Claude user frame arrived without an active operation".to_string())?
+    };
+    if active.kind == ActiveOperationKind::Prepare {
+        return Ok(());
+    }
+    emit_claude_image_candidates(context, collect_frame_images("user", object))
+}
+
 fn handle_result(context: &StreamLoopContext, object: &Map<String, Value>) -> Result<(), String> {
+    emit_claude_image_candidates(context, collect_frame_images("result", object))?;
     let result_session_id = extract_session_id(object);
     let success = result_is_success(object);
     let status = object
@@ -1113,6 +1415,122 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn claude_image_parser_only_accepts_tool_results_and_provider_output() {
+        let user = json!({
+            "type":"user",
+            "message":{"content":[{
+                "type":"image",
+                "source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}
+            }]}
+        });
+        assert!(collect_frame_images("user", user.as_object().unwrap()).is_empty());
+
+        let tool_result = json!({
+            "type":"user",
+            "message":{"content":[{
+                "type":"tool_result",
+                "tool_use_id":"tool-1",
+                "content":[{
+                    "type":"image",
+                    "source":{"type":"base64","media_type":"image/jpeg","data":"aGVsbG8="}
+                }]
+            }]}
+        });
+        let images = collect_frame_images("user", tool_result.as_object().unwrap());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].tool_call_id.as_deref(), Some("tool-1"));
+        assert_eq!(images[0].source, ClaudeArtifactSource::ToolResult);
+        assert_eq!(images[0].payload.as_deref(), Ok(b"hello".as_slice()));
+
+        let complete = json!({
+            "type":"result",
+            "content":[{
+                "type":"image",
+                "source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}
+            }]
+        });
+        let images = collect_frame_images("result", complete.as_object().unwrap());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].source, ClaudeArtifactSource::ProviderArtifact);
+    }
+
+    #[test]
+    fn claude_image_parser_retains_invalid_payload_as_an_operation_failure_event() {
+        let malformed = json!({
+            "type":"assistant",
+            "message":{"content":[{
+                "type":"image",
+                "source":{"type":"base64","media_type":"image/png","data":"%%%"}
+            }]}
+        });
+        let images = collect_frame_images("assistant", malformed.as_object().unwrap());
+        assert_eq!(images.len(), 1);
+        assert!(images[0].payload.is_err());
+    }
+
+    #[test]
+    fn stream_json_tool_images_are_emitted_once_per_turn_and_bad_data_is_reported() {
+        let fake = FakeClaude::new();
+        let controller =
+            ClaudeStreamController::spawn("claude-artifact", fake.launch(None)).unwrap();
+
+        for (turn_id, prompt, expected_count) in [
+            ("image-tool", "ARTIFACT_TOOL", 1),
+            ("image-mixed", "ARTIFACT_MIXED", 1),
+            ("image-duplicate", "ARTIFACT_DUP", 1),
+            ("image-input", "ARTIFACT_USER_INPUT", 0),
+            ("image-multiple", "ARTIFACT_MULTI", 2),
+            ("image-bad", "ARTIFACT_BAD", 1),
+            ("image-next-turn", "ARTIFACT_DUP", 1),
+        ] {
+            controller.start_turn(turn_id, prompt).unwrap();
+            let events = recv_turn_events(&controller, turn_id);
+            let artifacts = events
+                .iter()
+                .filter_map(|event| match event {
+                    ClaudeRuntimeEvent::ProviderArtifact {
+                        tool_call_id,
+                        source,
+                        mime_type,
+                        payload,
+                        ..
+                    } => Some((
+                        *source,
+                        tool_call_id.as_deref(),
+                        mime_type.as_str(),
+                        payload,
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(artifacts.len(), expected_count, "{prompt}");
+            if prompt == "ARTIFACT_TOOL" {
+                assert_eq!(artifacts[0].0, ClaudeArtifactSource::ToolResult);
+                assert_eq!(artifacts[0].1, Some("tool-9"));
+                assert!(artifacts[0].3.as_ref().unwrap().starts_with(b"\x89PNG"));
+            }
+            if prompt == "ARTIFACT_MIXED" {
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    ClaudeRuntimeEvent::AssistantMessage { text, .. } if text == "with image"
+                )));
+                assert_eq!(artifacts[0].0, ClaudeArtifactSource::ProviderArtifact);
+                assert_eq!(artifacts[0].2, "image/jpeg");
+            }
+            if prompt == "ARTIFACT_BAD" {
+                assert!(artifacts[0].3.is_err());
+            }
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ClaudeRuntimeEvent::TurnCompleted { local_turn_id: Some(id), success: true, .. }
+                    if id == turn_id
+            )));
+        }
+
+        controller.shutdown_runtime().unwrap();
     }
 
     #[test]
@@ -1730,6 +2148,31 @@ mod tests {
                 Err(RecvTimeoutError::Disconnected) => {
                     panic!("Claude event channel disconnected during turn; stderr={stderr}")
                 }
+            }
+        }
+    }
+
+    fn recv_turn_events(
+        controller: &ClaudeStreamController,
+        local_turn_id: &str,
+    ) -> Vec<ClaudeRuntimeEvent> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut events = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = controller
+                .recv_event_timeout(remaining)
+                .unwrap_or_else(|error| panic!("timed out waiting for {local_turn_id}: {error}"));
+            let completed = matches!(
+                &event,
+                ClaudeRuntimeEvent::TurnCompleted {
+                    local_turn_id: Some(id),
+                    ..
+                } if id == local_turn_id
+            );
+            events.push(event);
+            if completed {
+                return events;
             }
         }
     }

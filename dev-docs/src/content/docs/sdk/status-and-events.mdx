@@ -175,6 +175,20 @@ Core events can include a per-session sequence number. The client ignores an eve
 
 When a subscription is recreated, the SDK receives an authoritative lifecycle snapshot before live events resume. A resumed or recovered handle uses that snapshot to adopt the Core status and active operation. If Core reports a pending frontend tool, register its handler after `resumeSession()`; the SDK keeps the recovered request queued and submits it once a matching handler is available. Same-handle `session.resume()` also reconciles its post-reactivation snapshot before the promise resolves, so `getStatus()` is `idle` at the await boundary.
 
+## Provider artifact events
+
+`session.onArtifact((artifact, ctx) => ...)` receives metadata for a provider-generated file after Core has materialized it in the Workspace asset area. It is a Core-originated event scoped to the active user operation; its context has `type: "provider_artifact"`, `source: "core"`, and `turnKind: "user"`. Registering a handler does not replay artifacts from completed turns.
+
+```ts
+session.onArtifact((artifact, ctx) => {
+  console.log(ctx.turnId, artifact.path, artifact.kind);
+});
+```
+
+Artifacts can arrive while the session status is still `running`. The callback means the file is ready to read; it does not mean the turn is complete. `sendText()` resolves only after the matching `operation_completed` event, and by then all artifacts from that turn are already materialized. Use `listAssets()` to discover historical files instead of expecting `onArtifact()` to replay them.
+
+Missed live artifact events during reconnect use the normal event sequence and recovery path. Sequence deduplication prevents an already delivered artifact event from being delivered again.
+
 ## UI mapping
 
 A simple mapping:

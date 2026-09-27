@@ -36,6 +36,20 @@ for (const asset of assets) {
 
 `listAssets()` recursively returns regular files from every level of `assets/` as a flat array, sorted by filesystem modification time newest first and then by `name`. A nested file retains its basename in `name` and uses its complete public path in `path`, such as `/results/report.json`. Directory entries and symlinks are excluded; only `.pedelec-*` entries are excluded from every level, while other dotfiles are included. It has no pagination and can be called while the Agent runs. Use `readAsset()` with any returned path.
 
+### Receive provider-generated assets
+
+When a supported provider produces an image or file, Pedelec imports it into `.pedelec-runtime/assets/provider-artifacts/...` before calling `onArtifact()`. The callback carries metadata only; binary data is not embedded in the event. Its `artifact.path` is already available to `readAsset()` and also appears in `listAssets()`:
+
+```ts
+const offArtifact = session.onArtifact(async (artifact) => {
+  if (artifact.kind !== "image") return;
+  const file = await session.readAsset(artifact.path, "file");
+  renderImage(file);
+});
+```
+
+Provider artifacts share the existing 100 MiB per-file asset limit. Do not depend on provider-private filesystem paths; use the public `artifact.path`. Availability depends on whether the selected provider emits a supported generated artifact, and not every provider or model can produce every kind.
+
 ### Read an asset
 
 ```ts

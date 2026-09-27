@@ -175,6 +175,20 @@ Core event 可包含 per-session sequence number。Client 會忽略 sequence 不
 
 Subscription 重建時，SDK 會先收到 authoritative lifecycle snapshot，再接收 live event。Resume 或 recovery handle 會依 snapshot 採用 Core status 與 active operation；若 Core 回報 pending frontend tool，請在 `resumeSession()` 後註冊 handler，SDK 會先保留 recovered request，等相符 handler 可用後才 submit。同一個 handle 的 `session.resume()` 也會在 promise resolve 前 reconciliation reactivation 後的 snapshot，因此 await 後 `getStatus()` 一定是 `idle`。
 
+## Provider artifact events
+
+`session.onArtifact((artifact, ctx) => ...)` 會在 Core 將 provider 產生的檔案寫入 Workspace assets 後，回傳檔案 metadata。這是綁定目前 user operation 的 Core-originated event；context 包含 `type: "provider_artifact"`、`source: "core"` 與 `turnKind: "user"`。註冊 handler 不會重播已完成 turn 的 artifacts。
+
+```ts
+session.onArtifact((artifact, ctx) => {
+  console.log(ctx.turnId, artifact.path, artifact.kind);
+});
+```
+
+Artifact event 到達時 session status 仍可能是 `running`。Callback 表示檔案已可讀取，不表示 turn 已完成。`sendText()` 只會在收到相符的 `operation_completed` event 後 resolve；resolve 時該 turn 的 artifacts 都已完成匯入。要探索歷史檔案請使用 `listAssets()`，不要預期 `onArtifact()` 會重播舊 event。
+
+Reconnect 期間漏掉的 live artifact event 會沿用一般 event sequence 與 recovery 機制。Sequence deduplication 會避免重複派送已收到的 artifact event。
+
 ## UI mapping
 
 ```ts

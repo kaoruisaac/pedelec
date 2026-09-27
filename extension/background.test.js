@@ -1236,6 +1236,55 @@ test("maps normalized usage events without changing the token total", () => {
   });
 });
 
+test("routes provider artifacts as metadata to the matching session and deduplicates their sequence", async () => {
+  const chrome = createChrome();
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdkA = connectExternal(chrome);
+  const sdkB = connectExternal(chrome);
+  await createSdkSession(background, sdkA, native, "thread_artifact_a", false, "channel_a");
+  await createSdkSession(background, sdkB, native, "thread_artifact_b", false, "channel_b");
+
+  const artifact = {
+    id: "artifact-1",
+    provider: "codex",
+    path: "/provider-artifacts/codex/thread_artifact_a/image.png",
+    name: "image.png",
+    mimeType: "image/png",
+    sizeBytes: 42,
+    kind: "image",
+    source: "image_generation",
+  };
+  const event = {
+    threadId: "thread_artifact_a",
+    operationId: "operation-a",
+    seq: 1,
+    type: "provider_artifact",
+    artifact,
+  };
+  const mapped = background.sdkEventFromThreadEvent(event);
+  assert.deepEqual(mapped, {
+    sessionId: "thread_artifact_a",
+    operationId: "operation-a",
+    seq: 1,
+    type: "provider_artifact",
+    artifact,
+  });
+  assert.equal(mapped.artifact, artifact);
+
+  background.handleNativeMessage({ type: "thread_event", event });
+  const delivered = sdkA.sent.filter((message) => message.type === "provider_artifact");
+  assert.equal(delivered.length, 1);
+  assert.deepEqual(delivered[0], { ...mapped, channelId: "channel_a" });
+  assert.equal(sdkB.sent.some((message) => message.type === "provider_artifact"), false);
+  assert.equal(sdkA.sent.some((message) => message.type === "chat_message"), false);
+
+  background.handleNativeMessage({ type: "thread_event", event });
+  assert.equal(sdkA.sent.filter((message) => message.type === "provider_artifact").length, 1);
+});
+
 test("failed per-thread recovery retries on the connected Native Host and preserves caller origin", async () => {
   const chrome = createChrome();
   const native = new MockPort();

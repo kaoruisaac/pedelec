@@ -4,7 +4,10 @@ use pedelec_ipc::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+
+const MAX_PROVIDER_ARTIFACT_HOOK_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct ToolCliResponse {
@@ -16,11 +19,152 @@ pub struct ToolCliResponse {
 }
 
 pub fn run() {
-    let response = run_tool_cli(std::env::args().collect());
+    let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).map(String::as_str) == Some("provider-artifact-hook") {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let result = execute_provider_artifact_hook_cli(
+            &args,
+            std::env::var("PEDELEC_PROVIDER").ok().as_deref(),
+            runtime_file_path_from_env().as_deref(),
+            stdin.lock(),
+            stdout.lock(),
+            |request, runtime_file_path| match runtime_file_path {
+                Some(path) => send_core_ipc_request_with_runtime_path(request, path),
+                None => Err(PedelecError::new(
+                    error_codes::CORE_RUNTIME_UNAVAILABLE,
+                    "provider artifact hook is missing PEDELEC_CORE_IPC_RUNTIME_FILE",
+                )),
+            },
+        );
+        if let Err(error) = result {
+            eprintln!(
+                "pedelec-cli provider artifact hook failed: {}",
+                error.message
+            );
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let response = run_tool_cli(args);
     match serde_json::to_string(&response) {
         Ok(payload) => println!("{payload}"),
         Err(err) => eprintln!("cannot serialize pedelec-cli response: {err}"),
     }
+}
+
+fn execute_provider_artifact_hook_cli<R, W, F>(
+    args: &[String],
+    provider_env: Option<&str>,
+    runtime_file_path: Option<&Path>,
+    mut stdin: R,
+    mut stdout: W,
+    mut send_request: F,
+) -> Result<(), PedelecError>
+where
+    R: Read,
+    W: Write,
+    F: FnMut(&CoreIpcRequest, Option<&Path>) -> Result<CoreIpcResponse, PedelecError>,
+{
+    let (provider, stage) = parse_provider_artifact_hook_args(args)?;
+    if provider != "antigravity" || provider_env != Some("antigravity") {
+        return Err(PedelecError::new(
+            error_codes::IPC_UNAUTHORIZED,
+            "provider artifact hook requires the Antigravity runtime environment",
+        ));
+    }
+    let runtime_file_path = runtime_file_path.ok_or_else(|| {
+        PedelecError::new(
+            error_codes::CORE_RUNTIME_UNAVAILABLE,
+            "provider artifact hook is missing PEDELEC_CORE_IPC_RUNTIME_FILE",
+        )
+    })?;
+    let mut bytes = Vec::new();
+    stdin
+        .by_ref()
+        .take((MAX_PROVIDER_ARTIFACT_HOOK_PAYLOAD_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            PedelecError::with_details(
+                error_codes::INVALID_INPUT,
+                "provider artifact hook could not read stdin",
+                serde_json::json!({"reason":error.to_string()}),
+            )
+        })?;
+    if bytes.len() > MAX_PROVIDER_ARTIFACT_HOOK_PAYLOAD_BYTES {
+        return Err(PedelecError::new(
+            error_codes::MESSAGE_TOO_LARGE,
+            "provider artifact hook input exceeds the 1 MiB limit",
+        ));
+    }
+    let hook_payload = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+        PedelecError::with_details(
+            error_codes::INVALID_INPUT,
+            "provider artifact hook stdin is not valid JSON",
+            serde_json::json!({"reason":error.to_string()}),
+        )
+    })?;
+    if !hook_payload.is_object() {
+        return Err(PedelecError::new(
+            error_codes::INVALID_INPUT,
+            "provider artifact hook stdin must contain a JSON object",
+        ));
+    }
+    let request = CoreIpcRequest {
+        request_id: next_cli_request_id(),
+        r#type: "provider_artifact_hook".to_string(),
+        caller_origin: None,
+        caller_sdk_version: None,
+        payload: Some(serde_json::json!({
+            "provider":provider,
+            "stage":stage,
+            "hookPayload":hook_payload,
+        })),
+    };
+    let response = send_request(&request, Some(runtime_file_path))?;
+    if !response.ok {
+        return Err(response.error.unwrap_or_else(|| {
+            PedelecError::new(error_codes::IPC_UNAVAILABLE, "Core IPC hook request failed")
+        }));
+    }
+    // PreToolUse must allow the provider tool only after the Core snapshot
+    // succeeds. PostToolUse has no decision field.
+    let response_body = if stage == "before" {
+        r#"{"decision":"allow"}"#
+    } else {
+        "{}"
+    };
+    writeln!(stdout, "{response_body}").map_err(|error| {
+        PedelecError::with_details(
+            error_codes::IPC_UNAVAILABLE,
+            "provider artifact hook could not write its response",
+            serde_json::json!({"reason":error.to_string()}),
+        )
+    })
+}
+
+fn parse_provider_artifact_hook_args(
+    args: &[String],
+) -> Result<(&'static str, &'static str), PedelecError> {
+    if args.len() != 4
+        || args.get(1).map(String::as_str) != Some("provider-artifact-hook")
+        || args.get(2).map(String::as_str) != Some("antigravity")
+        || !matches!(args.get(3).map(String::as_str), Some("before" | "after"))
+    {
+        return Err(PedelecError::new(
+            error_codes::TOOL_ARGS_INVALID,
+            "usage: pedelec-cli provider-artifact-hook antigravity before|after",
+        ));
+    }
+    Ok((
+        "antigravity",
+        if args[3] == "before" {
+            "before"
+        } else {
+            "after"
+        },
+    ))
 }
 
 fn run_tool_cli(args: Vec<String>) -> ToolCliResponse {
@@ -202,6 +346,7 @@ fn next_cli_request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     fn tool_call_request() -> CoreIpcRequest {
         CoreIpcRequest {
@@ -232,6 +377,159 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.error.unwrap().code, error_codes::TOOL_ARGS_INVALID);
+    }
+
+    fn provider_artifact_hook_args(stage: &str) -> Vec<String> {
+        vec![
+            "pedelec-cli".into(),
+            "provider-artifact-hook".into(),
+            "antigravity".into(),
+            stage.into(),
+        ]
+    }
+
+    fn successful_hook_response(request: &CoreIpcRequest) -> CoreIpcResponse {
+        CoreIpcResponse {
+            request_id: request.request_id.clone(),
+            ok: true,
+            result: Some(serde_json::json!({})),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn provider_artifact_hook_before_returns_allow_after_core_success() {
+        let args = provider_artifact_hook_args("before");
+        let runtime_path = PathBuf::from("runtime.json");
+        let mut output = Vec::new();
+        let mut sent = None;
+        execute_provider_artifact_hook_cli(
+            &args,
+            Some("antigravity"),
+            Some(&runtime_path),
+            Cursor::new(br#"{"conversationId":"conv-1","artifactDirectoryPath":"C:/artifacts","toolCall":{"name":"generate_image","args":{}},"stepIdx":4}"#),
+            &mut output,
+            |request, path| {
+                assert_eq!(path, Some(runtime_path.as_path()));
+                sent = Some(request.clone());
+                Ok(successful_hook_response(request))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(output, b"{\"decision\":\"allow\"}\n");
+        let request = sent.unwrap();
+        assert_eq!(request.r#type, "provider_artifact_hook");
+        assert_eq!(request.caller_origin, None);
+        assert_eq!(request.payload.as_ref().unwrap()["provider"], "antigravity");
+        assert_eq!(request.payload.as_ref().unwrap()["stage"], "before");
+        assert_eq!(
+            request.payload.as_ref().unwrap()["hookPayload"]["conversationId"],
+            "conv-1"
+        );
+    }
+
+    #[test]
+    fn provider_artifact_hook_after_returns_empty_object() {
+        let args = provider_artifact_hook_args("after");
+        let runtime_path = PathBuf::from("runtime.json");
+        let mut output = Vec::new();
+        execute_provider_artifact_hook_cli(
+            &args,
+            Some("antigravity"),
+            Some(&runtime_path),
+            Cursor::new(br#"{}"#),
+            &mut output,
+            |request, _| Ok(successful_hook_response(request)),
+        )
+        .unwrap();
+
+        assert_eq!(output, b"{}\n");
+    }
+
+    #[test]
+    fn provider_artifact_hook_before_failure_does_not_emit_allow() {
+        let args = provider_artifact_hook_args("before");
+        let runtime_path = PathBuf::from("runtime.json");
+        let mut output = Vec::new();
+        let error = execute_provider_artifact_hook_cli(
+            &args,
+            Some("antigravity"),
+            Some(&runtime_path),
+            Cursor::new(br#"{}"#),
+            &mut output,
+            |_, _| {
+                Err(PedelecError::new(
+                    error_codes::IPC_UNAVAILABLE,
+                    "Core IPC connection closed",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::IPC_UNAVAILABLE);
+        assert!(!String::from_utf8(output)
+            .unwrap()
+            .contains("\"decision\":\"allow\""));
+
+        let mut output = Vec::new();
+        let error = execute_provider_artifact_hook_cli(
+            &args,
+            Some("antigravity"),
+            Some(&runtime_path),
+            Cursor::new(br#"{}"#),
+            &mut output,
+            |request, _| {
+                Ok(CoreIpcResponse {
+                    request_id: request.request_id.clone(),
+                    ok: false,
+                    result: None,
+                    error: Some(PedelecError::new(
+                        error_codes::PROVIDER_ARTIFACT_INVALID,
+                        "before snapshot failed",
+                    )),
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_ARTIFACT_INVALID);
+        assert!(!String::from_utf8(output)
+            .unwrap()
+            .contains("\"decision\":\"allow\""));
+    }
+
+    #[test]
+    fn provider_artifact_hook_rejects_invalid_environment_and_json() {
+        let args = provider_artifact_hook_args("after");
+        let runtime_path = PathBuf::from("runtime.json");
+        let mut output = Vec::new();
+        let error = execute_provider_artifact_hook_cli(
+            &args,
+            Some("claude"),
+            Some(&runtime_path),
+            Cursor::new(br#"{}"#),
+            &mut output,
+            |_, _| panic!("invalid provider must not reach Core IPC"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::IPC_UNAUTHORIZED);
+        assert!(!String::from_utf8(output)
+            .unwrap()
+            .contains("\"decision\":\"allow\""));
+
+        let mut output = Vec::new();
+        let error = execute_provider_artifact_hook_cli(
+            &args,
+            Some("antigravity"),
+            Some(&runtime_path),
+            Cursor::new(b"not-json"),
+            &mut output,
+            |_, _| panic!("invalid JSON must not reach Core IPC"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::INVALID_INPUT);
+        assert!(!String::from_utf8(output)
+            .unwrap()
+            .contains("\"decision\":\"allow\""));
     }
 
     #[test]

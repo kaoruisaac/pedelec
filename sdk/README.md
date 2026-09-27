@@ -233,6 +233,20 @@ const result = await session.readAsset("/model.glb", "file");
 
 Public asset paths use `/...` with `assets/` as their implicit root; nested paths such as `/results/model.glb` are supported up to 100 MiB.
 
+### Provider-generated assets
+
+When a supported provider generates an image or file, Pedelec imports it under `.pedelec-runtime/assets/provider-artifacts/` before notifying the application. `onArtifact()` receives metadata only; binary bytes and provider-private absolute paths are not included in the event. The public `artifact.path` works immediately with `readAsset()` and the same file is included by `listAssets()`.
+
+```ts
+const offArtifact = session.onArtifact(async (artifact) => {
+  if (artifact.kind !== "image") return;
+  const file = await session.readAsset(artifact.path, "file");
+  renderImage(file);
+});
+```
+
+Use `listAssets()` to discover files from earlier turns; registering an artifact handler does not replay history. Provider artifacts follow the existing per-file 100 MiB asset limit. Availability depends on the selected provider emitting a supported generated artifact, so not every provider or model can generate every artifact kind.
+
 ## Workspace
 
 Workspace is the filesystem root in which the Agent works. Pedelec stores its private runtime data under `<workspace>/.pedelec-runtime/`. There are two supported flows:

@@ -1933,6 +1933,9 @@ function createBackground(runtimeChrome, options = {}) {
     if (event.type === "assistant_message") {
       return { ...base, type: "chat_message", text: event.text || "" };
     }
+    if (event.type === "provider_artifact") {
+      return { ...base, type: "provider_artifact", artifact: event.artifact };
+    }
     if (event.type === "status_changed") {
       return { ...base, type: "status_changed", status: sdkStatusFromCoreStatus(event.status) };
     }

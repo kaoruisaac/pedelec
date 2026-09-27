@@ -1,7 +1,8 @@
 //! Loopback-only binary asset data plane.  The control plane only creates tickets.
 use pedelec_core::{
-    error_codes, workspace_assets_root, workspace_tmp_root, AssetDownloadState, AssetUploadState,
-    DenoModuleUploadState, PedelecError, SharedCoreRuntime, MAX_ASSET_UPLOAD_BYTES,
+    error_codes, finalize_asset_write, workspace_assets_root, workspace_tmp_root,
+    AssetDownloadState, AssetUploadState, DenoModuleUploadState, PedelecError, SharedCoreRuntime,
+    MAX_ASSET_UPLOAD_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -109,7 +110,7 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
     let length = headers
         .get("content-length")
         .and_then(|v| v.parse::<u64>().ok());
-    let (tmp, asset_root, relative_path, final_path, expected, public_path) = {
+    let (tmp, asset_root, relative_path, expected, public_path) = {
         let mut core = runtime.lock().unwrap();
         core.expire_asset_uploads();
         let ticket = match core.asset_upload_tickets.get_mut(upload_id) {
@@ -156,7 +157,6 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
             asset_upload_temp_path(&ticket.workspace_path, upload_id),
             workspace_assets_root(&ticket.workspace_path),
             ticket.relative_path.clone(),
-            workspace_assets_root(&ticket.workspace_path).join(&ticket.relative_path),
             ticket.expected_size_bytes,
             ticket.public_path.clone(),
         )
@@ -180,7 +180,7 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
     })();
     let ok = matches!(result, Ok(n) if n == expected);
     if ok {
-        let moved = finalize_upload(&tmp, &asset_root, &relative_path, &final_path, upload_id);
+        let moved = finalize_asset_write(&tmp, &asset_root, &relative_path, true, upload_id);
         if moved.is_ok() {
             runtime
                 .lock()
@@ -501,57 +501,6 @@ fn handle_download(
     result
 }
 
-fn finalize_upload(
-    tmp: &std::path::Path,
-    asset_root: &std::path::Path,
-    relative: &std::path::Path,
-    target: &std::path::Path,
-    upload_id: &str,
-) -> std::io::Result<()> {
-    fs::create_dir_all(asset_root)?;
-    let canonical_root = asset_root.canonicalize()?;
-    let parent_relative = relative
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new(""));
-    let mut parent = asset_root.to_path_buf();
-    for component in parent_relative.components() {
-        parent.push(component);
-        if parent.exists() {
-            let metadata = fs::symlink_metadata(&parent)?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || !parent.canonicalize()?.starts_with(&canonical_root)
-            {
-                return Err(std::io::Error::other("asset parent is unsafe"));
-            }
-        } else {
-            fs::create_dir(&parent)?;
-            if !parent.canonicalize()?.starts_with(&canonical_root) {
-                return Err(std::io::Error::other("asset parent escapes root"));
-            }
-        }
-    }
-    if let Ok(metadata) = fs::symlink_metadata(target) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(std::io::Error::other("asset target is not a regular file"));
-        }
-        let backup = target.with_file_name(format!(".pedelec-{upload_id}.backup"));
-        fs::rename(target, &backup)?;
-        match fs::rename(tmp, target) {
-            Ok(()) => {
-                let _ = fs::remove_file(backup);
-                Ok(())
-            }
-            Err(error) => {
-                let _ = fs::rename(&backup, target);
-                Err(error)
-            }
-        }
-    } else {
-        fs::rename(tmp, target)
-    }
-}
-
 fn respond(stream: &mut TcpStream, status: u16, body: Option<&str>) -> std::io::Result<()> {
     let body = body.unwrap_or("");
     let reason = match status {
@@ -586,6 +535,25 @@ fn respond_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_asset_replacement_survives_shared_finalizer() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("assets");
+        fs::create_dir_all(&root).unwrap();
+        let relative = Path::new("nested/image.png");
+        let first = root.join("first.tmp");
+        fs::write(&first, b"first").unwrap();
+        finalize_asset_write(&first, &root, relative, true, "first").unwrap();
+        let second = root.join("second.tmp");
+        fs::write(&second, b"second").unwrap();
+        finalize_asset_write(&second, &root, relative, true, "second").unwrap();
+        assert_eq!(fs::read(root.join(relative)).unwrap(), b"second");
+        let third = root.join("third.tmp");
+        fs::write(&third, b"third").unwrap();
+        assert!(finalize_asset_write(&third, &root, relative, false, "third").is_err());
+        assert_eq!(fs::read(root.join(relative)).unwrap(), b"second");
+    }
     use chrono::Utc;
     use pedelec_core::{
         workspace_assets_root, workspace_deno_modules_root, workspace_tmp_root, AssetUploadState,

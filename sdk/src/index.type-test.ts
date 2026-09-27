@@ -6,6 +6,8 @@ import {
   type DenoModuleDefinition,
   type ChatEventContext,
   type ChatDeltaEventContext,
+  type ProviderArtifact,
+  type ProviderArtifactEventContext,
   type EndedEventContext,
   type ErrorEventContext,
   type PedelecEventContext,
@@ -125,6 +127,19 @@ async function typedOnToolNameFromCreateSession() {
     void receivedAt;
     void deltaType;
     void chatDeltaCtx;
+  });
+
+  session.onArtifact((artifact, ctx) => {
+    const publicArtifact: ProviderArtifact = artifact;
+    const artifactContext: ProviderArtifactEventContext = ctx;
+    const turnKind: "user" = ctx.turnKind;
+    const origin: "core" = ctx.source;
+    const file: Promise<File> = session.readAsset(artifact.path, "file");
+    void publicArtifact;
+    void artifactContext;
+    void turnKind;
+    void origin;
+    void file;
   });
 
   session.onStatus((_status, ctx) => {

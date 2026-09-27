@@ -9,8 +9,10 @@ use crate::{
     ProviderRuntimeController, RpcDisconnectReason, RpcEnvelopeMode, RpcError, RpcEvent,
     RpcServerRequest, RuntimeControllerError, RuntimeEvent,
 };
+use base64::Engine;
 use pedelec_shared::paths::path_for_external_use;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
@@ -277,6 +279,12 @@ pub enum AcpTurnStatus {
     Interrupted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpArtifactSource {
+    ProviderArtifact,
+    ToolResult,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcpRuntimeEvent {
     SessionReady {
@@ -295,6 +303,19 @@ pub enum AcpRuntimeEvent {
         provider_session_id: String,
         local_turn_id: String,
         text: String,
+    },
+    /// Raw provider artifact ingress. This event is internal to the ACP/IPC
+    /// boundary and must never be serialized as a Core ThreadEvent.
+    ProviderArtifact {
+        pedelec_thread_id: String,
+        provider_session_id: String,
+        local_turn_id: String,
+        provider_artifact_id: Option<String>,
+        tool_call_id: Option<String>,
+        source: AcpArtifactSource,
+        suggested_filename: String,
+        mime_type: Option<String>,
+        payload: Result<Vec<u8>, String>,
     },
     UsageUpdated {
         pedelec_thread_id: String,
@@ -410,9 +431,25 @@ struct AcpPendingTurn {
     update_revision: u64,
     response_received: bool,
     complete_messages: HashSet<String>,
+    artifact_fingerprints: HashSet<String>,
+    /// ACP tool-call ids observed on this turn. Identity is session-scoped, so
+    /// correlation must search active turns instead of assuming global uniqueness.
+    tool_call_ids: HashSet<String>,
 }
 
 impl AcpPendingTurn {
+    fn start(local_turn_id: impl Into<String>) -> Self {
+        Self {
+            local_turn_id: local_turn_id.into(),
+            messages: Vec::new(),
+            update_revision: 0,
+            response_received: false,
+            complete_messages: HashSet::new(),
+            artifact_fingerprints: HashSet::new(),
+            tool_call_ids: HashSet::new(),
+        }
+    }
+
     fn append(&mut self, message_id: Option<&str>, text: &str) {
         let key = message_id.unwrap_or("__unidentified__");
         if self.complete_messages.contains(key) {
@@ -859,13 +896,7 @@ impl AcpController {
             }
             mappings.pending_turns.insert(
                 provider_session_id.to_string(),
-                AcpPendingTurn {
-                    local_turn_id: local_turn_id.to_string(),
-                    messages: Vec::new(),
-                    update_revision: 0,
-                    response_received: false,
-                    complete_messages: HashSet::new(),
-                },
+                AcpPendingTurn::start(local_turn_id),
             );
         }
         let controller = Arc::clone(self);
@@ -1286,16 +1317,30 @@ impl AcpController {
         // into the same aggregate before the quiescence wait so both forms
         // produce one final assistant event.
         if let Ok(value) = response.as_ref() {
-            if let Some((message_id, text)) = extract_complete_assistant(value) {
-                let mut mappings = self.mappings.lock().expect("ACP mappings mutex poisoned");
-                if let Some(turn) = mappings.pending_turns.get_mut(provider_session_id) {
-                    if turn.local_turn_id == local_turn_id {
+            let complete_message = extract_complete_assistant(value);
+            let complete_artifacts = collect_complete_artifact_candidates(value);
+            let has_complete_message = complete_message.is_some();
+            let mut artifact_events = Vec::new();
+            let mut mappings = self.mappings.lock().expect("ACP mappings mutex poisoned");
+            if let Some(turn) = mappings.pending_turns.get_mut(provider_session_id) {
+                if turn.local_turn_id == local_turn_id {
+                    if let Some((message_id, text)) = complete_message {
                         turn.set_complete(message_id.as_deref(), &text);
+                    }
+                    artifact_events = enqueue_unique_artifact_candidates(
+                        turn,
+                        pedelec_thread_id,
+                        provider_session_id,
+                        complete_artifacts,
+                    );
+                    if has_complete_message || !artifact_events.is_empty() {
                         turn.update_revision = turn.update_revision.wrapping_add(1);
                         mappings.turn_changed.notify_all();
                     }
                 }
             }
+            drop(mappings);
+            send_artifact_events(&self.event_tx, artifact_events);
         }
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1452,13 +1497,7 @@ fn run_event_worker(
                         transport.retire();
                     }
                 } else {
-                    let _ = events.send(AcpRuntimeEvent::Notification {
-                        method,
-                        params,
-                        pedelec_thread_id: None,
-                        provider_session_id: None,
-                        local_turn_id: None,
-                    });
+                    let _ = events.send(correlated_generic_notification(&mappings, method, params));
                 }
             }
             RuntimeEvent::Rpc(RpcEvent::ServerRequest(request)) => {
@@ -1491,6 +1530,64 @@ fn run_event_worker(
             }
         }
     }
+}
+
+fn correlated_generic_notification(
+    mappings: &Arc<Mutex<AcpMappings>>,
+    method: String,
+    params: Value,
+) -> AcpRuntimeEvent {
+    let (pedelec_thread_id, provider_session_id, local_turn_id) =
+        generic_notification_context(mappings, &params);
+    AcpRuntimeEvent::Notification {
+        method,
+        params,
+        pedelec_thread_id,
+        provider_session_id,
+        local_turn_id,
+    }
+}
+
+fn generic_notification_context(
+    mappings: &Arc<Mutex<AcpMappings>>,
+    params: &Value,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let requested_session_id = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+        .map(ToOwned::to_owned);
+    let Ok(mappings) = mappings.lock() else {
+        return (None, requested_session_id, None);
+    };
+    if let Some(session_id) = requested_session_id.as_deref() {
+        if let Some(thread_id) = mappings.provider_to_pedelec.get(session_id).cloned() {
+            let local_turn_id = mappings
+                .pending_turns
+                .get(session_id)
+                .map(|turn| turn.local_turn_id.clone());
+            return (Some(thread_id), Some(session_id.to_string()), local_turn_id);
+        }
+    }
+    let tool_call_id = params
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .filter(|tool_call_id| !tool_call_id.is_empty());
+    if let Some(tool_call_id) = tool_call_id {
+        let matched = mappings
+            .pending_turns
+            .iter()
+            .filter(|(_, turn)| turn.tool_call_ids.contains(tool_call_id))
+            .map(|(session_id, turn)| (session_id.clone(), turn.local_turn_id.clone()))
+            .collect::<Vec<_>>();
+        if matched.len() == 1 {
+            let (session_id, local_turn_id) = matched.into_iter().next().expect("len checked");
+            if let Some(thread_id) = mappings.provider_to_pedelec.get(&session_id).cloned() {
+                return (Some(thread_id), Some(session_id), Some(local_turn_id));
+            }
+        }
+    }
+    (None, requested_session_id, None)
 }
 
 fn handle_session_update(
@@ -1529,6 +1626,19 @@ fn handle_session_update(
         });
         return true;
     };
+    let artifact_source = match kind {
+        "agent_message_chunk"
+        | "assistant_message_chunk"
+        | "agent_message"
+        | "assistant_message"
+        | "agent_message_complete"
+        | "assistant_message_complete" => Some(AcpArtifactSource::ProviderArtifact),
+        "tool_call" | "tool_call_update" => Some(AcpArtifactSource::ToolResult),
+        _ => None,
+    };
+    let candidates = artifact_source
+        .map(|source| collect_update_artifact_candidates(update, source))
+        .unwrap_or_default();
     let mut mappings = mappings.lock().expect("ACP mappings mutex poisoned");
     let pedelec_id = mappings.provider_to_pedelec.get(&session_id).cloned();
     let local_turn_id = mappings
@@ -1537,17 +1647,6 @@ fn handle_session_update(
         .map(|turn| turn.local_turn_id.clone());
     match kind {
         "agent_message_chunk" | "assistant_message_chunk" => {
-            let Some(text) = extract_update_text(update) else {
-                drop(mappings);
-                let _ = events.send(AcpRuntimeEvent::Notification {
-                    method: "session/update".to_string(),
-                    params,
-                    pedelec_thread_id: pedelec_id,
-                    provider_session_id: Some(session_id.clone()),
-                    local_turn_id,
-                });
-                return false;
-            };
             let Some(pedelec_thread_id) = pedelec_id else {
                 drop(mappings);
                 let _ = events.send(AcpRuntimeEvent::Notification {
@@ -1570,12 +1669,35 @@ fn handle_session_update(
                 });
                 return false;
             };
-            turn.append(update.get("messageId").and_then(Value::as_str), &text);
-            turn.update_revision = turn.update_revision.wrapping_add(1);
+            let text = extract_update_text(update);
+            if text.is_none() && candidates.is_empty() {
+                drop(mappings);
+                let _ = events.send(AcpRuntimeEvent::Notification {
+                    method: "session/update".to_string(),
+                    params,
+                    pedelec_thread_id: Some(pedelec_thread_id),
+                    provider_session_id: Some(session_id.clone()),
+                    local_turn_id,
+                });
+                return false;
+            }
+            let artifact_events = enqueue_unique_artifact_candidates(
+                turn,
+                &pedelec_thread_id,
+                &session_id,
+                candidates,
+            );
+            if let Some(text) = text.as_deref() {
+                turn.append(update.get("messageId").and_then(Value::as_str), text);
+            }
+            if text.is_some() || !artifact_events.is_empty() {
+                turn.update_revision = turn.update_revision.wrapping_add(1);
+            }
             let local_turn_id = turn.local_turn_id.clone();
             mappings.turn_changed.notify_all();
             drop(mappings);
-            if !text.is_empty() {
+            send_artifact_events(events, artifact_events);
+            if let Some(text) = text.filter(|text| !text.is_empty()) {
                 let _ = events.send(AcpRuntimeEvent::AssistantDelta {
                     pedelec_thread_id,
                     provider_session_id: session_id.clone(),
@@ -1588,17 +1710,6 @@ fn handle_session_update(
         | "assistant_message"
         | "agent_message_complete"
         | "assistant_message_complete" => {
-            let Some(text) = extract_update_text(update) else {
-                drop(mappings);
-                let _ = events.send(AcpRuntimeEvent::Notification {
-                    method: "session/update".to_string(),
-                    params,
-                    pedelec_thread_id: pedelec_id,
-                    provider_session_id: Some(session_id.clone()),
-                    local_turn_id,
-                });
-                return false;
-            };
             let Some(pedelec_thread_id) = pedelec_id else {
                 drop(mappings);
                 let _ = events.send(AcpRuntimeEvent::Notification {
@@ -1621,11 +1732,34 @@ fn handle_session_update(
                 });
                 return false;
             };
-            let delta = turn.set_complete(update.get("messageId").and_then(Value::as_str), &text);
-            turn.update_revision = turn.update_revision.wrapping_add(1);
+            let text = extract_update_text(update);
+            if text.is_none() && candidates.is_empty() {
+                drop(mappings);
+                let _ = events.send(AcpRuntimeEvent::Notification {
+                    method: "session/update".to_string(),
+                    params,
+                    pedelec_thread_id: Some(pedelec_thread_id),
+                    provider_session_id: Some(session_id.clone()),
+                    local_turn_id,
+                });
+                return false;
+            }
+            let delta = text.as_deref().and_then(|text| {
+                turn.set_complete(update.get("messageId").and_then(Value::as_str), text)
+            });
+            let artifact_events = enqueue_unique_artifact_candidates(
+                turn,
+                &pedelec_thread_id,
+                &session_id,
+                candidates,
+            );
+            if text.is_some() || !artifact_events.is_empty() {
+                turn.update_revision = turn.update_revision.wrapping_add(1);
+            }
             let local_turn_id = turn.local_turn_id.clone();
             mappings.turn_changed.notify_all();
             drop(mappings);
+            send_artifact_events(events, artifact_events);
             if let Some(text) = delta.filter(|text| !text.is_empty()) {
                 let _ = events.send(AcpRuntimeEvent::AssistantDelta {
                     pedelec_thread_id,
@@ -1634,6 +1768,60 @@ fn handle_session_update(
                     text,
                 });
             }
+        }
+        "tool_call" | "tool_call_update" => {
+            let tool_call_id = update_tool_call_id(update)
+                .filter(|id| !id.is_empty())
+                .map(ToOwned::to_owned);
+            let Some(pedelec_thread_id) = pedelec_id else {
+                drop(mappings);
+                let _ = events.send(AcpRuntimeEvent::Notification {
+                    method: "session/update".to_string(),
+                    params,
+                    pedelec_thread_id: None,
+                    provider_session_id: Some(session_id.clone()),
+                    local_turn_id: None,
+                });
+                return false;
+            };
+            let Some(turn) = mappings.pending_turns.get_mut(&session_id) else {
+                drop(mappings);
+                let _ = events.send(AcpRuntimeEvent::Notification {
+                    method: "session/update".to_string(),
+                    params,
+                    pedelec_thread_id: Some(pedelec_thread_id),
+                    provider_session_id: Some(session_id.clone()),
+                    local_turn_id: None,
+                });
+                return false;
+            };
+            let recorded_tool_call =
+                tool_call_id.is_some_and(|tool_call_id| turn.tool_call_ids.insert(tool_call_id));
+            let artifact_events = enqueue_unique_artifact_candidates(
+                turn,
+                &pedelec_thread_id,
+                &session_id,
+                candidates,
+            );
+            if artifact_events.is_empty() {
+                if recorded_tool_call {
+                    turn.update_revision = turn.update_revision.wrapping_add(1);
+                    mappings.turn_changed.notify_all();
+                }
+                drop(mappings);
+                let _ = events.send(AcpRuntimeEvent::Notification {
+                    method: "session/update".to_string(),
+                    params,
+                    pedelec_thread_id: Some(pedelec_thread_id),
+                    provider_session_id: Some(session_id),
+                    local_turn_id,
+                });
+                return false;
+            }
+            turn.update_revision = turn.update_revision.wrapping_add(1);
+            mappings.turn_changed.notify_all();
+            drop(mappings);
+            send_artifact_events(events, artifact_events);
         }
         "usage_update" => {
             if !update.get("used").is_some_and(Value::is_number)
@@ -1713,6 +1901,313 @@ fn collect_text_content(value: &Value, output: &mut String) -> bool {
 
 fn extract_assistant_text(value: &Value) -> Option<String> {
     extract_text_content(value).or_else(|| value.get("content").and_then(extract_text_content))
+}
+
+struct AcpArtifactCandidate {
+    provider_artifact_id: Option<String>,
+    tool_call_id: Option<String>,
+    source: AcpArtifactSource,
+    suggested_filename: String,
+    mime_type: Option<String>,
+    payload: Result<Vec<u8>, String>,
+    fingerprint: String,
+    identity: String,
+}
+
+fn artifact_extension(mime_type: Option<&str>) -> &'static str {
+    match mime_type
+        .and_then(|mime| mime.split(';').next())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "audio/mpeg" => "mp3",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "video/mp4" => "mp4",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        _ => "bin",
+    }
+}
+
+fn content_identity(
+    source: AcpArtifactSource,
+    tool_call_id: Option<&str>,
+    message_id: Option<&str>,
+    block_id: Option<&str>,
+    index: usize,
+) -> String {
+    let source = match source {
+        AcpArtifactSource::ProviderArtifact => "provider_artifact",
+        AcpArtifactSource::ToolResult => "tool_result",
+    };
+    let id = tool_call_id
+        .map(|id| format!("tool:{id}"))
+        .or_else(|| message_id.map(|id| format!("message:{id}")))
+        .or_else(|| block_id.map(|id| format!("block:{id}")));
+    id.map(|id| format!("{source}:{id}:{index}"))
+        .unwrap_or_else(|| format!("{source}:content"))
+}
+
+fn collect_artifact_candidates(
+    value: &Value,
+    source: AcpArtifactSource,
+    message_id: Option<&str>,
+    tool_call_id: Option<&str>,
+) -> Vec<AcpArtifactCandidate> {
+    fn walk(
+        value: &Value,
+        source: AcpArtifactSource,
+        message_id: Option<&str>,
+        tool_call_id: Option<&str>,
+        index: &mut usize,
+        candidates: &mut Vec<AcpArtifactCandidate>,
+    ) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    walk(value, source, message_id, tool_call_id, index, candidates);
+                }
+            }
+            Value::Object(block) => {
+                let kind = block.get("type").and_then(Value::as_str);
+                let (encoded, mime_type) = match kind {
+                    Some("image") => (
+                        block.get("data").and_then(Value::as_str),
+                        block.get("mimeType").and_then(Value::as_str),
+                    ),
+                    Some("resource") => {
+                        let Some(resource) = block.get("resource").and_then(Value::as_object)
+                        else {
+                            return;
+                        };
+                        let Some(encoded) = resource.get("blob").and_then(Value::as_str) else {
+                            // Text resources are valid ACP content but are not
+                            // binary ProviderArtifacts.
+                            return;
+                        };
+                        (
+                            Some(encoded),
+                            resource.get("mimeType").and_then(Value::as_str),
+                        )
+                    }
+                    Some("resource_link") => return,
+                    Some("content") => {
+                        if let Some(content) = block.get("content") {
+                            walk(content, source, message_id, tool_call_id, index, candidates);
+                        }
+                        return;
+                    }
+                    _ => return,
+                };
+                let block_index = *index;
+                *index = index.saturating_add(1);
+                let block_id = block
+                    .get("id")
+                    .or_else(|| block.get("artifactId"))
+                    .and_then(Value::as_str);
+                let mime_type = mime_type
+                    .filter(|mime| !mime.trim().is_empty())
+                    .map(ToOwned::to_owned);
+                let mut digest = Sha256::new();
+                if let Some(mime_type) = mime_type.as_deref() {
+                    digest.update(mime_type.as_bytes());
+                    digest.update([0]);
+                }
+                let payload = match encoded {
+                    None => Err("ACP binary content is missing its base64 data".to_string()),
+                    Some(encoded)
+                        if encoded.len() as u64
+                            > ((pedelec_core::MAX_ASSET_UPLOAD_BYTES + 2) / 3) * 4 =>
+                    {
+                        digest.update(encoded.as_bytes());
+                        Err("ACP binary content exceeds the 100 MiB limit".to_string())
+                    }
+                    Some(encoded) => {
+                        match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                            Ok(bytes) if bytes.is_empty() => {
+                                digest.update(encoded.as_bytes());
+                                Err("ACP binary content is empty".to_string())
+                            }
+                            Ok(bytes)
+                                if bytes.len() as u64 > pedelec_core::MAX_ASSET_UPLOAD_BYTES =>
+                            {
+                                digest.update(encoded.as_bytes());
+                                Err("ACP binary content exceeds the 100 MiB limit".to_string())
+                            }
+                            Ok(bytes) => {
+                                digest.update(&bytes);
+                                Ok(bytes)
+                            }
+                            Err(_) => {
+                                digest.update(encoded.as_bytes());
+                                Err("ACP binary content is malformed base64".to_string())
+                            }
+                        }
+                    }
+                };
+                candidates.push(AcpArtifactCandidate {
+                    provider_artifact_id: block_id
+                        .or(message_id)
+                        .or(tool_call_id)
+                        .map(ToOwned::to_owned),
+                    tool_call_id: tool_call_id.map(ToOwned::to_owned),
+                    source,
+                    suggested_filename: format!(
+                        "artifact-{block_index}.{}",
+                        artifact_extension(mime_type.as_deref())
+                    ),
+                    mime_type,
+                    payload,
+                    fingerprint: format!("{:x}", digest.finalize()),
+                    identity: content_identity(
+                        source,
+                        tool_call_id,
+                        message_id,
+                        block_id,
+                        block_index,
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let mut candidates = Vec::new();
+    walk(
+        value,
+        source,
+        message_id,
+        tool_call_id,
+        &mut 0,
+        &mut candidates,
+    );
+    candidates
+}
+
+fn update_tool_call_id(update: &serde_json::Map<String, Value>) -> Option<&str> {
+    update
+        .get("toolCallId")
+        .or_else(|| update.get("tool_call_id"))
+        .or_else(|| {
+            update
+                .get("toolCall")
+                .and_then(|call| call.get("toolCallId"))
+        })
+        .or_else(|| update.get("toolCall").and_then(|call| call.get("id")))
+        .and_then(Value::as_str)
+}
+
+fn collect_update_artifact_candidates(
+    update: &serde_json::Map<String, Value>,
+    source: AcpArtifactSource,
+) -> Vec<AcpArtifactCandidate> {
+    let message_id = update
+        .get("messageId")
+        .or_else(|| {
+            update
+                .get("message")
+                .and_then(|value| value.get("messageId"))
+        })
+        .and_then(Value::as_str);
+    let tool_call_id = update_tool_call_id(update);
+    let content = update
+        .get("content")
+        .or_else(|| update.get("message").and_then(|value| value.get("content")))
+        .or_else(|| {
+            update
+                .get("toolCall")
+                .and_then(|value| value.get("content"))
+        })
+        .or_else(|| update.get("message"))
+        .or_else(|| update.get("toolCall"));
+    content.map_or_else(Vec::new, |content| {
+        collect_artifact_candidates(content, source, message_id, tool_call_id)
+    })
+}
+
+fn collect_complete_artifact_candidates(value: &Value) -> Vec<AcpArtifactCandidate> {
+    let mut candidates = Vec::new();
+    let message_id = value.get("messageId").and_then(Value::as_str);
+    for key in ["assistantMessage", "message", "content"] {
+        if let Some(content) = value.get(key) {
+            let nested_id = content
+                .get("messageId")
+                .and_then(Value::as_str)
+                .or(message_id);
+            let blocks = content.get("content").unwrap_or(content);
+            candidates.extend(collect_artifact_candidates(
+                blocks,
+                AcpArtifactSource::ProviderArtifact,
+                nested_id,
+                None,
+            ));
+        }
+    }
+    for key in ["toolCall", "toolCalls", "toolResults"] {
+        let Some(calls) = value.get(key) else {
+            continue;
+        };
+        let mut collect_call = |call: &Value| {
+            let tool_call_id = call
+                .get("toolCallId")
+                .or_else(|| call.get("id"))
+                .and_then(Value::as_str);
+            let content = call.get("content").unwrap_or(call);
+            candidates.extend(collect_artifact_candidates(
+                content,
+                AcpArtifactSource::ToolResult,
+                None,
+                tool_call_id,
+            ));
+        };
+        if let Some(calls) = calls.as_array() {
+            for call in calls {
+                collect_call(call);
+            }
+        } else {
+            collect_call(calls);
+        }
+    }
+    candidates
+}
+
+fn enqueue_unique_artifact_candidates(
+    turn: &mut AcpPendingTurn,
+    pedelec_thread_id: &str,
+    provider_session_id: &str,
+    candidates: Vec<AcpArtifactCandidate>,
+) -> Vec<AcpRuntimeEvent> {
+    candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let key = format!("{}:{}", candidate.identity, candidate.fingerprint);
+            turn.artifact_fingerprints
+                .insert(key)
+                .then(|| AcpRuntimeEvent::ProviderArtifact {
+                    pedelec_thread_id: pedelec_thread_id.to_string(),
+                    provider_session_id: provider_session_id.to_string(),
+                    local_turn_id: turn.local_turn_id.clone(),
+                    provider_artifact_id: candidate.provider_artifact_id,
+                    tool_call_id: candidate.tool_call_id,
+                    source: candidate.source,
+                    suggested_filename: candidate.suggested_filename,
+                    mime_type: candidate.mime_type,
+                    payload: candidate.payload,
+                })
+        })
+        .collect()
+}
+
+fn send_artifact_events(events: &mpsc::Sender<AcpRuntimeEvent>, artifacts: Vec<AcpRuntimeEvent>) {
+    for artifact in artifacts {
+        let _ = events.send(artifact);
+    }
 }
 
 fn extract_complete_assistant(value: &Value) -> Option<(Option<String>, String)> {
@@ -2900,16 +3395,11 @@ mod tests {
             .unwrap()
             .pedelec_to_provider
             .insert("thread".into(), "session".into());
-        mappings.lock().unwrap().pending_turns.insert(
-            "session".into(),
-            AcpPendingTurn {
-                local_turn_id: "local".into(),
-                messages: Vec::new(),
-                update_revision: 0,
-                response_received: false,
-                complete_messages: HashSet::new(),
-            },
-        );
+        mappings
+            .lock()
+            .unwrap()
+            .pending_turns
+            .insert("session".into(), AcpPendingTurn::start("local"));
         let (events_tx, events_rx) = mpsc::channel();
 
         handle_session_update(
@@ -2961,15 +3451,510 @@ mod tests {
         assert_eq!(turn.messages, vec![("message".into(), "你好".into())]);
     }
 
+    fn artifact_test_mappings() -> Arc<Mutex<AcpMappings>> {
+        let mappings = Arc::new(Mutex::new(AcpMappings::default()));
+        {
+            let mut mappings = mappings.lock().unwrap();
+            mappings
+                .provider_to_pedelec
+                .insert("session".into(), "thread".into());
+            mappings
+                .pedelec_to_provider
+                .insert("thread".into(), "session".into());
+            mappings
+                .pending_turns
+                .insert("session".into(), AcpPendingTurn::start("local"));
+        }
+        mappings
+    }
+
+    const TEST_PNG_BASE64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jFZ0AAAAASUVORK5CYII=";
+
+    fn test_png_bytes() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(TEST_PNG_BASE64)
+            .unwrap()
+    }
+
+    #[test]
+    fn assistant_text_and_image_content_emit_text_and_one_artifact() {
+        let mappings = artifact_test_mappings();
+        let (events_tx, events_rx) = mpsc::channel();
+        assert!(!handle_session_update(
+            &mappings,
+            &events_tx,
+            json!({
+                "sessionId": "session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "messageId": "message-image",
+                    "content": [
+                        {"type":"text","text":"image result "},
+                        {"type":"image","data":TEST_PNG_BASE64,"mimeType":"image/png"}
+                    ]
+                }
+            }),
+        ));
+
+        assert!(matches!(
+            events_rx.recv().unwrap(),
+            AcpRuntimeEvent::ProviderArtifact {
+                pedelec_thread_id,
+                provider_session_id,
+                local_turn_id,
+                provider_artifact_id: Some(provider_artifact_id),
+                source: AcpArtifactSource::ProviderArtifact,
+                mime_type: Some(mime_type),
+                payload: Ok(bytes),
+                ..
+            } if pedelec_thread_id == "thread"
+                && provider_session_id == "session"
+                && local_turn_id == "local"
+                && provider_artifact_id == "message-image"
+                && mime_type == "image/png"
+                && bytes == test_png_bytes()
+        ));
+        assert!(matches!(
+            events_rx.recv().unwrap(),
+            AcpRuntimeEvent::AssistantDelta { text, .. } if text == "image result "
+        ));
+    }
+
+    #[test]
+    fn duplicate_chunk_and_complete_image_content_emits_once() {
+        let mappings = artifact_test_mappings();
+        let (events_tx, events_rx) = mpsc::channel();
+        let image = json!({"type":"image","data":TEST_PNG_BASE64,"mimeType":"image/png"});
+        for kind in ["agent_message_chunk", "agent_message"] {
+            handle_session_update(
+                &mappings,
+                &events_tx,
+                json!({
+                    "sessionId": "session",
+                    "update": {
+                        "sessionUpdate": kind,
+                        "messageId": "same-message",
+                        "content": [image.clone()]
+                    }
+                }),
+            );
+        }
+        assert!(matches!(
+            events_rx.recv().unwrap(),
+            AcpRuntimeEvent::ProviderArtifact { .. }
+        ));
+        assert!(events_rx.try_recv().is_err());
+        assert_eq!(
+            mappings.lock().unwrap().pending_turns["session"]
+                .artifact_fingerprints
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn prompt_result_image_is_deduplicated_against_update_content() {
+        let mappings = artifact_test_mappings();
+        let (events_tx, events_rx) = mpsc::channel();
+        handle_session_update(
+            &mappings,
+            &events_tx,
+            json!({
+                "sessionId":"session",
+                "update":{
+                    "sessionUpdate":"agent_message_chunk",
+                    "messageId":"result-image",
+                    "content":[{"type":"image","data":TEST_PNG_BASE64,"mimeType":"image/png"}]
+                }
+            }),
+        );
+        assert!(matches!(
+            events_rx.recv().unwrap(),
+            AcpRuntimeEvent::ProviderArtifact { .. }
+        ));
+
+        let result_candidates = collect_complete_artifact_candidates(&json!({
+            "assistantMessage":{
+                "messageId":"result-image",
+                "content":[{"type":"image","data":TEST_PNG_BASE64,"mimeType":"image/png"}]
+            }
+        }));
+        let mut mappings = mappings.lock().unwrap();
+        let turn = mappings.pending_turns.get_mut("session").unwrap();
+        assert!(
+            enqueue_unique_artifact_candidates(turn, "thread", "session", result_candidates,)
+                .is_empty()
+        );
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn tool_call_image_and_embedded_binary_resource_are_tool_results() {
+        let mappings = artifact_test_mappings();
+        let (events_tx, events_rx) = mpsc::channel();
+        handle_session_update(
+            &mappings,
+            &events_tx,
+            json!({
+                "sessionId":"session",
+                "update":{
+                    "sessionUpdate":"tool_call_update",
+                    "toolCallId":"tool-image",
+                    "content":[
+                        {"type":"image","data":TEST_PNG_BASE64,"mimeType":"image/png"},
+                        {"type":"resource","resource":{"blob":"BAUG","mimeType":"application/pdf","uri":"file:///input/reference.pdf"}}
+                    ]
+                }
+            }),
+        );
+        let first = events_rx.recv().unwrap();
+        let second = events_rx.recv().unwrap();
+        assert!(matches!(
+            first,
+            AcpRuntimeEvent::ProviderArtifact {
+                source: AcpArtifactSource::ToolResult,
+                tool_call_id: Some(ref id),
+                payload: Ok(ref bytes),
+                ..
+            } if id == "tool-image" && bytes.as_slice() == test_png_bytes().as_slice()
+        ));
+        assert!(matches!(
+            second,
+            AcpRuntimeEvent::ProviderArtifact {
+                source: AcpArtifactSource::ToolResult,
+                mime_type: Some(ref mime),
+                payload: Ok(ref bytes),
+                ..
+            } if mime == "application/pdf" && bytes == &[4, 5, 6]
+        ));
+    }
+
+    #[test]
+    fn malformed_image_is_an_artifact_error_and_resource_links_are_not_read() {
+        let mappings = artifact_test_mappings();
+        let (events_tx, events_rx) = mpsc::channel();
+        assert!(!handle_session_update(
+            &mappings,
+            &events_tx,
+            json!({
+                "sessionId":"session",
+                "update":{
+                    "sessionUpdate":"agent_message",
+                    "messageId":"bad-image",
+                    "content":{"type":"image","data":"not base64!","mimeType":"image/png"}
+                }
+            }),
+        ));
+        assert!(matches!(
+            events_rx.recv().unwrap(),
+            AcpRuntimeEvent::ProviderArtifact { payload: Err(reason), .. }
+                if reason.contains("malformed base64")
+        ));
+
+        handle_session_update(
+            &mappings,
+            &events_tx,
+            json!({
+                "sessionId":"session",
+                "update":{
+                    "sessionUpdate":"agent_message",
+                    "content":{"type":"resource_link","uri":"file:///outside/image.png","name":"image.png"}
+                }
+            }),
+        );
+        assert!(matches!(
+            events_rx.recv().unwrap(),
+            AcpRuntimeEvent::Notification { .. }
+        ));
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn generic_notifications_carry_mapped_thread_and_turn_context() {
+        let mappings = artifact_test_mappings();
+        assert_eq!(
+            generic_notification_context(&mappings, &json!({"sessionId":"session"})),
+            (
+                Some("thread".into()),
+                Some("session".into()),
+                Some("local".into())
+            )
+        );
+        assert_eq!(
+            generic_notification_context(&mappings, &json!({"sessionId":"unknown"})),
+            (None, Some("unknown".into()), None)
+        );
+        assert_eq!(
+            generic_notification_context(&mappings, &json!({})),
+            (None, None, None)
+        );
+    }
+
+    fn record_tool_call(
+        mappings: &Arc<Mutex<AcpMappings>>,
+        session_id: &str,
+        session_update: &str,
+        tool_call_field: &str,
+        tool_call_id: &str,
+    ) {
+        let (events_tx, _events_rx) = mpsc::channel();
+        assert!(!handle_session_update(
+            mappings,
+            &events_tx,
+            json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": session_update,
+                    tool_call_field: tool_call_id
+                }
+            }),
+        ));
+    }
+
+    fn cursor_generate_image_params(tool_call_id: &str) -> Value {
+        json!({
+            "toolCallId": tool_call_id,
+            "description": "generated image",
+            "filePath": "C:/generated/icon.png"
+        })
+    }
+
+    #[test]
+    fn cursor_generate_image_without_session_id_correlates_to_the_active_tool_call() {
+        let mappings = artifact_test_mappings();
+        record_tool_call(
+            &mappings,
+            "session",
+            "tool_call",
+            "toolCallId",
+            "call-image-1",
+        );
+        record_tool_call(
+            &mappings,
+            "session",
+            "tool_call_update",
+            "tool_call_id",
+            "alias-call",
+        );
+
+        let event = correlated_generic_notification(
+            &mappings,
+            "cursor/generate_image".into(),
+            cursor_generate_image_params("call-image-1"),
+        );
+        assert!(matches!(
+            event,
+            AcpRuntimeEvent::Notification {
+                ref method,
+                ref pedelec_thread_id,
+                ref provider_session_id,
+                ref local_turn_id,
+                ref params,
+            } if method == "cursor/generate_image"
+                && pedelec_thread_id.as_deref() == Some("thread")
+                && provider_session_id.as_deref() == Some("session")
+                && local_turn_id.as_deref() == Some("local")
+                && params.get("sessionId").is_none()
+                && params["toolCallId"] == "call-image-1"
+                && params["filePath"] == "C:/generated/icon.png"
+        ));
+        assert!(matches!(
+            correlated_generic_notification(
+                &mappings,
+                "cursor/generate_image".into(),
+                cursor_generate_image_params("alias-call"),
+            ),
+            AcpRuntimeEvent::Notification {
+                pedelec_thread_id: Some(ref thread),
+                provider_session_id: Some(ref session),
+                local_turn_id: Some(ref turn),
+                ..
+            } if thread == "thread" && session == "session" && turn == "local"
+        ));
+
+        mappings.lock().unwrap().pending_turns.remove("session");
+        assert!(matches!(
+            correlated_generic_notification(
+                &mappings,
+                "cursor/generate_image".into(),
+                cursor_generate_image_params("call-image-1"),
+            ),
+            AcpRuntimeEvent::Notification {
+                pedelec_thread_id: None,
+                provider_session_id: None,
+                local_turn_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn duplicate_tool_call_ids_across_active_sessions_stay_uncorrelated() {
+        let mappings = artifact_test_mappings();
+        {
+            let mut mappings = mappings.lock().unwrap();
+            mappings
+                .provider_to_pedelec
+                .insert("session-b".into(), "thread-b".into());
+            mappings
+                .pedelec_to_provider
+                .insert("thread-b".into(), "session-b".into());
+            mappings
+                .pending_turns
+                .insert("session-b".into(), AcpPendingTurn::start("local-b"));
+        }
+        record_tool_call(&mappings, "session", "tool_call", "toolCallId", "same-call");
+        record_tool_call(
+            &mappings,
+            "session-b",
+            "tool_call_update",
+            "toolCallId",
+            "same-call",
+        );
+
+        assert!(matches!(
+            correlated_generic_notification(
+                &mappings,
+                "cursor/generate_image".into(),
+                cursor_generate_image_params("same-call"),
+            ),
+            AcpRuntimeEvent::Notification {
+                pedelec_thread_id: None,
+                provider_session_id: None,
+                local_turn_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_tool_call_id_stays_uncorrelated_and_non_fatal() {
+        let mappings = artifact_test_mappings();
+        record_tool_call(
+            &mappings,
+            "session",
+            "tool_call",
+            "toolCallId",
+            "call-image-1",
+        );
+        assert!(matches!(
+            correlated_generic_notification(
+                &mappings,
+                "cursor/generate_image".into(),
+                cursor_generate_image_params("missing-call"),
+            ),
+            AcpRuntimeEvent::Notification {
+                pedelec_thread_id: None,
+                provider_session_id: None,
+                local_turn_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn session_id_correlation_stays_authoritative_when_tool_call_ids_collide() {
+        let mappings = artifact_test_mappings();
+        {
+            let mut mappings = mappings.lock().unwrap();
+            mappings
+                .provider_to_pedelec
+                .insert("session-b".into(), "thread-b".into());
+            mappings
+                .pedelec_to_provider
+                .insert("thread-b".into(), "session-b".into());
+            mappings
+                .pending_turns
+                .insert("session-b".into(), AcpPendingTurn::start("local-b"));
+        }
+        record_tool_call(&mappings, "session", "tool_call", "toolCallId", "same-call");
+        record_tool_call(
+            &mappings,
+            "session-b",
+            "tool_call",
+            "toolCallId",
+            "same-call",
+        );
+
+        let mut params = cursor_generate_image_params("same-call");
+        params["sessionId"] = json!("session-b");
+        assert!(matches!(
+            correlated_generic_notification(&mappings, "cursor/generate_image".into(), params),
+            AcpRuntimeEvent::Notification {
+                pedelec_thread_id: Some(ref thread),
+                provider_session_id: Some(ref session),
+                local_turn_id: Some(ref turn),
+                ..
+            } if thread == "thread-b" && session == "session-b" && turn == "local-b"
+        ));
+    }
+
+    #[test]
+    fn cursor_generate_image_notification_from_the_agent_correlates_without_session_id() {
+        let fixture = FakeAcpAgent::new(false);
+        let controller = AcpController::spawn(
+            fixture.launch().with_env(
+                "FAKE_ACP_GENERATED_IMAGE",
+                fixture
+                    .directory
+                    .path()
+                    .join("generated.png")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            Arc::new(|_: &AcpPermissionRequest| AcpPermissionDecision::RejectOnce),
+        )
+        .unwrap();
+        let session_id = controller
+            .ensure_session(
+                "thread-1",
+                None,
+                &AcpSessionConfig::new(fixture.directory.path()),
+            )
+            .unwrap();
+        let _ = controller.recv_event_timeout(Duration::from_secs(2));
+        controller
+            .start_turn("thread-1", &session_id, "local-1", "cursor-generate-image")
+            .unwrap();
+
+        let mut correlated = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match controller.recv_event_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(AcpRuntimeEvent::Notification {
+                    method,
+                    pedelec_thread_id,
+                    provider_session_id,
+                    local_turn_id,
+                    params,
+                }) if method == "cursor/generate_image" => {
+                    correlated = Some((
+                        pedelec_thread_id,
+                        provider_session_id,
+                        local_turn_id,
+                        params,
+                    ));
+                }
+                Ok(AcpRuntimeEvent::TurnCompleted { .. }) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let (pedelec_thread_id, provider_session_id, local_turn_id, params) =
+            correlated.expect("cursor/generate_image should be correlated");
+        assert_eq!(pedelec_thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(provider_session_id.as_deref(), Some(session_id.as_str()));
+        assert_eq!(local_turn_id.as_deref(), Some("local-1"));
+        assert!(params.get("sessionId").is_none());
+        assert_eq!(params["toolCallId"], "call-image-1");
+        controller.shutdown().unwrap();
+    }
+
     #[test]
     fn complete_assistant_message_with_a_new_id_does_not_duplicate_anonymous_chunks() {
-        let mut turn = AcpPendingTurn {
-            local_turn_id: "local".into(),
-            messages: Vec::new(),
-            update_revision: 0,
-            response_received: false,
-            complete_messages: HashSet::new(),
-        };
+        let mut turn = AcpPendingTurn::start("local");
 
         turn.append(None, "hello ");
         assert_eq!(

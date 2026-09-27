@@ -21,7 +21,8 @@ use std::thread;
 use std::time::Duration;
 
 pub const CODEX_RUNTIME_KEY: &str = "codex";
-pub const DEFAULT_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+// A 100 MiB image expands to about 134 MiB as base64 inside one App Server frame.
+pub const DEFAULT_MAX_FRAME_BYTES: usize = 144 * 1024 * 1024;
 pub const DEFAULT_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +258,15 @@ pub enum CodexRuntimeEvent {
         provider_turn_id: Option<String>,
         text: String,
     },
+    ImageGeneration {
+        pedelec_thread_id: String,
+        provider_thread_id: String,
+        provider_turn_id: Option<String>,
+        item_id: String,
+        result: Option<String>,
+        saved_path: Option<PathBuf>,
+        mime_type: Option<String>,
+    },
     UsageUpdated {
         pedelec_thread_id: String,
         provider_thread_id: String,
@@ -347,6 +357,7 @@ struct PendingTurn {
     provider_turn_id: Option<String>,
     saw_evidence: bool,
     completed_assistant_items: HashSet<String>,
+    completed_artifact_items: HashSet<String>,
     completed_assistant_text_counts: HashMap<String, usize>,
 }
 
@@ -416,6 +427,7 @@ impl SessionMappings {
                 provider_turn_id: None,
                 saw_evidence: false,
                 completed_assistant_items: HashSet::new(),
+                completed_artifact_items: HashSet::new(),
                 completed_assistant_text_counts: HashMap::new(),
             },
         );
@@ -1474,6 +1486,31 @@ fn protocol_event(
     }
 }
 
+fn image_generation_event(
+    item: &Value,
+    pedelec_thread_id: &str,
+    pending: &mut PendingTurn,
+) -> Option<CodexRuntimeEvent> {
+    if item.get("type").and_then(Value::as_str) != Some("imageGeneration")
+        || item.get("status").and_then(Value::as_str) != Some("completed")
+    {
+        return None;
+    }
+    let item_id = non_empty_string(item.get("id")).unwrap_or_default();
+    if !pending.completed_artifact_items.insert(item_id.clone()) {
+        return None;
+    }
+    Some(CodexRuntimeEvent::ImageGeneration {
+        pedelec_thread_id: pedelec_thread_id.to_string(),
+        provider_thread_id: pending.provider_thread_id.clone(),
+        provider_turn_id: pending.provider_turn_id.clone(),
+        item_id,
+        result: non_empty_string(item.get("result")),
+        saved_path: non_empty_string(item.get("savedPath")).map(PathBuf::from),
+        mime_type: non_empty_string(item.get("mimeType")),
+    })
+}
+
 fn decode_codex_notification(
     mappings: &Arc<Mutex<SessionMappings>>,
     method: &str,
@@ -1602,7 +1639,11 @@ fn decode_codex_notification(
                     "item/completed notification item was not an object",
                 )];
             };
-            if non_empty_string(item.get("type")).as_deref() != Some("agentMessage") {
+            let item_type = non_empty_string(item.get("type"));
+            if !matches!(
+                item_type.as_deref(),
+                Some("agentMessage" | "imageGeneration")
+            ) {
                 return Vec::new();
             }
             let Some(provider_turn_id) = non_empty_string(params.get("turnId")) else {
@@ -1628,9 +1669,6 @@ fn decode_codex_notification(
             ) else {
                 return Vec::new();
             };
-            let Some(text) = non_empty_text(item.get("text")) else {
-                return Vec::new();
-            };
             let item_id = non_empty_string(item.get("id"));
             let Some(pending) = mappings.pending_turns.get_mut(&pedelec_thread_id) else {
                 return Vec::new();
@@ -1644,6 +1682,18 @@ fn decode_codex_notification(
             }
             pending.provider_turn_id = Some(provider_turn_id);
             pending.saw_evidence = true;
+            if item_type.as_deref() == Some("imageGeneration") {
+                return image_generation_event(
+                    &Value::Object(item.clone()),
+                    &pedelec_thread_id,
+                    pending,
+                )
+                .into_iter()
+                .collect();
+            }
+            let Some(text) = non_empty_text(item.get("text")) else {
+                return Vec::new();
+            };
             if item_id
                 .as_ref()
                 .is_some_and(|item_id| !pending.completed_assistant_items.insert(item_id.clone()))
@@ -1773,6 +1823,14 @@ fn decode_codex_notification(
             };
             if let Some(items) = turn.get("items").and_then(Value::as_array) {
                 for item in items {
+                    if item.get("type").and_then(Value::as_str) == Some("imageGeneration") {
+                        if let Some(event) =
+                            image_generation_event(item, &pedelec_thread_id, pending)
+                        {
+                            events.push(event);
+                        }
+                        continue;
+                    }
                     if non_empty_string(item.get("type")).as_deref() != Some("agentMessage") {
                         continue;
                     }
@@ -2424,6 +2482,101 @@ done
             }),
         )
         .is_empty());
+    }
+
+    #[test]
+    fn image_generation_items_use_inline_priority_fallback_and_item_id_deduplication() {
+        let setup = || {
+            let mappings = Arc::new(Mutex::new(SessionMappings::default()));
+            {
+                let mut state = mappings.lock().unwrap();
+                state.register("pedelec-a", "codex-a").unwrap();
+                state
+                    .register_pending_turn("pedelec-a", "codex-a", "local-a")
+                    .unwrap();
+            }
+            let _ = decode_codex_notification(
+                &mappings,
+                "turn/started",
+                &json!({
+                    "threadId":"codex-a", "turn":{"id":"turn-a", "status":"inProgress"}
+                }),
+            );
+            mappings
+        };
+        let mappings = setup();
+        let image = json!({"id":"img-a", "type":"imageGeneration", "status":"completed",
+            "result":"aW1hZ2U=", "savedPath":"C:/elsewhere/image.png"});
+        let first = decode_codex_notification(
+            &mappings,
+            "item/completed",
+            &json!({
+                "threadId":"codex-a", "turnId":"turn-a", "item":image
+            }),
+        );
+        assert!(
+            matches!(first.as_slice(), [CodexRuntimeEvent::ImageGeneration {
+            item_id, result: Some(result), saved_path: Some(_), ..
+        }] if item_id == "img-a" && result == "aW1hZ2U=")
+        );
+        let terminal = decode_codex_notification(
+            &mappings,
+            "turn/completed",
+            &json!({
+                "threadId":"codex-a", "turn":{"id":"turn-a", "status":"completed", "items":[image]}
+            }),
+        );
+        assert!(matches!(
+            terminal.as_slice(),
+            [CodexRuntimeEvent::TurnCompleted { .. }]
+        ));
+
+        let mappings = setup();
+        let fallback = decode_codex_notification(
+            &mappings,
+            "turn/completed",
+            &json!({
+                "threadId":"codex-a", "turn":{"id":"turn-a", "status":"completed", "items":[
+                    {"id":"img-b", "type":"imageGeneration", "status":"completed", "savedPath":"C:/generated.png"}
+                ]}
+            }),
+        );
+        assert!(matches!(
+            fallback.as_slice(),
+            [
+                CodexRuntimeEvent::ImageGeneration {
+                    result: None,
+                    saved_path: Some(_),
+                    ..
+                },
+                CodexRuntimeEvent::TurnCompleted { .. }
+            ]
+        ));
+
+        let mappings = setup();
+        let failed = decode_codex_notification(
+            &mappings,
+            "item/completed",
+            &json!({
+                "threadId":"codex-a", "turnId":"turn-a", "item":{
+                    "id":"img-c", "type":"imageGeneration", "status":"failed", "result":"bad"
+                }
+            }),
+        );
+        assert!(failed.is_empty());
+        let malformed = decode_codex_notification(
+            &mappings,
+            "item/completed",
+            &json!({
+                "threadId":"codex-a", "turnId":"turn-a", "item":{
+                    "id":"img-d", "type":"imageGeneration", "status":"completed", "result":"bad"
+                }
+            }),
+        );
+        assert!(matches!(
+            malformed.as_slice(),
+            [CodexRuntimeEvent::ImageGeneration { .. }]
+        ));
     }
 
     #[test]

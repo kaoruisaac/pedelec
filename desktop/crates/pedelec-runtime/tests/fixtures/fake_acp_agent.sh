@@ -63,6 +63,16 @@ while IFS= read -r line; do
         *'"text":"empty-success"'*)
           printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
           continue ;;
+        *'"text":"inline-image"'*)
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn","content":[{"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jFZ0AAAAASUVORK5CYII=","mimeType":"image/png"}]}}\n' "$id"
+          continue ;;
+        *'"text":"cursor-generate-image"'*)
+          image_path=${FAKE_ACP_GENERATED_IMAGE:-C:/generated/icon.png}
+          image_path=$(printf '%s' "$image_path" | sed 's/\\/\\\\/g; s/"/\\"/g')
+          printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"tool_call","toolCallId":"call-image-1"}}}\n' "$session_id"
+          printf '{"jsonrpc":"2.0","method":"cursor/generate_image","params":{"toolCallId":"call-image-1","description":"generated image","filePath":"%s"}}\n' "$image_path"
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
+          continue ;;
       esac
       printf 'fake ACP diagnostic\n' >&2
       case "$line" in

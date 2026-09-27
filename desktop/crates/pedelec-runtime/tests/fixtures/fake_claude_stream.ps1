@@ -63,6 +63,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     $thinkingOnly = $line -like '*THINKING_ONLY*'
     $nestedText = $line -like '*NESTED_TEXT*'
     $multiText = $line -like '*MULTI_TEXT*'
+    $artifactMode = if ($line -like '*ARTIFACT_TOOL*') { 'tool' }
+        elseif ($line -like '*ARTIFACT_MIXED*') { 'mixed' }
+        elseif ($line -like '*ARTIFACT_DUP*') { 'duplicate' }
+        elseif ($line -like '*ARTIFACT_BAD*') { 'bad' }
+        elseif ($line -like '*ARTIFACT_USER_INPUT*') { 'user-input' }
+        elseif ($line -like '*ARTIFACT_MULTI*') { 'multi' }
+        else { '' }
 
     if (-not $thinkingOnly) {
         $thinkingDelta = @{
@@ -97,6 +104,30 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     } elseif (-not $thinkingOnly) {
         $assistant = ('{"type":"assistant","message":{"content":[{"type":"text","text":"final-' + $turn + '"}]}}')
         [Console]::Out.WriteLine($assistant)
+    }
+
+    $image = '{"type":"image","id":"image-1","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jQQUAAAAASUVORK5CYII="}}'
+    $jpegImage = '{"type":"image","id":"image-jpeg","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/2Q=="}}'
+    switch ($artifactMode) {
+        'tool' {
+            [Console]::Out.WriteLine('{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-9","content":[{"type":"text","text":"generated"},' + $image + ']}]}}')
+        }
+        'mixed' {
+            [Console]::Out.WriteLine('{"type":"assistant","message":{"content":[{"type":"text","text":"with image"},' + $jpegImage + ']}}')
+        }
+        'duplicate' {
+            [Console]::Out.WriteLine('{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":' + $image + '}}')
+            [Console]::Out.WriteLine('{"type":"assistant","message":{"content":[{"type":"text","text":"with image"},' + $image + ']}}')
+        }
+        'bad' {
+            [Console]::Out.WriteLine('{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-bad","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"%%%"}}]}]}}')
+        }
+        'user-input' {
+            [Console]::Out.WriteLine('{"type":"user","message":{"content":[' + $image + ']}}')
+        }
+        'multi' {
+            [Console]::Out.WriteLine('{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-multi","content":[{"type":"image","id":"multi-1","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jQQUAAAAASUVORK5CYII="}},{"type":"image","id":"multi-2","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jQQUAAAAASUVORK5CYII="}}]}]}}')
+        }
     }
 
     if ($env:FAKE_CLAUDE_STDERR -eq '1') {

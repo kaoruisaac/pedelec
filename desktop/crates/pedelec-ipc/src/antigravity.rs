@@ -1,9 +1,10 @@
 use crate::{record_protocol_traffic, PersistentRuntimeDispatcher};
 use pedelec_core::{
     build_persistent_prepare_prompt, build_persistent_user_prompt_with_bootstrap, error_codes,
-    pedelec_host_context_from_persistent_instructions,
+    pedelec_host_context_from_persistent_instructions, ActiveProviderArtifactOperation,
     AntigravityReasoningEffort as CoreAntigravityReasoningEffort, PedelecError,
     PersistentProviderEndIntent, PersistentProviderSessionIntent, PersistentRuntimeOperation,
+    ProviderArtifactInput, ProviderArtifactKind, ProviderArtifactPayload, ProviderArtifactSource,
     ProviderCode, ProviderRuntimeDiagnostic, ProviderRuntimeEvent, SharedCoreRuntime,
 };
 use pedelec_runtime::{
@@ -11,18 +12,69 @@ use pedelec_runtime::{
     AntigravityRuntimeLaunchConfig, AntigravityStreamController, ProviderRuntimeController,
     ProviderRuntimeOwner, RuntimeRegistryError,
 };
-use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const ANTIGRAVITY_RUNTIME_KEY_PREFIX: &str = "antigravity-stream";
+const MAX_ANTIGRAVITY_SNAPSHOT_ENTRIES: usize = 4096;
+const MAX_ANTIGRAVITY_SNAPSHOT_DEPTH: usize = 16;
+const MAX_PENDING_ANTIGRAVITY_ARTIFACT_SNAPSHOTS: usize = 128;
+const ANTIGRAVITY_SNAPSHOT_TTL: Duration = Duration::from_secs(10 * 60);
+const SNAPSHOT_SAMPLE_BYTES: usize = 4096;
 
 type PumpKey = (String, u64);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ArtifactSnapshotKey {
+    conversation_id: String,
+    thread_id: String,
+    operation_id: String,
+    step_idx: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArtifactFileSnapshot {
+    size: u64,
+    modified: Option<(u64, u32)>,
+    content_sample: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingArtifactSnapshot {
+    canonical_root: PathBuf,
+    files: BTreeMap<PathBuf, ArtifactFileSnapshot>,
+    captured_at: Instant,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AntigravityHookPayload {
+    conversation_id: String,
+    #[serde(default)]
+    artifact_directory_path: Option<String>,
+    tool_call: AntigravityHookToolCall,
+    step_idx: u64,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AntigravityHookToolCall {
+    name: String,
+    #[serde(default)]
+    id: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct AntigravityRuntimeDispatcher {
@@ -31,6 +83,7 @@ pub struct AntigravityRuntimeDispatcher {
     program_override: Option<PathBuf>,
     env_overrides: Vec<(OsString, OsString)>,
     controllers: Arc<Mutex<HashMap<String, Arc<AntigravityStreamController>>>>,
+    artifact_snapshots: Arc<Mutex<HashMap<ArtifactSnapshotKey, PendingArtifactSnapshot>>>,
     event_pumps: Arc<Mutex<HashSet<PumpKey>>>,
     traffic_pumps: Arc<Mutex<HashSet<PumpKey>>>,
     stopped_generations: Arc<Mutex<HashSet<PumpKey>>>,
@@ -44,6 +97,7 @@ impl AntigravityRuntimeDispatcher {
             program_override: None,
             env_overrides: Vec::new(),
             controllers: Arc::new(Mutex::new(HashMap::new())),
+            artifact_snapshots: Arc::new(Mutex::new(HashMap::new())),
             event_pumps: Arc::new(Mutex::new(HashSet::new())),
             traffic_pumps: Arc::new(Mutex::new(HashSet::new())),
             stopped_generations: Arc::new(Mutex::new(HashSet::new())),
@@ -152,6 +206,223 @@ impl AntigravityRuntimeDispatcher {
             .ok()
             .and_then(|controllers| controllers.get(thread_id).cloned())
             .filter(|controller| controller.is_healthy())
+    }
+
+    pub fn handle_provider_artifact_hook(
+        &self,
+        stage: &str,
+        payload: Value,
+    ) -> Result<(), PedelecError> {
+        let hook: AntigravityHookPayload = serde_json::from_value(payload).map_err(|error| {
+            PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_INVALID,
+                "Antigravity hook payload has an invalid shape",
+                json!({"provider":"antigravity", "stage":stage, "reason":error.to_string()}),
+            )
+        })?;
+        if hook.tool_call.name != "generate_image" {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_INVALID,
+                "Antigravity artifact hook received a non-image tool call",
+                json!({
+                    "provider":"antigravity",
+                    "stage":stage,
+                    "tool":hook.tool_call.name,
+                }),
+            ));
+        }
+        if !matches!(stage, "before" | "after") {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_INVALID,
+                "Antigravity artifact hook stage must be before or after",
+                json!({"provider":"antigravity", "stage":stage}),
+            ));
+        }
+        let operation = self
+            .core_runtime
+            .lock()
+            .map_err(|_| mutex_error("Core runtime"))?
+            .active_antigravity_artifact_operation(&hook.conversation_id)?;
+        let key = ArtifactSnapshotKey {
+            conversation_id: hook.conversation_id.clone(),
+            thread_id: operation.thread_id.clone(),
+            operation_id: operation.operation_id.clone(),
+            step_idx: hook.step_idx,
+        };
+
+        if stage == "before" {
+            if self
+                .artifact_snapshots
+                .lock()
+                .map_err(|_| mutex_error("Antigravity artifact snapshot"))?
+                .contains_key(&key)
+            {
+                return Ok(());
+            }
+            let (canonical_root, files) = scan_artifact_directory_for_operation(
+                &self.core_runtime,
+                &operation,
+                &hook.conversation_id,
+                hook.step_idx,
+                "before",
+                hook.artifact_directory_path.as_deref(),
+            )?;
+            let mut snapshots = self
+                .artifact_snapshots
+                .lock()
+                .map_err(|_| mutex_error("Antigravity artifact snapshot"))?;
+            snapshots
+                .retain(|_, snapshot| snapshot.captured_at.elapsed() <= ANTIGRAVITY_SNAPSHOT_TTL);
+            if snapshots.len() >= MAX_PENDING_ANTIGRAVITY_ARTIFACT_SNAPSHOTS {
+                let error = antigravity_artifact_failure(
+                    &operation,
+                    &hook.conversation_id,
+                    hook.step_idx,
+                    "before",
+                    "too many Antigravity image operations are awaiting completion",
+                );
+                drop(snapshots);
+                fail_antigravity_artifact_operation(&self.core_runtime, &operation, &error);
+                return Err(error);
+            }
+            snapshots.insert(
+                key,
+                PendingArtifactSnapshot {
+                    canonical_root,
+                    files,
+                    captured_at: Instant::now(),
+                },
+            );
+            return Ok(());
+        }
+
+        let before = self
+            .artifact_snapshots
+            .lock()
+            .map_err(|_| mutex_error("Antigravity artifact snapshot"))?
+            .remove(&key);
+        if hook
+            .error
+            .as_deref()
+            .is_some_and(|error| !error.trim().is_empty())
+        {
+            return Ok(());
+        }
+        let Some(before) = before else {
+            let error = antigravity_artifact_failure(
+                &operation,
+                &hook.conversation_id,
+                hook.step_idx,
+                "after",
+                "successful generate_image has no matching before snapshot",
+            );
+            fail_antigravity_artifact_operation(&self.core_runtime, &operation, &error);
+            return Err(error);
+        };
+        let (canonical_root, after_files) = scan_artifact_directory_for_operation(
+            &self.core_runtime,
+            &operation,
+            &hook.conversation_id,
+            hook.step_idx,
+            "after",
+            hook.artifact_directory_path.as_deref(),
+        )?;
+        if canonical_root != before.canonical_root {
+            let error = antigravity_artifact_failure(
+                &operation,
+                &hook.conversation_id,
+                hook.step_idx,
+                "after",
+                "Antigravity artifact directory changed during generate_image",
+            );
+            fail_antigravity_artifact_operation(&self.core_runtime, &operation, &error);
+            return Err(error);
+        }
+
+        let mut generated = after_files
+            .iter()
+            .filter(|(relative, snapshot)| {
+                is_supported_visual_path(relative) && before.files.get(*relative) != Some(*snapshot)
+            })
+            .map(|(relative, _)| relative.clone())
+            .collect::<Vec<_>>();
+        generated.sort();
+        if generated.is_empty() {
+            let error = antigravity_artifact_failure(
+                &operation,
+                &hook.conversation_id,
+                hook.step_idx,
+                "after",
+                "successful generate_image produced no new or changed visual artifact",
+            );
+            fail_antigravity_artifact_operation(&self.core_runtime, &operation, &error);
+            return Err(error);
+        }
+
+        for (index, relative) in generated.iter().enumerate() {
+            let path = match safe_source_beneath_root(&canonical_root, relative) {
+                Ok(path) => path,
+                Err(reason) => {
+                    let error = antigravity_artifact_failure(
+                        &operation,
+                        &hook.conversation_id,
+                        hook.step_idx,
+                        "materialize",
+                        &reason,
+                    );
+                    fail_antigravity_artifact_operation(&self.core_runtime, &operation, &error);
+                    return Err(error);
+                }
+            };
+            let Some(mime_type) = antigravity_image_format(&path) else {
+                let error = antigravity_artifact_failure(
+                    &operation,
+                    &hook.conversation_id,
+                    hook.step_idx,
+                    "materialize",
+                    "Antigravity generated visual file has invalid image data",
+                );
+                fail_antigravity_artifact_operation(&self.core_runtime, &operation, &error);
+                return Err(error);
+            };
+            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+                let error = antigravity_artifact_failure(
+                    &operation,
+                    &hook.conversation_id,
+                    hook.step_idx,
+                    "materialize",
+                    "Antigravity generated visual filename is invalid",
+                );
+                fail_antigravity_artifact_operation(&self.core_runtime, &operation, &error);
+                return Err(error);
+            };
+            let provider_artifact_id = format!("step-{}-{}", hook.step_idx, index);
+            let result = self
+                .core_runtime
+                .lock()
+                .map_err(|_| mutex_error("Core runtime"))?
+                .materialize_provider_artifact(ProviderArtifactInput {
+                    thread_id: &operation.thread_id,
+                    provider: ProviderCode::Antigravity,
+                    provider_turn_id: Some(&operation.provider_turn_id),
+                    kind: ProviderArtifactKind::Image,
+                    source: ProviderArtifactSource::ImageGeneration,
+                    provider_artifact_id: Some(provider_artifact_id),
+                    tool_call_id: hook.tool_call.id.clone(),
+                    suggested_filename: filename,
+                    mime_type,
+                    payload: ProviderArtifactPayload::File(&path),
+                });
+            if let Err(materialization_error) = result {
+                fail_antigravity_artifact_operation(
+                    &self.core_runtime,
+                    &operation,
+                    &materialization_error,
+                );
+                return Err(materialization_error);
+            }
+        }
+        Ok(())
     }
 
     fn start_traffic_pump(&self, controller: Arc<AntigravityStreamController>, thread_id: String) {
@@ -397,6 +668,271 @@ impl PersistentRuntimeDispatcher for AntigravityRuntimeDispatcher {
             }
             PersistentRuntimeOperation::EndSession { .. } => unreachable!(),
         }
+    }
+
+    fn handle_provider_artifact_hook(
+        &self,
+        provider: &str,
+        stage: &str,
+        payload: Value,
+    ) -> Result<(), PedelecError> {
+        if provider != "antigravity" {
+            return Err(PedelecError::with_details(
+                error_codes::PROVIDER_UNSUPPORTED,
+                "Antigravity artifact hook received another provider",
+                json!({"provider":provider}),
+            ));
+        }
+        AntigravityRuntimeDispatcher::handle_provider_artifact_hook(self, stage, payload)
+    }
+}
+
+fn scan_artifact_directory_for_operation(
+    runtime: &SharedCoreRuntime,
+    operation: &ActiveProviderArtifactOperation,
+    conversation_id: &str,
+    step_idx: u64,
+    stage: &str,
+    directory: Option<&str>,
+) -> Result<(PathBuf, BTreeMap<PathBuf, ArtifactFileSnapshot>), PedelecError> {
+    let Some(directory) = directory else {
+        let error = antigravity_artifact_failure(
+            operation,
+            conversation_id,
+            step_idx,
+            stage,
+            "Antigravity did not report an artifact directory",
+        );
+        fail_antigravity_artifact_operation(runtime, operation, &error);
+        return Err(error);
+    };
+    match scan_artifact_directory(Path::new(directory)) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(reason) => {
+            let error =
+                antigravity_artifact_failure(operation, conversation_id, step_idx, stage, &reason);
+            fail_antigravity_artifact_operation(runtime, operation, &error);
+            Err(error)
+        }
+    }
+}
+
+fn scan_artifact_directory(
+    directory: &Path,
+) -> Result<(PathBuf, BTreeMap<PathBuf, ArtifactFileSnapshot>), String> {
+    if !directory.is_absolute() {
+        return Err("Antigravity artifact directory must be absolute".to_string());
+    }
+    let root_metadata = fs::symlink_metadata(directory)
+        .map_err(|error| format!("Antigravity artifact directory is unavailable: {error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("Antigravity artifact directory is not a regular directory".to_string());
+    }
+    let canonical_root = directory.canonicalize().map_err(|error| {
+        format!("Antigravity artifact directory could not be resolved: {error}")
+    })?;
+    let mut files = BTreeMap::new();
+    collect_artifact_files(&canonical_root, &canonical_root, 0, &mut files)?;
+    Ok((canonical_root, files))
+}
+
+fn collect_artifact_files(
+    root: &Path,
+    directory: &Path,
+    depth: usize,
+    files: &mut BTreeMap<PathBuf, ArtifactFileSnapshot>,
+) -> Result<(), String> {
+    if depth > MAX_ANTIGRAVITY_SNAPSHOT_DEPTH {
+        return Err("Antigravity artifact directory exceeds the scan depth limit".to_string());
+    }
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| format!("Antigravity artifact directory could not be read: {error}"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Antigravity artifact entry could not be read: {error}"))?;
+    entries.sort();
+    for path in entries {
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            format!("Antigravity artifact entry could not be inspected: {error}")
+        })?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            let canonical = path.canonicalize().map_err(|error| {
+                format!("Antigravity artifact directory could not be resolved: {error}")
+            })?;
+            if !canonical.starts_with(root) {
+                continue;
+            }
+            collect_artifact_files(root, &canonical, depth + 1, files)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("Antigravity artifact file could not be resolved: {error}"))?;
+        if !canonical.starts_with(root) {
+            continue;
+        }
+        let relative = canonical
+            .strip_prefix(root)
+            .map_err(|_| "Antigravity artifact path escaped its directory".to_string())?
+            .to_path_buf();
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err("Antigravity artifact path is invalid".to_string());
+        }
+        if files.len() >= MAX_ANTIGRAVITY_SNAPSHOT_ENTRIES {
+            return Err("Antigravity artifact directory exceeds the file-count limit".to_string());
+        }
+        let content_sample = if is_supported_visual_path(&relative) {
+            Some(sample_file_identity(&canonical, metadata.len())?)
+        } else {
+            None
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|time| (time.as_secs(), time.subsec_nanos()));
+        files.insert(
+            relative,
+            ArtifactFileSnapshot {
+                size: metadata.len(),
+                modified,
+                content_sample,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn sample_file_identity(path: &Path, size: u64) -> Result<[u8; 32], String> {
+    let mut file = File::open(path)
+        .map_err(|error| format!("Antigravity visual artifact could not be opened: {error}"))?;
+    let sample_size = usize::try_from(size.min(SNAPSHOT_SAMPLE_BYTES as u64))
+        .map_err(|_| "Antigravity artifact size is invalid".to_string())?;
+    let mut first = vec![0u8; sample_size];
+    file.read_exact(&mut first)
+        .map_err(|error| format!("Antigravity visual artifact could not be read: {error}"))?;
+    let mut hash = Sha256::new();
+    hash.update(size.to_le_bytes());
+    hash.update(&first);
+    if size > sample_size as u64 {
+        let tail_size = SNAPSHOT_SAMPLE_BYTES.min(size as usize);
+        file.seek(SeekFrom::End(-(tail_size as i64)))
+            .map_err(|error| format!("Antigravity visual artifact could not be read: {error}"))?;
+        let mut tail = vec![0u8; tail_size];
+        file.read_exact(&mut tail)
+            .map_err(|error| format!("Antigravity visual artifact could not be read: {error}"))?;
+        hash.update(&tail);
+    }
+    Ok(hash.finalize().into())
+}
+
+fn is_supported_visual_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp"
+            )
+        })
+}
+
+fn antigravity_image_format(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 12];
+    let count = file.read(&mut header).ok()?;
+    let bytes = &header[..count];
+    match extension.as_str() {
+        "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Some("image/png"),
+        "jpg" | "jpeg" if bytes.starts_with(&[0xff, 0xd8, 0xff]) => Some("image/jpeg"),
+        "webp" if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => {
+            Some("image/webp")
+        }
+        _ => None,
+    }
+}
+
+fn safe_source_beneath_root(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("Antigravity artifact path is invalid".to_string());
+    }
+    let mut current = root.to_path_buf();
+    let components = relative.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            format!("Antigravity artifact file could not be inspected: {error}")
+        })?;
+        if metadata.file_type().is_symlink()
+            || (index + 1 < components.len() && !metadata.is_dir())
+            || (index + 1 == components.len() && !metadata.is_file())
+        {
+            return Err("Antigravity artifact contains an unsafe path component".to_string());
+        }
+    }
+    let canonical = current
+        .canonicalize()
+        .map_err(|error| format!("Antigravity artifact file could not be resolved: {error}"))?;
+    if !canonical.starts_with(root) {
+        return Err("Antigravity artifact file escaped its directory".to_string());
+    }
+    Ok(canonical)
+}
+
+fn antigravity_artifact_failure(
+    operation: &ActiveProviderArtifactOperation,
+    conversation_id: &str,
+    step_idx: u64,
+    stage: &str,
+    message: &str,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::PROVIDER_ARTIFACT_MATERIALIZATION_FAILED,
+        message,
+        json!({
+            "provider":"antigravity",
+            "threadId":operation.thread_id,
+            "providerTurnId":operation.provider_turn_id,
+            "operationId":operation.operation_id,
+            "conversationId":conversation_id,
+            "tool":"generate_image",
+            "stepIdx":step_idx,
+            "stage":stage,
+        }),
+    )
+}
+
+fn fail_antigravity_artifact_operation(
+    runtime: &SharedCoreRuntime,
+    operation: &ActiveProviderArtifactOperation,
+    error: &PedelecError,
+) {
+    if let Ok(mut core) = runtime.lock() {
+        if core.current_operation_id(&operation.thread_id).as_deref()
+            != Some(operation.operation_id.as_str())
+        {
+            return;
+        }
+        let _ = core.reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
+            thread_id: operation.thread_id.clone(),
+            provider_turn_id: Some(operation.provider_turn_id.clone()),
+            error: error.clone(),
+        });
     }
 }
 
@@ -771,12 +1307,303 @@ mod tests {
     use super::*;
     use pedelec_core::{
         CreateThreadInput, CreateThreadSkillsInput, EffortLevel, EndThreadInput,
-        OpenWorkspaceInput, PersistentRuntimeOperation, PrepareThreadInput,
-        ProviderExecutionOperationKind, SendTextInput, ThreadEvent, ThreadStatus, WorkspaceManager,
+        OpenWorkspaceInput, PersistentRuntimeOperation, PrepareThreadInput, ProviderArtifactSource,
+        ProviderExecutionOperationKind, ProviderRuntimeEvent, SendTextInput, ThreadEvent,
+        ThreadStatus, WorkspaceManager,
     };
     use std::fs;
     use std::time::Instant;
     use tempfile::tempdir;
+
+    #[test]
+    fn artifact_hook_routes_conversations_and_imports_only_new_or_changed_images() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let runtime = test_runtime(temp.path());
+        let thread_id = create_thread(&runtime, &workspace, "artifact guidance");
+        let events = runtime
+            .lock()
+            .unwrap()
+            .subscribe_thread(pedelec_core::SubscribeThreadInput {
+                thread_id: thread_id.clone(),
+            })
+            .unwrap();
+        let operation = start_active_operation(&runtime, &thread_id, "conversation-one", "op-one");
+        let dispatcher =
+            AntigravityRuntimeDispatcher::new(ProviderRuntimeOwner::new(), runtime.clone());
+        let artifact_dir = temp.path().join("provider-artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(artifact_dir.join("historic.png"), tiny_png(9)).unwrap();
+        fs::write(artifact_dir.join("changed.png"), tiny_png(1)).unwrap();
+        fs::write(artifact_dir.join("notes.txt"), b"historic log").unwrap();
+
+        dispatcher
+            .handle_provider_artifact_hook(
+                "before",
+                hook_payload("conversation-one", &artifact_dir, 4, "generate_image", None),
+            )
+            .unwrap();
+        fs::write(artifact_dir.join("changed.png"), tiny_png(2)).unwrap();
+        fs::write(artifact_dir.join("new.webp"), tiny_webp()).unwrap();
+        fs::write(artifact_dir.join("transcript.jsonl"), b"not an artifact").unwrap();
+        dispatcher
+            .handle_provider_artifact_hook(
+                "after",
+                hook_payload("conversation-one", &artifact_dir, 4, "generate_image", None),
+            )
+            .unwrap();
+
+        let imported = events
+            .try_iter()
+            .filter_map(|event| match event {
+                ThreadEvent::ProviderArtifact { artifact, .. } => Some(artifact),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(imported.len(), 2);
+        assert_eq!(imported[0].source, ProviderArtifactSource::ImageGeneration);
+        assert_eq!(imported[0].name, "changed.png");
+        assert_eq!(imported[1].name, "new.webp");
+        assert!(imported
+            .iter()
+            .all(|artifact| artifact.name != "historic.png"));
+        assert!(imported
+            .iter()
+            .all(|artifact| artifact.tool_call_id.as_deref() == Some("tool-4")));
+        assert!(imported.iter().all(|artifact| !artifact
+            .path
+            .contains(temp.path().to_string_lossy().as_ref())));
+        assert_eq!(operation.operation_id, "op-one");
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .current_operation_id(&thread_id)
+                .as_deref(),
+            Some("op-one")
+        );
+    }
+
+    #[test]
+    fn artifact_hook_conversation_mapping_is_unique_across_threads_in_one_workspace() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("shared-workspace");
+        let runtime = test_runtime(temp.path());
+        let first = create_thread(&runtime, &workspace, "first thread");
+        let second = create_thread(&runtime, &workspace, "second thread");
+        let first_operation =
+            start_active_operation(&runtime, &first, "conversation-first", "op-first");
+        let second_operation =
+            start_active_operation(&runtime, &second, "conversation-second", "op-second");
+        {
+            let core = runtime.lock().unwrap();
+            assert_eq!(
+                core.active_antigravity_artifact_operation("conversation-first")
+                    .unwrap(),
+                first_operation
+            );
+            assert_eq!(
+                core.active_antigravity_artifact_operation("conversation-second")
+                    .unwrap(),
+                second_operation
+            );
+        }
+        runtime
+            .lock()
+            .unwrap()
+            .thread_manager
+            .provider_session_state_mut(&second)
+            .unwrap()
+            .provider_session_id = Some("conversation-first".into());
+        let error = runtime
+            .lock()
+            .unwrap()
+            .active_antigravity_artifact_operation("conversation-first")
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_ARTIFACT_INVALID);
+    }
+
+    #[test]
+    fn failed_image_tool_clears_snapshot_and_no_output_failure_cannot_be_revived() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let runtime = test_runtime(temp.path());
+        let thread_id = create_thread(&runtime, &workspace, "artifact failure");
+        let artifact_dir = temp.path().join("provider-artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher = AntigravityRuntimeDispatcher::new(owner, runtime.clone());
+
+        let operation = start_active_operation(
+            &runtime,
+            &thread_id,
+            "conversation-failed-tool",
+            "op-failed-tool",
+        );
+        dispatcher
+            .handle_provider_artifact_hook(
+                "before",
+                hook_payload(
+                    "conversation-failed-tool",
+                    &artifact_dir,
+                    5,
+                    "generate_image",
+                    None,
+                ),
+            )
+            .unwrap();
+        dispatcher
+            .handle_provider_artifact_hook(
+                "after",
+                hook_payload(
+                    "conversation-failed-tool",
+                    &artifact_dir,
+                    5,
+                    "generate_image",
+                    Some("image model failed"),
+                ),
+            )
+            .unwrap();
+        assert!(dispatcher.artifact_snapshots.lock().unwrap().is_empty());
+        runtime
+            .lock()
+            .unwrap()
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.clone(),
+                provider_turn_id: Some(operation.provider_turn_id),
+                success: false,
+                error: Some(PedelecError::new(
+                    error_codes::PROVIDER_REQUEST_FAILED,
+                    "image tool failed",
+                )),
+            })
+            .unwrap();
+
+        let thread_id = create_thread(&runtime, &workspace, "missing output");
+        let operation =
+            start_active_operation(&runtime, &thread_id, "conversation-empty", "op-empty");
+        dispatcher
+            .handle_provider_artifact_hook(
+                "before",
+                hook_payload(
+                    "conversation-empty",
+                    &artifact_dir,
+                    6,
+                    "generate_image",
+                    None,
+                ),
+            )
+            .unwrap();
+        let error = dispatcher
+            .handle_provider_artifact_hook(
+                "after",
+                hook_payload(
+                    "conversation-empty",
+                    &artifact_dir,
+                    6,
+                    "generate_image",
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            error_codes::PROVIDER_ARTIFACT_MATERIALIZATION_FAILED
+        );
+        assert_eq!(
+            runtime.lock().unwrap().thread_status(&thread_id),
+            Some(ThreadStatus::Error)
+        );
+        runtime
+            .lock()
+            .unwrap()
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.clone(),
+                provider_turn_id: Some(operation.provider_turn_id),
+                success: true,
+                error: None,
+            })
+            .unwrap_err();
+        assert_eq!(
+            runtime.lock().unwrap().thread_status(&thread_id),
+            Some(ThreadStatus::Error)
+        );
+    }
+
+    #[test]
+    fn artifact_snapshot_ignores_symlinks_and_rejects_unsafe_directories() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("artifact-root");
+        let outside = temp.path().join("outside.png");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&outside, tiny_png(3)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(&outside, root.join("linked.png")).unwrap();
+            let (canonical, files) = scan_artifact_directory(&root).unwrap();
+            assert!(!files.contains_key(Path::new("linked.png")));
+            assert!(canonical.starts_with(temp.path()));
+        }
+        assert!(scan_artifact_directory(Path::new("relative/artifacts")).is_err());
+    }
+
+    fn hook_payload(
+        conversation_id: &str,
+        artifact_dir: &Path,
+        step_idx: u64,
+        tool_name: &str,
+        error: Option<&str>,
+    ) -> Value {
+        let mut payload = json!({
+            "conversationId":conversation_id,
+            "artifactDirectoryPath":artifact_dir,
+            "toolCall":{"name":tool_name,"id":"tool-4","args":{}},
+            "stepIdx":step_idx,
+        });
+        if let Some(error) = error {
+            payload["error"] = Value::String(error.to_string());
+        }
+        payload
+    }
+
+    fn tiny_png(payload: u8) -> Vec<u8> {
+        [b"\x89PNG\r\n\x1a\n".as_slice(), &[payload; 8]].concat()
+    }
+
+    fn tiny_webp() -> Vec<u8> {
+        b"RIFF\x04\0\0\0WEBPVP8 ".to_vec()
+    }
+
+    fn start_active_operation(
+        runtime: &SharedCoreRuntime,
+        thread_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+    ) -> ActiveProviderArtifactOperation {
+        runtime
+            .lock()
+            .unwrap()
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.to_string(),
+                message: "generate an image".to_string(),
+                operation_id: Some(operation_id.to_string()),
+            })
+            .unwrap();
+        runtime
+            .lock()
+            .unwrap()
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::SessionReady {
+                thread_id: thread_id.to_string(),
+                provider_session_id: conversation_id.to_string(),
+            })
+            .unwrap();
+        runtime
+            .lock()
+            .unwrap()
+            .active_antigravity_artifact_operation(conversation_id)
+            .unwrap()
+    }
 
     #[test]
     fn prepare_materializes_agent_before_spawn_and_reuses_one_process() {

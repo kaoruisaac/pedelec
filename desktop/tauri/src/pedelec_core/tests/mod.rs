@@ -3,7 +3,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{mpsc, Arc, Barrier, Mutex};
@@ -20,6 +20,10 @@ mod tests {
         assert!(instruction.contains("Deno Modules are imported from `pedelec-deno` scripts"));
         assert!(instruction.contains("readSpecCommand` / `callCommand"));
         assert!(instruction.contains("Invoke each listed Pedelec App Tool call once"));
+        assert!(instruction.contains("Before accessing local files outside the declared workspace, ask the user for permission"));
+        assert!(instruction
+            .contains("An exact artifact the provider generated and returned in the current turn"));
+        assert!(instruction.contains("does not permit browsing its directory"));
         assert!(instruction.contains("consume the structured result or error returned by Pedelec"));
         assert!(!instruction.contains("Exact-retry"));
         assert!(instruction
@@ -57,6 +61,80 @@ mod tests {
         assert!(!agent.contains("thread-"));
         assert!(!agent.contains("run <workspace-relative-script-path>"));
         assert!(!agent.contains("ambiguous transport failure"));
+    }
+
+    #[test]
+    fn antigravity_workspace_installs_and_merges_provider_artifact_hooks_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let hooks_path = temp.path().join(".agents/hooks.json");
+        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
+        let user_hook = json!({
+            "Stop": [{"hooks": [{"type":"command", "command":"user-hook"}]}]
+        });
+        std::fs::write(
+            &hooks_path,
+            serde_json::to_vec(&json!({
+                "user-hook":user_hook,
+                "pedelec-provider-artifacts":{"outdated":true},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        CoreRuntime::new()
+            .prepare_antigravity_persistent_workspace(temp.path())
+            .unwrap();
+        let hooks: Value = serde_json::from_slice(&std::fs::read(&hooks_path).unwrap()).unwrap();
+        assert_eq!(hooks["user-hook"], user_hook);
+        assert_eq!(
+            hooks["pedelec-provider-artifacts"]["PreToolUse"][0]["matcher"],
+            "generate_image"
+        );
+        assert_eq!(
+            hooks["pedelec-provider-artifacts"]["PostToolUse"][0]["matcher"],
+            "generate_image"
+        );
+        // PreToolUse is paired with the CLI `before` stage. That command
+        // returns {"decision":"allow"} after the snapshot succeeds; the
+        // decision itself stays out of hooks.json.
+        assert_eq!(
+            hooks["pedelec-provider-artifacts"]["PreToolUse"][0]["hooks"][0]["command"],
+            "pedelec-cli provider-artifact-hook antigravity before"
+        );
+        assert!(!serde_json::to_string(&hooks).unwrap().contains("decision"));
+        assert_eq!(
+            hooks["pedelec-provider-artifacts"]["PostToolUse"][0]["hooks"][0]["command"],
+            "pedelec-cli provider-artifact-hook antigravity after"
+        );
+        assert!(!serde_json::to_string(&hooks).unwrap().contains("threadId"));
+        let once = std::fs::read(&hooks_path).unwrap();
+        CoreRuntime::new()
+            .prepare_antigravity_persistent_workspace(temp.path())
+            .unwrap();
+        assert_eq!(std::fs::read(hooks_path).unwrap(), once);
+    }
+
+    #[test]
+    fn antigravity_workspace_creates_hooks_and_rejects_malformed_hooks_without_overwrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = CoreRuntime::new();
+        runtime
+            .prepare_antigravity_persistent_workspace(temp.path())
+            .unwrap();
+        let hooks_path = temp.path().join(".agents/hooks.json");
+        let hooks: Value = serde_json::from_slice(&std::fs::read(&hooks_path).unwrap()).unwrap();
+        assert!(hooks["pedelec-provider-artifacts"].is_object());
+
+        let malformed_workspace = temp.path().join("malformed");
+        std::fs::create_dir_all(malformed_workspace.join(".agents")).unwrap();
+        let malformed_path = malformed_workspace.join(".agents/hooks.json");
+        let original = b"{ this is not json";
+        std::fs::write(&malformed_path, original).unwrap();
+        let error = runtime
+            .prepare_antigravity_persistent_workspace(&malformed_workspace)
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_BOOTSTRAP_ASSET_FAILED);
+        assert_eq!(std::fs::read(malformed_path).unwrap(), original);
     }
 
     #[test]
@@ -7163,6 +7241,274 @@ mod tests {
                 ..
             } if operation_id == "op_complete"
         )));
+    }
+
+    #[test]
+    fn provider_artifact_materializes_once_per_call_and_precedes_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_artifact";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        let events = runtime.event_bus.subscribe(thread_id);
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "draw".into(),
+                operation_id: Some("op_image".into()),
+            })
+            .unwrap();
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnStarted {
+                thread_id: thread_id.into(),
+                provider_turn_id: "provider-turn".into(),
+            })
+            .unwrap();
+        let make_input = || ProviderArtifactInput {
+            thread_id,
+            provider: ProviderCode::Codex,
+            provider_turn_id: Some("provider-turn"),
+            kind: ProviderArtifactKind::Image,
+            source: ProviderArtifactSource::ImageGeneration,
+            provider_artifact_id: Some("image-1".into()),
+            tool_call_id: None,
+            suggested_filename: "image.png",
+            mime_type: "image/png",
+            payload: ProviderArtifactPayload::Bytes(b"tiny-image"),
+        };
+        let first = runtime.materialize_provider_artifact(make_input()).unwrap();
+        let second = runtime.materialize_provider_artifact(make_input()).unwrap();
+        assert_ne!(first.id, second.id);
+        assert_ne!(first.path, second.path);
+        assert_eq!(first.provider_artifact_id.as_deref(), Some("image-1"));
+        let root =
+            workspace_assets_root(&runtime.thread_workspace(thread_id).unwrap().canonical_path);
+        assert_eq!(
+            fs::read(root.join(first.path.trim_start_matches('/'))).unwrap(),
+            b"tiny-image"
+        );
+        assert_eq!(
+            runtime
+                .list_assets(ListAssetsInput {
+                    thread_id: thread_id.into()
+                })
+                .unwrap()
+                .assets
+                .len(),
+            2
+        );
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.into(),
+                provider_turn_id: Some("provider-turn".into()),
+                success: true,
+                error: None,
+            })
+            .unwrap();
+        let emitted = collect_available_core_events(&events);
+        let artifact_seq = emitted
+            .iter()
+            .find_map(|event| match event {
+                ThreadEvent::ProviderArtifact {
+                    seq,
+                    operation_id,
+                    artifact,
+                    ..
+                } => {
+                    assert_eq!(operation_id, "op_image");
+                    let value = serde_json::to_value(event).unwrap();
+                    assert_eq!(value["type"], "provider_artifact");
+                    assert_eq!(value["artifact"]["mimeType"], "image/png");
+                    assert_eq!(value["artifact"]["source"], "image_generation");
+                    assert!(value["artifact"].get("savedPath").is_none());
+                    assert!(value["artifact"].get("result").is_none());
+                    assert_eq!(artifact.path, first.path);
+                    Some(*seq)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let completion_seq = emitted
+            .iter()
+            .find_map(|event| match event {
+                ThreadEvent::OperationCompleted {
+                    seq, success: true, ..
+                } => Some(*seq),
+                _ => None,
+            })
+            .unwrap();
+        assert!(artifact_seq < completion_seq);
+    }
+
+    #[test]
+    fn provider_artifact_rejects_oversize_and_unsafe_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_artifact_invalid";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        let events = runtime.event_bus.subscribe(thread_id);
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "draw".into(),
+                operation_id: None,
+            })
+            .unwrap();
+        let source = temp.path().join("large.png");
+        let file = fs::File::create(&source).unwrap();
+        file.set_len(MAX_ASSET_UPLOAD_BYTES + 1).unwrap();
+        fn input<'a>(thread_id: &'a str, path: &'a Path) -> ProviderArtifactInput<'a> {
+            ProviderArtifactInput {
+                thread_id,
+                provider: ProviderCode::Codex,
+                provider_turn_id: None,
+                kind: ProviderArtifactKind::Image,
+                source: ProviderArtifactSource::ImageGeneration,
+                provider_artifact_id: None,
+                tool_call_id: None,
+                suggested_filename: "image.png",
+                mime_type: "image/png",
+                payload: ProviderArtifactPayload::File(path),
+            }
+        }
+        let error = runtime
+            .materialize_provider_artifact(input(thread_id, &source))
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_ARTIFACT_INVALID);
+        assert_eq!(
+            error.details.as_ref().unwrap()["actualSizeBytes"],
+            MAX_ASSET_UPLOAD_BYTES + 1
+        );
+        let error = runtime
+            .materialize_provider_artifact(input(thread_id, temp.path()))
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_ARTIFACT_INVALID);
+        runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
+                thread_id: thread_id.into(),
+                provider_turn_id: None,
+                error,
+            })
+            .unwrap();
+        assert!(runtime
+            .reduce_provider_runtime_event(ProviderRuntimeEvent::TurnCompleted {
+                thread_id: thread_id.into(),
+                provider_turn_id: None,
+                success: true,
+                error: None,
+            })
+            .is_err());
+        let emitted = collect_available_core_events(&events);
+        assert!(emitted
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::OperationCompleted {
+            success: false, error: Some(error), ..
+        } if error.code == error_codes::PROVIDER_ARTIFACT_INVALID)));
+        assert!(!emitted
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::OperationCompleted { success: true, .. })));
+    }
+
+    #[test]
+    fn provider_artifact_rejects_unsafe_destination_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_artifact_parent";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "draw".into(),
+                operation_id: None,
+            })
+            .unwrap();
+        let root =
+            workspace_assets_root(&runtime.thread_workspace(thread_id).unwrap().canonical_path);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("provider-artifacts"), b"blocking file").unwrap();
+        let error = runtime
+            .materialize_provider_artifact(ProviderArtifactInput {
+                thread_id,
+                provider: ProviderCode::Codex,
+                provider_turn_id: None,
+                kind: ProviderArtifactKind::Image,
+                source: ProviderArtifactSource::ImageGeneration,
+                provider_artifact_id: None,
+                tool_call_id: None,
+                suggested_filename: "image.png",
+                mime_type: "image/png",
+                payload: ProviderArtifactPayload::Bytes(b"tiny-image"),
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            error_codes::PROVIDER_ARTIFACT_MATERIALIZATION_FAILED
+        );
+    }
+
+    #[test]
+    fn provider_artifact_rejects_symlink_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread_id = "thread_artifact_symlink";
+        let mut runtime =
+            runtime_with_provider_thread(temp.path(), thread_id, ProviderCode::Codex, None, None);
+        runtime
+            .begin_send_text_intent(SendTextInput {
+                thread_id: thread_id.into(),
+                message: "draw".into(),
+                operation_id: None,
+            })
+            .unwrap();
+        let source = temp.path().join("source.png");
+        let link = temp.path().join("linked.png");
+        fs::write(&source, b"tiny-image").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(&source, &link).is_err() {
+            return; // Windows may not grant symlink creation to the test process.
+        }
+        let error = runtime
+            .materialize_provider_artifact(ProviderArtifactInput {
+                thread_id,
+                provider: ProviderCode::Codex,
+                provider_turn_id: None,
+                kind: ProviderArtifactKind::Image,
+                source: ProviderArtifactSource::ImageGeneration,
+                provider_artifact_id: None,
+                tool_call_id: None,
+                suggested_filename: "image.png",
+                mime_type: "image/png",
+                payload: ProviderArtifactPayload::File(&link),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_ARTIFACT_INVALID);
+    }
+
+    #[test]
+    fn asset_finalizer_rejects_symlink_destination_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("assets");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let link = root.join("provider-artifacts");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&outside, &link).is_err() {
+            return;
+        }
+        let tmp = root.join("staged.tmp");
+        fs::write(&tmp, b"image").unwrap();
+        assert!(finalize_asset_write(
+            &tmp,
+            &root,
+            Path::new("provider-artifacts/codex/image.png"),
+            false,
+            "art_1"
+        )
+        .is_err());
+        assert!(!outside.join("codex/image.png").exists());
     }
 
     #[test]

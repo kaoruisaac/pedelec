@@ -1744,6 +1744,167 @@ describe("Pedelec SDK", () => {
     expect(statuses).toEqual(["running", "idle"]);
   });
 
+  it("dispatches materialized provider artifacts during the active user turn without completing it", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const received: Array<{ artifact: any; ctx: any }> = [];
+    const statuses: string[] = [];
+    session.onArtifact((artifact, ctx) => received.push({ artifact, ctx }));
+    session.onStatus((status) => statuses.push(status));
+
+    let resolved = false;
+    const send = session.sendText("make an image").then(() => { resolved = true; });
+    const request = pageWindow.lastSent();
+    respondOk(pageWindow, request);
+    const artifact = {
+      id: "artifact-1",
+      provider: "codex",
+      path: "/provider-artifacts/codex/thread_1/image-1.png",
+      name: "image-1.png",
+      mimeType: "image/png",
+      sizeBytes: 42,
+      kind: "image",
+      source: "image_generation",
+      providerArtifactId: "image-1",
+    };
+
+    emitEvent(pageWindow, request, {
+      type: "provider_artifact",
+      sessionId: "thread_1",
+      seq: 1,
+      artifact,
+    });
+    await nextTick();
+
+    expect(received).toHaveLength(1);
+    expect(received[0].artifact).toEqual(artifact);
+    expect(received[0].ctx).toMatchObject({
+      type: "provider_artifact",
+      source: "core",
+      sessionId: "thread_1",
+      provider: "codex",
+      turnId: request.operationId,
+      turnKind: "user",
+    });
+    expect(received[0].ctx.eventReceivedAt).toEqual(expect.any(Number));
+    expect(received[0].ctx.eventEmittedAt).toEqual(expect.any(Number));
+    expect(session.getStatus()).toBe("running");
+    expect(resolved).toBe(false);
+
+    // Core may repeat an event while recovering a subscription; seq dedupe keeps delivery once.
+    emitEvent(pageWindow, request, {
+      type: "provider_artifact",
+      sessionId: "thread_1",
+      seq: 1,
+      artifact,
+    });
+    expect(received).toHaveLength(1);
+
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 2 });
+    await send;
+    expect(resolved).toBe(true);
+    expect(statuses).toEqual(["running", "idle"]);
+  });
+
+  it("ignores stale operation artifacts and suppresses prepare-scoped artifacts", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const received: any[] = [];
+    const errors: any[] = [];
+    session.onArtifact((artifact) => received.push(artifact));
+    session.onError((error) => errors.push(error));
+    const artifact = {
+      id: "artifact-1", provider: "codex", path: "/artifact.png", name: "artifact.png",
+      mimeType: "image/png", sizeBytes: 1, kind: "image", source: "provider_artifact",
+    };
+
+    const send = session.sendText("first");
+    const request = pageWindow.lastSent();
+    respondOk(pageWindow, request);
+    emitEvent(pageWindow, request, {
+      type: "provider_artifact", sessionId: "thread_1", seq: 1,
+      operationId: "stale-operation", artifact,
+    });
+    expect(received).toEqual([]);
+    expect(errors).toContainEqual(expect.objectContaining({ code: "SDK_PROTOCOL_ERROR" }));
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 2 });
+    await send;
+
+    const prepare = session.prepare();
+    const prepareRequest = pageWindow.lastSent();
+    respondOk(pageWindow, prepareRequest);
+    emitEvent(pageWindow, prepareRequest, {
+      type: "provider_artifact", sessionId: "thread_1", seq: 3, artifact,
+    });
+    expect(received).toEqual([]);
+    emitEvent(pageWindow, prepareRequest, { type: "operation_completed", sessionId: "thread_1", seq: 4 });
+    await prepare;
+  });
+
+  it("rejects malformed provider artifact metadata as SDK_PROTOCOL_ERROR", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const received: any[] = [];
+    const errors: any[] = [];
+    session.onArtifact((artifact) => received.push(artifact));
+    session.onError((error) => errors.push(error));
+    const valid = {
+      id: "artifact-1", provider: "codex", path: "/image.png", name: "image.png",
+      mimeType: "image/png", sizeBytes: 1, kind: "image", source: "image_generation",
+    };
+    const invalidArtifacts = [
+      { ...valid, path: "/../image.png" },
+      { ...valid, path: "/different.png" },
+      { ...valid, id: " " },
+      { ...valid, provider: "unknown-provider" },
+      { ...valid, kind: "document" },
+      { ...valid, source: "unknown-source" },
+      { ...valid, mimeType: " " },
+      { ...valid, sizeBytes: 1.5 },
+      { ...valid, sizeBytes: -1 },
+      { ...valid, providerArtifactId: " " },
+      { ...valid, toolCallId: 7 },
+    ];
+
+    const send = session.sendText("make files");
+    const request = pageWindow.lastSent();
+    respondOk(pageWindow, request);
+    invalidArtifacts.forEach((artifact, index) => {
+      emitEvent(pageWindow, request, {
+        type: "provider_artifact", sessionId: "thread_1", seq: index + 1, artifact,
+      });
+    });
+    expect(received).toEqual([]);
+    expect(errors).toHaveLength(invalidArtifacts.length);
+    expect(errors.every((error) => error.code === "SDK_PROTOCOL_ERROR")).toBe(true);
+    expect(session.getStatus()).toBe("running");
+    emitEvent(pageWindow, request, {
+      type: "operation_completed", sessionId: "thread_1", seq: invalidArtifacts.length + 1,
+    });
+    await send;
+  });
+
+  it("supports unsubscribing from provider artifacts", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    let calls = 0;
+    const off = session.onArtifact(() => { calls += 1; });
+    off();
+    const send = session.sendText("make a file");
+    const request = pageWindow.lastSent();
+    respondOk(pageWindow, request);
+    emitEvent(pageWindow, request, {
+      type: "provider_artifact", sessionId: "thread_1", seq: 1,
+      artifact: {
+        id: "artifact-1", provider: "codex", path: "/image.png", name: "image.png",
+        mimeType: "image/png", sizeBytes: 1, kind: "image", source: "provider_artifact",
+      },
+    });
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 2 });
+    await send;
+    expect(calls).toBe(0);
+  });
+
   it("rejects concurrent sendText with SESSION_BUSY", async () => {
     const pedelec = new Pedelec();
     const { session } = await createProviderSession(pedelec, pageWindow);

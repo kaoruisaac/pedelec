@@ -2,12 +2,14 @@ use crate::{record_protocol_traffic, PersistentRuntimeDispatcher};
 use pedelec_core::{
     build_persistent_prepare_prompt, error_codes,
     ClaudeReasoningEffort as CoreClaudeReasoningEffort, PedelecError, PersistentProviderEndIntent,
-    PersistentProviderSessionIntent, PersistentRuntimeOperation, ProviderCode,
+    PersistentProviderSessionIntent, PersistentRuntimeOperation, ProviderArtifactInput,
+    ProviderArtifactKind, ProviderArtifactPayload, ProviderArtifactSource, ProviderCode,
     ProviderRuntimeDiagnostic, ProviderRuntimeEvent, SharedCoreRuntime,
 };
 use pedelec_runtime::{
-    ClaudeReasoningEffort, ClaudeRuntimeError, ClaudeRuntimeEvent, ClaudeRuntimeLaunchConfig,
-    ClaudeStreamController, ProviderRuntimeController, ProviderRuntimeOwner, RuntimeRegistryError,
+    ClaudeArtifactSource, ClaudeReasoningEffort, ClaudeRuntimeError, ClaudeRuntimeEvent,
+    ClaudeRuntimeLaunchConfig, ClaudeStreamController, ProviderRuntimeController,
+    ProviderRuntimeOwner, RuntimeRegistryError,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -471,6 +473,25 @@ fn handle_runtime_event(
                     });
             }
         }
+        ClaudeRuntimeEvent::ProviderArtifact {
+            local_turn_id,
+            identity,
+            tool_call_id,
+            source,
+            mime_type,
+            payload,
+        } => {
+            materialize_claude_artifact(
+                runtime,
+                thread_id,
+                &local_turn_id,
+                &identity,
+                tool_call_id,
+                source,
+                &mime_type,
+                payload,
+            );
+        }
         ClaudeRuntimeEvent::UsageUpdated {
             local_turn_id,
             usage,
@@ -617,6 +638,129 @@ fn handle_runtime_event(
             );
         }
     }
+}
+
+fn materialize_claude_artifact(
+    runtime: &SharedCoreRuntime,
+    thread_id: &str,
+    local_turn_id: &str,
+    identity: &str,
+    tool_call_id: Option<String>,
+    source: ClaudeArtifactSource,
+    mime_type: &str,
+    payload: Result<Vec<u8>, String>,
+) {
+    let mut core = match runtime.lock() {
+        Ok(core) => core,
+        Err(_) => return,
+    };
+    let provider_source = match source {
+        ClaudeArtifactSource::ToolResult => ProviderArtifactSource::ToolResult,
+        ClaudeArtifactSource::ProviderArtifact => ProviderArtifactSource::ProviderArtifact,
+    };
+    let (mime_type, filename) = match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => ("image/png", "image.png"),
+        "image/jpeg" => ("image/jpeg", "image.jpg"),
+        "image/webp" => ("image/webp", "image.webp"),
+        "image/gif" => ("image/gif", "image.gif"),
+        _ => {
+            let error = PedelecError::with_details(
+                error_codes::PROVIDER_ARTIFACT_INVALID,
+                "Claude image media_type is unsupported",
+                json!({
+                    "provider":"claude",
+                    "threadId":thread_id,
+                    "providerTurnId":local_turn_id,
+                    "providerArtifactId":identity,
+                    "toolCallId":tool_call_id,
+                    "stage":"metadata",
+                    "mimeType":mime_type,
+                }),
+            );
+            let _ = core.reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
+                thread_id: thread_id.to_string(),
+                provider_turn_id: Some(local_turn_id.to_string()),
+                error,
+            });
+            return;
+        }
+    };
+    let bytes = match payload {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        Ok(_) => {
+            let error = claude_artifact_invalid_error(
+                thread_id,
+                local_turn_id,
+                identity,
+                tool_call_id.as_deref(),
+                "payload",
+                "Claude image output is empty",
+            );
+            let _ = core.reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
+                thread_id: thread_id.to_string(),
+                provider_turn_id: Some(local_turn_id.to_string()),
+                error,
+            });
+            return;
+        }
+        Err(reason) => {
+            let error = claude_artifact_invalid_error(
+                thread_id,
+                local_turn_id,
+                identity,
+                tool_call_id.as_deref(),
+                "decode",
+                &reason,
+            );
+            let _ = core.reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
+                thread_id: thread_id.to_string(),
+                provider_turn_id: Some(local_turn_id.to_string()),
+                error,
+            });
+            return;
+        }
+    };
+    let result = core.materialize_provider_artifact(ProviderArtifactInput {
+        thread_id,
+        provider: ProviderCode::Claude,
+        provider_turn_id: Some(local_turn_id),
+        kind: ProviderArtifactKind::Image,
+        source: provider_source,
+        provider_artifact_id: Some(identity.to_string()),
+        tool_call_id: tool_call_id.clone(),
+        suggested_filename: filename,
+        mime_type,
+        payload: ProviderArtifactPayload::Bytes(&bytes),
+    });
+    if let Err(error) = result {
+        let _ = core.reduce_provider_runtime_event(ProviderRuntimeEvent::ProviderError {
+            thread_id: thread_id.to_string(),
+            provider_turn_id: Some(local_turn_id.to_string()),
+            error,
+        });
+    }
+}
+
+fn claude_artifact_invalid_error(
+    thread_id: &str,
+    local_turn_id: &str,
+    identity: &str,
+    tool_call_id: Option<&str>,
+    stage: &str,
+    reason: &str,
+) -> PedelecError {
+    PedelecError::with_details(
+        error_codes::PROVIDER_ARTIFACT_INVALID,
+        reason,
+        json!({
+            "provider":"claude",
+            "threadId":thread_id,
+            "providerTurnId":local_turn_id,
+            "providerArtifactId":identity,
+            "toolCallId":tool_call_id,
+            "stage":stage,
+        }),
+    )
 }
 
 fn reduce_disconnect(runtime: &SharedCoreRuntime, thread_id: &str, error: PedelecError) {
@@ -973,6 +1117,115 @@ mod tests {
         let durable = fs::read_to_string(protocol_logs[0].path()).unwrap();
         assert!(durable.contains("\"direction\":\"client_to_provider\""));
         assert!(durable.contains("\"direction\":\"provider_to_client\""));
+        let _ = owner.shutdown();
+    }
+
+    #[test]
+    fn claude_images_materialize_before_completion_and_failures_latch() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let runtime = test_runtime(temp.path());
+        let thread_id = create_thread(&runtime, &workspace, "artifact guidance");
+        let event_rx = runtime
+            .lock()
+            .unwrap()
+            .subscribe_thread(pedelec_core::SubscribeThreadInput {
+                thread_id: thread_id.clone(),
+            })
+            .unwrap();
+        let stdin_log = temp.path().join("stdin.jsonl");
+        let start_log = temp.path().join("start.log");
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher = test_dispatcher(
+            owner.clone(),
+            Arc::clone(&runtime),
+            temp.path(),
+            &stdin_log,
+            &start_log,
+        );
+
+        dispatch_prepare(&dispatcher, &runtime, &thread_id);
+        wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+        let controller = dispatcher.current_controller(&thread_id).unwrap();
+
+        for (prompt, expected_count) in [
+            ("ARTIFACT_TOOL", 1),
+            ("ARTIFACT_MIXED", 1),
+            ("ARTIFACT_DUP", 1),
+            ("ARTIFACT_MULTI", 2),
+            ("ARTIFACT_USER_INPUT", 0),
+        ] {
+            dispatch_turn(&dispatcher, &runtime, &thread_id, prompt);
+            wait_for_status(&runtime, &thread_id, ThreadStatus::Idle);
+            let events = event_rx.try_iter().collect::<Vec<_>>();
+            let artifacts = events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    matches!(event, ThreadEvent::ProviderArtifact { .. }).then_some((index, event))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(artifacts.len(), expected_count, "{prompt}");
+            if prompt == "ARTIFACT_TOOL" {
+                let ThreadEvent::ProviderArtifact {
+                    artifact,
+                    operation_id,
+                    ..
+                } = artifacts[0].1
+                else {
+                    unreachable!()
+                };
+                assert_eq!(artifact.source, ProviderArtifactSource::ToolResult);
+                assert_eq!(artifact.tool_call_id.as_deref(), Some("tool-9"));
+                let artifact_position = artifacts[0].0;
+                let completion_position = events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            event,
+                            ThreadEvent::OperationCompleted {
+                                operation_id: completed_operation_id,
+                                success: true,
+                                ..
+                            } if completed_operation_id == operation_id
+                        )
+                    })
+                    .unwrap();
+                assert!(artifact_position < completion_position);
+            }
+            if prompt == "ARTIFACT_MIXED" {
+                let ThreadEvent::ProviderArtifact { artifact, .. } = artifacts[0].1 else {
+                    unreachable!()
+                };
+                assert_eq!(artifact.source, ProviderArtifactSource::ProviderArtifact);
+                assert_eq!(artifact.mime_type, "image/jpeg");
+            }
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ThreadEvent::OperationCompleted { success: true, .. }
+            )));
+        }
+
+        dispatch_turn(&dispatcher, &runtime, &thread_id, "ARTIFACT_BAD");
+        wait_for_status(&runtime, &thread_id, ThreadStatus::Error);
+        let failed_events = event_rx.try_iter().collect::<Vec<_>>();
+        assert!(!failed_events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::ProviderArtifact { .. })));
+        assert!(failed_events.iter().any(|event| matches!(
+            event,
+            ThreadEvent::Error { error, .. }
+                if error.code == error_codes::PROVIDER_ARTIFACT_INVALID
+        )));
+        assert!(failed_events.iter().any(|event| matches!(
+            event,
+            ThreadEvent::OperationCompleted { success: false, .. }
+        )));
+        assert_eq!(
+            controller.session_id().as_deref(),
+            Some("claude-session-fresh")
+        );
+
         let _ = owner.shutdown();
     }
 

@@ -2868,6 +2868,7 @@ dependencies = [
 name = "pedelec-ipc"
 version = "0.4.3"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "pedelec-cli",
@@ -2876,6 +2877,7 @@ dependencies = [
  "pedelec-shared",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -2896,10 +2898,12 @@ dependencies = [
 name = "pedelec-runtime"
 version = "0.4.3"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "pedelec-core",
  "pedelec-shared",
  "serde_json",
+ "sha2",
  "tempfile",
  "uuid",
 ]

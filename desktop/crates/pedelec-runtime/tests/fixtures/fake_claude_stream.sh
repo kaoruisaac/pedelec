@@ -48,6 +48,7 @@ while IFS= read -r line; do
   thinking_only=0
   nested_text=0
   multi_text=0
+  artifact_mode=""
   case "$line" in
     *THINKING_ONLY*) thinking_only=1 ;;
   esac
@@ -56,6 +57,14 @@ while IFS= read -r line; do
   esac
   case "$line" in
     *MULTI_TEXT*) multi_text=1 ;;
+  esac
+  case "$line" in
+    *ARTIFACT_TOOL*) artifact_mode="tool" ;;
+    *ARTIFACT_MIXED*) artifact_mode="mixed" ;;
+    *ARTIFACT_DUP*) artifact_mode="duplicate" ;;
+    *ARTIFACT_BAD*) artifact_mode="bad" ;;
+    *ARTIFACT_USER_INPUT*) artifact_mode="user-input" ;;
+    *ARTIFACT_MULTI*) artifact_mode="multi" ;;
   esac
 
   if [ "$thinking_only" -eq 0 ]; then
@@ -74,6 +83,30 @@ while IFS= read -r line; do
   elif [ "$thinking_only" -eq 0 ]; then
     printf '{"type":"assistant","message":{"content":[{"type":"text","text":"final-%s"}]}}\n' "$turn"
   fi
+
+  image='{"type":"image","id":"image-1","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jQQUAAAAASUVORK5CYII="}}'
+  jpeg_image='{"type":"image","id":"image-jpeg","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/2Q=="}}'
+  case "$artifact_mode" in
+    tool)
+      printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-9","content":[{"type":"text","text":"generated"},%s]}]}}\n' "$image"
+      ;;
+    mixed)
+      printf '{"type":"assistant","message":{"content":[{"type":"text","text":"with image"},%s]}}\n' "$jpeg_image"
+      ;;
+    duplicate)
+      printf '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":%s}}\n' "$image"
+      printf '{"type":"assistant","message":{"content":[{"type":"text","text":"with image"},%s]}}\n' "$image"
+      ;;
+    bad)
+      printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-bad","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"%%%"}}]}]}}'
+      ;;
+    user-input)
+      printf '{"type":"user","message":{"content":[%s]}}\n' "$image"
+      ;;
+    multi)
+      printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-multi","content":[{"type":"image","id":"multi-1","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jQQUAAAAASUVORK5CYII="}},{"type":"image","id":"multi-2","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jQQUAAAAASUVORK5CYII="}}]}]}}'
+      ;;
+  esac
 
   if [ "${FAKE_CLAUDE_STDERR:-}" = "1" ]; then
     printf '%s\n' 'fake Claude diagnostic' >&2

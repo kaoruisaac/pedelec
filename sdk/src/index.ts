@@ -34,6 +34,23 @@ export type Asset = {
   modifiedAt: number;
 };
 
+export type ProviderArtifactKind = "image" | "audio" | "video" | "file";
+export type ProviderArtifactSource = "image_generation" | "tool_result" | "provider_artifact";
+
+/** Metadata for a provider-generated file already materialized in Workspace assets. */
+export type ProviderArtifact = {
+  id: string;
+  provider: ProviderCode;
+  path: AssetPath;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  kind: ProviderArtifactKind;
+  source: ProviderArtifactSource;
+  providerArtifactId?: string;
+  toolCallId?: string;
+};
+
 export type DenoModuleDefinition<TName extends string = string> = {
   name: TName;
   description?: string;
@@ -305,6 +322,15 @@ export type ChatDeltaEventContext = PedelecEventContext & {
   eventReceivedAt: number;
 };
 
+export type ProviderArtifactEventContext = PedelecEventContext & {
+  type: "provider_artifact";
+  turnId: string;
+  turnStartedAt: number;
+  turnKind: "user";
+  eventReceivedAt: number;
+  source: "core";
+};
+
 export type ToolCallContext = PedelecEventContext & {
   type: "tool_call";
   toolRequestId: string;
@@ -353,6 +379,14 @@ type SessionEvent =
       seq?: number;
       operationId?: string;
       text: string;
+    }
+  | {
+      type: "provider_artifact";
+      channelId: string;
+      sessionId: string;
+      seq?: number;
+      operationId: string;
+      artifact: unknown;
     }
   | {
       type: "status_changed";
@@ -497,6 +531,7 @@ type EventDispatchMeta = {
 
 type ChatHandler = (text: string, ctx: ChatEventContext) => void;
 type ChatDeltaHandler = (text: string, ctx: ChatDeltaEventContext) => void;
+export type ProviderArtifactHandler = (artifact: ProviderArtifact, ctx: ProviderArtifactEventContext) => void;
 type GenericToolHandler<TToolName extends string = string> = (
   tool: TToolName,
   args: unknown,
@@ -1702,6 +1737,7 @@ export class PedelecSession<TToolName extends string = string> {
   private readonly namedToolHandlers = new Map<string, ToolSpecificHandler>();
   private readonly chatHandlers = new Set<ChatHandler>();
   private readonly chatDeltaHandlers = new Set<ChatDeltaHandler>();
+  private readonly artifactHandlers = new Set<ProviderArtifactHandler>();
   private readonly errorHandlers = new Set<ErrorHandler>();
   private readonly statusHandlers = new Set<StatusHandler>();
   private readonly endedHandlers = new Set<EndedHandler>();
@@ -1841,6 +1877,11 @@ export class PedelecSession<TToolName extends string = string> {
   onChatDelta(handler: ChatDeltaHandler): () => void {
     this.chatDeltaHandlers.add(handler);
     return () => this.chatDeltaHandlers.delete(handler);
+  }
+
+  onArtifact(handler: ProviderArtifactHandler): () => void {
+    this.artifactHandlers.add(handler);
+    return () => this.artifactHandlers.delete(handler);
   }
 
   onTool(handler: GenericToolHandler<TToolName>): () => void;
@@ -2072,6 +2113,25 @@ export class PedelecSession<TToolName extends string = string> {
       return;
     }
 
+    if (event.type === "provider_artifact") {
+      let artifact: ProviderArtifact;
+      try {
+        artifact = normalizeProviderArtifact(event.artifact);
+      } catch (error) {
+        this.emitError(normalizeError(error, "SDK_PROTOCOL_ERROR", "provider_artifact event had an invalid payload"), {
+          source: "sdk",
+          eventReceivedAt: meta.eventReceivedAt,
+        });
+        return;
+      }
+      const turn = this.requireOperationTurn(event.operationId, "provider_artifact", meta);
+      if (!turn || turn.kind === "prepare") return;
+      for (const handler of this.artifactHandlers) {
+        handler(artifact, this.createProviderArtifactContext(meta, turn));
+      }
+      return;
+    }
+
     if (event.type === "status_changed") {
       if (event.operationId && !this.matchesActiveOperation(event.operationId)) return;
       if (!event.operationId && this.activeTurn) return;
@@ -2288,7 +2348,7 @@ export class PedelecSession<TToolName extends string = string> {
 
   private requireOperationTurn(
     operationId: string | undefined,
-    type: "chat_delta" | "chat_message" | "tool_call",
+    type: "chat_delta" | "chat_message" | "provider_artifact" | "tool_call",
     meta: EventDispatchMeta,
   ): ActiveTurn | null {
     if (operationId && this.activeTurn?.turnId === operationId) {
@@ -2486,6 +2546,18 @@ export class PedelecSession<TToolName extends string = string> {
     };
   }
 
+  private createProviderArtifactContext(meta: EventDispatchMeta, turn: ActiveTurn): ProviderArtifactEventContext {
+    return {
+      ...this.createBaseContext(meta, turn),
+      type: "provider_artifact",
+      turnId: turn.turnId,
+      turnStartedAt: turn.turnStartedAt,
+      turnKind: "user",
+      eventReceivedAt: meta.eventReceivedAt ?? Date.now(),
+      source: "core",
+    };
+  }
+
   private createToolCallContext(
     event: Extract<SessionEvent, { type: "tool_call" }>,
     meta: EventDispatchMeta,
@@ -2535,6 +2607,7 @@ function isSessionEvent(message: PortMessage): message is SessionEvent {
   return (
     message.type === "chat_delta" ||
     message.type === "chat_message" ||
+    message.type === "provider_artifact" ||
     message.type === "status_changed" ||
     message.type === "tool_call" ||
     message.type === "operation_completed" ||
@@ -2559,6 +2632,42 @@ function isEffort(value: unknown): value is Effort {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeProviderArtifact(value: unknown): ProviderArtifact {
+  if (!isPlainObject(value)) {
+    throw makeError("SDK_PROTOCOL_ERROR", "provider_artifact event had an invalid artifact object");
+  }
+
+  const { id, provider, path, name, mimeType, sizeBytes, kind, source } = value;
+  const optionalIdIsValid = (key: "providerArtifactId" | "toolCallId") =>
+    !(key in value) || (typeof value[key] === "string" && value[key].trim().length > 0);
+  const validName = typeof name === "string" && name.trim().length > 0 &&
+    !name.includes("/") && !name.includes("\\") && name !== "." && name !== "..";
+  const validPath = isValidAssetPath(path) && path.slice(path.lastIndexOf("/") + 1) === name;
+  const validSize = typeof sizeBytes === "number" && Number.isFinite(sizeBytes) &&
+    Number.isInteger(sizeBytes) && sizeBytes >= 0;
+  const validKind = kind === "image" || kind === "audio" || kind === "video" || kind === "file";
+  const validSource = source === "image_generation" || source === "tool_result" || source === "provider_artifact";
+
+  if (typeof id !== "string" || id.trim().length === 0 || !isProviderCode(provider) || !validPath ||
+      !validName || typeof mimeType !== "string" || mimeType.trim().length === 0 || !validSize ||
+      !validKind || !validSource || !optionalIdIsValid("providerArtifactId") || !optionalIdIsValid("toolCallId")) {
+    throw makeError("SDK_PROTOCOL_ERROR", "provider_artifact event had an invalid artifact payload");
+  }
+
+  return {
+    id,
+    provider,
+    path,
+    name,
+    mimeType,
+    sizeBytes,
+    kind,
+    source,
+    ...(value.providerArtifactId === undefined ? {} : { providerArtifactId: value.providerArtifactId as string }),
+    ...(value.toolCallId === undefined ? {} : { toolCallId: value.toolCallId as string }),
+  };
 }
 
 function normalizePedelecSettings(value: unknown): PedelecSettings {

@@ -145,6 +145,56 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             }
             continue
         }
+        if ($request.params.prompt[0].text -eq 'inline-image') {
+            $result = @{
+                stopReason = 'end_turn'
+                content = @(@{ type = 'image'; data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jFZ0AAAAASUVORK5CYII='; mimeType = 'image/png' })
+            }
+            if ($null -ne $request.id) {
+                @{
+                    jsonrpc = '2.0'
+                    id = $request.id
+                    result = $result
+                } | ConvertTo-Json -Compress -Depth 12 | Write-Output
+                [Console]::Out.Flush()
+            }
+            continue
+        }
+        if ($request.params.prompt[0].text -eq 'cursor-generate-image') {
+            $imagePath = $env:FAKE_ACP_GENERATED_IMAGE
+            if ([string]::IsNullOrWhiteSpace($imagePath)) { $imagePath = 'C:/generated/icon.png' }
+            @{
+                jsonrpc = '2.0'
+                method = 'session/update'
+                params = @{
+                    sessionId = $sessionId
+                    update = @{
+                        sessionUpdate = 'tool_call'
+                        toolCallId = 'call-image-1'
+                    }
+                }
+            } | ConvertTo-Json -Compress -Depth 12 | Write-Output
+            @{
+                jsonrpc = '2.0'
+                method = 'cursor/generate_image'
+                params = @{
+                    toolCallId = 'call-image-1'
+                    description = 'generated image'
+                    filePath = $imagePath
+                }
+            } | ConvertTo-Json -Compress -Depth 12 | Write-Output
+            [Console]::Out.Flush()
+            $result = @{ stopReason = 'end_turn' }
+            if ($null -ne $request.id) {
+                @{
+                    jsonrpc = '2.0'
+                    id = $request.id
+                    result = $result
+                } | ConvertTo-Json -Compress -Depth 12 | Write-Output
+                [Console]::Out.Flush()
+            }
+            continue
+        }
         [Console]::Error.WriteLine('fake ACP diagnostic')
         [Console]::Error.Flush()
         if ($request.params.prompt[0].text -notlike 'concurrent-*') {
