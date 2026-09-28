@@ -1757,9 +1757,9 @@ describe("Pedelec SDK", () => {
     const request = pageWindow.lastSent();
     respondOk(pageWindow, request);
     const artifact = {
-      id: "artifact-1",
+      id: "art_abc123",
       provider: "codex",
-      path: "/provider-artifacts/codex/thread_1/image-1.png",
+      path: "/provider-artifacts/codex/thread_1/art_abc123-image-1.png",
       name: "image-1.png",
       mimeType: "image/png",
       sizeBytes: 42,
@@ -1767,6 +1767,7 @@ describe("Pedelec SDK", () => {
       source: "image_generation",
       providerArtifactId: "image-1",
     };
+    expect(artifact.name).not.toBe(artifact.path.slice(artifact.path.lastIndexOf("/") + 1));
 
     emitEvent(pageWindow, request, {
       type: "provider_artifact",
@@ -1778,6 +1779,8 @@ describe("Pedelec SDK", () => {
 
     expect(received).toHaveLength(1);
     expect(received[0].artifact).toEqual(artifact);
+    expect(received[0].artifact.name).toBe("image-1.png");
+    expect(received[0].artifact.path).toBe("/provider-artifacts/codex/thread_1/art_abc123-image-1.png");
     expect(received[0].ctx).toMatchObject({
       type: "provider_artifact",
       source: "core",
@@ -1804,6 +1807,43 @@ describe("Pedelec SDK", () => {
     await send;
     expect(resolved).toBe(true);
     expect(statuses).toEqual(["running", "idle"]);
+  });
+
+  it("accepts Core collision-safe provider artifact paths whose basename differs from logical name", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const received: any[] = [];
+    const errors: any[] = [];
+    session.onArtifact((artifact) => received.push(artifact));
+    session.onError((error) => errors.push(error));
+    const artifact = {
+      id: "art_abc123",
+      provider: "codex",
+      path: "/provider-artifacts/codex/thread_1/art_abc123-image.png",
+      name: "image.png",
+      mimeType: "image/png",
+      sizeBytes: 42,
+      kind: "image",
+      source: "image_generation",
+    };
+    expect(artifact.path.slice(artifact.path.lastIndexOf("/") + 1)).toBe("art_abc123-image.png");
+    expect(artifact.name).toBe("image.png");
+
+    const send = session.sendText("make an image");
+    const request = pageWindow.lastSent();
+    respondOk(pageWindow, request);
+    emitEvent(pageWindow, request, {
+      type: "provider_artifact",
+      sessionId: "thread_1",
+      seq: 1,
+      artifact,
+    });
+
+    expect(received).toEqual([artifact]);
+    expect(errors).toEqual([]);
+    expect(session.getStatus()).toBe("running");
+    emitEvent(pageWindow, request, { type: "operation_completed", sessionId: "thread_1", seq: 2 });
+    await send;
   });
 
   it("ignores stale operation artifacts and suppresses prepare-scoped artifacts", async () => {
@@ -1854,7 +1894,10 @@ describe("Pedelec SDK", () => {
     };
     const invalidArtifacts = [
       { ...valid, path: "/../image.png" },
-      { ...valid, path: "/different.png" },
+      { ...valid, path: "/provider-artifacts/codex/../image.png" },
+      { ...valid, path: "/provider-artifacts\\image.png" },
+      { ...valid, path: "" },
+      { ...valid, path: "image.png" },
       { ...valid, id: " " },
       { ...valid, provider: "unknown-provider" },
       { ...valid, kind: "document" },

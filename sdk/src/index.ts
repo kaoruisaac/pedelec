@@ -2644,7 +2644,9 @@ function normalizeProviderArtifact(value: unknown): ProviderArtifact {
     !(key in value) || (typeof value[key] === "string" && value[key].trim().length > 0);
   const validName = typeof name === "string" && name.trim().length > 0 &&
     !name.includes("/") && !name.includes("\\") && name !== "." && name !== "..";
-  const validPath = isValidAssetPath(path) && path.slice(path.lastIndexOf("/") + 1) === name;
+  // Core persists a collision-safe basename (`<artifact-id>-<name>`). Logical `name`
+  // and public `path` are validated independently.
+  const validPath = isValidAssetPath(path);
   const validSize = typeof sizeBytes === "number" && Number.isFinite(sizeBytes) &&
     Number.isInteger(sizeBytes) && sizeBytes >= 0;
   const validKind = kind === "image" || kind === "audio" || kind === "video" || kind === "file";
