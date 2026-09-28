@@ -1,49 +1,33 @@
 /**
- * Pinned Deno release metadata used by build/staging and release verification.
+ * Pinned Deno release metadata shared by release tooling.
  *
- * Keep this file free of runtime provisioning logic: the Desktop application
- * receives the raw executable as a Tauri resource and never downloads it.
+ * `desktop/deno-runtime-manifest.json` is the only authoritative copy.
+ * Desktop provisioning parses that same file at compile time.
  */
 
-export const DENO_VERSION = "2.9.5";
-export const DENO_RELEASE_TAG = `v${DENO_VERSION}`;
-export const DENO_RELEASE_BASE_URL =
-  `https://github.com/denoland/deno/releases/download/${DENO_RELEASE_TAG}`;
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const DENO_ARTIFACTS = Object.freeze({
-  "x86_64-pc-windows-msvc": Object.freeze({
-    platform: "win32",
-    artifact: "deno-x86_64-pc-windows-msvc.zip",
-    archiveSha256:
-      "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a",
-  }),
-  "aarch64-pc-windows-msvc": Object.freeze({
-    platform: "win32",
-    artifact: "deno-aarch64-pc-windows-msvc.zip",
-    archiveSha256:
-      "73f20b3566a0a6e3f6912fd7bf5b3a7ccd04d68414baedea3b397437bdec6472",
-  }),
-  "aarch64-apple-darwin": Object.freeze({
-    platform: "darwin",
-    artifact: "deno-aarch64-apple-darwin.zip",
-    archiveSha256:
-      "b796aadd131f6930560c1ee040cf0d6f53933fbb987464e9ff46bd7ea4830615",
-  }),
-  "x86_64-apple-darwin": Object.freeze({
-    platform: "darwin",
-    artifact: "deno-x86_64-apple-darwin.zip",
-    archiveSha256:
-      "c1b8b89a81e91b2a8b3f96def3195d08cfe3a105651da7908d53061f7140510d",
-  }),
-  "x86_64-unknown-linux-gnu": Object.freeze({
-    platform: "linux",
-    artifact: "deno-x86_64-unknown-linux-gnu.zip",
-    archiveSha256:
-      "8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530",
-  }),
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+export const DENO_RELEASE_MANIFEST_PATH = join(scriptDir, "..", "deno-runtime-manifest.json");
+
+export const SUPPORTED_DENO_TARGETS = Object.freeze([
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+]);
+
+const TARGET_PLATFORMS = Object.freeze({
+  "x86_64-pc-windows-msvc": "win32",
+  "aarch64-pc-windows-msvc": "win32",
+  "aarch64-apple-darwin": "darwin",
+  "x86_64-apple-darwin": "darwin",
+  "x86_64-unknown-linux-gnu": "linux",
 });
 
-export const DENO_RELEASE_ARTIFACTS = DENO_ARTIFACTS;
 export const PUBLIC_HELPER_BINARY_STEMS = Object.freeze([
   "pedelec-cli",
   "pedelec-deno",
@@ -51,7 +35,67 @@ export const PUBLIC_HELPER_BINARY_STEMS = Object.freeze([
   "pedelec-native-host",
 ]);
 export const RAW_DENO_BINARY_STEM = "deno";
-export const DENO_NOTICE_RESOURCE = "third-party-notices/DENO-LICENSE.txt";
+export const RAW_DENO_STAGED_NAMES = Object.freeze(["deno", "deno.exe"]);
+
+const manifest = JSON.parse(readFileSync(DENO_RELEASE_MANIFEST_PATH, "utf8"));
+assertValidDenoReleaseManifest(manifest);
+
+export const DENO_VERSION = manifest.version;
+export const DENO_RELEASE_TAG = `v${DENO_VERSION}`;
+export const DENO_NOTICE_RESOURCE = manifest.noticeResource;
+export const DENO_RELEASE_ARTIFACTS = Object.freeze(
+  Object.fromEntries(
+    Object.entries(manifest.artifacts).map(([target, artifact]) => [
+      target,
+      Object.freeze({ ...artifact }),
+    ]),
+  ),
+);
+
+export function assertValidDenoReleaseManifest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Deno release manifest must be an object.");
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(value.version) || value.version === "latest") {
+    throw new Error(`Deno release version must be a pinned semver, got "${value.version}".`);
+  }
+  if (value.noticeResource !== "third-party-notices/DENO-LICENSE.txt") {
+    throw new Error(`Unexpected Deno notice resource "${value.noticeResource}".`);
+  }
+  if (value.executableStem !== RAW_DENO_BINARY_STEM) {
+    throw new Error(`Unexpected Deno executable stem "${value.executableStem}".`);
+  }
+  const targets = Object.keys(value.artifacts ?? {});
+  if (targets.length !== SUPPORTED_DENO_TARGETS.length ||
+    SUPPORTED_DENO_TARGETS.some((target) => !value.artifacts[target])) {
+    throw new Error(
+      `Deno release manifest must contain exactly: ${SUPPORTED_DENO_TARGETS.join(", ")}.`,
+    );
+  }
+  for (const target of SUPPORTED_DENO_TARGETS) {
+    const artifact = value.artifacts[target];
+    const expectedPlatform = TARGET_PLATFORMS[target];
+    if (!artifact || artifact.platform !== expectedPlatform) {
+      throw new Error(
+        `Deno target "${target}" must declare platform "${expectedPlatform}".`,
+      );
+    }
+    if (artifact.artifact !== `deno-${target}.zip`) {
+      throw new Error(`Unexpected artifact name for ${target}: "${artifact.artifact}".`);
+    }
+    const expectedUrl =
+      `https://github.com/denoland/deno/releases/download/v${value.version}/${artifact.artifact}`;
+    if (artifact.url !== expectedUrl) {
+      throw new Error(`Deno artifact URL for ${target} does not match the pinned release.`);
+    }
+    if (!/^[0-9a-f]{64}$/.test(artifact.archiveSha256 ?? "")) {
+      throw new Error(`Invalid expected Deno artifact SHA-256 for ${target}.`);
+    }
+    if (!Number.isInteger(artifact.archiveSizeBytes) || artifact.archiveSizeBytes <= 0) {
+      throw new Error(`Deno artifact size for ${target} must be a positive integer.`);
+    }
+  }
+}
 
 function inferredTarget(platform, arch) {
   const targetByPlatform = {
@@ -78,14 +122,14 @@ export function resolveDenoTarget({
   arch = process.arch,
 } = {}) {
   const target = helperTarget || inferredTarget(platform, arch);
-  if (!target || !DENO_ARTIFACTS[target]) {
+  if (!target || !DENO_RELEASE_ARTIFACTS[target]) {
     const supplied = helperTarget || `${platform}/${arch}`;
     throw new Error(
       `Unsupported Deno build target "${supplied}". ` +
-        `Supported targets: ${Object.keys(DENO_ARTIFACTS).join(", ")}`,
+        `Supported targets: ${SUPPORTED_DENO_TARGETS.join(", ")}`,
     );
   }
-  if (DENO_ARTIFACTS[target].platform !== platform) {
+  if (DENO_RELEASE_ARTIFACTS[target].platform !== platform) {
     throw new Error(
       `Deno target "${target}" does not match host platform "${platform}".`,
     );
@@ -94,17 +138,16 @@ export function resolveDenoTarget({
 }
 
 export function denoArtifactForTarget(target) {
-  const metadata = DENO_ARTIFACTS[target];
+  const metadata = DENO_RELEASE_ARTIFACTS[target];
   if (!metadata) {
     throw new Error(
       `Unsupported Deno build target "${target}". ` +
-        `Supported targets: ${Object.keys(DENO_ARTIFACTS).join(", ")}`,
+        `Supported targets: ${SUPPORTED_DENO_TARGETS.join(", ")}`,
     );
   }
   return {
     target,
     ...metadata,
-    url: `${DENO_RELEASE_BASE_URL}/${metadata.artifact}`,
     executable: platformExecutableName(metadata.platform),
   };
 }

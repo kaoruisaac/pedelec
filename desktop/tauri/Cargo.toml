@@ -25,6 +25,7 @@ dirs = "6"
 jsonschema = { version = "0.46.5", default-features = false }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
 sha2 = "0.10"
+zip.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"

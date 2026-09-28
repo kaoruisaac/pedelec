@@ -1,8 +1,8 @@
 //! Execution-level coverage for logical Deno Module imports.
 //!
 //! These tests dispatch through [`super::DenoRuntimeOwner`] and the production
-//! `build_deno_command_args()` path. They require the staged raw Deno resource
-//! (`desktop/tauri/binaries/{deno,deno.exe}`) or `PEDELEC_TEST_DENO`.
+//! `build_deno_command_args()` path. They use `PEDELEC_TEST_DENO` or a managed
+//! runtime that has already been provisioned for the pinned Deno version.
 
 use super::{build_deno_command_args, DenoRuntimeOwner, DenoRuntimePolicy, PreparedDenoExecution};
 use pedelec_core::{
@@ -11,7 +11,8 @@ use pedelec_core::{
     CreateThreadSkillsInput, DenoModuleUploadState, DenoRunInput, DenoRunTarget, EffortLevel,
     OpenWorkspaceInput, ProviderCode, ThreadStatus, WorkspaceManager,
 };
-use pedelec_shared::paths::bundled_deno_binary_name;
+use pedelec_shared::deno_release::managed_runtime_executable_for_current;
+use pedelec_shared::paths::pedelec_home_dir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,22 +47,24 @@ fn resolve_test_deno_executable() -> Option<PathBuf> {
         assert_ne!(
             path.file_name().and_then(|name| name.to_str()),
             Some("pedelec-deno"),
-            "PEDELEC_TEST_DENO must point at the raw Deno resource, not pedelec-deno"
+            "PEDELEC_TEST_DENO must point at the managed Deno executable, not pedelec-deno"
+        );
+        assert_ne!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("pedelec-deno.exe"),
+            "PEDELEC_TEST_DENO must point at the managed Deno executable, not pedelec-deno"
         );
         return Some(path);
     }
 
-    let binary_name = bundled_deno_binary_name();
-    let mut current = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    loop {
-        let candidate = current.join("tauri").join("binaries").join(binary_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !current.pop() {
-            return None;
+    if let Ok(home) = pedelec_home_dir() {
+        if let Ok(path) = managed_runtime_executable_for_current(&home) {
+            if path.is_file() {
+                return Some(path);
+            }
         }
     }
+    None
 }
 
 fn test_deno_executable() -> Option<PathBuf> {
@@ -69,8 +72,7 @@ fn test_deno_executable() -> Option<PathBuf> {
         Some(path) => Some(path),
         None => {
             eprintln!(
-                "skipping real Deno execution fixture: stage desktop/tauri/binaries/{} or set PEDELEC_TEST_DENO",
-                bundled_deno_binary_name()
+                "skipping real Deno execution fixture: set PEDELEC_TEST_DENO or provision the pinned managed runtime"
             );
             None
         }

@@ -1,32 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 
-import {
-  DENO_VERSION,
-  platformExecutableName,
-} from "./deno-release.mjs";
-
-const scriptDir = dirname(fileURLToPath(import.meta.url));
-const desktopDir = resolve(scriptDir, "..");
-const defaultBinary = join(
-  desktopDir,
-  "tauri",
-  "binaries",
-  platformExecutableName(process.platform),
-);
+import { DENO_VERSION } from "./deno-release.mjs";
 
 function parseBinaryArg(argv) {
-  if (argv.length === 0) {
-    return defaultBinary;
-  }
   if (argv.length === 2 && argv[0] === "--binary") {
     return resolve(argv[1]);
   }
-  throw new Error("usage: node scripts/verify-deno-runtime.mjs [--binary <path>]");
+  throw new Error(
+    "usage: node scripts/verify-deno-runtime.mjs --binary <path>\n" +
+      "Raw Deno is not a bundled app resource. Pass a managed runtime executable.",
+  );
 }
 
 function run(binary, workspace, script, scriptArgs = [], expectedExitCode = 0) {

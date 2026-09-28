@@ -1,17 +1,11 @@
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { chmod, copyFile, mkdir, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inflateRawSync } from "node:zlib";
 
 import {
-  assertSha256,
-  denoArtifactForTarget,
-  DENO_VERSION,
-  platformExecutableName,
   publicHelperBinaryNames,
+  RAW_DENO_STAGED_NAMES,
   resolveDenoTarget,
 } from "./deno-release.mjs";
 
@@ -19,9 +13,6 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = join(scriptDir, "..");
 const tauriDir = join(desktopDir, "tauri");
 const resourceDir = join(tauriDir, "binaries");
-const placeholderPath = join(resourceDir, ".placeholder");
-const helperTarget = process.env.PEDELEC_HELPER_TARGET || "";
-const signingIdentity = process.env.APPLE_SIGNING_IDENTITY || "";
 
 function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -42,189 +33,19 @@ function runCommand(command, args, options = {}) {
   }
 }
 
-function sha256(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
+export async function removeStaleRawDeno(directory) {
+  for (const name of RAW_DENO_STAGED_NAMES) {
+    await rm(join(directory, name), { force: true });
+  }
 }
 
-function userCacheDir() {
-  if (process.platform === "win32") {
-    return process.env.LOCALAPPDATA
-      ? join(process.env.LOCALAPPDATA, "pedelec", "cache")
-      : join(homedir(), "AppData", "Local", "pedelec", "cache");
+export async function copyHelperBinaries(profileDir, directory, names) {
+  await mkdir(directory, { recursive: true });
+  for (const name of names) {
+    const destinationPath = join(directory, name);
+    await copyFile(join(profileDir, name), destinationPath);
+    await makeExecutable(destinationPath);
   }
-  if (process.platform === "darwin") {
-    return join(homedir(), "Library", "Caches", "pedelec");
-  }
-  return join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "pedelec");
-}
-
-function denoArchiveCachePath(metadata) {
-  return join(
-    userCacheDir(),
-    "deno",
-    `v${DENO_VERSION}`,
-    metadata.target,
-    metadata.artifact,
-  );
-}
-
-function verifyArchive(metadata, bytes) {
-  assertSha256(metadata.archiveSha256, sha256(bytes));
-  return bytes;
-}
-
-async function acquireVerifiedArchive(metadata) {
-  const localArchive = process.env.PEDELEC_DENO_ARCHIVE;
-  if (localArchive) {
-    console.log(`Using PEDELEC_DENO_ARCHIVE: ${localArchive}`);
-    return verifyArchive(metadata, await readFile(localArchive));
-  }
-
-  const cachePath = denoArchiveCachePath(metadata);
-  try {
-    const cached = await readFile(cachePath);
-    verifyArchive(metadata, cached);
-    console.log(`Using cached pinned Deno ${metadata.target} artifact: ${cachePath}`);
-    return cached;
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      console.warn(
-        `Ignoring invalid cached Deno artifact ${cachePath}: ${error instanceof Error ? error.message : error}`,
-      );
-      try {
-        await rm(cachePath, { force: true });
-      } catch {
-        // A read-only/busy cache must not prevent a fresh download.
-      }
-    }
-  }
-
-  console.log(`Downloading pinned Deno ${metadata.target} artifact.`);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120_000);
-  let bytes;
-  try {
-    const response = await fetch(metadata.url, {
-      signal: controller.signal,
-      headers: { "user-agent": "pedelec-tauri-stager" },
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} ${response.statusText}`);
-    }
-    bytes = Buffer.from(await response.arrayBuffer());
-  } catch (error) {
-    throw new Error(`Could not acquire Deno artifact ${metadata.url}: ${error}`);
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  verifyArchive(metadata, bytes);
-  try {
-    await mkdir(dirname(cachePath), { recursive: true });
-    await writeFile(cachePath, bytes);
-    console.log(`Cached pinned Deno ${metadata.target} artifact: ${cachePath}`);
-  } catch (error) {
-    console.warn(
-      `Could not cache Deno artifact ${cachePath}; continuing without cache: ${error instanceof Error ? error.message : error}`,
-    );
-  }
-  return bytes;
-}
-
-function readZipEntry(archive, expectedName) {
-  const minimumEndRecordSize = 22;
-  const maximumCommentSize = 0xffff;
-  const searchStart = Math.max(
-    0,
-    archive.length - minimumEndRecordSize - maximumCommentSize,
-  );
-  let endRecordOffset = -1;
-  for (let offset = archive.length - minimumEndRecordSize; offset >= searchStart; offset -= 1) {
-    if (archive.readUInt32LE(offset) === 0x06054b50) {
-      endRecordOffset = offset;
-      break;
-    }
-  }
-  if (endRecordOffset < 0) {
-    throw new Error("Deno artifact is not a supported ZIP archive.");
-  }
-
-  const centralDirectorySize = archive.readUInt32LE(endRecordOffset + 12);
-  const centralDirectoryOffset = archive.readUInt32LE(endRecordOffset + 16);
-  const centralDirectoryEnd = centralDirectoryOffset + centralDirectorySize;
-  if (centralDirectoryEnd > archive.length) {
-    throw new Error("Deno artifact ZIP central directory is truncated.");
-  }
-
-  const entries = [];
-  let cursor = centralDirectoryOffset;
-  while (cursor < centralDirectoryEnd) {
-    if (archive.readUInt32LE(cursor) !== 0x02014b50) {
-      throw new Error("Deno artifact ZIP has an invalid central directory entry.");
-    }
-    const flags = archive.readUInt16LE(cursor + 8);
-    const compressionMethod = archive.readUInt16LE(cursor + 10);
-    const compressedSize = archive.readUInt32LE(cursor + 20);
-    const uncompressedSize = archive.readUInt32LE(cursor + 24);
-    const nameLength = archive.readUInt16LE(cursor + 28);
-    const extraLength = archive.readUInt16LE(cursor + 30);
-    const commentLength = archive.readUInt16LE(cursor + 32);
-    const localHeaderOffset = archive.readUInt32LE(cursor + 42);
-    const nameStart = cursor + 46;
-    const nameEnd = nameStart + nameLength;
-    const entryEnd = nameEnd + extraLength + commentLength;
-    if (entryEnd > centralDirectoryEnd) {
-      throw new Error("Deno artifact ZIP central directory entry is truncated.");
-    }
-    entries.push({
-      flags,
-      compressionMethod,
-      compressedSize,
-      uncompressedSize,
-      localHeaderOffset,
-      name: archive.subarray(nameStart, nameEnd).toString("utf8"),
-    });
-    cursor = entryEnd;
-  }
-
-  const matches = entries.filter((entry) => entry.name === expectedName);
-  if (matches.length !== 1) {
-    throw new Error(
-      `Deno artifact must contain exactly one root-level ${expectedName} executable; found ${matches.length}.`,
-    );
-  }
-  const entry = matches[0];
-  if ((entry.flags & 0x1) !== 0) {
-    throw new Error("Encrypted Deno artifacts are not supported.");
-  }
-  if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
-    throw new Error(
-      `Unsupported compression method ${entry.compressionMethod} for ${expectedName}.`,
-    );
-  }
-
-  const localHeaderOffset = entry.localHeaderOffset;
-  if (
-    localHeaderOffset + 30 > archive.length ||
-    archive.readUInt32LE(localHeaderOffset) !== 0x04034b50
-  ) {
-    throw new Error(`Deno artifact local header is invalid for ${expectedName}.`);
-  }
-  const localNameLength = archive.readUInt16LE(localHeaderOffset + 26);
-  const localExtraLength = archive.readUInt16LE(localHeaderOffset + 28);
-  const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
-  const dataEnd = dataStart + entry.compressedSize;
-  if (dataEnd > archive.length) {
-    throw new Error(`Deno artifact data is truncated for ${expectedName}.`);
-  }
-
-  const compressed = archive.subarray(dataStart, dataEnd);
-  const extracted =
-    entry.compressionMethod === 0 ? compressed : inflateRawSync(compressed);
-  if (extracted.length !== entry.uncompressedSize) {
-    throw new Error(`Deno artifact size verification failed for ${expectedName}.`);
-  }
-  return extracted;
 }
 
 async function makeExecutable(path) {
@@ -234,6 +55,7 @@ async function makeExecutable(path) {
 }
 
 function signExecutable(path, label) {
+  const signingIdentity = process.env.APPLE_SIGNING_IDENTITY || "";
   if (process.platform !== "darwin") {
     return;
   }
@@ -271,16 +93,16 @@ function signExecutable(path, label) {
   }
 }
 
-async function stage() {
-  const target = resolveDenoTarget({
-    helperTarget,
-    platform: process.platform,
-    arch: process.arch,
-  });
-  const denoMetadata = denoArtifactForTarget(target);
-  const helperBinaryNames = publicHelperBinaryNames(process.platform);
-  const rawDenoName = platformExecutableName(process.platform);
-
+export async function stageHelperBinaries({
+  desktopDir,
+  resourceDir,
+  helperTarget = process.env.PEDELEC_HELPER_TARGET || "",
+  platform = process.platform,
+  arch = process.arch,
+  run = runCommand,
+}) {
+  resolveDenoTarget({ helperTarget, platform, arch });
+  const helperBinaryNames = publicHelperBinaryNames(platform);
   const cargoArgs = [
     "build",
     "--manifest-path",
@@ -293,42 +115,46 @@ async function stage() {
   }
 
   await mkdir(resourceDir, { recursive: true });
+  await removeStaleRawDeno(resourceDir);
+  const placeholderPath = join(resourceDir, ".placeholder");
   await writeFile(placeholderPath, "");
   try {
-    runCommand(process.platform === "win32" ? "cargo.exe" : "cargo", cargoArgs, {
+    run(platform === "win32" ? "cargo.exe" : "cargo", cargoArgs, {
       cwd: desktopDir,
     });
 
     const profileDir = helperTarget
       ? join(desktopDir, "target", helperTarget, "release")
       : join(desktopDir, "target", "release");
-
+    await copyHelperBinaries(profileDir, resourceDir, helperBinaryNames);
     for (const name of helperBinaryNames) {
-      const sourcePath = join(profileDir, name);
-      const destinationPath = join(resourceDir, name);
-      await copyFile(sourcePath, destinationPath);
-      await makeExecutable(destinationPath);
-      signExecutable(destinationPath, name);
+      signExecutable(join(resourceDir, name), name);
     }
-
-    const archive = await acquireVerifiedArchive(denoMetadata);
-    const rawDenoBytes = readZipEntry(archive, denoMetadata.executable);
-    const rawDenoPath = join(resourceDir, rawDenoName);
-    await writeFile(rawDenoPath, rawDenoBytes);
-    await makeExecutable(rawDenoPath);
-    signExecutable(rawDenoPath, rawDenoName);
-
-    console.log(
-      `Staged Pedelec helpers and Deno ${denoMetadata.target} ${rawDenoName} in ${resourceDir}.`,
-    );
+    await removeStaleRawDeno(resourceDir);
   } finally {
     await rm(placeholderPath, { force: true });
   }
 }
 
-try {
-  await stage();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+async function stage() {
+  await stageHelperBinaries({
+    desktopDir,
+    resourceDir,
+    helperTarget: process.env.PEDELEC_HELPER_TARGET || "",
+    platform: process.platform,
+    arch: process.arch,
+  });
+  console.log(`Staged Pedelec helper binaries in ${resourceDir}.`);
+}
+
+const isDirectExecution = process.argv[1]
+  && basename(process.argv[1]) === "stage-tauri-binaries.mjs";
+
+if (isDirectExecution) {
+  try {
+    await stage();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
 }

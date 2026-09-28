@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
   DENO_NOTICE_RESOURCE,
-  platformExecutableName,
   publicHelperBinaryNames,
 } from "./deno-release.mjs";
 
@@ -112,14 +111,8 @@ async function stageArchitecture(architecture) {
 
   await copyFile(join(targetReleaseDir, "pedelec-app.exe"), join(stageDir, "pedelec-app.exe"));
 
-  for (const binaryName of [
-    ...publicHelperBinaryNames("win32"),
-    platformExecutableName("win32"),
-  ]) {
-    const sourcePath = binaryName === platformExecutableName("win32")
-      ? join(tauriDir, "binaries", binaryName)
-      : join(targetReleaseDir, binaryName);
-    await copyFile(sourcePath, join(binariesDir, binaryName));
+  for (const binaryName of publicHelperBinaryNames("win32")) {
+    await copyFile(join(targetReleaseDir, binaryName), join(binariesDir, binaryName));
   }
   await copyFile(join(tauriDir, DENO_NOTICE_RESOURCE), join(stageDir, DENO_NOTICE_RESOURCE));
 

@@ -1,3 +1,7 @@
+use crate::app_preparation::{
+    run_idempotent_startup, should_present_main_window, AppPreparation, StartupProgress,
+    WindowPresentation,
+};
 use crate::directory_picker::TauriCoreIpcPlatformServices;
 use crate::effort_wizard::{cleanup_stale_probe_runs, EffortWizardOwner};
 #[cfg(debug_assertions)]
@@ -17,6 +21,7 @@ use crate::provider_installer::{
 use crate::provider_terminal::{
     open as open_provider_terminal_window, OpenProviderTerminalInput, OpenProviderTerminalOutput,
 };
+use crate::runtime_provision::ReqwestArchiveDownloader;
 use pedelec_core::{
     error_codes, refresh_shared_providers_force, start_initial_provider_scan,
     wait_for_provider_readiness, CheckOllamaConnectionInput, CheckOllamaConnectionOutput,
@@ -31,8 +36,9 @@ use pedelec_ipc::{
     start_provider_turn_with_dispatcher, PersistentRuntimeDispatcher, ProviderRuntimeDispatcher,
 };
 use pedelec_runtime::{DenoRuntimeOwner, ProviderRuntimeOwner};
-use pedelec_shared::paths::bundled_deno_binary_name;
-use std::path::PathBuf;
+use pedelec_shared::deno_release::current_deno_artifact;
+use pedelec_shared::paths::pedelec_home_dir;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use tauri::menu::{Menu, MenuItem};
@@ -76,7 +82,14 @@ pub fn run() {
         .manage(provider_runtime_dispatcher.clone())
         .manage(deno_runtime_owner)
         .manage(effort_wizard_owner)
+        .manage(AppPreparation::new())
+        .manage(WindowPresentation::new(should_present_main_window(
+            background_launch,
+        )))
         .invoke_handler(tauri::generate_handler![
+            crate::app_preparation::get_app_preparation_state,
+            crate::app_preparation::retry_app_preparation,
+            acknowledge_preparation_frame,
             create_thread,
             get_settings,
             update_settings,
@@ -176,36 +189,10 @@ pub fn run() {
                     err.message
                 )))
             })?;
-            let raw_deno_source =
-                required_bundled_binary_path(app, bundled_deno_binary_name(), "raw Deno")?;
-            deno_runtime_for_setup.set_executable_path(raw_deno_source);
-            // Provider detection is part of backend initialization, but it is
-            // intentionally detached from UI/Core IPC startup.
+            // Provider detection does not need the managed runtime and stays
+            // detached from Deno-dependent IPC startup.
             cleanup_stale_probe_runs();
             start_initial_provider_scan(runtime_for_setup.clone());
-            // A failed data plane must not prevent the desktop/control plane from starting.
-            let _asset_upload_server = start_asset_upload_server(runtime_for_setup.clone());
-            let platform_services =
-                Arc::new(TauriCoreIpcPlatformServices::new(app.handle().clone()));
-            let _ipc_handle = start_core_ipc_server_with_services_dispatchers(
-                runtime_for_setup.clone(),
-                platform_services,
-                Arc::new(provider_runtime_dispatcher.clone()),
-                Arc::new(deno_runtime_for_setup.clone()),
-            )
-            .map_err(|err| {
-                tauri::Error::from(std::io::Error::other(format!(
-                    "cannot start Core IPC server: {}",
-                    err.message
-                )))
-            })?;
-            forward_thread_events_to_tauri(app.handle().clone(), runtime_for_setup.clone());
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "Core IPC listening at {} (runtime: {})",
-                _ipc_handle.runtime_file.endpoint,
-                _ipc_handle.runtime_file_path.to_string_lossy()
-            );
             #[cfg(debug_assertions)]
             eprintln!(
                 "pedelec-cli installed at {}",
@@ -278,10 +265,36 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            if !background_launch {
-                show_main_window(app.handle());
-            }
+            let preparation = app.state::<AppPreparation>();
+            preparation.attach_app(app.handle().clone());
+            let services = Arc::new(DesktopServices {
+                progress: StartupProgress::new(),
+                deno: deno_runtime_for_setup.clone(),
+                runtime: runtime_for_setup.clone(),
+                provider_runtime: provider_runtime_dispatcher.clone(),
+                app: app.handle().clone(),
+            });
+            let home = pedelec_home_dir().map_err(|err| {
+                tauri::Error::from(std::io::Error::other(format!(
+                    "cannot resolve runtime directory: {}",
+                    err.message
+                )))
+            })?;
+            let plan = current_deno_artifact()
+                .map_err(|err| tauri::Error::from(std::io::Error::other(err)))?
+                .clone();
+            preparation.configure(
+                home,
+                plan,
+                Arc::new(ReqwestArchiveDownloader),
+                Arc::new(move |executable| services.start(&executable)),
+            );
+            preparation
+                .bootstrap()
+                .map_err(|err| tauri::Error::from(std::io::Error::other(err)))?;
 
+            // The window stays hidden until the frontend has painted a
+            // deterministic frame. Background launches never take that path.
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -323,19 +336,67 @@ fn bundled_binary_path(app: &App, binary_name: &str) -> Result<PathBuf, tauri::E
         .resolve(format!("binaries/{binary_name}"), BaseDirectory::Resource)
 }
 
-fn required_bundled_binary_path(
-    app: &App,
-    binary_name: &str,
-    label: &str,
-) -> Result<PathBuf, tauri::Error> {
-    let path = bundled_binary_path(app, binary_name)?;
-    if !path.is_absolute() || !path.is_file() {
-        return Err(tauri::Error::from(std::io::Error::other(format!(
-            "required {label} bundled resource is missing or invalid: {}",
-            path.display()
-        ))));
+struct DesktopServices {
+    progress: StartupProgress,
+    deno: DenoRuntimeOwner,
+    runtime: SharedCoreRuntime,
+    provider_runtime: ProviderRuntimeDispatcher,
+    app: tauri::AppHandle,
+}
+
+impl DesktopServices {
+    fn start(&self, executable: &Path) -> Result<(), String> {
+        let deno_for_path = self.deno.clone();
+        let runtime_for_upload = self.runtime.clone();
+        let runtime_for_ipc = self.runtime.clone();
+        let runtime_for_events = self.runtime.clone();
+        let provider_runtime = self.provider_runtime.clone();
+        let deno_for_ipc = self.deno.clone();
+        let app_for_ipc = self.app.clone();
+        let app_for_events = self.app.clone();
+        let executable = executable.to_path_buf();
+        run_idempotent_startup(
+            &self.progress,
+            move || deno_for_path.set_executable_path(executable),
+            move || {
+                // A failed data plane must not prevent the control plane from starting.
+                if let Err(err) = start_asset_upload_server(runtime_for_upload) {
+                    eprintln!("asset upload server did not start: {}", err.message);
+                }
+                Ok(())
+            },
+            move || {
+                let ipc_handle = start_core_ipc_server_with_services_dispatchers(
+                    runtime_for_ipc,
+                    Arc::new(TauriCoreIpcPlatformServices::new(app_for_ipc)),
+                    Arc::new(provider_runtime),
+                    Arc::new(deno_for_ipc),
+                )
+                .map_err(|err| {
+                    eprintln!("core ipc failed: {}", err.message);
+                    "core services did not start".to_string()
+                })?;
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "Core IPC listening at {} (runtime: {})",
+                    ipc_handle.runtime_file.endpoint,
+                    ipc_handle.runtime_file_path.to_string_lossy()
+                );
+                Ok(())
+            },
+            move || forward_thread_events_to_tauri(app_for_events, runtime_for_events),
+        )
     }
-    Ok(path)
+}
+
+#[tauri::command]
+fn acknowledge_preparation_frame(
+    app: tauri::AppHandle,
+    presentation: State<'_, WindowPresentation>,
+) {
+    if presentation.reveal_once() {
+        show_main_window(&app);
+    }
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -400,6 +461,12 @@ mod launch_mode_tests {
         assert!(should_show_window_for_second_instance(
             vec!["--open".into()]
         ));
+    }
+
+    #[test]
+    fn provisioning_does_not_force_a_background_launch_visible() {
+        assert!(!should_present_main_window(true));
+        assert!(should_present_main_window(false));
     }
 
     #[test]

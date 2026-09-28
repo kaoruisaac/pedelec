@@ -408,22 +408,30 @@ jobs:
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
 
-      - name: Verify Windows Deno resources and runtime
+      - name: Verify Windows bundle excludes raw Deno
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $resourceDir = Join-Path $PWD "desktop/tauri/binaries"
-          $expected = @("pedelec-cli.exe", "pedelec-deno.exe", "pedelec-agent.exe", "pedelec-native-host.exe", "deno.exe")
+          $expected = @("pedelec-cli.exe", "pedelec-deno.exe", "pedelec-agent.exe", "pedelec-native-host.exe")
           foreach ($name in $expected) {
             $path = Join-Path $resourceDir $name
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "Missing staged Windows Tauri resource: $name"
             }
           }
-          if (Test-Path -LiteralPath (Join-Path $resourceDir "deno") -PathType Leaf) {
-            throw "Unexpected extensionless raw Deno resource in Windows staging directory."
+          foreach ($name in @("deno", "deno.exe")) {
+            if (Test-Path -LiteralPath (Join-Path $resourceDir $name) -PathType Leaf) {
+              throw "Staged Windows resources must not contain raw Deno: $name"
+            }
           }
-          node desktop/scripts/verify-deno-runtime.mjs --binary (Join-Path $resourceDir "deno.exe")
+          node desktop/scripts/verify-release-bundle.mjs --dir $resourceDir --require-helpers
+          $bundleDir = Join-Path $PWD "desktop/target/release/bundle"
+          if (-not (Test-Path -LiteralPath $bundleDir -PathType Container)) {
+            throw "Windows bundle directory not found: $bundleDir"
+          }
+          node desktop/scripts/verify-release-bundle.mjs --dir $bundleDir
+          node desktop/scripts/verify-release-bundle.mjs --windows-updater $bundleDir
 
       - name: Build and upload macOS Tauri bundles
         if: runner.os == 'macOS'
@@ -451,10 +459,21 @@ jobs:
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
 
-      - name: Verify staged macOS Deno runtime
+      - name: Verify macOS bundle excludes raw Deno
         if: runner.os == 'macOS'
         shell: bash
-        run: node desktop/scripts/verify-deno-runtime.mjs --binary desktop/tauri/binaries/deno
+        run: |
+          set -euo pipefail
+          node desktop/scripts/verify-release-bundle.mjs --dir desktop/tauri/binaries --require-helpers
+          bundle_root="desktop/target/${PEDELEC_HELPER_TARGET}/release/bundle"
+          [ -d "$bundle_root" ] || { echo "Bundle directory not found: $bundle_root" >&2; exit 1; }
+          node desktop/scripts/verify-release-bundle.mjs --dir "$bundle_root"
+          if find "$bundle_root" -type f \( -name deno -o -name deno.exe \) -print -quit | grep -q .; then
+            echo "macOS bundle must not contain raw Deno" >&2
+            exit 1
+          fi
+        env:
+          PEDELEC_HELPER_TARGET: ${{ matrix.helper_target }}
 
       - name: Build and upload Linux Tauri bundle
         if: runner.os == 'Linux'
@@ -475,10 +494,16 @@ jobs:
           args: ${{ matrix.args }}
           assetNamePattern: "Pedelec-[version]-[platform]-[arch]-[bundle][ext]"
 
-      - name: Verify staged Linux Deno runtime
+      - name: Verify Linux staging excludes raw Deno
         if: runner.os == 'Linux'
         shell: bash
-        run: node desktop/scripts/verify-deno-runtime.mjs --binary desktop/tauri/binaries/deno
+        run: |
+          set -euo pipefail
+          node desktop/scripts/verify-release-bundle.mjs --dir desktop/tauri/binaries --require-helpers
+          if find desktop/tauri/binaries -type f \( -name deno -o -name deno.exe \) -print -quit | grep -q .; then
+            echo "Linux staging must not contain raw Deno" >&2
+            exit 1
+          fi
 
       - name: Verify Linux Debian bundle
         if: runner.os == 'Linux'
@@ -517,11 +542,20 @@ jobs:
             }
           }
 
+          require_deb_entry '/binaries/pedelec-cli$' 'pedelec-cli'
           require_deb_entry '/binaries/pedelec-deno$' 'pedelec-deno'
-          require_deb_entry '/binaries/deno$' 'raw deno'
+          require_deb_entry '/binaries/pedelec-agent$' 'pedelec-agent'
+          require_deb_entry '/binaries/pedelec-native-host$' 'pedelec-native-host'
           require_deb_entry '/third-party-notices/DENO-LICENSE\.txt$' 'Deno license notice'
+          require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-cli$' 'executable pedelec-cli'
           require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-deno$' 'executable pedelec-deno'
-          require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/deno$' 'executable raw deno'
+          require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-agent$' 'executable pedelec-agent'
+          require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-native-host$' 'executable pedelec-native-host'
+          if grep -Eq '/binaries/deno(\.exe)?$' <<<"$deb_contents"; then
+            echo "Debian bundle must not contain raw Deno" >&2
+            printf '%s\n' "$deb_contents" >&2
+            exit 1
+          fi
 
           forbidden_paths=()
           while IFS= read -r -d '' forbidden_path; do
@@ -594,7 +628,12 @@ jobs:
           xcrun stapler validate "$app_path"
 
           echo "Verifying helper binary signatures."
-          for helper_name in pedelec-cli pedelec-deno pedelec-agent pedelec-native-host deno; do
+          if find "$app_path" -type f \( -name deno -o -name deno.exe \) -print -quit | grep -q .; then
+            echo "macOS app bundle must not contain raw Deno" >&2
+            exit 1
+          fi
+
+          for helper_name in pedelec-cli pedelec-deno pedelec-agent pedelec-native-host; do
             helpers=()
             while IFS= read -r -d '' helper; do
               helpers+=("$helper")

@@ -100,8 +100,8 @@ impl DenoRuntimeOwner {
         }
     }
 
-    /// Lets Desktop resolve a Tauri resource after the application handle is
-    /// available while keeping the owner constructible in tests first.
+    /// Points the owner at a verified managed runtime after provisioning.
+    /// The executable path stays empty until that install is published.
     pub fn set_executable_path(&self, executable_path: impl Into<PathBuf>) {
         if let Ok(mut path) = self.inner.executable_path.lock() {
             *path = executable_path.into();

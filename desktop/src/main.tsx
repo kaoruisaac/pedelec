@@ -1,8 +1,10 @@
 import { render } from "solid-js/web";
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { updateStore } from "./updater/updateStore";
+import { PreparationMask } from "./preparation/PreparationMask";
+import { createPreparationStore } from "./preparation/preparationStore";
 import { EventMonitorApp } from "./event-monitor/EventMonitorApp";
 import HomePage from "./home/HomePage";
 import SettingsPage from "./settings/SettingsPage";
@@ -28,6 +30,17 @@ export function AppShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
   const [appVersion, setAppVersion] = createSignal<string | null>(null);
   const effortWizard = createEffortWizardStore();
+  const preparation = createPreparationStore();
+  let shell: HTMLDivElement | undefined;
+
+  createEffect(() => {
+    shell?.toggleAttribute("inert", preparation.state().blocking);
+  });
+
+  createEffect(() => {
+    preparation.state();
+    preparation.presentFrame();
+  });
 
   async function openEffortWizard(origin: EffortWizardEntryOrigin): Promise<void> {
     await effortWizard.openWizard(origin);
@@ -40,6 +53,7 @@ export function AppShell() {
     let pendingForegroundCheck = false;
 
     void effortWizard.initialize();
+    void preparation.initialize();
 
     void getVersion().then((version) => {
       if (disposed) return;
@@ -65,6 +79,7 @@ export function AppShell() {
     });
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (preparation.state().blocking) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "m") {
         setPage("monitor");
       }
@@ -74,6 +89,7 @@ export function AppShell() {
     onCleanup(() => {
       disposed = true;
       effortWizard.dispose();
+      preparation.dispose();
       unlistenFocus?.();
       window.removeEventListener("keydown", handleKeyDown);
     });
@@ -82,9 +98,11 @@ export function AppShell() {
   return (
     <PopUpProvider>
       <div
+        ref={shell}
         class="app-shell"
         classList={{
           "is-sidebar-collapsed": sidebarCollapsed(),
+          "is-blocked": preparation.state().blocking,
         }}
       >
         <aside class="app-sidebar" aria-label="Main menu">
@@ -156,7 +174,10 @@ export function AppShell() {
                   class="app-nav-item"
                   classList={{ "is-active": page() === key }}
                   title={label}
-                  onClick={() => setPage(key)}
+                  onClick={() => {
+                    if (preparation.state().blocking) return;
+                    setPage(key);
+                  }}
                 >
                   <span class="app-nav-icon" aria-hidden="true">
                     {key === "home" ? "H" : key === "settings" ? "S" : "E"}
@@ -194,6 +215,9 @@ export function AppShell() {
           </div>
         </section>
       </div>
+      <Show when={preparation.state().blocking}>
+        <PreparationMask state={preparation.state} onRetry={() => void preparation.retry()} />
+      </Show>
     </PopUpProvider>
   );
 }

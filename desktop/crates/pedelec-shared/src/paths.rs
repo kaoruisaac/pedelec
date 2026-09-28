@@ -100,14 +100,79 @@ pub fn pedelec_native_host_binary_name() -> &'static str {
         "pedelec-native-host"
     }
 }
-/// Name of the raw Deno executable kept as an internal Desktop resource.
+/// File name of the managed Deno executable for this host.
 /// This is intentionally distinct from the public `pedelec-deno` helper.
-pub fn bundled_deno_binary_name() -> &'static str {
+pub fn deno_executable_file_name() -> &'static str {
     if cfg!(windows) {
         "deno.exe"
     } else {
         "deno"
     }
+}
+
+pub fn managed_deno_runtimes_root(pedelec_home: &Path) -> PathBuf {
+    pedelec_home.join("runtimes").join("deno")
+}
+
+pub fn managed_deno_runtime_dir(
+    pedelec_home: &Path,
+    version: &str,
+    target: &str,
+) -> Result<PathBuf, PedelecError> {
+    validate_runtime_component("version", version)?;
+    validate_runtime_component("target", target)?;
+    Ok(managed_deno_runtimes_root(pedelec_home)
+        .join(version)
+        .join(target))
+}
+
+pub fn managed_deno_executable_path(
+    pedelec_home: &Path,
+    version: &str,
+    target: &str,
+    executable_name: &str,
+) -> Result<PathBuf, PedelecError> {
+    validate_executable_name(executable_name)?;
+    Ok(managed_deno_runtime_dir(pedelec_home, version, target)?.join(executable_name))
+}
+
+/// Attempt-scoped downloads and extracts live here, never in a finalized version directory.
+pub fn managed_deno_partial_dir(
+    pedelec_home: &Path,
+    version: &str,
+    target: &str,
+) -> Result<PathBuf, PedelecError> {
+    validate_runtime_component("version", version)?;
+    validate_runtime_component("target", target)?;
+    Ok(managed_deno_runtimes_root(pedelec_home)
+        .join(".partial")
+        .join(version)
+        .join(target))
+}
+
+fn validate_runtime_component(label: &str, value: &str) -> Result<(), PedelecError> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains(['/', '\\', '\0'])
+        || value.starts_with('.')
+    {
+        return Err(PedelecError::new(
+            error_codes::CORE_RUNTIME_UNAVAILABLE,
+            format!("invalid Deno runtime {label}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_executable_name(value: &str) -> Result<(), PedelecError> {
+    if value != "deno" && value != "deno.exe" {
+        return Err(PedelecError::new(
+            error_codes::CORE_RUNTIME_UNAVAILABLE,
+            "invalid Deno runtime executable name",
+        ));
+    }
+    Ok(())
 }
 pub fn pedelec_tool_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_tool_binary_name()))
@@ -197,17 +262,62 @@ fn launch_error(reason: impl Into<String>, detail: impl Into<String>) -> Pedelec
 
 #[cfg(test)]
 mod tests {
-    use super::{bundled_deno_binary_name, path_for_external_use};
+    use super::{
+        deno_executable_file_name, managed_deno_executable_path, managed_deno_partial_dir,
+        path_for_external_use,
+    };
     use std::path::Path;
 
     #[test]
-    fn raw_deno_resource_name_is_not_the_public_helper_name() {
-        assert_ne!(bundled_deno_binary_name(), "pedelec-deno");
-        assert_ne!(bundled_deno_binary_name(), "pedelec-deno.exe");
+    fn managed_deno_executable_is_version_and_target_specific() {
+        let home = Path::new("/home/user/.pedelec");
+        let executable_name = deno_executable_file_name();
+        let path = managed_deno_executable_path(
+            home,
+            "2.9.5",
+            "x86_64-unknown-linux-gnu",
+            executable_name,
+        )
+        .unwrap();
         assert_eq!(
-            bundled_deno_binary_name(),
-            if cfg!(windows) { "deno.exe" } else { "deno" }
+            path,
+            home.join("runtimes")
+                .join("deno")
+                .join("2.9.5")
+                .join("x86_64-unknown-linux-gnu")
+                .join(executable_name)
         );
+        assert_ne!(executable_name, "pedelec-deno");
+        assert_ne!(executable_name, "pedelec-deno.exe");
+    }
+
+    #[test]
+    fn partial_runtime_files_stay_outside_the_final_directory() {
+        let home = Path::new("/home/user/.pedelec");
+        let partial = managed_deno_partial_dir(home, "2.9.5", "x86_64-pc-windows-msvc").unwrap();
+        let final_dir =
+            super::managed_deno_runtime_dir(home, "2.9.5", "x86_64-pc-windows-msvc").unwrap();
+        assert!(partial
+            .components()
+            .any(|component| component.as_os_str() == ".partial"));
+        assert!(!final_dir.starts_with(&partial));
+        assert!(!partial.starts_with(&final_dir));
+    }
+
+    #[test]
+    fn runtime_path_components_reject_traversal() {
+        let home = Path::new("/home/user/.pedelec");
+        assert!(
+            managed_deno_executable_path(home, "..", "x86_64-pc-windows-msvc", "deno.exe").is_err()
+        );
+        assert!(managed_deno_executable_path(home, "2.9.5", "a/b", "deno.exe").is_err());
+        assert!(managed_deno_executable_path(
+            home,
+            "2.9.5",
+            "x86_64-pc-windows-msvc",
+            "pedelec-deno"
+        )
+        .is_err());
     }
 
     #[cfg(windows)]
