@@ -2,6 +2,7 @@ use crate::runtime_provision::{
     provision_managed_runtime, AppPreparationSnapshot, AppPreparationState, ArchiveDownload,
     ProvisionError, APP_PREPARATION_EVENT,
 };
+use pedelec_runtime::ManagedDenoRuntime;
 use pedelec_shared::deno_release::DenoArtifact;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +33,7 @@ struct PreparationConfig {
     home: PathBuf,
     plan: DenoArtifact,
     downloader: Arc<dyn ArchiveDownload>,
-    on_ready: Arc<dyn Fn(PathBuf) -> Result<(), String> + Send + Sync>,
+    on_ready: Arc<dyn Fn(ManagedDenoRuntime) -> Result<(), String> + Send + Sync>,
 }
 
 pub struct StartupGate {
@@ -104,12 +105,12 @@ impl Default for StartupProgress {
 
 pub fn run_idempotent_startup(
     progress: &StartupProgress,
-    set_path: impl FnOnce(),
+    configure_runtime: impl FnOnce() -> Result<(), String>,
     upload: impl FnOnce() -> Result<(), String>,
     ipc: impl FnOnce() -> Result<(), String>,
     events: impl FnOnce(),
 ) -> Result<(), String> {
-    set_path();
+    configure_runtime()?;
     if !progress.upload.load(Ordering::SeqCst) {
         upload()?;
         progress.upload.store(true, Ordering::SeqCst);
@@ -162,7 +163,7 @@ impl AppPreparation {
         home: PathBuf,
         plan: DenoArtifact,
         downloader: Arc<dyn ArchiveDownload>,
-        on_ready: Arc<dyn Fn(PathBuf) -> Result<(), String> + Send + Sync>,
+        on_ready: Arc<dyn Fn(ManagedDenoRuntime) -> Result<(), String> + Send + Sync>,
     ) {
         *self.inner.config.lock().unwrap() = Some(PreparationConfig {
             home,
@@ -337,16 +338,23 @@ impl AppPreparation {
         }
     }
 
-    fn continue_startup(&self, path: &Path) -> Result<(), String> {
-        let on_ready = {
+    fn continue_startup(&self, executable: &Path) -> Result<(), String> {
+        let (on_ready, home, version, target) = {
             let config = self.inner.config.lock().unwrap();
-            config.as_ref().map(|config| Arc::clone(&config.on_ready))
+            let Some(config) = config.as_ref() else {
+                return Err("runtime provisioning is not configured".to_string());
+            };
+            (
+                Arc::clone(&config.on_ready),
+                config.home.clone(),
+                config.plan.version.clone(),
+                config.plan.target.clone(),
+            )
         };
-        let Some(on_ready) = on_ready else {
-            return Err("runtime provisioning is not configured".to_string());
-        };
-        let executable = path.to_path_buf();
-        self.inner.gate.on_ready(move || on_ready(executable))
+        let cache_dir = pedelec_shared::paths::managed_deno_cache_dir(&home, &version, &target)
+            .map_err(|err| err.message)?;
+        let runtime = ManagedDenoRuntime::new(executable, cache_dir).map_err(|err| err.message)?;
+        self.inner.gate.on_ready(move || on_ready(runtime))
     }
 
     fn publish_attempt(&self, attempt: u64, state: AppPreparationState) {
@@ -557,8 +565,10 @@ mod tests {
             temp.path().to_path_buf(),
             plan,
             provisioner,
-            Arc::new(move |path| {
-                assert!(path.is_file());
+            Arc::new(move |runtime| {
+                assert!(runtime.executable_path.is_file());
+                assert!(runtime.cache_dir.is_dir());
+                assert_eq!(runtime.cache_dir.parent(), runtime.executable_path.parent());
                 recorded.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }),
@@ -613,7 +623,7 @@ mod tests {
         let events = AtomicU32::new(0);
         let err = run_idempotent_startup(
             &progress,
-            || {},
+            || Ok(()),
             || {
                 uploads.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -629,7 +639,7 @@ mod tests {
         assert!(err.is_err());
         run_idempotent_startup(
             &progress,
-            || {},
+            || Ok(()),
             || {
                 uploads.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -645,7 +655,7 @@ mod tests {
         .unwrap();
         run_idempotent_startup(
             &progress,
-            || {},
+            || Ok(()),
             || {
                 uploads.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -709,12 +719,18 @@ mod tests {
         *preparation.inner.listener.lock().unwrap() = Some(Arc::new(move |snapshot| {
             recorded.lock().unwrap().push(snapshot);
         }));
+        let expected_cache =
+            pedelec_shared::paths::managed_deno_cache_dir(temp.path(), &plan.version, &plan.target)
+                .unwrap();
         preparation.configure(
             temp.path().to_path_buf(),
             plan,
             downloader,
-            Arc::new(|path| {
-                assert_eq!(std::fs::read(path).unwrap(), b"already");
+            Arc::new(move |runtime| {
+                assert_eq!(std::fs::read(&runtime.executable_path).unwrap(), b"already");
+                assert_eq!(runtime.cache_dir, expected_cache);
+                assert!(runtime.cache_dir.is_dir());
+                assert_eq!(runtime.cache_dir.parent(), runtime.executable_path.parent());
                 Ok(())
             }),
         );
@@ -748,6 +764,71 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(ProvisionError::new("download should not run"))
         }
+    }
+
+    #[test]
+    fn runtime_configuration_failure_stops_startup_before_later_steps() {
+        let progress = StartupProgress::new();
+        let uploads = AtomicU32::new(0);
+        let err = run_idempotent_startup(
+            &progress,
+            || Err("cache unavailable".into()),
+            || {
+                uploads.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            || Ok(()),
+            || {},
+        );
+        assert!(err.is_err());
+        assert_eq!(uploads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ready_requires_a_usable_managed_cache_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable_name = deno_executable_file_name();
+        let body = zip_archive(&[(executable_name, b"already")]);
+        let plan = plan_for(&body);
+        let executable = temp
+            .path()
+            .join("runtimes")
+            .join("deno")
+            .join(&plan.version)
+            .join(&plan.target)
+            .join(executable_name);
+        let cache =
+            pedelec_shared::paths::managed_deno_cache_dir(temp.path(), &plan.version, &plan.target)
+                .unwrap();
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"already").unwrap();
+        std::fs::write(&cache, b"not-a-directory").unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&calls);
+        let preparation = AppPreparation::with_mode(true);
+        preparation.configure(
+            temp.path().to_path_buf(),
+            plan.clone(),
+            Arc::new(CountingDownload {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(move |_| {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        );
+        assert!(preparation.bootstrap().is_err());
+        assert!(matches!(
+            preparation.snapshot().state,
+            AppPreparationState::Failed
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        std::fs::remove_file(&cache).unwrap();
+        let retried = preparation.retry();
+        assert!(matches!(retried.state, AppPreparationState::Ready));
+        assert!(cache.is_dir());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

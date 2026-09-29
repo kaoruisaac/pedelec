@@ -136,6 +136,15 @@ pub fn managed_deno_executable_path(
     Ok(managed_deno_runtime_dir(pedelec_home, version, target)?.join(executable_name))
 }
 
+/// Deno-owned cache for one managed runtime. This is a path only; callers create it.
+pub fn managed_deno_cache_dir(
+    pedelec_home: &Path,
+    version: &str,
+    target: &str,
+) -> Result<PathBuf, PedelecError> {
+    Ok(managed_deno_runtime_dir(pedelec_home, version, target)?.join("cache"))
+}
+
 /// Attempt-scoped downloads and extracts live here, never in a finalized version directory.
 pub fn managed_deno_partial_dir(
     pedelec_home: &Path,
@@ -263,8 +272,8 @@ fn launch_error(reason: impl Into<String>, detail: impl Into<String>) -> Pedelec
 #[cfg(test)]
 mod tests {
     use super::{
-        deno_executable_file_name, managed_deno_executable_path, managed_deno_partial_dir,
-        path_for_external_use,
+        deno_executable_file_name, managed_deno_cache_dir, managed_deno_executable_path,
+        managed_deno_partial_dir, path_for_external_use,
     };
     use std::path::Path;
 
@@ -289,6 +298,29 @@ mod tests {
         );
         assert_ne!(executable_name, "pedelec-deno");
         assert_ne!(executable_name, "pedelec-deno.exe");
+    }
+
+    #[test]
+    fn managed_deno_cache_is_version_and_target_specific() {
+        let home = Path::new("/home/user/.pedelec");
+        let workspace = Path::new("/home/user/project");
+        let cache = managed_deno_cache_dir(home, "2.9.5", "x86_64-pc-windows-msvc").unwrap();
+        let runtime_dir =
+            super::managed_deno_runtime_dir(home, "2.9.5", "x86_64-pc-windows-msvc").unwrap();
+        assert_eq!(cache, runtime_dir.join("cache"));
+        assert!(cache.starts_with(&runtime_dir));
+        assert_ne!(
+            managed_deno_cache_dir(home, "2.9.6", "x86_64-pc-windows-msvc").unwrap(),
+            cache
+        );
+        assert_ne!(
+            managed_deno_cache_dir(home, "2.9.5", "aarch64-apple-darwin").unwrap(),
+            cache
+        );
+        assert!(!cache.starts_with(workspace));
+        assert!(managed_deno_cache_dir(home, "..", "x86_64-pc-windows-msvc").is_err());
+        assert!(managed_deno_cache_dir(home, "2.9.5", "a/b").is_err());
+        assert!(managed_deno_cache_dir(home, ".2.9.5", "x86_64-pc-windows-msvc").is_err());
     }
 
     #[test]

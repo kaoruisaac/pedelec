@@ -1,6 +1,6 @@
 use pedelec_core::{
-    error_codes, workspace_runtime_data_root, DenoExecutionIntent, DenoExecutionOwner,
-    DenoExecutionTarget, DenoRunOutput, DenoRuntimeDispatcher, PedelecError,
+    error_codes, DenoExecutionIntent, DenoExecutionOwner, DenoExecutionTarget, DenoRunOutput,
+    DenoRuntimeDispatcher, PedelecError,
 };
 use pedelec_shared::paths::path_for_external_use;
 use std::collections::HashMap;
@@ -69,9 +69,32 @@ impl Drop for ActiveDenoRun {
     }
 }
 
+/// Managed Deno executable and the Deno-owned cache that belongs to it.
+/// Both values are installed together so dispatch never sees a half-configured runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedDenoRuntime {
+    pub executable_path: PathBuf,
+    pub cache_dir: PathBuf,
+}
+
+impl ManagedDenoRuntime {
+    /// Validates and creates `cache_dir` as a real directory. Does not touch a workspace.
+    pub fn new(
+        executable_path: impl Into<PathBuf>,
+        cache_dir: impl Into<PathBuf>,
+    ) -> Result<Self, PedelecError> {
+        let runtime = Self {
+            executable_path: executable_path.into(),
+            cache_dir: cache_dir.into(),
+        };
+        ensure_managed_cache_directory(&runtime.cache_dir)?;
+        Ok(runtime)
+    }
+}
+
 #[derive(Debug)]
 struct DenoRuntimeInner {
-    executable_path: Mutex<PathBuf>,
+    runtime: Mutex<Option<ManagedDenoRuntime>>,
     policy: DenoRuntimePolicy,
     active_runs: Mutex<HashMap<String, ActiveDenoRunEntry>>,
     shutting_down: AtomicBool,
@@ -79,20 +102,23 @@ struct DenoRuntimeInner {
 
 /// Desktop-owned raw-Deno process owner.  It has no dependency on the App
 /// Tool broker and maintains one active child per Pedelec thread.
+///
+/// The owner starts unconfigured. Dispatch fails until [`Self::configure`]
+/// installs the managed executable and cache together.
 #[derive(Debug, Clone)]
 pub struct DenoRuntimeOwner {
     inner: Arc<DenoRuntimeInner>,
 }
 
 impl DenoRuntimeOwner {
-    pub fn new(executable_path: impl Into<PathBuf>) -> Self {
-        Self::with_policy(executable_path, DenoRuntimePolicy::default())
+    pub fn new() -> Self {
+        Self::with_policy(DenoRuntimePolicy::default())
     }
 
-    pub fn with_policy(executable_path: impl Into<PathBuf>, policy: DenoRuntimePolicy) -> Self {
+    pub fn with_policy(policy: DenoRuntimePolicy) -> Self {
         Self {
             inner: Arc::new(DenoRuntimeInner {
-                executable_path: Mutex::new(executable_path.into()),
+                runtime: Mutex::new(None),
                 policy,
                 active_runs: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
@@ -100,20 +126,36 @@ impl DenoRuntimeOwner {
         }
     }
 
-    /// Points the owner at a verified managed runtime after provisioning.
-    /// The executable path stays empty until that install is published.
-    pub fn set_executable_path(&self, executable_path: impl Into<PathBuf>) {
-        if let Ok(mut path) = self.inner.executable_path.lock() {
-            *path = executable_path.into();
-        }
+    /// Installs the managed executable and cache as one runtime configuration.
+    pub fn configure(&self, runtime: ManagedDenoRuntime) -> Result<(), PedelecError> {
+        ensure_managed_cache_directory(&runtime.cache_dir)?;
+        let mut slot = self.inner.runtime.lock().map_err(|_| {
+            PedelecError::new(
+                error_codes::DENO_RUNTIME_UNAVAILABLE,
+                "Deno runtime configuration is unavailable",
+            )
+        })?;
+        *slot = Some(runtime);
+        Ok(())
     }
 
-    pub fn executable_path(&self) -> PathBuf {
+    fn managed_runtime(&self) -> Result<ManagedDenoRuntime, PedelecError> {
         self.inner
-            .executable_path
+            .runtime
             .lock()
-            .map(|path| path.clone())
-            .unwrap_or_default()
+            .map_err(|_| {
+                PedelecError::new(
+                    error_codes::DENO_RUNTIME_UNAVAILABLE,
+                    "Deno runtime configuration is unavailable",
+                )
+            })?
+            .clone()
+            .ok_or_else(|| {
+                PedelecError::new(
+                    error_codes::DENO_RUNTIME_UNAVAILABLE,
+                    "Deno runtime is not configured",
+                )
+            })
     }
 
     pub fn active_run_count(&self) -> usize {
@@ -209,20 +251,21 @@ impl DenoRuntimeOwner {
             run: Arc::clone(&run),
         };
 
-        let executable_path = self.executable_path();
-        validate_executable_path(&executable_path, &execution_id)?;
+        let runtime = self.managed_runtime()?;
+        validate_executable_path(&runtime.executable_path, &execution_id)?;
+        ensure_managed_cache_directory(&runtime.cache_dir)?;
         let prepared = PreparedDenoExecution::prepare(&intent)?;
         let command_args = build_deno_command_args(&prepared);
 
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(deno_unavailable_error(
                 &execution_id,
-                &executable_path,
+                &runtime.executable_path,
                 "Deno runtime owner is shutting down",
             ));
         }
 
-        let mut command = Command::new(&executable_path);
+        let mut command = Command::new(&runtime.executable_path);
         command
             .args(command_args)
             .current_dir(prepared.workspace())
@@ -235,8 +278,9 @@ impl DenoRuntimeOwner {
             .stderr(Stdio::piped())
             // Do not inherit arbitrary host variables.  These are runtime
             // implementation values, not script-visible host configuration.
+            // DENO_DIR is the managed runtime cache, not a script permission.
             .env_clear()
-            .env("DENO_DIR", prepared.cache_dir())
+            .env("DENO_DIR", path_for_external_use(&runtime.cache_dir))
             .env("DENO_NO_UPDATE_CHECK", "1")
             .env("NO_COLOR", "1");
         #[cfg(windows)]
@@ -248,7 +292,7 @@ impl DenoRuntimeOwner {
                 "could not start the configured Deno runtime",
                 serde_json::json!({
                     "executionId": execution_id,
-                    "executablePath": executable_path,
+                    "executablePath": &runtime.executable_path,
                     "error": err.to_string(),
                 }),
             )
@@ -495,11 +539,11 @@ fn execution_label(intent: &DenoExecutionIntent) -> String {
 
 /// One Deno execution resolved to a single canonical workspace root.
 ///
-/// Every filesystem-sensitive execution value - sandbox permission flags,
-/// process cwd, the executed entrypoint, and the Pedelec-owned Deno cache -
-/// is derived from `workspace`, so no two aliases of the same directory (for
-/// example macOS `/var` versus `/private/var`) can be mixed inside one
-/// invocation.
+/// Filesystem permission flags, process cwd, the executed entrypoint, and a
+/// thread import map are derived from `workspace`, so no two aliases of the
+/// same directory (for example macOS `/var` versus `/private/var`) can be
+/// mixed inside one invocation. The Deno-owned cache is not part of this
+/// value; it belongs to the managed runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PreparedDenoTarget {
     WorkspaceFile(PathBuf),
@@ -510,7 +554,6 @@ enum PreparedDenoTarget {
 pub struct PreparedDenoExecution {
     workspace: PathBuf,
     target: PreparedDenoTarget,
-    cache_dir: PathBuf,
     import_map_path: Option<PathBuf>,
     args: Vec<String>,
 }
@@ -572,11 +615,9 @@ impl PreparedDenoExecution {
                 .map(|path| prepare_import_map_path(path, &workspace, &intent.thread_id))
                 .transpose()?
         };
-        let cache_dir = prepare_deno_cache_dir(&workspace)?;
         Ok(Self {
             workspace,
             target,
-            cache_dir,
             import_map_path,
             args: intent.args.clone(),
         })
@@ -600,11 +641,6 @@ impl PreparedDenoExecution {
             PreparedDenoTarget::WorkspaceFile(_) => None,
             PreparedDenoTarget::StdinSource(source) => Some(source.as_str()),
         }
-    }
-
-    /// The Pedelec-owned Deno cache, always inside [`Self::workspace`].
-    pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
     }
 
     /// The canonical Core-owned import map, when this execution belongs to a
@@ -759,24 +795,33 @@ fn validate_executable_path(path: &Path, thread_id: &str) -> Result<(), PedelecE
     Ok(())
 }
 
-/// Creates and validates the Pedelec-owned Deno cache.  `canonical_workspace`
-/// must already be the canonical execution root so that the containment check
-/// below compares two paths in the same form.
-fn prepare_deno_cache_dir(canonical_workspace: &Path) -> Result<PathBuf, PedelecError> {
-    let runtime_root = workspace_runtime_data_root(canonical_workspace);
-    ensure_owned_directory(&runtime_root, "Pedelec runtime data root")?;
-    let cache_dir = runtime_root.join("deno");
-    ensure_owned_directory(&cache_dir, "Pedelec-owned Deno cache directory")?;
-    let canonical_cache = canonical_execution_path(&cache_dir, "Pedelec-owned Deno cache")?;
-    if !canonical_cache.starts_with(canonical_workspace) {
-        return Err(PedelecError::new(
-            error_codes::DENO_RUNTIME_UNAVAILABLE,
-            "Pedelec-owned Deno cache resolves outside the workspace",
-        ));
+fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
-    Ok(canonical_cache)
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
+fn ensure_managed_cache_directory(path: &Path) -> Result<(), PedelecError> {
+    if !path.is_absolute() {
+        return Err(PedelecError::with_details(
+            error_codes::DENO_RUNTIME_UNAVAILABLE,
+            "managed Deno cache directory must be an absolute path",
+            serde_json::json!({ "path": path }),
+        ));
+    }
+    ensure_owned_directory(path, "managed Deno cache directory")
+}
+
+/// Creates a real directory and rejects a symlink or reparse-point root.
+/// This does not require the directory to live inside a workspace.
 fn ensure_owned_directory(path: &Path, label: &str) -> Result<(), PedelecError> {
     let invalid = |reason: &str| {
         PedelecError::with_details(
@@ -787,8 +832,10 @@ fn ensure_owned_directory(path: &Path, label: &str) -> Result<(), PedelecError> 
     };
 
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(invalid("symbolic links are not accepted"));
+        Ok(metadata) if is_link_or_reparse(&metadata) => {
+            return Err(invalid(
+                "symbolic links and reparse points are not accepted",
+            ));
         }
         Ok(metadata) if !metadata.is_dir() => {
             return Err(invalid("path is not a directory"));
@@ -809,7 +856,7 @@ fn ensure_owned_directory(path: &Path, label: &str) -> Result<(), PedelecError> 
                     serde_json::json!({ "path": path, "error": error.to_string() }),
                 )
             })?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            if is_link_or_reparse(&metadata) || !metadata.is_dir() {
                 return Err(invalid("path changed to a non-directory entry"));
             }
         }
@@ -1014,6 +1061,21 @@ mod tests {
         PathBuf::from(path_for_external_use(&path.canonicalize().unwrap()))
     }
 
+    fn configured_owner(
+        executable: impl Into<PathBuf>,
+        cache_dir: impl Into<PathBuf>,
+        policy: DenoRuntimePolicy,
+    ) -> DenoRuntimeOwner {
+        let owner = DenoRuntimeOwner::with_policy(policy);
+        owner
+            .configure(ManagedDenoRuntime {
+                executable_path: executable.into(),
+                cache_dir: cache_dir.into(),
+            })
+            .unwrap();
+        owner
+    }
+
     fn permission_value(args: &[OsString], flag: &str) -> String {
         args.iter()
             .find_map(|arg| {
@@ -1196,7 +1258,11 @@ mod tests {
     #[test]
     fn owner_reports_missing_executable_as_runtime_unavailable() {
         let temp = tempfile::tempdir().unwrap();
-        let owner = DenoRuntimeOwner::new(temp.path().join("missing-deno"));
+        let owner = configured_owner(
+            temp.path().join("missing-deno"),
+            temp.path().join("managed-cache"),
+            DenoRuntimePolicy::default(),
+        );
         let error = owner
             .dispatch_intent(intent(temp.path(), "script.ts", Vec::new()))
             .unwrap_err();
@@ -1217,8 +1283,9 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_secs(2),
                 stdout_cap_bytes: 4096,
@@ -1254,8 +1321,9 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_secs(2),
                 stdout_cap_bytes: 4096,
@@ -1289,8 +1357,9 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_secs(2),
                 stdout_cap_bytes: 5,
@@ -1315,8 +1384,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("not-executable-deno");
         fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_secs(2),
                 stdout_cap_bytes: 1024,
@@ -1340,8 +1410,9 @@ mod tests {
         let script = temp.path().join("sleep-deno.sh");
         fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_millis(100),
                 stdout_cap_bytes: 1024,
@@ -1358,8 +1429,9 @@ mod tests {
         assert_eq!(error.code, error_codes::DENO_EXECUTION_TIMEOUT);
         assert_eq!(owner.active_run_count(), 0);
 
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_secs(5),
                 stdout_cap_bytes: 1024,
@@ -1390,8 +1462,9 @@ mod tests {
         assert_eq!(error.code, error_codes::DENO_EXECUTION_CANCELLED);
         assert_eq!(owner.active_run_count(), 0);
 
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_secs(5),
                 stdout_cap_bytes: 1024,
@@ -1451,8 +1524,9 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_secs(5),
                 stdout_cap_bytes: 4096,
@@ -1497,6 +1571,13 @@ mod tests {
         assert_eq!(second_output.exit_code, 0);
         assert!(second_output.stdout.contains("done="));
         assert_eq!(owner.active_run_count(), 0);
+        assert!(temp.path().join("managed-cache").is_dir());
+        assert!(!temp
+            .path()
+            .join(".pedelec-runtime")
+            .join("deno")
+            .join("gen")
+            .exists());
     }
 
     #[cfg(unix)]
@@ -1508,8 +1589,9 @@ mod tests {
         let script = temp.path().join("long-deno.sh");
         fs::write(&script, "#!/bin/sh\ncat >/dev/null\nsleep 5\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let owner = DenoRuntimeOwner::with_policy(
+        let owner = configured_owner(
             &script,
+            &temp.path().join("managed-cache"),
             DenoRuntimePolicy {
                 execution_timeout: Duration::from_secs(10),
                 stdout_cap_bytes: 1024,
@@ -1581,8 +1663,7 @@ mod tests {
         assert!(prepared
             .entrypoint()
             .is_some_and(|entrypoint| entrypoint.starts_with(&canonical_workspace)));
-        assert!(prepared.cache_dir().starts_with(&canonical_workspace));
-        assert!(prepared.cache_dir().is_dir());
+        assert!(!workspace.join(".pedelec-runtime").exists());
         // Workspace-local files stay reachable through the canonical root.
         assert!(canonical_workspace.join("input.txt").is_file());
 
@@ -1708,7 +1789,7 @@ mod tests {
             prepared.entrypoint(),
             Some(canonical_workspace.join("script.ts").as_path())
         );
-        assert!(prepared.cache_dir().starts_with(&canonical_workspace));
+        assert!(!real_workspace.join(".pedelec-runtime").exists());
 
         // The granted permission covers the canonical contents the script
         // actually reads and writes, not the alias Deno never sees.
@@ -1772,10 +1853,254 @@ mod tests {
         assert!(prepared
             .entrypoint()
             .is_some_and(|entrypoint| entrypoint.starts_with(&granted)));
-        assert!(prepared.cache_dir().starts_with(&granted));
+        assert!(!temp.path().join(".pedelec-runtime").exists());
         if temp.path().starts_with("/var/") {
             assert!(granted.starts_with("/private/var/"));
         }
+    }
+
+    fn assert_no_deno_owned_workspace_cache(workspace: &Path) {
+        let deno_root = workspace.join(".pedelec-runtime").join("deno");
+        for name in ["node_compat_bin", "gen", "npm"] {
+            assert!(
+                !deno_root.join(name).exists(),
+                "workspace gained Deno-owned cache entry {name}"
+            );
+        }
+        if !deno_root.is_dir() {
+            return;
+        }
+        for entry in fs::read_dir(&deno_root).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                name == "threads" || name == "workspace",
+                "unexpected Deno-owned cache entry in workspace: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unconfigured_runtime_dispatch_fails_without_a_workspace_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let owner = DenoRuntimeOwner::new();
+        let error = owner
+            .dispatch_intent(intent(&workspace, "script.ts", Vec::new()))
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_RUNTIME_UNAVAILABLE);
+        assert_eq!(error.message, "Deno runtime is not configured");
+        assert_eq!(owner.active_run_count(), 0);
+        assert_no_deno_owned_workspace_cache(&workspace);
+    }
+
+    #[test]
+    fn cache_creation_failure_does_not_fall_back_to_the_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let blocked = temp.path().join("blocked-cache");
+        fs::write(&blocked, b"not a directory").unwrap();
+
+        let error = ManagedDenoRuntime::new(temp.path().join("deno"), &blocked).unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_RUNTIME_UNAVAILABLE);
+        assert!(error.message.contains("cache"));
+        assert_no_deno_owned_workspace_cache(&workspace);
+
+        let owner = DenoRuntimeOwner::new();
+        let error = owner
+            .configure(ManagedDenoRuntime {
+                executable_path: temp.path().join("deno"),
+                cache_dir: blocked,
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_RUNTIME_UNAVAILABLE);
+        assert!(owner.managed_runtime().is_err());
+
+        let cache_dir = temp.path().join("usable-cache");
+        let executable = temp.path().join("deno-placeholder");
+        fs::write(&executable, b"not a real binary").unwrap();
+        let owner = configured_owner(&executable, &cache_dir, DenoRuntimePolicy::default());
+        fs::remove_dir_all(&cache_dir).unwrap();
+        fs::write(&cache_dir, b"blocked").unwrap();
+        let error = owner
+            .dispatch_intent(intent(&workspace, "script.ts", Vec::new()))
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_RUNTIME_UNAVAILABLE);
+        assert!(error.message.contains("cache"));
+        assert_no_deno_owned_workspace_cache(&workspace);
+    }
+
+    #[test]
+    fn managed_cache_is_independent_of_workspace_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+        fs::create_dir_all(&workspace_a).unwrap();
+        fs::create_dir_all(&workspace_b).unwrap();
+        let cache_dir = temp.path().join("managed-cache");
+        let owner = DenoRuntimeOwner::new();
+        let runtime = ManagedDenoRuntime::new(temp.path().join("deno"), &cache_dir).unwrap();
+        owner.configure(runtime).unwrap();
+        assert!(cache_dir.is_dir());
+        assert!(!cache_dir.starts_with(&workspace_a));
+        assert!(!cache_dir.starts_with(&workspace_b));
+        assert_eq!(owner.managed_runtime().unwrap().cache_dir, cache_dir);
+
+        let prepared_a = prepared(&workspace_a, "script.ts", Vec::new());
+        let prepared_b = prepared(&workspace_b, "script.ts", Vec::new());
+        let args_a = build_deno_command_args(&prepared_a);
+        let args_b = build_deno_command_args(&prepared_b);
+        let read_a = permission_value(&args_a, "--allow-read");
+        let read_b = permission_value(&args_b, "--allow-read");
+        assert_ne!(read_a, read_b);
+        assert_eq!(read_a, path_for_external_use(prepared_a.workspace()));
+        assert_eq!(read_b, path_for_external_use(prepared_b.workspace()));
+        assert_eq!(permission_value(&args_a, "--allow-write"), read_a);
+        assert_eq!(permission_value(&args_b, "--allow-write"), read_b);
+        assert_no_deno_owned_workspace_cache(&workspace_a);
+        assert_no_deno_owned_workspace_cache(&workspace_b);
+    }
+
+    #[test]
+    fn workspace_execution_ignores_thread_import_maps() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let import_map = workspace.join(".pedelec-runtime/deno/threads/thread-1/import-map.json");
+        fs::create_dir_all(import_map.parent().unwrap()).unwrap();
+        fs::write(&import_map, "{\"imports\":{}}").unwrap();
+        let prepared = PreparedDenoExecution::prepare(&DenoExecutionIntent {
+            thread_id: String::new(),
+            owner: DenoExecutionOwner::Workspace {
+                workspace_id: "workspace-runtime".into(),
+                run_id: "run-1".into(),
+            },
+            workspace_path: workspace.clone(),
+            target: DenoExecutionTarget::StdinSource {
+                source: "console.log(1)".into(),
+            },
+            args: Vec::new(),
+            timeout_ms: 0,
+            import_map_path: Some(import_map.clone()),
+        })
+        .unwrap();
+        assert!(prepared.import_map_path().is_none());
+        assert!(prepared.stdin_source().is_some());
+        assert!(import_map.is_file());
+        assert_no_deno_owned_workspace_cache(&workspace);
+        assert!(build_deno_command_args(&prepared)
+            .iter()
+            .all(|arg| !arg.to_string_lossy().starts_with("--import-map=")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_cache_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_cache = temp.path().join("real-cache");
+        fs::create_dir_all(&real_cache).unwrap();
+        let link = temp.path().join("link-cache");
+        symlink(&real_cache, &link).unwrap();
+        let error = ManagedDenoRuntime::new(temp.path().join("deno"), &link).unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_RUNTIME_UNAVAILABLE);
+        assert!(error.message.contains("cache"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_cache_dispatch_stays_parallel_and_workspace_scoped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("fake-deno.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\ncat >/dev/null\nsleep 0.25\nprintf 'deno_dir=%s\\n' \"$DENO_DIR\"\nprintf 'args=%s\\n' \"$*\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let cache_dir = temp.path().join("managed-cache");
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+        fs::create_dir_all(&workspace_a).unwrap();
+        fs::create_dir_all(&workspace_b).unwrap();
+        let owner = configured_owner(
+            &script,
+            &cache_dir,
+            DenoRuntimePolicy {
+                execution_timeout: Duration::from_secs(5),
+                stdout_cap_bytes: 4096,
+                stderr_cap_bytes: 4096,
+            },
+        );
+        let cache_marker = path_for_external_use(&cache_dir);
+
+        let first_owner = owner.clone();
+        let first_workspace = workspace_a.clone();
+        let first = thread::spawn(move || {
+            first_owner.dispatch_intent(workspace_intent(
+                &first_workspace,
+                "workspace-a",
+                "run-a",
+                5_000,
+            ))
+        });
+        let second_owner = owner.clone();
+        let second_workspace = workspace_b.clone();
+        let second = thread::spawn(move || {
+            second_owner.dispatch_intent(workspace_intent(
+                &second_workspace,
+                "workspace-b",
+                "run-b",
+                5_000,
+            ))
+        });
+
+        for _ in 0..100 {
+            if owner.active_run_count() == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(owner.active_run_count(), 2);
+
+        let first_output = first.join().unwrap().unwrap();
+        let second_output = second.join().unwrap().unwrap();
+        assert_eq!(first_output.exit_code, 0, "{}", first_output.stderr);
+        assert_eq!(second_output.exit_code, 0, "{}", second_output.stderr);
+        assert!(first_output
+            .stdout
+            .contains(&format!("deno_dir={cache_marker}")));
+        assert!(second_output
+            .stdout
+            .contains(&format!("deno_dir={cache_marker}")));
+        let granted_a = path_for_external_use(&canonical(&workspace_a));
+        let granted_b = path_for_external_use(&canonical(&workspace_b));
+        assert!(first_output
+            .stdout
+            .contains(&format!("--allow-read={granted_a}")));
+        assert!(first_output
+            .stdout
+            .contains(&format!("--allow-write={granted_a}")));
+        assert!(!first_output
+            .stdout
+            .contains(&format!("--allow-read={granted_b}")));
+        assert!(second_output
+            .stdout
+            .contains(&format!("--allow-read={granted_b}")));
+        assert!(second_output
+            .stdout
+            .contains(&format!("--allow-write={granted_b}")));
+        assert!(!second_output
+            .stdout
+            .contains(&format!("--allow-read={granted_a}")));
+        assert_no_deno_owned_workspace_cache(&workspace_a);
+        assert_no_deno_owned_workspace_cache(&workspace_b);
+        assert_eq!(owner.active_run_count(), 0);
     }
 }
 

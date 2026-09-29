@@ -35,10 +35,10 @@ use pedelec_ipc::{
     start_core_ipc_server_with_services_dispatchers, start_debug_provider_turn_with_dispatcher,
     start_provider_turn_with_dispatcher, PersistentRuntimeDispatcher, ProviderRuntimeDispatcher,
 };
-use pedelec_runtime::{DenoRuntimeOwner, ProviderRuntimeOwner};
+use pedelec_runtime::{DenoRuntimeOwner, ManagedDenoRuntime, ProviderRuntimeOwner};
 use pedelec_shared::deno_release::current_deno_artifact;
 use pedelec_shared::paths::pedelec_home_dir;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use tauri::menu::{Menu, MenuItem};
@@ -59,9 +59,9 @@ pub fn run() {
     let provider_runtime_dispatcher =
         ProviderRuntimeDispatcher::new(provider_runtime_owner.clone(), runtime_for_setup.clone());
     let provider_runtime_for_exit = provider_runtime_dispatcher.clone();
-    // Tauri requires managed state to be registered before `setup`; the
-    // resource-authoritative path is injected before any dispatcher starts.
-    let deno_runtime_owner = DenoRuntimeOwner::new(PathBuf::new());
+    // Tauri requires managed state to be registered before `setup`. The
+    // executable and cache are configured together after provisioning.
+    let deno_runtime_owner = DenoRuntimeOwner::new();
     let deno_runtime_for_setup = deno_runtime_owner.clone();
     let deno_runtime_for_exit = deno_runtime_owner.clone();
     let effort_wizard_owner = EffortWizardOwner::new();
@@ -287,7 +287,7 @@ pub fn run() {
                 home,
                 plan,
                 Arc::new(ReqwestArchiveDownloader),
-                Arc::new(move |executable| services.start(&executable)),
+                Arc::new(move |runtime| services.start(runtime)),
             );
             preparation
                 .bootstrap()
@@ -345,7 +345,7 @@ struct DesktopServices {
 }
 
 impl DesktopServices {
-    fn start(&self, executable: &Path) -> Result<(), String> {
+    fn start(&self, runtime: ManagedDenoRuntime) -> Result<(), String> {
         let deno_for_path = self.deno.clone();
         let runtime_for_upload = self.runtime.clone();
         let runtime_for_ipc = self.runtime.clone();
@@ -354,10 +354,9 @@ impl DesktopServices {
         let deno_for_ipc = self.deno.clone();
         let app_for_ipc = self.app.clone();
         let app_for_events = self.app.clone();
-        let executable = executable.to_path_buf();
         run_idempotent_startup(
             &self.progress,
-            move || deno_for_path.set_executable_path(executable),
+            move || deno_for_path.configure(runtime).map_err(|err| err.message),
             move || {
                 // A failed data plane must not prevent the control plane from starting.
                 if let Err(err) = start_asset_upload_server(runtime_for_upload) {

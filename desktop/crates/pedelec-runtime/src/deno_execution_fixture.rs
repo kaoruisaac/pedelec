@@ -4,7 +4,10 @@
 //! `build_deno_command_args()` path. They use `PEDELEC_TEST_DENO` or a managed
 //! runtime that has already been provisioned for the pinned Deno version.
 
-use super::{build_deno_command_args, DenoRuntimeOwner, DenoRuntimePolicy, PreparedDenoExecution};
+use super::{
+    build_deno_command_args, DenoRuntimeOwner, DenoRuntimePolicy, ManagedDenoRuntime,
+    PreparedDenoExecution,
+};
 use pedelec_core::{
     workspace_deno_import_map_path, workspace_deno_modules_root, workspace_tmp_root, CoreRuntime,
     CreateDenoModuleUploadInput, CreateThreadDenoModuleInput, CreateThreadInput,
@@ -79,15 +82,42 @@ fn test_deno_executable() -> Option<PathBuf> {
     }
 }
 
-fn owner(executable: &Path) -> DenoRuntimeOwner {
-    DenoRuntimeOwner::with_policy(
-        executable,
-        DenoRuntimePolicy {
-            execution_timeout: Duration::from_secs(30),
-            stdout_cap_bytes: 64 * 1024,
-            stderr_cap_bytes: 64 * 1024,
-        },
-    )
+fn owner(executable: &Path, cache_dir: &Path) -> DenoRuntimeOwner {
+    let owner = DenoRuntimeOwner::with_policy(DenoRuntimePolicy {
+        execution_timeout: Duration::from_secs(30),
+        stdout_cap_bytes: 64 * 1024,
+        stderr_cap_bytes: 64 * 1024,
+    });
+    owner
+        .configure(
+            ManagedDenoRuntime::new(executable, cache_dir).expect("managed Deno cache directory"),
+        )
+        .expect("managed Deno runtime configuration");
+    owner
+}
+
+fn assert_no_deno_owned_workspace_cache(workspace: &Path) {
+    let deno_root = workspace.join(".pedelec-runtime").join("deno");
+    if !deno_root.is_dir() {
+        return;
+    }
+    for entry in fs::read_dir(&deno_root).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        assert!(
+            name == "threads" || name == "workspace",
+            "Deno-owned cache appeared in the workspace: {name}"
+        );
+    }
+}
+
+fn assert_injected_cache_was_used(cache_dir: &Path) {
+    assert!(cache_dir.is_dir());
+    assert!(
+        fs::read_dir(cache_dir).unwrap().next().is_some(),
+        "expected Deno to write cache files under {}",
+        cache_dir.display()
+    );
 }
 
 fn runtime_for(temp: &tempfile::TempDir) -> CoreRuntime {
@@ -279,12 +309,21 @@ console.log(JSON.stringify({ value, localValue, loaded, nodeBuiltinValue }));
         assert!(args.iter().any(|arg| arg == denied));
     }
 
-    let output = owner(&executable).dispatch(intent).unwrap();
+    let cache_dir = temp.path().join("managed-deno-cache");
+    let output = owner(&executable, &cache_dir).dispatch(intent).unwrap();
     assert_eq!(
         output.exit_code, 0,
         "stdout={} stderr={}",
         output.stdout, output.stderr
     );
+    assert_injected_cache_was_used(&cache_dir);
+    assert!(!cache_dir.starts_with(&workspace));
+    assert!(expected_import_map.is_file());
+    assert!(workspace_deno_modules_root(&workspace, &thread_id)
+        .join("sprite-tools")
+        .join("index.mjs")
+        .is_file());
+    assert_no_deno_owned_workspace_cache(&workspace);
     assert!(
         output.stdout.contains("sprite-tools-ok"),
         "{}",
@@ -343,12 +382,16 @@ console.log(JSON.stringify({ value, localValue, arg: Deno.args[0] }));
         .iter()
         .any(|arg| arg.to_string_lossy().starts_with("--import-map=")));
 
-    let output = owner(&executable).dispatch(intent).unwrap();
+    let cache_dir = temp.path().join("managed-deno-cache");
+    let output = owner(&executable, &cache_dir).dispatch(intent).unwrap();
     assert_eq!(
         output.exit_code, 0,
         "stdout={} stderr={}",
         output.stdout, output.stderr
     );
+    assert_injected_cache_was_used(&cache_dir);
+    assert!(!cache_dir.starts_with(&workspace));
+    assert_no_deno_owned_workspace_cache(&workspace);
     assert!(
         output.stdout.contains("sprite-tools-ok"),
         "{}",
@@ -381,7 +424,9 @@ console.log("unreachable");
 
     let mut runtime = runtime_for(&temp);
     let (_thread_id, intent) = ready_module_thread(&mut runtime, &workspace);
-    let output = owner(&executable).dispatch(intent).unwrap();
+    let cache_dir = temp.path().join("managed-deno-cache");
+    let output = owner(&executable, &cache_dir).dispatch(intent).unwrap();
+    assert_no_deno_owned_workspace_cache(&workspace);
     assert_ne!(output.exit_code, 0);
     let combined = format!("{}\n{}", output.stdout, output.stderr);
     assert!(
@@ -411,7 +456,9 @@ console.log("unreachable");
 
     let mut runtime = runtime_for(&temp);
     let (_thread_id, intent) = ready_module_thread(&mut runtime, &workspace);
-    let output = owner(&executable).dispatch(intent).unwrap();
+    let cache_dir = temp.path().join("managed-deno-cache");
+    let output = owner(&executable, &cache_dir).dispatch(intent).unwrap();
+    assert_no_deno_owned_workspace_cache(&workspace);
     assert_ne!(output.exit_code, 0);
     let combined = format!("{}\n{}", output.stdout, output.stderr);
     assert!(

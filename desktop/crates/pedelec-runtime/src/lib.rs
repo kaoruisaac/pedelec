@@ -34,8 +34,9 @@ pub use codex::{
     DEFAULT_MAX_FRAME_BYTES,
 };
 pub use deno::{
-    build_deno_command_args, DenoRuntimeOwner, DenoRuntimePolicy, PreparedDenoExecution,
-    DEFAULT_DENO_EXECUTION_TIMEOUT, DEFAULT_DENO_STDERR_CAP_BYTES, DEFAULT_DENO_STDOUT_CAP_BYTES,
+    build_deno_command_args, DenoRuntimeOwner, DenoRuntimePolicy, ManagedDenoRuntime,
+    PreparedDenoExecution, DEFAULT_DENO_EXECUTION_TIMEOUT, DEFAULT_DENO_STDERR_CAP_BYTES,
+    DEFAULT_DENO_STDOUT_CAP_BYTES,
 };
 pub use jsonl::{JsonLineChannel, JsonLineEof, JsonLineError, JsonLineEvent, JsonLineFramer};
 pub use owner::{

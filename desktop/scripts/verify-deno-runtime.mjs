@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -16,8 +16,19 @@ function parseBinaryArg(argv) {
   );
 }
 
-function run(binary, workspace, script, scriptArgs = [], expectedExitCode = 0) {
-  const cacheDir = join(workspace, ".pedelec-runtime", "deno");
+async function exists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function run(binary, workspace, cacheDir, script, scriptArgs = [], expectedExitCode = 0) {
   const result = spawnSync(
     binary,
     [
@@ -76,6 +87,7 @@ async function verifyRuntime(binary) {
   verifyVersion(binary);
   const createdRoot = await mkdtemp(join(tmpdir(), "pedelec-deno-smoke-"));
   await mkdir(join(createdRoot, "workspace"), { recursive: true });
+  await mkdir(join(createdRoot, "managed-cache"), { recursive: true });
   // Temporary roots can be exposed through a filesystem alias (on macOS
   // `/var` while the real path is `/private/var`).  Deno compares permission
   // prefixes against canonical paths, so the whole smoke test - permission
@@ -83,6 +95,7 @@ async function verifyRuntime(binary) {
   // workspace root.
   const root = await realpath(createdRoot);
   const workspace = await realpath(join(root, "workspace"));
+  const cacheDir = await realpath(join(root, "managed-cache"));
   const outside = join(root, "outside.txt");
   await writeFile(join(workspace, "input.txt"), "workspace input\n");
   await writeFile(outside, "outside input\n");
@@ -127,17 +140,22 @@ async function verifyRuntime(binary) {
   );
 
   try {
-    const js = run(binary, workspace, join(workspace, "basic.js"), ["--allow-all"]);
+    const js = run(binary, workspace, cacheDir, join(workspace, "basic.js"), ["--allow-all"]);
     assert.match(js.stdout, /js-ok:--allow-all/);
 
-    const ts = run(binary, workspace, join(workspace, "workspace.ts"), ["--", "value"]);
+    const ts = run(binary, workspace, cacheDir, join(workspace, "workspace.ts"), ["--", "value"]);
     assert.match(ts.stdout, /local-import-ok:workspace input:--\|value/);
     assert.equal(await readFile(join(workspace, "output.txt"), "utf8"), "WORKSPACE INPUT\n");
 
-    const denied = run(binary, workspace, join(workspace, "denied.ts"));
+    const denied = run(binary, workspace, cacheDir, join(workspace, "denied.ts"));
     assert.match(denied.stdout, /denied-capabilities-ok/);
 
-    run(binary, workspace, join(workspace, "remote.ts"), [], 1);
+    run(binary, workspace, cacheDir, join(workspace, "remote.ts"), [], 1);
+    assert.equal(await exists(join(workspace, ".pedelec-runtime")), false);
+    for (const name of ["node_compat_bin", "gen", "npm"]) {
+      assert.equal(await exists(join(workspace, name)), false);
+      assert.equal(await exists(join(workspace, ".pedelec-runtime", "deno", name)), false);
+    }
   } finally {
     await rm(createdRoot, { recursive: true, force: true });
   }
