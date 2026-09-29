@@ -105,7 +105,7 @@ openWorkspace(): Promise<PedelecWorkspace | null>
 openWorkspace(path: string): Promise<PedelecWorkspace>
 ```
 
-開啟或初始化 workspace capability。省略 path 時，Pedelec Desktop 開啟原生資料夾 picker，取消時回傳 `null`；指定 path 時不會開啟 picker。回傳的 workspace 提供 `path`、`createSession()`、`listFiles()`、`listFolders()` 與 `run()`。
+開啟或初始化 workspace capability。省略 path 時，Pedelec Desktop 開啟原生資料夾 picker，取消時回傳 `null`；指定 path 時不會開啟 picker。回傳的 workspace 提供 `path`、`createSession()`、`listFiles()`、`listFolders()`、`uploadFile()`、`readFile()` 與 `run()`。
 
 ```ts
 const workspace = await pedelec.openWorkspace();

@@ -59,6 +59,39 @@ listFolders(path?: string): Promise<string[]>
 
 除了回傳 directories 外，root、relative path、separator、sorting、`.pedelec-runtime`、symlink/junction 與 response size 行為都與 `listFiles()` 相同。
 
+## `uploadFile()`
+
+```ts
+uploadFile(file: File): Promise<string>
+uploadFile(file: File, targetPath: string): Promise<string>
+```
+
+把一個 browser `File` 上傳到這個 Workspace。path 是 Workspace-relative，使用 `/`，而且沒有前導 `/`。
+
+```ts
+const workspace = await pedelec.openWorkspace("C:\\workspace\\project");
+const file = new File(["hello"], "hello.txt", { type: "text/plain" });
+
+const path = await workspace.uploadFile(file);
+// Workspace root 下的 "hello.txt"，沒有 generated prefix
+
+await workspace.uploadFile(file, "references/photo.png");
+```
+
+沒有 `targetPath` 時，回傳 path 就是原始 `file.name`，檔案放在 Workspace root。指定 `targetPath` 時會原樣回傳，缺少的 parent directory 會建立。單檔上限 100 MiB。Upload 使用本機 transfer server 與一次性 ticket；多個 `uploadFile()` 可以同時進行。Pedelec 不會鎖住整個 Workspace，也不會替同一個 path 的並行寫入做衝突協調，這件事由 application 負責。成功的 upload 會取代既有 regular file。absolute path、`..`、symlink 與 junction 都會被拒絕。
+
+## `readFile()`
+
+```ts
+readFile(path: string, type: "text"): Promise<string>
+readFile<T = JsonValue>(path: string, type: "json"): Promise<T>
+readFile(path: string, type: "file"): Promise<File>
+```
+
+讀取一個 Workspace-relative regular file，包含 `.pedelec-runtime` 底下的路徑。`text` 要求嚴格 UTF-8。`json` 會解析該文字。`file` 回傳 browser `File`：檔名是目標 basename，MIME type 依副檔名判斷，`lastModified` 使用 filesystem modification time。讀取上限同樣是 100 MiB。讀取過程中檔案若改變或被截斷，會失敗，不會回傳不完整內容。
+
+`uploadAsset()`、`readAsset()` 與 `listAssets()` 仍是 Session-scoped convenience API，根目錄固定在 `.pedelec-runtime/assets`。一般 Workspace filesystem 存取請使用 `uploadFile()`、`readFile()` 與 `listFiles()`。
+
 ## `run(script, options?)`
 
 使用方式請先參閱 [Workspace Deno 執行](../deno/workspace-execution/)；以下記錄精確 API 契約。

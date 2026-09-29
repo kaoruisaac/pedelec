@@ -311,6 +311,21 @@ async function workspacePublicTypeContract() {
   pedelec.workspaceFolderPicker();
 }
 
+async function workspaceFileTransferTypes() {
+  const pedelec = new Pedelec();
+  const workspace = await pedelec.openWorkspace("C:\\workspace\\project");
+  const file = new File(["hello"], "hello.txt", { type: "text/plain" });
+  const generated: string = await workspace.uploadFile(file);
+  const nested: string = await workspace.uploadFile(file, "references/photo.png");
+  const text: string = await workspace.readFile("README.md", "text");
+  const parsed: { ok: boolean } = await workspace.readFile("result.json", "json");
+  const downloaded: File = await workspace.readFile(generated, "file");
+  void nested;
+  void text;
+  void parsed;
+  void downloaded;
+}
+
 function directoryPickerIsRemoved() {
   const pedelec = new Pedelec();
   // @ts-expect-error directoryPicker was removed in favor of openWorkspace
@@ -339,6 +354,7 @@ void effortLevelPublicTypeContract;
 void listAssetsHasPublicTypes;
 void availabilityHasPublicType;
 void workspacePublicTypeContract;
+void workspaceFileTransferTypes;
 void directoryPickerIsRemoved;
 void publicSecurityTypesAreRestricted;
 

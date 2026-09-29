@@ -600,6 +600,116 @@ test("Workspace Deno Module setup and run requests preserve origin and strip art
   );
 });
 
+test("workspace file transfer forwards workspace identity without a session", async () => {
+  const chrome = createChrome();
+  const uploadNative = new MockPort();
+  const downloadNative = new MockPort();
+  chrome.nativePortQueue.push(uploadNative, downloadNative);
+  const background = createBackground(chrome, { disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "workspace_file_upload",
+    type: "create_workspace_file_upload",
+    workspaceId: "workspace_custom",
+    filename: "photo.png",
+    sizeBytes: 4,
+    mimeType: "image/png",
+    targetPath: "references/photo.png",
+    sessionId: "must-not-forward",
+    threadId: "must-not-forward",
+  });
+  const uploadRequest = await respondToNativeType(
+    background,
+    uploadNative,
+    "create_workspace_file_upload",
+    { uploadId: "upl_1", uploadUrl: "http://127.0.0.1:1/uploads/upl_1", token: "t" },
+  );
+  assert.deepEqual(
+    {
+      callerOrigin: uploadRequest.callerOrigin,
+      workspaceId: uploadRequest.workspaceId,
+      filename: uploadRequest.filename,
+      sizeBytes: uploadRequest.sizeBytes,
+      mimeType: uploadRequest.mimeType,
+      targetPath: uploadRequest.targetPath,
+      sessionId: uploadRequest.sessionId,
+      threadId: uploadRequest.threadId,
+    },
+    {
+      callerOrigin: "https://app.example.test",
+      workspaceId: "workspace_custom",
+      filename: "photo.png",
+      sizeBytes: 4,
+      mimeType: "image/png",
+      targetPath: "references/photo.png",
+      sessionId: undefined,
+      threadId: undefined,
+    },
+  );
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "workspace_file_download",
+    type: "create_workspace_file_download",
+    workspaceId: "workspace_other",
+    path: "README.md",
+    sessionId: "must-not-forward",
+  });
+  await waitFor(() => downloadNative.sent.length === 1);
+  assert.equal(downloadNative.sent[0].type, "create_workspace_file_download");
+  assert.equal(downloadNative.sent[0].path, "README.md");
+  assert.equal(downloadNative.sent[0].threadId, undefined);
+  assert.equal(downloadNative.sent[0].sessionId, undefined);
+  background.handleNativeMessage({
+    type: "response",
+    requestId: downloadNative.sent[0].requestId,
+    ok: false,
+    error: { code: "WORKSPACE_ACCESS_DENIED", message: "workspace is not accessible to this caller" },
+  });
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "workspace_file_download"));
+  const denied = sdk.sent.find((message) => message.requestId === "workspace_file_download");
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error.code, "WORKSPACE_ACCESS_DENIED");
+});
+
+test("unapproved workspace file upload waits for origin approval", async () => {
+  const chrome = createChrome({ approved: false });
+  const native = new MockPort();
+  chrome.nativePortQueue.push(native);
+  const background = createBackground(chrome, { approvalTimeoutMs: 1000, disableReconnect: true });
+  background.start();
+  const sdk = connectExternal(chrome);
+
+  sdk.emit({
+    channelId: "channel_a",
+    requestId: "workspace_file_approval",
+    type: "create_workspace_file_upload",
+    workspaceId: "workspace_custom",
+    filename: "hello.txt",
+    sizeBytes: 1,
+    mimeType: "text/plain",
+  });
+  await waitFor(() => background.getPendingApproval()?.requestCount === 1);
+  assert.equal(native.sent.length, 0);
+
+  const popup = new MockPort();
+  popup.name = "popup";
+  background.handlePopupConnect(popup);
+  popup.emit({ type: "approve_origin", origin: "https://app.example.test" });
+  const request = await respondToNative(background, native, {
+    uploadId: "upl_1",
+    uploadUrl: "http://127.0.0.1:1/uploads/upl_1",
+    token: "t",
+  });
+  assert.equal(request.type, "create_workspace_file_upload");
+  assert.equal(request.threadId, undefined);
+  assert.equal(request.workspaceId, "workspace_custom");
+  await waitFor(() => sdk.sent.some((message) => message.requestId === "workspace_file_approval"));
+});
+
 test("open_workspace picker cancellation is forwarded as a successful null result", async () => {
   const chrome = createChrome();
   const native = new MockPort();

@@ -13,7 +13,7 @@ App 與 Agent 共用 Session 所在 Workspace 的 `.pedelec-runtime/assets/` 目
 
 ### Upload 檔案
 
-使用 `uploadAsset()` 傳送一個 browser `File`。單檔上限為 100 MiB；實體根目錄是 `.pedelec-runtime/assets/`，公開 path 使用 `/...`，並以 `assets/` 為 SDK 隱含根目錄。Upload 可與 prepare 和 Agent execution 並行，但同一 session 一次只能有一個 upload。
+檔案要放在 Session asset 區域時，使用 `uploadAsset()` 傳送一個 browser `File`。這是 Session-scoped convenience API：根目錄固定在 `.pedelec-runtime/assets`，適合 provider artifacts 與要和 Agent 共用的檔案。一般 Workspace filesystem 存取請使用 `workspace.uploadFile()`、`workspace.readFile()` 與 `workspace.listFiles()`。單檔上限為 100 MiB；實體根目錄是 `.pedelec-runtime/assets/`，公開 path 使用 `/...`，並以 `assets/` 為 SDK 隱含根目錄。Upload 可與 prepare 和 Agent execution 並行，但同一 session 一次只能有一個 upload。
 
 ```ts
 const file = input.files?.[0];

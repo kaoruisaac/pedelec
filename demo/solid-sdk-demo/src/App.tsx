@@ -187,7 +187,8 @@ export default function App() {
   const [selectedWorkspace, setSelectedWorkspace] = createSignal<PedelecWorkspace | null>(null);
   const [workspacePicking, setWorkspacePicking] = createSignal(false);
   const [workspaceListPath, setWorkspaceListPath] = createSignal("");
-  const [workspaceOperation, setWorkspaceOperation] = createSignal<"idle" | "files" | "folders" | "run">("idle");
+  const [workspaceOperation, setWorkspaceOperation] = createSignal<"idle" | "files" | "folders" | "run" | "transfer">("idle");
+  const [workspaceTransferNote, setWorkspaceTransferNote] = createSignal("");
   const [workspaceFiles, setWorkspaceFiles] = createSignal<string[]>([]);
   const [workspaceFolders, setWorkspaceFolders] = createSignal<string[]>([]);
   const [workspaceScript, setWorkspaceScript] = createSignal(defaultWorkspaceScript);
@@ -387,6 +388,26 @@ export default function App() {
       if (kind === "files") setWorkspaceFiles(values);
       else setWorkspaceFolders(values);
       appendGlobalEvent(`workspace_list_${kind}_resolved`, { path: path || undefined, count: values.length });
+    } catch (err) {
+      recordError(toDemoError(err));
+      markExtensionError(err);
+    } finally {
+      setWorkspaceOperation("idle");
+    }
+  }
+
+  async function transferWorkspaceFile(file: File) {
+    const workspace = workspaceTarget();
+    if (!workspace || workspaceOperation() !== "idle") return;
+
+    setWorkspaceOperation("transfer");
+    try {
+      const path = await workspace.uploadFile(file);
+      const preview = file.type.startsWith("text/") || /\.(txt|md|json|csv)$/i.test(file.name)
+        ? await workspace.readFile(path, "text")
+        : (await workspace.readFile(path, "file")).name;
+      setWorkspaceTransferNote(`${path}: ${preview.slice(0, 120)}`);
+      appendGlobalEvent("workspace_file_transfer_resolved", { path });
     } catch (err) {
       recordError(toDemoError(err));
       markExtensionError(err);
@@ -1108,6 +1129,21 @@ export default function App() {
                       {workspaceOperation() === "folders" ? "Listing..." : "List folders"}
                     </button>
                   </div>
+                  <label>
+                    Upload to Workspace root
+                    <input
+                      type="file"
+                      disabled={workspaceOperation() !== "idle"}
+                      onChange={(event) => {
+                        const selected = event.currentTarget.files?.[0];
+                        event.currentTarget.value = "";
+                        if (selected) void transferWorkspaceFile(selected);
+                      }}
+                    />
+                  </label>
+                  <Show when={workspaceTransferNote()}>
+                    <p class="field-hint">{workspaceTransferNote()}</p>
+                  </Show>
                   <div class="workspace-results">
                     <JsonBlock label="Files" value={workspaceFiles()} />
                     <JsonBlock label="Folders" value={workspaceFolders()} />

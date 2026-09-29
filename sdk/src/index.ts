@@ -25,7 +25,8 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
 export type AssetPath = `/${string}`;
-export type ReadAssetType = "text" | "json" | "file";
+export type ReadFileType = "text" | "json" | "file";
+export type ReadAssetType = ReadFileType;
 
 export type Asset = {
   name: string;
@@ -89,6 +90,148 @@ function invalidListAssetsResponse(details: unknown): never {
 function isValidAssetPath(path: unknown): path is AssetPath {
   return typeof path === "string" && /^\/(?:[^/\\\x00-\x1f]+)(?:\/[^/\\\x00-\x1f]+)*$/.test(path) &&
     path.split("/").every((part, index) => index === 0 || (part !== "." && part !== ".."));
+}
+
+function isValidWorkspaceFilePath(path: unknown): path is string {
+  return typeof path === "string" &&
+    /^(?:[^/\\:\x00-\x1f]+)(?:\/[^/\\:\x00-\x1f]+)*$/.test(path) &&
+    path.split("/").every((part) => part !== "." && part !== "..");
+}
+
+function isReadFileType(type: unknown): type is ReadFileType {
+  return type === "text" || type === "json" || type === "file";
+}
+
+type BrowserFileTransferClient = {
+  request<T>(type: string, payload?: Record<string, unknown>): Promise<T>;
+};
+
+type BrowserUploadRequest = {
+  type: string;
+  payload: Record<string, unknown>;
+  file: File;
+  expectedPath?: string;
+  acceptPath: (path: unknown) => boolean;
+  failedCode: string;
+  failedMessage: string;
+};
+
+type BrowserDownloadRequest = {
+  type: string;
+  payload: Record<string, unknown>;
+  readType: ReadFileType;
+  acceptPath: (path: unknown) => boolean;
+  failedCode: string;
+  failedMessage: string;
+  textDecodeCode: string;
+  textDecodeMessage: string;
+  invalidJsonCode: string;
+  invalidJsonMessage: string;
+};
+
+function rejectBrowserFile(file: File, message: string): PedelecError | null {
+  if (typeof File === "undefined" || !(file instanceof File) || !file.name || file.size < 0) {
+    return makeError("INVALID_INPUT", message);
+  }
+  return null;
+}
+
+function uploadBrowserFile(client: BrowserFileTransferClient, request: BrowserUploadRequest): Promise<string> {
+  return client.request<{ uploadId?: string; uploadUrl?: string; token?: string }>(request.type, request.payload).then(async (ticket) => {
+    if (!ticket?.uploadUrl || !ticket.token) {
+      throw makeError("SDK_PROTOCOL_ERROR", "file upload ticket was invalid");
+    }
+    let response: Response;
+    try {
+      response = await fetch(ticket.uploadUrl, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${ticket.token}`,
+          "Content-Type": request.file.type || "application/octet-stream",
+        },
+        body: request.file,
+        credentials: "omit",
+      });
+    } catch (error) {
+      throw normalizeError(error, request.failedCode, request.failedMessage);
+    }
+    let payload: { path?: unknown; error?: unknown } | null = null;
+    try {
+      payload = await response.json();
+    } catch {
+      // normalized below
+    }
+    if (!response.ok) {
+      throw normalizeError(payload?.error, request.failedCode, request.failedMessage);
+    }
+    if (!request.acceptPath(payload?.path)) {
+      throw makeError("SDK_PROTOCOL_ERROR", "file upload response had an invalid path");
+    }
+    if (request.expectedPath !== undefined && payload?.path !== request.expectedPath) {
+      throw makeError("SDK_PROTOCOL_ERROR", "file upload response path did not match target path");
+    }
+    return payload?.path as string;
+  });
+}
+
+function downloadBrowserFile<T = JsonValue>(
+  client: BrowserFileTransferClient,
+  request: BrowserDownloadRequest,
+): Promise<string | T | File> {
+  return client.request<unknown>(request.type, request.payload).then(async (ticket) => {
+    if (!ticket || typeof ticket !== "object") {
+      throw makeError("SDK_PROTOCOL_ERROR", "file download ticket was invalid");
+    }
+    const value = ticket as Record<string, unknown>;
+    if (
+      typeof value.downloadUrl !== "string" ||
+      typeof value.token !== "string" ||
+      typeof value.name !== "string" ||
+      typeof value.mimeType !== "string" ||
+      typeof value.modifiedAt !== "number" ||
+      !Number.isFinite(value.modifiedAt) ||
+      !request.acceptPath(value.path)
+    ) {
+      throw makeError("SDK_PROTOCOL_ERROR", "file download ticket was invalid");
+    }
+    let response: Response;
+    try {
+      response = await fetch(value.downloadUrl, {
+        headers: { Authorization: `Bearer ${value.token}` },
+        credentials: "omit",
+      });
+    } catch (error) {
+      throw normalizeError(error, request.failedCode, request.failedMessage);
+    }
+    if (!response.ok) {
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch {
+        // normalize below
+      }
+      throw normalizeError((payload as { error?: unknown } | undefined)?.error, request.failedCode, request.failedMessage);
+    }
+    const bytes = await response.arrayBuffer();
+    if (request.readType === "file") {
+      return new File([bytes], value.name, {
+        type: value.mimeType || "application/octet-stream",
+        lastModified: value.modifiedAt,
+      });
+    }
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw makeError(request.textDecodeCode, request.textDecodeMessage);
+    }
+    if (request.readType === "text") return text;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw makeError(request.invalidJsonCode, request.invalidJsonMessage);
+    }
+  });
 }
 
 export type ToolArgsSchemaMeta<TDefault extends JsonValue = JsonValue> = {
@@ -821,6 +964,58 @@ export class PedelecWorkspace {
 
   listFolders(path?: string): Promise<string[]> {
     return this.list("workspace_list_folders", path);
+  }
+
+  uploadFile(file: File): Promise<string>;
+  uploadFile(file: File, targetPath: string): Promise<string>;
+  uploadFile(file: File, targetPath?: string): Promise<string> {
+    const invalidFile = rejectBrowserFile(file, "uploadFile requires a browser File with a filename");
+    if (invalidFile) return Promise.reject(invalidFile);
+    if (file.size > MAX_ASSET_UPLOAD_BYTES) {
+      return Promise.reject(makeError("WORKSPACE_FILE_TOO_LARGE", "workspace file exceeds the 100 MiB limit"));
+    }
+    if (targetPath !== undefined && !isValidWorkspaceFilePath(targetPath)) {
+      return Promise.reject(makeError("WORKSPACE_PATH_INVALID", "workspace target path is invalid"));
+    }
+    if (targetPath === undefined && !isValidWorkspaceFilePath(file.name)) {
+      return Promise.reject(makeError("WORKSPACE_PATH_INVALID", "workspace filename is invalid"));
+    }
+    return uploadBrowserFile(this.client, {
+      type: "create_workspace_file_upload",
+      payload: {
+        workspaceId: this.workspaceId,
+        filename: file.name,
+        sizeBytes: file.size,
+        mimeType: file.type,
+        ...(targetPath === undefined ? {} : { targetPath }),
+      },
+      file,
+      expectedPath: targetPath ?? file.name,
+      acceptPath: isValidWorkspaceFilePath,
+      failedCode: "WORKSPACE_FILE_UPLOAD_FAILED",
+      failedMessage: "workspace file upload failed",
+    });
+  }
+
+  readFile(path: string, type: "text"): Promise<string>;
+  readFile<T = JsonValue>(path: string, type: "json"): Promise<T>;
+  readFile(path: string, type: "file"): Promise<File>;
+  readFile<T = JsonValue>(path: string, type: ReadFileType): Promise<string | T | File> {
+    if (!isValidWorkspaceFilePath(path) || !isReadFileType(type)) {
+      return Promise.reject(makeError("WORKSPACE_PATH_INVALID", "workspace path or read type is invalid"));
+    }
+    return downloadBrowserFile<T>(this.client, {
+      type: "create_workspace_file_download",
+      payload: { workspaceId: this.workspaceId, path },
+      readType: type,
+      acceptPath: isValidWorkspaceFilePath,
+      failedCode: "WORKSPACE_FILE_READ_FAILED",
+      failedMessage: "workspace file read failed",
+      textDecodeCode: "WORKSPACE_FILE_TEXT_DECODE_FAILED",
+      textDecodeMessage: "workspace file is not valid UTF-8",
+      invalidJsonCode: "WORKSPACE_FILE_INVALID_JSON",
+      invalidJsonMessage: "workspace file does not contain valid JSON",
+    });
   }
 
   run(script: string, options: WorkspaceRunOptions = {}): Promise<WorkspaceRunResult> {
@@ -1927,27 +2122,25 @@ export class PedelecSession<TToolName extends string = string> {
     if (this.uploadPromise) {
       return Promise.reject(makeError("SESSION_BUSY", "session is busy", { sessionId: this.sessionId }));
     }
-    if (typeof File === "undefined" || !(file instanceof File) || !file.name || file.size < 0) {
-      return Promise.reject(makeError("INVALID_INPUT", "uploadAsset requires a browser File with a filename"));
-    }
+    const invalidFile = rejectBrowserFile(file, "uploadAsset requires a browser File with a filename");
+    if (invalidFile) return Promise.reject(invalidFile);
     if (file.size > MAX_ASSET_UPLOAD_BYTES) return Promise.reject(makeError("ASSET_TOO_LARGE", "asset exceeds the 100 MiB limit"));
     if (targetPath !== undefined && !isValidAssetPath(targetPath)) return Promise.reject(makeError("ASSET_PATH_INVALID", "asset target path is invalid"));
-    this.uploadPromise = this.client.request<{ uploadId: string; uploadUrl: string; token: string }>("create_asset_upload", {
-      sessionId: this.sessionId, filename: file.name, sizeBytes: file.size, mimeType: file.type,
-      ...(targetPath === undefined ? {} : { targetPath }),
-    }).then(async (ticket) => {
-      if (!ticket?.uploadUrl || !ticket.token) throw makeError("SDK_PROTOCOL_ERROR", "asset upload ticket was invalid");
-      let response: Response;
-      try {
-        response = await fetch(ticket.uploadUrl, { method: "PUT", headers: { Authorization: `Bearer ${ticket.token}`, "Content-Type": file.type || "application/octet-stream" }, body: file, credentials: "omit" });
-      } catch (error) { throw normalizeError(error, "ASSET_UPLOAD_FAILED", "asset upload failed"); }
-      let payload: any = null;
-      try { payload = await response.json(); } catch { /* normalized below */ }
-      if (!response.ok) throw normalizeError(payload?.error, "ASSET_UPLOAD_FAILED", "asset upload failed");
-        if (!isValidAssetPath(payload?.path)) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response had an invalid path");
-        if (targetPath !== undefined && payload.path !== targetPath) throw makeError("SDK_PROTOCOL_ERROR", "asset upload response path did not match target path");
-      return payload.path as AssetPath;
-    }).finally(() => { this.uploadPromise = null; });
+    this.uploadPromise = uploadBrowserFile(this.client, {
+      type: "create_asset_upload",
+      payload: {
+        sessionId: this.sessionId,
+        filename: file.name,
+        sizeBytes: file.size,
+        mimeType: file.type,
+        ...(targetPath === undefined ? {} : { targetPath }),
+      },
+      file,
+      expectedPath: targetPath,
+      acceptPath: isValidAssetPath,
+      failedCode: "ASSET_UPLOAD_FAILED",
+      failedMessage: "asset upload failed",
+    }).then((path) => path as AssetPath).finally(() => { this.uploadPromise = null; });
     return this.uploadPromise;
   }
 
@@ -1963,31 +2156,20 @@ export class PedelecSession<TToolName extends string = string> {
   readAsset(path: AssetPath, type: "file"): Promise<File>;
   readAsset<T = JsonValue>(path: AssetPath, type: ReadAssetType): Promise<string | T | File> {
     if (this.transportDetached || this.ending || this.status === "ended") return Promise.reject(makeError("SESSION_ENDED", "session has ended", { sessionId: this.sessionId }));
-    if (!isValidAssetPath(path) || !["text", "json", "file"].includes(type)) {
+    if (!isValidAssetPath(path) || !isReadFileType(type)) {
       return Promise.reject(makeError("ASSET_PATH_INVALID", "asset path or read type is invalid"));
     }
-    return this.client.request<unknown>("create_asset_download", { sessionId: this.sessionId, path }).then(async ticket => {
-      if (!ticket || typeof ticket !== "object") throw makeError("SDK_PROTOCOL_ERROR", "asset download ticket was invalid");
-      const value = ticket as Record<string, unknown>;
-      if (typeof value.downloadUrl !== "string" || typeof value.token !== "string" || typeof value.name !== "string" ||
-          typeof value.mimeType !== "string" || typeof value.modifiedAt !== "number" || !Number.isFinite(value.modifiedAt) || !isValidAssetPath(value.path)) {
-        throw makeError("SDK_PROTOCOL_ERROR", "asset download ticket was invalid");
-      }
-      let response: Response;
-      try { response = await fetch(value.downloadUrl, { headers: { Authorization: `Bearer ${value.token}` }, credentials: "omit" }); }
-      catch (error) { throw normalizeError(error, "ASSET_READ_FAILED", "asset read failed"); }
-      if (!response.ok) {
-        let payload: unknown; try { payload = await response.json(); } catch { /* normalize below */ }
-        throw normalizeError((payload as { error?: unknown } | undefined)?.error, "ASSET_READ_FAILED", "asset read failed");
-      }
-      const bytes = await response.arrayBuffer();
-      if (type === "file") return new File([bytes], value.name, { type: value.mimeType || "application/octet-stream", lastModified: value.modifiedAt });
-      let text: string;
-      try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-      catch { throw makeError("ASSET_TEXT_DECODE_FAILED", "asset is not valid UTF-8"); }
-      if (type === "text") return text;
-      try { return JSON.parse(text) as T; }
-      catch { throw makeError("ASSET_INVALID_JSON", "asset does not contain valid JSON"); }
+    return downloadBrowserFile<T>(this.client, {
+      type: "create_asset_download",
+      payload: { sessionId: this.sessionId, path },
+      readType: type,
+      acceptPath: isValidAssetPath,
+      failedCode: "ASSET_READ_FAILED",
+      failedMessage: "asset read failed",
+      textDecodeCode: "ASSET_TEXT_DECODE_FAILED",
+      textDecodeMessage: "asset is not valid UTF-8",
+      invalidJsonCode: "ASSET_INVALID_JSON",
+      invalidJsonMessage: "asset does not contain valid JSON",
     });
   }
 

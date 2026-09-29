@@ -59,6 +59,39 @@ listFolders(path?: string): Promise<string[]>
 
 Has the same root, relative path, separator, sorting, `.pedelec-runtime`, symlink/junction, and oversized-response semantics as `listFiles()`, but returns directories.
 
+## `uploadFile()`
+
+```ts
+uploadFile(file: File): Promise<string>
+uploadFile(file: File, targetPath: string): Promise<string>
+```
+
+Uploads one browser `File` into this Workspace. Paths are Workspace-relative, use `/`, and do not start with `/`.
+
+```ts
+const workspace = await pedelec.openWorkspace("C:\\workspace\\project");
+const file = new File(["hello"], "hello.txt", { type: "text/plain" });
+
+const path = await workspace.uploadFile(file);
+// "hello.txt" at the Workspace root, with no generated prefix
+
+await workspace.uploadFile(file, "references/photo.png");
+```
+
+Without `targetPath`, the returned path is the original `file.name` placed at the Workspace root. An explicit `targetPath` is returned unchanged, and missing parent directories are created. The limit is 100 MiB. Uploads use the local transfer server and a one-time ticket; several `uploadFile()` calls may run at the same time. Pedelec does not lock the Workspace or resolve conflicts when concurrent writers choose the same path. The application owns that coordination. A successful upload replaces an existing regular file. Absolute paths, `..`, symlinks, and junctions are rejected.
+
+## `readFile()`
+
+```ts
+readFile(path: string, type: "text"): Promise<string>
+readFile<T = JsonValue>(path: string, type: "json"): Promise<T>
+readFile(path: string, type: "file"): Promise<File>
+```
+
+Reads one Workspace-relative regular file, including paths under `.pedelec-runtime`. `text` requires strict UTF-8. `json` parses that text. `file` returns a browser `File` whose name is the target basename, whose type comes from the extension, and whose `lastModified` is the filesystem modification time. Reads are also limited to 100 MiB. A file that changes or is truncated during the read fails instead of returning partial bytes.
+
+`uploadAsset()`, `readAsset()`, and `listAssets()` remain Session-scoped conveniences rooted at `.pedelec-runtime/assets`. Use `uploadFile()`, `readFile()`, and `listFiles()` for general Workspace filesystem access.
+
 ## `run(script, options?)`
 
 For usage, start with [Workspace Deno Execution](../deno/workspace-execution/). The exact API contract follows.

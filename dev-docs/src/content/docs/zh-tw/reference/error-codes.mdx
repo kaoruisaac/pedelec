@@ -178,3 +178,20 @@ Asset failure 可能發生在 SDK request、loopback upload `PUT`、download `GE
 | `ASSET_DOWNLOAD_TICKET_EXPIRED` / `ASSET_DOWNLOAD_UNAUTHORIZED` | Loopback download ticket 被拒絕 | 重新開始 read |
 | `ASSET_READ_FAILED` | Download 或 filesystem read 失敗 | 診斷 session/filesystem 後 retry |
 | `ASSET_TEXT_DECODE_FAILED` / `ASSET_INVALID_JSON` | SDK 無法 UTF-8 decode 或 parse JSON | 改用 `file` 或修正檔案內容 |
+
+## Workspace files
+
+`workspace.uploadFile()` 與 `workspace.readFile()` 使用 Workspace path 與 file error。它們不會回報 `THREAD_*` 或 `SESSION_*`。Session asset methods 仍使用上面的 asset codes。
+
+| Code | 意義 | 建議處理 |
+| --- | --- | --- |
+| `WORKSPACE_FILE_TOO_LARGE` / `WORKSPACE_FILE_READ_TOO_LARGE` | 上傳或讀取超過 100 MiB | 改用較小的檔案 |
+| `WORKSPACE_FILE_TRANSFER_UNAVAILABLE` | 本機 transfer server 無法使用 | 確認 Desktop/Core 後再重試 |
+| `WORKSPACE_FILE_UPLOAD_TICKET_EXPIRED` / `WORKSPACE_FILE_DOWNLOAD_TICKET_EXPIRED` | 一次性 ticket 已過期 | 重新開始傳輸 |
+| `WORKSPACE_FILE_UPLOAD_UNAUTHORIZED` / `WORKSPACE_FILE_DOWNLOAD_UNAUTHORIZED` | Ticket 或 token 被拒絕 | 重新開始傳輸 |
+| `WORKSPACE_FILE_UPLOAD_SIZE_MISMATCH` | 上傳位元組數與檔案不符 | 以未變更的檔案重試 |
+| `WORKSPACE_FILE_UPLOAD_FAILED` / `WORKSPACE_FILE_READ_FAILED` | 傳輸或 filesystem 操作失敗 | 保留細節，診斷後再重試 |
+| `WORKSPACE_FILE_NOT_FOUND` | 目標檔案不存在 | 檢查 Workspace-relative path |
+| `WORKSPACE_FILE_NOT_REGULAR` | 目標是 directory、symlink、junction 或其他非 regular file | 改選 regular file |
+| `WORKSPACE_PATH_INVALID` | path 是 absolute、含 `..`，或不是合法的 Workspace-relative path | 使用沒有前導 slash 的相對 path，分隔字元為 `/` |
+| `WORKSPACE_FILE_TEXT_DECODE_FAILED` / `WORKSPACE_FILE_INVALID_JSON` | SDK 無法 decode UTF-8 或 parse JSON | 改用 `file` 或修正內容 |

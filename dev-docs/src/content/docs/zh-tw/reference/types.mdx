@@ -101,6 +101,11 @@ class PedelecWorkspace {
   ): Promise<PedelecSession<ToolNameOf<TTools>>>;
   listFiles(path?: string): Promise<string[]>;
   listFolders(path?: string): Promise<string[]>;
+  uploadFile(file: File): Promise<string>;
+  uploadFile(file: File, targetPath: string): Promise<string>;
+  readFile(path: string, type: "text"): Promise<string>;
+  readFile<T = JsonValue>(path: string, type: "json"): Promise<T>;
+  readFile(path: string, type: "file"): Promise<File>;
   run(script: string, options?: WorkspaceRunOptions): Promise<WorkspaceRunResult>;
 }
 ```

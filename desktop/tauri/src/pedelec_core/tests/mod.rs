@@ -5726,13 +5726,14 @@ mod tests {
             sdk_origin: None,
         };
 
-        let error = resolve_asset_file(
-            &thread,
+        let _ = thread;
+        let error = resolve_workspace_regular_file(
             &temp.path().join("workspace/thread_asset_isolation"),
-            "/result.json",
+            &workspace_relative_for_asset(Path::new("result.json")),
+            MAX_ASSET_UPLOAD_BYTES,
         )
         .unwrap_err();
-        assert_eq!(error.code, error_codes::ASSET_NOT_FOUND);
+        assert_eq!(error, WorkspaceFileFault::NotFound);
     }
 
     #[test]

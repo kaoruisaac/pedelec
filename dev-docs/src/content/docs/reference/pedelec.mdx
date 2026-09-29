@@ -108,7 +108,7 @@ openWorkspace(): Promise<PedelecWorkspace | null>
 openWorkspace(path: string): Promise<PedelecWorkspace>
 ```
 
-Opens or initializes a workspace capability. Without a path, Pedelec Desktop opens the native directory picker and cancellation resolves to `null`. An explicit path bypasses the picker. The returned workspace exposes `path`, `createSession()`, `listFiles()`, `listFolders()`, and `run()`.
+Opens or initializes a workspace capability. Without a path, Pedelec Desktop opens the native directory picker and cancellation resolves to `null`. An explicit path bypasses the picker. The returned workspace exposes `path`, `createSession()`, `listFiles()`, `listFolders()`, `uploadFile()`, `readFile()`, and `run()`.
 
 ```ts
 const workspace = await pedelec.openWorkspace();

@@ -286,6 +286,17 @@ console.log(session.workspace.path); // null for managed Workspace
 
 `workspace.listFiles(path?)` and `workspace.listFolders(path?)` recursively return Workspace-relative paths. An omitted path lists from the Workspace root; `/` is the separator and results are lexicographically sorted. The `.pedelec-runtime` directory is included. Symlinks and junctions are neither followed nor returned. Results are not silently truncated: an oversized response fails with `WORKSPACE_LIST_TOO_LARGE`, so retry with a narrower path.
 
+`workspace.uploadFile(file, targetPath?)` and `workspace.readFile(path, type)` transfer regular files anywhere in the Workspace, including `.pedelec-runtime`. Paths are Workspace-relative, use `/`, and do not start with `/`. `uploadFile(file)` stores the original filename at the Workspace root and does not add a generated prefix. The limit is 100 MiB. Workspace uploads may run concurrently; shared filesystem conflicts remain the application's responsibility. `readFile()` accepts `"text"`, `"json"`, or `"file"`.
+
+```ts
+const workspace = await pedelec.openWorkspace("C:\\workspace\\project");
+const file = new File(["hello"], "hello.txt", { type: "text/plain" });
+const path = await workspace.uploadFile(file, "references/photo.png");
+const text = await workspace.readFile("README.md", "text");
+```
+
+`session.uploadAsset()`, `readAsset()`, and `listAssets()` stay available as Session-scoped conveniences. Their root is `.pedelec-runtime/assets`, which suits provider artifacts and Agent-shared assets. Use the Workspace methods for general filesystem access.
+
 `workspace.run(script, options?)` executes application-supplied Deno code in the Workspace:
 
 ```ts

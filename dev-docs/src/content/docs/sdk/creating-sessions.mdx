@@ -30,7 +30,7 @@ const workspace = await pedelec.openWorkspace("C:\\workspace\\project-a");
 const session = await workspace.createSession({ provider: "codex" });
 ```
 
-`PedelecWorkspace` exposes `path`, `createSession()`, `listFiles()`, `listFolders()`, and `run()`. See the [PedelecWorkspace reference](../reference/pedelec-workspace/) for method semantics, security, concurrency, and lifetime. A managed session created with `pedelec.createSession()` also exposes its managed Workspace as `session.workspace`; the Workspace handle remains available after `session.end()`.
+`PedelecWorkspace` exposes `path`, `createSession()`, `listFiles()`, `listFolders()`, `uploadFile()`, `readFile()`, and `run()`. See the [PedelecWorkspace reference](../reference/pedelec-workspace/) for method semantics, security, concurrency, and lifetime. A managed session created with `pedelec.createSession()` also exposes its managed Workspace as `session.workspace`; the Workspace handle remains available after `session.end()`.
 
 ```ts
 const session = await pedelec.createSession();

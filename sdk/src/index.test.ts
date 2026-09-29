@@ -3624,3 +3624,221 @@ describe("Pedelec SDK", () => {
   });
 });
 
+describe("workspace file transfer", () => {
+  let pageWindow: MockWindow;
+
+  beforeEach(() => {
+    pageWindow = installWindowMock();
+  });
+
+  afterEach(() => {
+    delete (globalThis as any).window;
+    delete (globalThis as any).chrome;
+    delete (globalThis as any).fetch;
+  });
+
+  async function openWorkspace(pedelec: Pedelec) {
+    const open = pedelec.openWorkspace("C:\\workspace\\project");
+    const request = pageWindow.lastSent();
+    respondOk(pageWindow, request, {
+      workspace: { workspaceId: "workspace_files", path: "C:\\workspace\\project" },
+    });
+    return open;
+  }
+
+  it("uploads a root file without a generated prefix and reads it back", async () => {
+    const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = async (input, init) => {
+      fetchCalls.push({ url: String(input), init });
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({ path: "hello.txt" }), { status: 201 });
+      }
+      return new Response(new Uint8Array([104, 101, 108, 108, 111]), {
+        status: 200,
+        headers: { "Content-Type": "text/plain" },
+      });
+    };
+    const pedelec = new Pedelec();
+    const workspace = await openWorkspace(pedelec);
+    const file = new File(["hello"], "hello.txt", { type: "text/plain" });
+    const upload = workspace.uploadFile(file);
+    const request = pageWindow.lastSent();
+    expect(request).toMatchObject({
+      type: "create_workspace_file_upload",
+      workspaceId: "workspace_files",
+      filename: "hello.txt",
+      sizeBytes: 5,
+      mimeType: "text/plain",
+    });
+    expect(request.targetPath).toBeUndefined();
+    respondOk(pageWindow, request, {
+      uploadId: "upl_internal",
+      uploadUrl: "http://127.0.0.1:9/uploads/upl_internal",
+      token: "token",
+    });
+    await expect(upload).resolves.toBe("hello.txt");
+
+    const text = workspace.readFile("hello.txt", "text");
+    const download = pageWindow.lastSent();
+    expect(download).toMatchObject({
+      type: "create_workspace_file_download",
+      workspaceId: "workspace_files",
+      path: "hello.txt",
+    });
+    respondOk(pageWindow, download, {
+      downloadId: "dnl_1",
+      downloadUrl: "http://127.0.0.1:9/downloads/dnl_1",
+      token: "token",
+      path: "hello.txt",
+      name: "hello.txt",
+      sizeBytes: 5,
+      modifiedAt: 123,
+      mimeType: "text/plain",
+    });
+    await expect(text).resolves.toBe("hello");
+    const parsed = workspace.readFile<{ ok: boolean }>("result.json", "json");
+    respondOk(pageWindow, pageWindow.lastSent(), {
+      downloadUrl: "http://127.0.0.1:9/downloads/dnl_2",
+      token: "token",
+      path: "result.json",
+      name: "result.json",
+      mimeType: "application/json",
+      modifiedAt: 123,
+    });
+    globalThis.fetch = async () => new Response(new TextEncoder().encode('{"ok":true}'), { status: 200 });
+    await expect(parsed).resolves.toEqual({ ok: true });
+    expect(fetchCalls.length).toBeGreaterThan(0);
+  });
+
+  it("round-trips a nested target and rejects invalid paths and oversized files locally", async () => {
+    globalThis.fetch = async () => new Response(JSON.stringify({ path: "references/photo.png" }), { status: 201 });
+    const pedelec = new Pedelec();
+    const workspace = await openWorkspace(pedelec);
+    const file = new File(["x"], "photo.png", { type: "image/png" });
+    const upload = workspace.uploadFile(file, "references/photo.png");
+    const request = pageWindow.lastSent();
+    expect(request).toMatchObject({ targetPath: "references/photo.png" });
+    respondOk(pageWindow, request, {
+      uploadUrl: "http://127.0.0.1:9/uploads/upl_nested",
+      token: "token",
+    });
+    await expect(upload).resolves.toBe("references/photo.png");
+
+    const sent = pageWindow.port.sent.length;
+    await expect(workspace.uploadFile(file, "/src/App.tsx")).rejects.toMatchObject({ code: "WORKSPACE_PATH_INVALID" });
+    await expect(workspace.uploadFile(file, "../secret.txt")).rejects.toMatchObject({ code: "WORKSPACE_PATH_INVALID" });
+    await expect(workspace.readFile("../secret.txt", "text")).rejects.toMatchObject({ code: "WORKSPACE_PATH_INVALID" });
+    const huge = new File([new Uint8Array(1)], "huge.bin");
+    Object.defineProperty(huge, "size", { value: 100 * 1024 * 1024 + 1 });
+    await expect(workspace.uploadFile(huge)).rejects.toMatchObject({ code: "WORKSPACE_FILE_TOO_LARGE" });
+    expect(pageWindow.port.sent).toHaveLength(sent);
+  });
+
+  it("rejects malformed tickets, protocol path mismatches, and HTTP failures", async () => {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: { code: "WORKSPACE_FILE_UPLOAD_SIZE_MISMATCH", message: "size" } }), { status: 413 });
+    const pedelec = new Pedelec();
+    const workspace = await openWorkspace(pedelec);
+    const file = new File(["x"], "photo.png");
+    const badTicket = workspace.uploadFile(file);
+    respondOk(pageWindow, pageWindow.lastSent(), {});
+    await expect(badTicket).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR" });
+
+    const mismatch = workspace.uploadFile(file, "references/photo.png");
+    respondOk(pageWindow, pageWindow.lastSent(), { uploadUrl: "http://127.0.0.1:9/uploads/upl", token: "token" });
+    globalThis.fetch = async () => new Response(JSON.stringify({ path: "other.png" }), { status: 201 });
+    await expect(mismatch).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR" });
+
+    const httpFailure = workspace.uploadFile(file);
+    respondOk(pageWindow, pageWindow.lastSent(), { uploadUrl: "http://127.0.0.1:9/uploads/upl", token: "token" });
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: { code: "WORKSPACE_FILE_UPLOAD_SIZE_MISMATCH", message: "size" } }), { status: 413 });
+    await expect(httpFailure).rejects.toMatchObject({ code: "WORKSPACE_FILE_UPLOAD_SIZE_MISMATCH" });
+
+    const badDownload = workspace.readFile("photo.png", "file");
+    respondOk(pageWindow, pageWindow.lastSent(), { downloadUrl: "http://127.0.0.1:9/downloads/dnl" });
+    await expect(badDownload).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR" });
+
+    globalThis.fetch = async () => new Response(new Uint8Array([0xff, 0xfe]), { status: 200 });
+    const invalidUtf8 = workspace.readFile("photo.png", "text");
+    respondOk(pageWindow, pageWindow.lastSent(), {
+      downloadUrl: "http://127.0.0.1:9/downloads/dnl",
+      token: "token",
+      path: "photo.png",
+      name: "photo.png",
+      mimeType: "text/plain",
+      modifiedAt: 1,
+    });
+    await expect(invalidUtf8).rejects.toMatchObject({ code: "WORKSPACE_FILE_TEXT_DECODE_FAILED" });
+
+    globalThis.fetch = async () => new Response(new TextEncoder().encode("{"), { status: 200 });
+    const invalidJson = workspace.readFile("photo.png", "json");
+    respondOk(pageWindow, pageWindow.lastSent(), {
+      downloadUrl: "http://127.0.0.1:9/downloads/dnl",
+      token: "token",
+      path: "photo.png",
+      name: "photo.png",
+      mimeType: "application/json",
+      modifiedAt: 1,
+    });
+    await expect(invalidJson).rejects.toMatchObject({ code: "WORKSPACE_FILE_INVALID_JSON" });
+
+    globalThis.fetch = async () => new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    const downloaded = workspace.readFile("photo.png", "file");
+    respondOk(pageWindow, pageWindow.lastSent(), {
+      downloadUrl: "http://127.0.0.1:9/downloads/dnl",
+      token: "token",
+      path: "photo.png",
+      name: "photo.png",
+      mimeType: "image/png",
+      modifiedAt: 42,
+    });
+    const result = await downloaded;
+    expect(result).toBeInstanceOf(File);
+    expect(result.name).toBe("photo.png");
+    expect(result.type).toBe("image/png");
+    expect(result.lastModified).toBe(42);
+  });
+
+  it("allows multiple workspace uploads to stay pending", async () => {
+    const pedelec = new Pedelec();
+    const workspace = await openWorkspace(pedelec);
+    const first = workspace.uploadFile(new File(["a"], "a.bin"), "a.bin");
+    const second = workspace.uploadFile(new File(["b"], "b.bin"), "b.bin");
+    const requests = pageWindow.port.sent.filter((message) => message.type === "create_workspace_file_upload");
+    expect(requests).toHaveLength(2);
+    respondOk(pageWindow, requests[0], { uploadUrl: "http://127.0.0.1:9/uploads/a", token: "a" });
+    respondOk(pageWindow, requests[1], { uploadUrl: "http://127.0.0.1:9/uploads/b", token: "b" });
+    globalThis.fetch = async (input) => new Response(JSON.stringify({ path: String(input).endsWith("/a") ? "a.bin" : "b.bin" }), { status: 201 });
+    await expect(Promise.all([first, second])).resolves.toEqual(["a.bin", "b.bin"]);
+  });
+
+  it("keeps asset upload compatibility guards", async () => {
+    globalThis.fetch = async () => new Response(JSON.stringify({ path: "/upl_1234abcd-hello.txt" }), { status: 201 });
+    const pedelec = new Pedelec();
+    const { session, createRequest } = await createProviderSession(pedelec, pageWindow);
+    const file = new File(["hello"], "hello.txt", { type: "text/plain" });
+    const upload = session.uploadAsset(file);
+    const request = pageWindow.lastSent();
+    expect(request).toMatchObject({ type: "create_asset_upload", sessionId: "thread_1", filename: "hello.txt" });
+    expect(request.targetPath).toBeUndefined();
+    const busy = session.uploadAsset(file);
+    await expect(busy).rejects.toMatchObject({ code: "SESSION_BUSY" });
+    respondOk(pageWindow, request, { uploadUrl: "http://127.0.0.1:9/uploads/upl", token: "token" });
+    await expect(upload).resolves.toBe("/upl_1234abcd-hello.txt");
+
+    const exact = session.uploadAsset(file, "/nested/hello.txt");
+    respondOk(pageWindow, pageWindow.lastSent(), { uploadUrl: "http://127.0.0.1:9/uploads/upl2", token: "token" });
+    globalThis.fetch = async () => new Response(JSON.stringify({ path: "/nested/hello.txt" }), { status: 201 });
+    await expect(exact).resolves.toBe("/nested/hello.txt");
+
+    pageWindow.emitFromExtension({
+      source: "pedelec-sdk-extension",
+      channelId: createRequest.channelId,
+      type: "ended",
+      sessionId: "thread_1",
+      seq: 1,
+    });
+    await expect(session.uploadAsset(file)).rejects.toMatchObject({ code: "SESSION_ENDED" });
+    await expect(session.readAsset("/hello.txt", "text")).rejects.toMatchObject({ code: "SESSION_ENDED" });
+  });
+});
+

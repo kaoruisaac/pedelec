@@ -2456,6 +2456,161 @@ mod tests {
         }"#
     }
 
+    #[test]
+    fn workspace_file_transfer_authorizes_the_workspace_and_not_a_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom");
+        std::fs::create_dir_all(&custom).unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime {
+            workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("managed")),
+            ..CoreRuntime::default()
+        }));
+        runtime.lock().unwrap().set_asset_upload_port(9);
+        let opened = runtime
+            .lock()
+            .unwrap()
+            .open_workspace(
+                pedelec_core::OpenWorkspaceInput { path: custom },
+                "https://app.example.test",
+                None,
+            )
+            .unwrap();
+        runtime.lock().unwrap().thread_manager.insert_thread(
+            ThreadState {
+                thread_id: "thread_asset_auth".into(),
+                workspace_id: opened.workspace_id.clone(),
+                provider: ProviderCode::Codex,
+                effort_level: Some(EffortLevel::Default),
+                effort_args: vec![],
+                skills: vec![],
+                status: ThreadStatus::Idle,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                sdk_origin: Some("https://app.example.test".into()),
+            },
+            ProviderSessionState {
+                provider_session_id: None,
+                active_provider_turn_id: None,
+            },
+        );
+
+        let denied = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "ws_upload_denied".into(),
+                r#type: "create_workspace_file_upload".into(),
+                caller_origin: Some("https://other.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "workspaceId": opened.workspace_id,
+                    "filename": "hello.txt",
+                    "sizeBytes": 1,
+                    "mimeType": "text/plain"
+                })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert!(!denied.ok);
+        assert_eq!(
+            denied.error.unwrap().code,
+            error_codes::WORKSPACE_ACCESS_DENIED
+        );
+
+        let missing_origin = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "ws_upload_no_origin".into(),
+                r#type: "create_workspace_file_download".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "workspaceId": opened.workspace_id,
+                    "path": "hello.txt"
+                })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert_eq!(
+            missing_origin.error.unwrap().code,
+            error_codes::IPC_UNAUTHORIZED
+        );
+
+        let unknown = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "ws_upload_unknown".into(),
+                r#type: "create_workspace_file_upload".into(),
+                caller_origin: Some("https://app.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "workspaceId": "missing",
+                    "filename": "hello.txt",
+                    "sizeBytes": 1,
+                    "mimeType": "text/plain"
+                })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert_eq!(
+            unknown.error.unwrap().code,
+            error_codes::WORKSPACE_NOT_FOUND
+        );
+
+        let allowed = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "ws_upload_ok".into(),
+                r#type: "create_workspace_file_upload".into(),
+                caller_origin: Some("https://app.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "workspaceId": opened.workspace_id,
+                    "filename": "hello.txt",
+                    "sizeBytes": 1,
+                    "mimeType": "text/plain",
+                    "threadId": "must-not-be-required"
+                })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert!(allowed.ok);
+        assert!(allowed.result.unwrap().get("uploadUrl").is_some());
+
+        let asset_denied = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "asset_denied".into(),
+                r#type: "create_asset_upload".into(),
+                caller_origin: Some("https://other.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "threadId": "thread_asset_auth",
+                    "filename": "hello.txt",
+                    "sizeBytes": 1,
+                    "mimeType": "text/plain"
+                })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert_eq!(
+            asset_denied.error.unwrap().code,
+            error_codes::THREAD_ACCESS_DENIED
+        );
+
+        let asset_missing = handle_core_ipc_request(
+            CoreIpcRequest {
+                request_id: "asset_missing".into(),
+                r#type: "create_asset_download".into(),
+                caller_origin: Some("https://app.example.test".into()),
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "threadId": "missing_thread",
+                    "path": "/hello.txt"
+                })),
+            },
+            runtime,
+        );
+        assert_eq!(
+            asset_missing.error.unwrap().code,
+            error_codes::THREAD_NOT_FOUND
+        );
+    }
+
     fn phase09_skills_manifest() -> Value {
         let registry: Value = serde_json::from_str(phase09_tools_json()).unwrap();
         json!({

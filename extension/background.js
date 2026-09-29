@@ -2417,6 +2417,46 @@ function createBackground(runtimeChrome, options = {}) {
         return;
       }
 
+      if (message.type === "create_workspace_file_upload" || message.type === "create_workspace_file_download") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
+        requireSdkWorkspaceRequest(message);
+        if (message.type === "create_workspace_file_upload") {
+          if (typeof message.filename !== "string" || !message.filename.trim()) {
+            throw { code: "SDK_PROTOCOL_ERROR", message: "filename is required" };
+          }
+          if (!Number.isInteger(message.sizeBytes) || message.sizeBytes < 0) {
+            throw { code: "SDK_PROTOCOL_ERROR", message: "sizeBytes must be a non-negative integer" };
+          }
+          if (typeof message.mimeType !== "string") {
+            throw { code: "SDK_PROTOCOL_ERROR", message: "mimeType is required" };
+          }
+          if (message.targetPath !== undefined && (typeof message.targetPath !== "string" || !message.targetPath.trim())) {
+            throw { code: "SDK_PROTOCOL_ERROR", message: "targetPath must be a non-empty string when provided" };
+          }
+          const result = await sendSdkNativeRequest(context, "create_workspace_file_upload", {
+            workspaceId: message.workspaceId,
+            filename: message.filename,
+            sizeBytes: message.sizeBytes,
+            mimeType: message.mimeType,
+            ...(message.targetPath === undefined ? {} : { targetPath: message.targetPath }),
+          });
+          postSdkResponse(port, channelId, requestId, true, result || {});
+          return;
+        }
+        if (typeof message.path !== "string" || !message.path.trim()) {
+          throw { code: "SDK_PROTOCOL_ERROR", message: "path is required" };
+        }
+        const result = await sendSdkNativeRequest(context, "create_workspace_file_download", {
+          workspaceId: message.workspaceId,
+          path: message.path,
+        });
+        postSdkResponse(port, channelId, requestId, true, result || {});
+        return;
+      }
+
       if (message.type === "create_asset_upload") {
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);

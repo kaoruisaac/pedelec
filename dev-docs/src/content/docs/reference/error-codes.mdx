@@ -178,3 +178,20 @@ Asset failures can occur while creating an SDK request, during loopback upload `
 | `ASSET_DOWNLOAD_TICKET_EXPIRED` / `ASSET_DOWNLOAD_UNAUTHORIZED` | Loopback download ticket was rejected | Start a fresh read |
 | `ASSET_READ_FAILED` | Download or filesystem read failed | Retry after diagnosing the session/filesystem |
 | `ASSET_TEXT_DECODE_FAILED` / `ASSET_INVALID_JSON` | SDK conversion could not decode UTF-8 or parse JSON | Use `file` or correct the file contents |
+
+## Workspace files
+
+`workspace.uploadFile()` and `workspace.readFile()` use Workspace path and file errors. They do not report `THREAD_*` or `SESSION_*` codes. Session asset methods keep the asset codes above.
+
+| Code | Meaning | Recommended response |
+| --- | --- | --- |
+| `WORKSPACE_FILE_TOO_LARGE` / `WORKSPACE_FILE_READ_TOO_LARGE` | Upload or read exceeds 100 MiB | Choose a smaller file |
+| `WORKSPACE_FILE_TRANSFER_UNAVAILABLE` | Local transfer server is unavailable | Check Desktop/Core and retry after recovery |
+| `WORKSPACE_FILE_UPLOAD_TICKET_EXPIRED` / `WORKSPACE_FILE_DOWNLOAD_TICKET_EXPIRED` | One-time ticket expired | Start a fresh transfer |
+| `WORKSPACE_FILE_UPLOAD_UNAUTHORIZED` / `WORKSPACE_FILE_DOWNLOAD_UNAUTHORIZED` | Ticket or token was rejected | Start a fresh transfer |
+| `WORKSPACE_FILE_UPLOAD_SIZE_MISMATCH` | Uploaded byte count did not match the file | Retry with the unchanged file |
+| `WORKSPACE_FILE_UPLOAD_FAILED` / `WORKSPACE_FILE_READ_FAILED` | Transfer or filesystem operation failed | Preserve details and retry after diagnosis |
+| `WORKSPACE_FILE_NOT_FOUND` | Target file is absent | Check the Workspace-relative path |
+| `WORKSPACE_FILE_NOT_REGULAR` | Target is a directory, symlink, junction, or other non-regular file | Choose a regular file |
+| `WORKSPACE_PATH_INVALID` | Path is absolute, traverses with `..`, or otherwise is not a Workspace-relative path | Use a relative `/`-separated path without a leading slash |
+| `WORKSPACE_FILE_TEXT_DECODE_FAILED` / `WORKSPACE_FILE_INVALID_JSON` | SDK could not decode UTF-8 or parse JSON | Use `file` or correct the contents |

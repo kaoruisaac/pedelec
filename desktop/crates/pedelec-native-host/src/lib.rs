@@ -255,6 +255,20 @@ fn native_message_to_core_request(
             &object,
             &["workspaceId", "moduleName", "expectedSizeBytes"],
         ))),
+        "create_workspace_file_upload" => Some(Value::Object(select_fields(
+            &object,
+            &[
+                "workspaceId",
+                "filename",
+                "sizeBytes",
+                "mimeType",
+                "targetPath",
+            ],
+        ))),
+        "create_workspace_file_download" => Some(Value::Object(select_fields(
+            &object,
+            &["workspaceId", "path"],
+        ))),
         "abort_session_setup" => Some(Value::Object(select_fields(&object, &["threadId"]))),
         "list_providers" | "get_settings" => Some(Value::Object(object)),
         "open_workspace" => Some(Value::Object(select_fields(&object, &["path"]))),
@@ -914,6 +928,44 @@ mod tests {
                 "script": "console.log(1)",
                 "timeoutMs": 1000,
             }))
+        );
+
+        let upload = native_message_to_core_request(json!({
+            "type": "create_workspace_file_upload",
+            "requestId": "req_upload",
+            "callerOrigin": "https://approved.example",
+            "workspaceId": "ws_1",
+            "filename": "photo.png",
+            "sizeBytes": 4,
+            "mimeType": "image/png",
+            "targetPath": "references/photo.png",
+            "threadId": "must-not-cross-ipc",
+            "sessionId": "must-not-cross-ipc",
+        }))
+        .unwrap();
+        assert_eq!(
+            upload.payload,
+            Some(json!({
+                "workspaceId": "ws_1",
+                "filename": "photo.png",
+                "sizeBytes": 4,
+                "mimeType": "image/png",
+                "targetPath": "references/photo.png",
+            }))
+        );
+
+        let download = native_message_to_core_request(json!({
+            "type": "create_workspace_file_download",
+            "requestId": "req_download",
+            "callerOrigin": "https://approved.example",
+            "workspaceId": "ws_1",
+            "path": "README.md",
+            "threadId": "must-not-cross-ipc",
+        }))
+        .unwrap();
+        assert_eq!(
+            download.payload,
+            Some(json!({ "workspaceId": "ws_1", "path": "README.md" }))
         );
     }
 

@@ -13,7 +13,7 @@ The App and Agent share the Workspace's physical `.pedelec-runtime/assets/` dire
 
 ### Upload a file
 
-Use `uploadAsset()` with one browser `File`. Files are limited to 100 MiB; returned public paths use `/...`, with `.pedelec-runtime/assets/` as their physical root and `assets/` as their implicit SDK root. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
+Use `uploadAsset()` with one browser `File` when the file should live in the Session asset area. This is a Session-scoped convenience API: its root is fixed at `.pedelec-runtime/assets`, which suits provider artifacts and files shared with the Agent. General Workspace filesystem access uses `workspace.uploadFile()`, `workspace.readFile()`, and `workspace.listFiles()`. Files are limited to 100 MiB; returned public asset paths use `/...`, with `.pedelec-runtime/assets/` as their physical root and `assets/` as their implicit SDK root. Upload can run alongside prepare and agent execution, although a session allows only one concurrent upload.
 
 ```ts
 const file = input.files?.[0];

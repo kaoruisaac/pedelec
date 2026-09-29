@@ -70,11 +70,27 @@ pub fn workspace_assets_root(workspace_path: &Path) -> PathBuf {
     workspace_runtime_data_root(workspace_path).join("assets")
 }
 
-/// Commit a staged asset after checking every destination directory. Provider
-/// artifacts use `replace = false`; browser uploads retain replacement support.
-pub fn finalize_asset_write(
+/// Confirm `root` already exists as a real directory.
+///
+/// Missing roots, symlinks, junctions, and other reparse points are rejected.
+/// This helper never creates `root`.
+pub fn require_authoritative_directory(root: &Path) -> io::Result<PathBuf> {
+    let metadata = fs::symlink_metadata(root)?;
+    if is_link_or_junction(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::other("workspace file root is unsafe"));
+    }
+    root.canonicalize()
+}
+
+/// Commit a staged file under an authoritative root after checking every
+/// destination directory. The root must already exist as a real directory;
+/// this helper never creates it and refuses symlink or junction roots.
+/// Missing parent directories below the root may still be created. Provider
+/// artifacts use `replace = false`; browser uploads retain replacement
+/// support. The root may be a Workspace or the Workspace assets directory.
+pub fn finalize_workspace_file_write(
     tmp: &Path,
-    asset_root: &Path,
+    root: &Path,
     relative: &Path,
     replace: bool,
     write_id: &str,
@@ -84,11 +100,10 @@ pub fn finalize_asset_write(
             .components()
             .any(|part| !matches!(part, Component::Normal(_)))
     {
-        return Err(io::Error::other("asset path is unsafe"));
+        return Err(io::Error::other("workspace file path is unsafe"));
     }
-    fs::create_dir_all(asset_root)?;
-    let canonical_root = asset_root.canonicalize()?;
-    let mut parent = asset_root.to_path_buf();
+    let canonical_root = require_authoritative_directory(root)?;
+    let mut parent = root.to_path_buf();
     for component in relative
         .parent()
         .unwrap_or_else(|| Path::new(""))
@@ -97,27 +112,29 @@ pub fn finalize_asset_write(
         parent.push(component);
         if parent.exists() {
             let metadata = fs::symlink_metadata(&parent)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(io::Error::other("asset parent is unsafe"));
+            if is_link_or_junction(&metadata) || !metadata.is_dir() {
+                return Err(io::Error::other("workspace file parent is unsafe"));
             }
         } else {
             fs::create_dir(&parent)?;
         }
         if !parent.canonicalize()?.starts_with(&canonical_root) {
-            return Err(io::Error::other("asset parent escapes root"));
+            return Err(io::Error::other("workspace file parent escapes root"));
         }
     }
-    let target = asset_root.join(relative);
+    let target = root.join(relative);
     if !replace {
         // A hard link commits atomically and fails if the target already exists.
-        // The staging file is created on the same asset filesystem.
+        // The staging file is created on the same filesystem as the destination.
         fs::hard_link(tmp, &target)?;
         fs::remove_file(tmp)?;
         return Ok(());
     }
     if let Ok(metadata) = fs::symlink_metadata(&target) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(io::Error::other("asset target is not a regular file"));
+        if is_link_or_junction(&metadata) || !metadata.is_file() {
+            return Err(io::Error::other(
+                "workspace file target is not a regular file",
+            ));
         }
         let backup = target.with_file_name(format!(".pedelec-{write_id}.backup"));
         fs::rename(&target, &backup)?;
@@ -134,6 +151,18 @@ pub fn finalize_asset_write(
     } else {
         fs::rename(tmp, target)
     }
+}
+
+/// Compatibility wrapper for callers that still name the Workspace file commit
+/// helper in asset terms.
+pub fn finalize_asset_write(
+    tmp: &Path,
+    asset_root: &Path,
+    relative: &Path,
+    replace: bool,
+    write_id: &str,
+) -> io::Result<()> {
+    finalize_workspace_file_write(tmp, asset_root, relative, replace, write_id)
 }
 
 /// Returns the legacy workspace-global skills root for callers inspecting
@@ -314,6 +343,25 @@ pub struct CreateAssetDownloadOutput {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspaceFileUploadInput {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    pub filename: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspaceFileDownloadInput {
+    pub workspace_id: String,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListAssetsInput {
@@ -335,22 +383,55 @@ pub struct ListAssetsOutput {
     pub assets: Vec<Asset>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileTransferAudience {
+    Workspace,
+    Asset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileTransferOwner {
+    Workspace { workspace_id: String },
+    Thread { thread_id: String },
+}
+
+impl FileTransferOwner {
+    fn thread_id(&self) -> Option<&str> {
+        match self {
+            Self::Thread { thread_id } => Some(thread_id.as_str()),
+            Self::Workspace { .. } => None,
+        }
+    }
+
+    fn workspace_id(&self) -> Option<&str> {
+        match self {
+            Self::Workspace { workspace_id } => Some(workspace_id.as_str()),
+            Self::Thread { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct AssetUploadTicket {
-    pub thread_id: String,
+pub struct FileUploadTicket {
+    pub owner: FileTransferOwner,
+    pub audience: FileTransferAudience,
+    /// Authoritative Workspace directory. Staging files live under its tmp root.
     pub workspace_path: PathBuf,
-    pub public_path: String,
+    /// Directory `relative_path` is committed under. Workspace and asset
+    /// transfers both use the Workspace root; asset paths include
+    /// `.pedelec-runtime/assets`.
+    pub commit_root: PathBuf,
+    /// Logical path returned to the caller. Asset paths keep a leading `/`.
+    pub response_path: String,
     pub relative_path: PathBuf,
-    pub filename: String,
-    pub safe_filename: String,
     pub expected_size_bytes: u64,
     pub token_hash: String,
     pub expires_at: DateTime<Utc>,
-    pub state: AssetUploadState,
+    pub state: FileUploadState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssetUploadState {
+pub enum FileUploadState {
     Pending,
     Uploading,
     Completed,
@@ -358,14 +439,78 @@ pub enum AssetUploadState {
     Expired,
 }
 
+pub type AssetUploadState = FileUploadState;
+
 #[derive(Debug, Clone)]
-pub struct AssetDownloadTicket {
-    pub thread_id: String,
+pub struct FileDownloadTicket {
+    pub owner: FileTransferOwner,
+    pub audience: FileTransferAudience,
     pub workspace_path: PathBuf,
-    pub public_path: String,
+    pub commit_root: PathBuf,
+    pub response_path: String,
+    pub relative_path: PathBuf,
+    pub expected_size_bytes: u64,
     pub token_hash: String,
     pub expires_at: DateTime<Utc>,
-    pub state: AssetDownloadState,
+    pub state: FileDownloadState,
+}
+
+impl FileTransferAudience {
+    pub fn upload_unauthorized(self) -> &'static str {
+        match self {
+            Self::Asset => error_codes::ASSET_UPLOAD_UNAUTHORIZED,
+            Self::Workspace => error_codes::WORKSPACE_FILE_UPLOAD_UNAUTHORIZED,
+        }
+    }
+
+    pub fn upload_expired(self) -> &'static str {
+        match self {
+            Self::Asset => error_codes::ASSET_UPLOAD_TICKET_EXPIRED,
+            Self::Workspace => error_codes::WORKSPACE_FILE_UPLOAD_TICKET_EXPIRED,
+        }
+    }
+
+    pub fn upload_size_mismatch(self) -> &'static str {
+        match self {
+            Self::Asset => error_codes::ASSET_UPLOAD_SIZE_MISMATCH,
+            Self::Workspace => error_codes::WORKSPACE_FILE_UPLOAD_SIZE_MISMATCH,
+        }
+    }
+
+    pub fn upload_failed(self) -> &'static str {
+        match self {
+            Self::Asset => error_codes::ASSET_UPLOAD_FAILED,
+            Self::Workspace => error_codes::WORKSPACE_FILE_UPLOAD_FAILED,
+        }
+    }
+
+    pub fn download_unauthorized(self) -> &'static str {
+        match self {
+            Self::Asset => error_codes::ASSET_DOWNLOAD_UNAUTHORIZED,
+            Self::Workspace => error_codes::WORKSPACE_FILE_DOWNLOAD_UNAUTHORIZED,
+        }
+    }
+
+    pub fn download_expired(self) -> &'static str {
+        match self {
+            Self::Asset => error_codes::ASSET_DOWNLOAD_TICKET_EXPIRED,
+            Self::Workspace => error_codes::WORKSPACE_FILE_DOWNLOAD_TICKET_EXPIRED,
+        }
+    }
+
+    pub fn path_invalid(self) -> &'static str {
+        match self {
+            Self::Asset => error_codes::ASSET_PATH_INVALID,
+            Self::Workspace => error_codes::WORKSPACE_PATH_INVALID,
+        }
+    }
+
+    pub fn read_failed(self) -> &'static str {
+        match self {
+            Self::Asset => error_codes::ASSET_READ_FAILED,
+            Self::Workspace => error_codes::WORKSPACE_FILE_READ_FAILED,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -508,13 +653,15 @@ struct DenoModuleImportMap {
     imports: BTreeMap<String, String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssetDownloadState {
+pub enum FileDownloadState {
     Pending,
     Downloading,
     Completed,
     Failed,
     Expired,
 }
+
+pub type AssetDownloadState = FileDownloadState;
 
 impl PedelecError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
@@ -2060,8 +2207,8 @@ pub struct CoreRuntime {
     pub provider_refresh_in_progress: bool,
     pub provider_readiness: ProviderReadiness,
     pub asset_upload_port: Option<u16>,
-    pub asset_upload_tickets: HashMap<String, AssetUploadTicket>,
-    pub asset_download_tickets: HashMap<String, AssetDownloadTicket>,
+    pub file_upload_tickets: HashMap<String, FileUploadTicket>,
+    pub file_download_tickets: HashMap<String, FileDownloadTicket>,
     /// Authoritative metadata and setup state for the modules declared by
     /// each thread.  This intentionally remains separate from ThreadState so
     /// older diagnostic/test thread constructors remain source-compatible.
@@ -2437,6 +2584,30 @@ impl CoreRuntime {
                 DenoModuleUploadOwner::Workspace { workspace_id: candidate, .. }
                     if candidate == workspace_id
             )
+        });
+        self.clear_workspace_file_transfers(Some(workspace_id));
+    }
+
+    /// Drop active file-transfer tickets owned by one Workspace, or by every
+    /// Workspace when `workspace_id` is `None`. Thread-owned asset tickets stay.
+    fn clear_workspace_file_transfers(&mut self, workspace_id: Option<&str>) {
+        let targeted = |owner: &FileTransferOwner| match workspace_id {
+            Some(workspace_id) => owner.workspace_id() == Some(workspace_id),
+            None => owner.workspace_id().is_some(),
+        };
+        self.file_upload_tickets.retain(|_, ticket| {
+            !(targeted(&ticket.owner)
+                && matches!(
+                    ticket.state,
+                    FileUploadState::Pending | FileUploadState::Uploading
+                ))
+        });
+        self.file_download_tickets.retain(|_, ticket| {
+            !(targeted(&ticket.owner)
+                && matches!(
+                    ticket.state,
+                    FileDownloadState::Pending | FileDownloadState::Downloading
+                ))
         });
     }
 
@@ -3347,7 +3518,7 @@ impl CoreRuntime {
                 ));
             }
             drop(output);
-            finalize_asset_write(&tmp, &root, &relative, false, &id)
+            finalize_workspace_file_write(&tmp, &root, &relative, false, &id)
         })();
         if let Err(error) = write_result {
             let _ = fs::remove_file(&tmp);
@@ -3397,12 +3568,6 @@ impl CoreRuntime {
                 "asset exceeds the 100 MiB limit",
             ));
         }
-        let port = self.asset_upload_port.ok_or_else(|| {
-            PedelecError::new(
-                error_codes::ASSET_UPLOAD_SERVER_UNAVAILABLE,
-                "asset upload server is unavailable",
-            )
-        })?;
         let thread = self.thread_manager.thread(&input.thread_id)?;
         if matches!(thread.status, ThreadStatus::Stopping | ThreadStatus::Ended) {
             return Err(PedelecError::new(
@@ -3414,12 +3579,12 @@ impl CoreRuntime {
             .thread_workspace(&input.thread_id)?
             .canonical_path
             .clone();
-        self.expire_asset_uploads();
-        if self.asset_upload_tickets.values().any(|ticket| {
-            ticket.thread_id == input.thread_id
+        self.expire_file_uploads();
+        if self.file_upload_tickets.values().any(|ticket| {
+            ticket.owner.thread_id() == Some(input.thread_id.as_str())
                 && matches!(
                     ticket.state,
-                    AssetUploadState::Pending | AssetUploadState::Uploading
+                    FileUploadState::Pending | FileUploadState::Uploading
                 )
         }) {
             return Err(PedelecError::new(
@@ -3429,52 +3594,86 @@ impl CoreRuntime {
         }
         // Keep asset names readable while using the separate 256-bit token
         // for authorization. The collision check covers all tickets in this runtime.
-        let upload_id = loop {
-            let candidate = format!("upl_{}", &Uuid::new_v4().simple().to_string()[..8]);
-            if !self.asset_upload_tickets.contains_key(&candidate) {
-                break candidate;
-            }
-        };
-        let token = (0..8)
-            .map(|_| Uuid::new_v4().simple().to_string())
-            .collect::<String>();
-        let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
-        let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
+        let upload_id = self.allocate_upload_id();
         let safe_filename = safe_asset_filename(&input.filename);
-        let (public_path, relative_path) = match input.target_path.as_deref() {
-            Some(path) => parse_public_asset_path(path).map_err(|_| {
-                PedelecError::with_details(
-                    error_codes::ASSET_PATH_INVALID,
-                    "asset path is invalid",
-                    serde_json::json!({"threadId": input.thread_id, "path": path}),
-                )
-            })?,
+        let (response_path, relative_path) = match input.target_path.as_deref() {
+            Some(path) => {
+                let (public_path, asset_relative) =
+                    parse_public_asset_path(path).map_err(|_| {
+                        PedelecError::with_details(
+                            error_codes::ASSET_PATH_INVALID,
+                            "asset path is invalid",
+                            serde_json::json!({"threadId": input.thread_id, "path": path}),
+                        )
+                    })?;
+                (public_path, workspace_relative_for_asset(&asset_relative))
+            }
             None => {
                 let filename = format!("{upload_id}-{safe_filename}");
-                (format!("/{filename}"), PathBuf::from(filename))
+                (
+                    format!("/{filename}"),
+                    workspace_relative_for_asset(&PathBuf::from(filename)),
+                )
             }
         };
-        self.asset_upload_tickets.insert(
-            upload_id.clone(),
-            AssetUploadTicket {
+        self.prepare_file_upload(
+            FileTransferOwner::Thread {
                 thread_id: input.thread_id,
-                workspace_path,
-                public_path,
-                relative_path,
-                filename: input.filename,
-                safe_filename,
-                expected_size_bytes: input.size_bytes,
-                token_hash,
-                expires_at,
-                state: AssetUploadState::Pending,
             },
-        );
-        Ok(CreateAssetUploadOutput {
-            upload_id: upload_id.clone(),
-            upload_url: format!("http://127.0.0.1:{port}/uploads/{upload_id}"),
-            token,
-            expires_at: expires_at.timestamp_millis(),
-        })
+            FileTransferAudience::Asset,
+            workspace_path,
+            response_path,
+            relative_path,
+            input.size_bytes,
+            upload_id,
+        )
+    }
+
+    pub fn create_workspace_file_upload(
+        &mut self,
+        input: CreateWorkspaceFileUploadInput,
+    ) -> Result<CreateAssetUploadOutput, PedelecError> {
+        if input.filename.trim().is_empty() || input.filename == "." || input.filename == ".." {
+            return Err(PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "filename is invalid",
+            ));
+        }
+        if input.size_bytes > MAX_ASSET_UPLOAD_BYTES {
+            return Err(PedelecError::new(
+                error_codes::WORKSPACE_FILE_TOO_LARGE,
+                "workspace file exceeds the 100 MiB limit",
+            ));
+        }
+        let workspace = self.workspace(&input.workspace_id)?.clone();
+        let workspace_path = resolve_workspace_root(&workspace)?;
+        let (response_path, relative_path) = match input.target_path.as_deref() {
+            Some(path) => parse_workspace_file_path(path).map_err(|_| {
+                workspace_path_error(&input.workspace_id, Some(path), "workspace path is invalid")
+            })?,
+            None => {
+                let filename = parse_workspace_filename(&input.filename).map_err(|_| {
+                    workspace_path_error(
+                        &input.workspace_id,
+                        Some(&input.filename),
+                        "workspace filename is invalid",
+                    )
+                })?;
+                (filename.clone(), PathBuf::from(filename))
+            }
+        };
+        let upload_id = self.allocate_upload_id();
+        self.prepare_file_upload(
+            FileTransferOwner::Workspace {
+                workspace_id: input.workspace_id,
+            },
+            FileTransferAudience::Workspace,
+            workspace_path,
+            response_path,
+            relative_path,
+            input.size_bytes,
+            upload_id,
+        )
     }
 
     pub fn list_assets(&self, input: ListAssetsInput) -> Result<ListAssetsOutput, PedelecError> {
@@ -3509,26 +3708,67 @@ impl CoreRuntime {
         Ok(ListAssetsOutput { assets })
     }
 
-    pub fn expire_asset_uploads(&mut self) {
+    pub fn expire_file_uploads(&mut self) {
         let now = Utc::now();
-        for ticket in self.asset_upload_tickets.values_mut() {
-            if ticket.state == AssetUploadState::Pending && ticket.expires_at <= now {
-                ticket.state = AssetUploadState::Expired;
+        for ticket in self.file_upload_tickets.values_mut() {
+            if ticket.state == FileUploadState::Pending && ticket.expires_at <= now {
+                ticket.state = FileUploadState::Expired;
             }
         }
     }
 
+    pub fn expire_asset_uploads(&mut self) {
+        self.expire_file_uploads();
+    }
+
     pub(crate) fn invalidate_asset_uploads_for_thread(&mut self, thread_id: &str) {
-        for ticket in self.asset_upload_tickets.values_mut() {
-            if ticket.thread_id == thread_id
+        for ticket in self.file_upload_tickets.values_mut() {
+            if ticket.owner.thread_id() == Some(thread_id)
                 && matches!(
                     ticket.state,
-                    AssetUploadState::Pending | AssetUploadState::Uploading
+                    FileUploadState::Pending | FileUploadState::Uploading
                 )
             {
-                ticket.state = AssetUploadState::Failed;
+                ticket.state = FileUploadState::Failed;
             }
         }
+    }
+
+    /// Commit a staged upload only while its ticket is still the same
+    /// `Uploading` transfer. A removed, failed, or expired ticket is left
+    /// unchanged and does not reach the filesystem.
+    pub fn commit_admitted_file_upload(
+        &mut self,
+        upload_id: &str,
+        tmp: &Path,
+        commit_root: &Path,
+        relative_path: &Path,
+        audience: FileTransferAudience,
+    ) -> io::Result<()> {
+        let committable = self
+            .file_upload_tickets
+            .get(upload_id)
+            .is_some_and(|ticket| {
+                ticket.state == FileUploadState::Uploading
+                    && ticket.audience == audience
+                    && ticket.commit_root == commit_root
+                    && ticket.relative_path == relative_path
+            });
+        if !committable {
+            return Err(io::Error::other("upload ticket is no longer committable"));
+        }
+        finalize_workspace_file_write(tmp, commit_root, relative_path, true, upload_id)?;
+        if let Some(ticket) = self.file_upload_tickets.get_mut(upload_id) {
+            if ticket.state == FileUploadState::Uploading
+                && ticket.audience == audience
+                && ticket.commit_root == commit_root
+                && ticket.relative_path == relative_path
+            {
+                ticket.state = FileUploadState::Completed;
+                return Ok(());
+            }
+        }
+        Err(io::Error::other("upload ticket is no longer committable"))
     }
 
     pub fn create_asset_download(
@@ -3546,68 +3786,196 @@ impl CoreRuntime {
             .thread_workspace(&input.thread_id)?
             .canonical_path
             .clone();
-        let (target, name, size_bytes, modified_at) =
-            resolve_asset_file(thread, &workspace_path, &input.path)?;
-        let port = self.asset_upload_port.ok_or_else(|| {
-            PedelecError::new(
-                error_codes::ASSET_UPLOAD_SERVER_UNAVAILABLE,
-                "asset transfer server is unavailable",
+        let (_, asset_relative) = parse_public_asset_path(&input.path).map_err(|_| {
+            PedelecError::with_details(
+                error_codes::ASSET_PATH_INVALID,
+                "asset path is invalid",
+                serde_json::json!({"threadId": input.thread_id, "path": input.path}),
             )
         })?;
-        self.expire_asset_downloads();
-        let download_id = loop {
-            let candidate = format!("dnl_{}", &Uuid::new_v4().simple().to_string()[..8]);
-            if !self.asset_download_tickets.contains_key(&candidate) {
-                break candidate;
-            }
-        };
-        let token = (0..8)
-            .map(|_| Uuid::new_v4().simple().to_string())
-            .collect::<String>();
-        let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
-        self.asset_download_tickets.insert(
-            download_id.clone(),
-            AssetDownloadTicket {
+        let relative_path = workspace_relative_for_asset(&asset_relative);
+        self.prepare_file_download(
+            FileTransferOwner::Thread {
                 thread_id: input.thread_id,
+            },
+            FileTransferAudience::Asset,
+            workspace_path,
+            input.path,
+            relative_path,
+        )
+    }
+
+    pub fn create_workspace_file_download(
+        &mut self,
+        input: CreateWorkspaceFileDownloadInput,
+    ) -> Result<CreateAssetDownloadOutput, PedelecError> {
+        let workspace = self.workspace(&input.workspace_id)?.clone();
+        let workspace_path = resolve_workspace_root(&workspace)?;
+        let (response_path, relative_path) =
+            parse_workspace_file_path(&input.path).map_err(|_| {
+                workspace_path_error(
+                    &input.workspace_id,
+                    Some(&input.path),
+                    "workspace path is invalid",
+                )
+            })?;
+        self.prepare_file_download(
+            FileTransferOwner::Workspace {
+                workspace_id: input.workspace_id,
+            },
+            FileTransferAudience::Workspace,
+            workspace_path,
+            response_path,
+            relative_path,
+        )
+    }
+
+    pub fn expire_file_downloads(&mut self) {
+        let now = Utc::now();
+        for ticket in self.file_download_tickets.values_mut() {
+            if ticket.state == FileDownloadState::Pending && ticket.expires_at <= now {
+                ticket.state = FileDownloadState::Expired;
+            }
+        }
+    }
+
+    pub fn expire_asset_downloads(&mut self) {
+        self.expire_file_downloads();
+    }
+
+    pub(crate) fn invalidate_asset_downloads_for_thread(&mut self, thread_id: &str) {
+        for ticket in self.file_download_tickets.values_mut() {
+            if ticket.owner.thread_id() == Some(thread_id)
+                && matches!(
+                    ticket.state,
+                    FileDownloadState::Pending | FileDownloadState::Downloading
+                )
+            {
+                ticket.state = FileDownloadState::Failed;
+            }
+        }
+    }
+
+    fn allocate_upload_id(&self) -> String {
+        loop {
+            let candidate = format!("upl_{}", &Uuid::new_v4().simple().to_string()[..8]);
+            if !self.file_upload_tickets.contains_key(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    fn allocate_download_id(&self) -> String {
+        loop {
+            let candidate = format!("dnl_{}", &Uuid::new_v4().simple().to_string()[..8]);
+            if !self.file_download_tickets.contains_key(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    fn transfer_server_port(&self, audience: FileTransferAudience) -> Result<u16, PedelecError> {
+        self.asset_upload_port.ok_or_else(|| match audience {
+            FileTransferAudience::Asset => PedelecError::new(
+                error_codes::ASSET_UPLOAD_SERVER_UNAVAILABLE,
+                "asset transfer server is unavailable",
+            ),
+            FileTransferAudience::Workspace => PedelecError::new(
+                error_codes::WORKSPACE_FILE_TRANSFER_UNAVAILABLE,
+                "workspace file transfer server is unavailable",
+            ),
+        })
+    }
+
+    fn prepare_file_upload(
+        &mut self,
+        owner: FileTransferOwner,
+        audience: FileTransferAudience,
+        workspace_path: PathBuf,
+        response_path: String,
+        relative_path: PathBuf,
+        expected_size_bytes: u64,
+        upload_id: String,
+    ) -> Result<CreateAssetUploadOutput, PedelecError> {
+        let port = self.transfer_server_port(audience)?;
+        if let Err(fault) = validate_workspace_file_destination(&workspace_path, &relative_path) {
+            return Err(map_file_transfer_fault(
+                audience,
+                &owner,
+                &response_path,
+                fault,
+                false,
+            ));
+        }
+        let (token, token_hash) = new_transfer_token();
+        let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
+        self.file_upload_tickets.insert(
+            upload_id.clone(),
+            FileUploadTicket {
+                owner,
+                audience,
+                commit_root: workspace_path.clone(),
                 workspace_path,
-                public_path: input.path.clone(),
-                token_hash: format!("{:x}", Sha256::digest(token.as_bytes())),
+                response_path,
+                relative_path,
+                expected_size_bytes,
+                token_hash,
                 expires_at,
-                state: AssetDownloadState::Pending,
+                state: FileUploadState::Pending,
+            },
+        );
+        Ok(CreateAssetUploadOutput {
+            upload_id: upload_id.clone(),
+            upload_url: format!("http://127.0.0.1:{port}/uploads/{upload_id}"),
+            token,
+            expires_at: expires_at.timestamp_millis(),
+        })
+    }
+
+    fn prepare_file_download(
+        &mut self,
+        owner: FileTransferOwner,
+        audience: FileTransferAudience,
+        workspace_path: PathBuf,
+        response_path: String,
+        relative_path: PathBuf,
+    ) -> Result<CreateAssetDownloadOutput, PedelecError> {
+        let resolved =
+            resolve_workspace_regular_file(&workspace_path, &relative_path, MAX_ASSET_UPLOAD_BYTES)
+                .map_err(|fault| {
+                    map_file_transfer_fault(audience, &owner, &response_path, fault, true)
+                })?;
+        let port = self.transfer_server_port(audience)?;
+        self.expire_file_downloads();
+        let download_id = self.allocate_download_id();
+        let (token, token_hash) = new_transfer_token();
+        let expires_at = Utc::now() + chrono::Duration::seconds(ASSET_UPLOAD_TICKET_SECONDS);
+        self.file_download_tickets.insert(
+            download_id.clone(),
+            FileDownloadTicket {
+                owner,
+                audience,
+                workspace_path: workspace_path.clone(),
+                commit_root: workspace_path,
+                response_path: response_path.clone(),
+                relative_path,
+                expected_size_bytes: resolved.size_bytes,
+                token_hash,
+                expires_at,
+                state: FileDownloadState::Pending,
             },
         );
         Ok(CreateAssetDownloadOutput {
             download_id: download_id.clone(),
             download_url: format!("http://127.0.0.1:{port}/downloads/{download_id}"),
             token,
-            path: input.path,
-            name,
-            size_bytes,
-            modified_at,
-            mime_type: asset_mime_type(&target),
+            path: response_path,
+            name: resolved.name,
+            size_bytes: resolved.size_bytes,
+            modified_at: resolved.modified_at,
+            mime_type: file_mime_type(&resolved.canonical_target),
             expires_at: expires_at.timestamp_millis(),
         })
-    }
-
-    pub fn expire_asset_downloads(&mut self) {
-        let now = Utc::now();
-        for ticket in self.asset_download_tickets.values_mut() {
-            if ticket.state == AssetDownloadState::Pending && ticket.expires_at <= now {
-                ticket.state = AssetDownloadState::Expired;
-            }
-        }
-    }
-    pub(crate) fn invalidate_asset_downloads_for_thread(&mut self, thread_id: &str) {
-        for ticket in self.asset_download_tickets.values_mut() {
-            if ticket.thread_id == thread_id
-                && matches!(
-                    ticket.state,
-                    AssetDownloadState::Pending | AssetDownloadState::Downloading
-                )
-            {
-                ticket.state = AssetDownloadState::Failed;
-            }
-        }
     }
 
     pub fn create_thread(
@@ -3893,10 +4261,10 @@ impl CoreRuntime {
         self.session_usage_operations
             .retain(|(thread_id, _)| thread_id != &input.thread_id);
         self.debug_reactivating_threads.remove(&input.thread_id);
-        self.asset_upload_tickets
-            .retain(|_, ticket| ticket.thread_id != input.thread_id);
-        self.asset_download_tickets
-            .retain(|_, ticket| ticket.thread_id != input.thread_id);
+        self.file_upload_tickets
+            .retain(|_, ticket| ticket.owner.thread_id() != Some(input.thread_id.as_str()));
+        self.file_download_tickets
+            .retain(|_, ticket| ticket.owner.thread_id() != Some(input.thread_id.as_str()));
         self.deno_module_upload_tickets
             .retain(|_, ticket| ticket.thread_id != input.thread_id);
         self.deno_modules.remove(&input.thread_id);
@@ -5442,6 +5810,7 @@ impl CoreRuntime {
         self.workspace_run_import_maps.clear();
         self.deno_module_upload_tickets
             .retain(|_, ticket| !matches!(&ticket.owner, DenoModuleUploadOwner::Workspace { .. }));
+        self.clear_workspace_file_transfers(None);
         errors
     }
 
@@ -5458,6 +5827,7 @@ impl CoreRuntime {
         self.workspace_run_import_maps.clear();
         self.deno_module_upload_tickets
             .retain(|_, ticket| !matches!(&ticket.owner, DenoModuleUploadOwner::Workspace { .. }));
+        self.clear_workspace_file_transfers(None);
         errors
     }
 
@@ -10104,75 +10474,337 @@ fn parse_public_asset_path(public_path: &str) -> Result<(String, PathBuf), ()> {
     Ok((public_path.to_string(), relative.split('/').collect()))
 }
 
-fn resolve_asset_file(
-    thread: &ThreadState,
-    workspace_path: &Path,
-    public_path: &str,
-) -> Result<(PathBuf, String, u64, i64), PedelecError> {
-    let (_, relative_path) = parse_public_asset_path(public_path).map_err(|_| {
-        PedelecError::with_details(
-            error_codes::ASSET_PATH_INVALID,
-            "asset path is invalid",
-            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
-        )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceFileFault {
+    Invalid,
+    NotFound,
+    NotRegular,
+    TooLarge,
+    AccessDenied,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedWorkspaceFile {
+    pub canonical_target: PathBuf,
+    pub name: String,
+    pub size_bytes: u64,
+    pub modified_at: i64,
+}
+
+fn workspace_relative_for_asset(asset_relative: &Path) -> PathBuf {
+    let mut path = PathBuf::from(PEDELEC_RUNTIME_DATA_DIR);
+    path.push("assets");
+    path.push(asset_relative);
+    path
+}
+
+fn parse_workspace_file_path(value: &str) -> Result<(String, PathBuf), ()> {
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || value.contains('\\')
+        || value.contains(':')
+        || value.contains('\0')
+        || value.chars().any(char::is_control)
+    {
+        return Err(());
+    }
+    let candidate = Path::new(value);
+    if candidate.is_absolute() {
+        return Err(());
+    }
+    let mut parts = Vec::new();
+    for component in candidate.components() {
+        match component {
+            Component::Normal(part) => {
+                let text = part.to_str().ok_or(())?;
+                if text.is_empty() || text == "." || text == ".." {
+                    return Err(());
+                }
+                parts.push(text.to_string());
+            }
+            _ => return Err(()),
+        }
+    }
+    if parts.is_empty() {
+        return Err(());
+    }
+    Ok((parts.join("/"), parts.iter().collect()))
+}
+
+fn parse_workspace_filename(filename: &str) -> Result<String, ()> {
+    let (public, relative) = parse_workspace_file_path(filename)?;
+    if relative.components().count() != 1 {
+        return Err(());
+    }
+    Ok(public)
+}
+
+fn relative_is_normal(relative: &Path) -> bool {
+    !relative.as_os_str().is_empty()
+        && relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+fn validate_workspace_file_destination(
+    root: &Path,
+    relative: &Path,
+) -> Result<(), WorkspaceFileFault> {
+    if !relative_is_normal(relative) {
+        return Err(WorkspaceFileFault::Invalid);
+    }
+    if !root.exists() {
+        return Ok(());
+    }
+    let root_meta = fs::symlink_metadata(root).map_err(fault_from_io)?;
+    if is_link_or_junction(&root_meta) || !root_meta.is_dir() {
+        return Err(WorkspaceFileFault::Invalid);
+    }
+    let canonical_root = root.canonicalize().map_err(fault_from_io)?;
+    let mut current = root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(part) = component else {
+            return Err(WorkspaceFileFault::Invalid);
+        };
+        current.push(part);
+        let is_last = index + 1 == components.len();
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(fault_from_io(error)),
+        };
+        if is_link_or_junction(&metadata) {
+            return Err(if is_last {
+                WorkspaceFileFault::NotRegular
+            } else {
+                WorkspaceFileFault::Invalid
+            });
+        }
+        let canonical = current.canonicalize().map_err(fault_from_io)?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(WorkspaceFileFault::Invalid);
+        }
+        if is_last {
+            if !metadata.is_file() {
+                return Err(WorkspaceFileFault::NotRegular);
+            }
+        } else if !metadata.is_dir() {
+            return Err(WorkspaceFileFault::Invalid);
+        }
+    }
+    Ok(())
+}
+
+pub fn revalidate_workspace_regular_file(
+    root: &Path,
+    relative: &Path,
+) -> Result<ResolvedWorkspaceFile, WorkspaceFileFault> {
+    resolve_workspace_regular_file(root, relative, MAX_ASSET_UPLOAD_BYTES)
+}
+
+fn resolve_workspace_regular_file(
+    root: &Path,
+    relative: &Path,
+    max_bytes: u64,
+) -> Result<ResolvedWorkspaceFile, WorkspaceFileFault> {
+    if !relative_is_normal(relative) {
+        return Err(WorkspaceFileFault::Invalid);
+    }
+    let root_meta = fs::symlink_metadata(root).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            WorkspaceFileFault::NotFound
+        } else {
+            fault_from_io(error)
+        }
     })?;
-    let root = workspace_assets_root(workspace_path);
-    let target = root.join(relative_path);
-    let metadata = fs::symlink_metadata(&target).map_err(|_| {
-        PedelecError::with_details(
-            error_codes::ASSET_NOT_FOUND,
-            "asset was not found",
-            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
-        )
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(PedelecError::with_details(
-            error_codes::ASSET_NOT_FILE,
-            "asset is not a regular file",
-            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
-        ));
+    if is_link_or_junction(&root_meta) || !root_meta.is_dir() {
+        return Err(WorkspaceFileFault::Invalid);
     }
     let canonical_root = root
         .canonicalize()
-        .map_err(|_| PedelecError::new(error_codes::ASSET_NOT_FOUND, "asset root was not found"))?;
-    let canonical_target = target.canonicalize().map_err(|_| {
-        PedelecError::with_details(
-            error_codes::ASSET_NOT_FOUND,
-            "asset was not found",
-            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
-        )
-    })?;
+        .map_err(|_| WorkspaceFileFault::NotFound)?;
+    let mut current = root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(part) = component else {
+            return Err(WorkspaceFileFault::Invalid);
+        };
+        current.push(part);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(WorkspaceFileFault::NotFound);
+            }
+            Err(error) => return Err(fault_from_io(error)),
+        };
+        let is_last = index + 1 == components.len();
+        if is_link_or_junction(&metadata) {
+            return Err(if is_last {
+                WorkspaceFileFault::NotRegular
+            } else {
+                WorkspaceFileFault::Invalid
+            });
+        }
+        if is_last {
+            if !metadata.is_file() {
+                return Err(WorkspaceFileFault::NotRegular);
+            }
+            if metadata.len() > max_bytes {
+                return Err(WorkspaceFileFault::TooLarge);
+            }
+        } else if !metadata.is_dir() {
+            return Err(WorkspaceFileFault::Invalid);
+        }
+    }
+    let canonical_target = current
+        .canonicalize()
+        .map_err(|_| WorkspaceFileFault::NotFound)?;
     if !canonical_target.starts_with(&canonical_root) {
-        return Err(PedelecError::with_details(
-            error_codes::ASSET_PATH_INVALID,
-            "asset path escapes the asset root",
-            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
-        ));
+        return Err(WorkspaceFileFault::Invalid);
     }
-    if metadata.len() > MAX_ASSET_UPLOAD_BYTES {
-        return Err(PedelecError::with_details(
-            error_codes::ASSET_READ_TOO_LARGE,
-            "asset exceeds the 100 MiB limit",
-            serde_json::json!({"threadId": thread.thread_id, "path": public_path}),
-        ));
+    let metadata =
+        fs::symlink_metadata(&canonical_target).map_err(|_| WorkspaceFileFault::NotFound)?;
+    if is_link_or_junction(&metadata) || !metadata.is_file() {
+        return Err(WorkspaceFileFault::NotRegular);
     }
-    let modified_at = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(0);
-    let name = target
+    if metadata.len() > max_bytes {
+        return Err(WorkspaceFileFault::TooLarge);
+    }
+    let name = canonical_target
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            PedelecError::new(error_codes::ASSET_PATH_INVALID, "asset filename is invalid")
-        })?
+        .ok_or(WorkspaceFileFault::Invalid)?
         .to_string();
-    Ok((canonical_target, name, metadata.len(), modified_at))
+    Ok(ResolvedWorkspaceFile {
+        canonical_target,
+        name,
+        size_bytes: metadata.len(),
+        modified_at: file_modified_at_millis(&metadata),
+    })
 }
 
-fn asset_mime_type(path: &Path) -> String {
+fn file_modified_at_millis(metadata: &fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn fault_from_io(error: io::Error) -> WorkspaceFileFault {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        WorkspaceFileFault::AccessDenied
+    } else if error.kind() == io::ErrorKind::NotFound {
+        WorkspaceFileFault::NotFound
+    } else {
+        WorkspaceFileFault::Invalid
+    }
+}
+
+fn new_transfer_token() -> (String, String) {
+    let token = (0..8)
+        .map(|_| Uuid::new_v4().simple().to_string())
+        .collect::<String>();
+    let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+    (token, token_hash)
+}
+
+fn map_file_transfer_fault(
+    audience: FileTransferAudience,
+    owner: &FileTransferOwner,
+    path: &str,
+    fault: WorkspaceFileFault,
+    reading: bool,
+) -> PedelecError {
+    match audience {
+        FileTransferAudience::Asset => {
+            let thread_id = owner.thread_id().unwrap_or("");
+            let (code, message) = match fault {
+                WorkspaceFileFault::Invalid => {
+                    (error_codes::ASSET_PATH_INVALID, "asset path is invalid")
+                }
+                WorkspaceFileFault::NotFound => {
+                    (error_codes::ASSET_NOT_FOUND, "asset was not found")
+                }
+                WorkspaceFileFault::NotRegular => {
+                    (error_codes::ASSET_NOT_FILE, "asset is not a regular file")
+                }
+                WorkspaceFileFault::TooLarge => {
+                    if reading {
+                        (
+                            error_codes::ASSET_READ_TOO_LARGE,
+                            "asset exceeds the 100 MiB limit",
+                        )
+                    } else {
+                        (
+                            error_codes::ASSET_TOO_LARGE,
+                            "asset exceeds the 100 MiB limit",
+                        )
+                    }
+                }
+                WorkspaceFileFault::AccessDenied => {
+                    if reading {
+                        (error_codes::ASSET_READ_FAILED, "asset read failed")
+                    } else {
+                        (error_codes::ASSET_UPLOAD_FAILED, "asset upload failed")
+                    }
+                }
+            };
+            PedelecError::with_details(
+                code,
+                message,
+                serde_json::json!({"threadId": thread_id, "path": path}),
+            )
+        }
+        FileTransferAudience::Workspace => {
+            let workspace_id = match owner {
+                FileTransferOwner::Workspace { workspace_id } => workspace_id.as_str(),
+                FileTransferOwner::Thread { .. } => "",
+            };
+            let (code, message) = match fault {
+                WorkspaceFileFault::Invalid => (
+                    error_codes::WORKSPACE_PATH_INVALID,
+                    "workspace path is invalid",
+                ),
+                WorkspaceFileFault::NotFound => (
+                    error_codes::WORKSPACE_FILE_NOT_FOUND,
+                    "workspace file was not found",
+                ),
+                WorkspaceFileFault::NotRegular => (
+                    error_codes::WORKSPACE_FILE_NOT_REGULAR,
+                    "workspace path is not a regular file",
+                ),
+                WorkspaceFileFault::TooLarge => {
+                    if reading {
+                        (
+                            error_codes::WORKSPACE_FILE_READ_TOO_LARGE,
+                            "workspace file exceeds the 100 MiB limit",
+                        )
+                    } else {
+                        (
+                            error_codes::WORKSPACE_FILE_TOO_LARGE,
+                            "workspace file exceeds the 100 MiB limit",
+                        )
+                    }
+                }
+                WorkspaceFileFault::AccessDenied => (
+                    error_codes::WORKSPACE_ACCESS_DENIED,
+                    "workspace file is not accessible",
+                ),
+            };
+            PedelecError::with_details(
+                code,
+                message,
+                serde_json::json!({"workspaceId": workspace_id, "path": path}),
+            )
+        }
+    }
+}
+
+pub fn file_mime_type(path: &Path) -> String {
     match path
         .extension()
         .and_then(|part| part.to_str())
@@ -10291,6 +10923,19 @@ pub mod error_codes {
     pub const ASSET_READ_FAILED: &str = "ASSET_READ_FAILED";
     pub const ASSET_DOWNLOAD_TICKET_EXPIRED: &str = "ASSET_DOWNLOAD_TICKET_EXPIRED";
     pub const ASSET_DOWNLOAD_UNAUTHORIZED: &str = "ASSET_DOWNLOAD_UNAUTHORIZED";
+    pub const WORKSPACE_FILE_TOO_LARGE: &str = "WORKSPACE_FILE_TOO_LARGE";
+    pub const WORKSPACE_FILE_TRANSFER_UNAVAILABLE: &str = "WORKSPACE_FILE_TRANSFER_UNAVAILABLE";
+    pub const WORKSPACE_FILE_UPLOAD_TICKET_EXPIRED: &str = "WORKSPACE_FILE_UPLOAD_TICKET_EXPIRED";
+    pub const WORKSPACE_FILE_UPLOAD_UNAUTHORIZED: &str = "WORKSPACE_FILE_UPLOAD_UNAUTHORIZED";
+    pub const WORKSPACE_FILE_UPLOAD_SIZE_MISMATCH: &str = "WORKSPACE_FILE_UPLOAD_SIZE_MISMATCH";
+    pub const WORKSPACE_FILE_UPLOAD_FAILED: &str = "WORKSPACE_FILE_UPLOAD_FAILED";
+    pub const WORKSPACE_FILE_NOT_FOUND: &str = "WORKSPACE_FILE_NOT_FOUND";
+    pub const WORKSPACE_FILE_NOT_REGULAR: &str = "WORKSPACE_FILE_NOT_REGULAR";
+    pub const WORKSPACE_FILE_READ_TOO_LARGE: &str = "WORKSPACE_FILE_READ_TOO_LARGE";
+    pub const WORKSPACE_FILE_READ_FAILED: &str = "WORKSPACE_FILE_READ_FAILED";
+    pub const WORKSPACE_FILE_DOWNLOAD_TICKET_EXPIRED: &str =
+        "WORKSPACE_FILE_DOWNLOAD_TICKET_EXPIRED";
+    pub const WORKSPACE_FILE_DOWNLOAD_UNAUTHORIZED: &str = "WORKSPACE_FILE_DOWNLOAD_UNAUTHORIZED";
     pub const DENO_MODULE_NAME_INVALID: &str = "DENO_MODULE_NAME_INVALID";
     pub const DENO_MODULE_SETUP_INCOMPLETE: &str = "DENO_MODULE_SETUP_INCOMPLETE";
     pub const DENO_MODULE_NOT_FOUND: &str = "DENO_MODULE_NOT_FOUND";
@@ -14761,3 +15406,7 @@ mod deno_tests {
 #[cfg(test)]
 #[path = "../../../tauri/src/pedelec_core/tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../tauri/src/pedelec_core/tests/workspace_files.rs"]
+mod workspace_file_tests;

@@ -1,11 +1,12 @@
 //! Loopback-only binary asset data plane.  The control plane only creates tickets.
 use pedelec_core::{
-    error_codes, finalize_asset_write, workspace_assets_root, workspace_tmp_root,
-    AssetDownloadState, AssetUploadState, DenoModuleUploadState, PedelecError, SharedCoreRuntime,
+    error_codes, file_mime_type, require_authoritative_directory,
+    revalidate_workspace_regular_file, workspace_tmp_root, DenoModuleUploadState,
+    FileDownloadState, FileUploadState, PedelecError, SharedCoreRuntime, WorkspaceFileFault,
     MAX_ASSET_UPLOAD_BYTES,
 };
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -14,6 +15,30 @@ use std::thread;
 
 fn asset_upload_temp_path(workspace_path: &Path, upload_id: &str) -> std::path::PathBuf {
     workspace_tmp_root(workspace_path).join(format!("{upload_id}.upload"))
+}
+
+/// Open `<workspace>/.pedelec-runtime/tmp/<uploadId>.upload`.
+///
+/// The Workspace root and tmp root must already exist as real directories.
+/// This helper never creates either of them.
+fn open_workspace_upload_staging_file(
+    workspace_path: &Path,
+    upload_id: &str,
+) -> std::io::Result<(std::path::PathBuf, File)> {
+    let canonical_workspace = require_authoritative_directory(workspace_path)?;
+    let tmp_root = workspace_tmp_root(workspace_path);
+    let canonical_tmp = require_authoritative_directory(&tmp_root)?;
+    if !canonical_tmp.starts_with(&canonical_workspace) {
+        return Err(std::io::Error::other(
+            "workspace upload staging root escapes workspace",
+        ));
+    }
+    let path = tmp_root.join(format!("{upload_id}.upload"));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    Ok((path, file))
 }
 
 pub fn start_asset_upload_server(runtime: SharedCoreRuntime) -> Result<u16, PedelecError> {
@@ -110,10 +135,10 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
     let length = headers
         .get("content-length")
         .and_then(|v| v.parse::<u64>().ok());
-    let (tmp, asset_root, relative_path, expected, public_path) = {
+    let (staging_root, commit_root, relative_path, expected, response_path, audience) = {
         let mut core = runtime.lock().unwrap();
-        core.expire_asset_uploads();
-        let ticket = match core.asset_upload_tickets.get_mut(upload_id) {
+        core.expire_file_uploads();
+        let ticket = match core.file_upload_tickets.get_mut(upload_id) {
             Some(ticket) => ticket,
             None => {
                 return respond_error(
@@ -124,90 +149,100 @@ fn handle(mut stream: TcpStream, runtime: SharedCoreRuntime) -> std::io::Result<
                 )
             }
         };
-        if ticket.state == AssetUploadState::Expired {
+        let audience = ticket.audience;
+        if ticket.state == FileUploadState::Expired {
             return respond_error(
                 &mut stream,
                 410,
-                error_codes::ASSET_UPLOAD_TICKET_EXPIRED,
+                audience.upload_expired(),
                 "upload ticket has expired",
             );
         }
-        if ticket.state != AssetUploadState::Pending
+        if ticket.state != FileUploadState::Pending
             || format!("{:x}", Sha256::digest(token.as_bytes())) != ticket.token_hash
         {
-            ticket.state = AssetUploadState::Failed;
+            ticket.state = FileUploadState::Failed;
             return respond_error(
                 &mut stream,
                 401,
-                error_codes::ASSET_UPLOAD_UNAUTHORIZED,
+                audience.upload_unauthorized(),
                 "upload token is invalid",
             );
         }
         if length.is_some_and(|n| n > ticket.expected_size_bytes || n > MAX_ASSET_UPLOAD_BYTES) {
-            ticket.state = AssetUploadState::Failed;
+            ticket.state = FileUploadState::Failed;
             return respond_error(
                 &mut stream,
                 413,
-                error_codes::ASSET_UPLOAD_SIZE_MISMATCH,
+                audience.upload_size_mismatch(),
                 "upload size does not match ticket",
             );
         }
-        ticket.state = AssetUploadState::Uploading;
+        ticket.state = FileUploadState::Uploading;
         (
-            asset_upload_temp_path(&ticket.workspace_path, upload_id),
-            workspace_assets_root(&ticket.workspace_path),
+            ticket.workspace_path.clone(),
+            ticket.commit_root.clone(),
             ticket.relative_path.clone(),
             ticket.expected_size_bytes,
-            ticket.public_path.clone(),
+            ticket.response_path.clone(),
+            audience,
         )
     };
-    let result = (|| -> std::io::Result<u64> {
-        fs::create_dir_all(tmp.parent().unwrap())?;
-        let mut file = File::create(&tmp)?;
-        let mut total = 0u64;
-        let mut buf = [0u8; 64 * 1024];
-        while total < expected {
-            let want = ((expected - total) as usize).min(buf.len());
-            let n = reader.read(&mut buf[..want])?;
-            if n == 0 {
-                break;
+    let mut tmp = asset_upload_temp_path(&staging_root, upload_id);
+    let root_is_authoritative = require_authoritative_directory(&staging_root).is_ok()
+        && require_authoritative_directory(&commit_root).is_ok();
+    let result = if root_is_authoritative {
+        (|| -> std::io::Result<u64> {
+            let (path, mut file) = open_workspace_upload_staging_file(&staging_root, upload_id)?;
+            tmp = path;
+            let mut total = 0u64;
+            let mut buf = [0u8; 64 * 1024];
+            while total < expected {
+                let want = ((expected - total) as usize).min(buf.len());
+                let n = reader.read(&mut buf[..want])?;
+                if n == 0 {
+                    break;
+                }
+                file.write_all(&buf[..n])?;
+                total += n as u64;
             }
-            file.write_all(&buf[..n])?;
-            total += n as u64;
-        }
-        file.flush()?;
-        Ok(total)
-    })();
+            file.flush()?;
+            Ok(total)
+        })()
+    } else {
+        Err(std::io::Error::other("workspace file root is unsafe"))
+    };
     let ok = matches!(result, Ok(n) if n == expected);
     if ok {
-        let moved = finalize_asset_write(&tmp, &asset_root, &relative_path, true, upload_id);
-        if moved.is_ok() {
-            runtime
-                .lock()
-                .unwrap()
-                .asset_upload_tickets
-                .get_mut(upload_id)
-                .map(|t| t.state = AssetUploadState::Completed);
-            return respond(
-                &mut stream,
-                201,
-                Some(&format!(r#"{{"path":"{public_path}"}}"#)),
-            );
+        let committed = {
+            let mut core = runtime.lock().unwrap();
+            core.commit_admitted_file_upload(
+                upload_id,
+                &tmp,
+                &commit_root,
+                &relative_path,
+                audience,
+            )
+        };
+        if committed.is_ok() {
+            let body = serde_json::json!({ "path": response_path }).to_string();
+            return respond(&mut stream, 201, Some(&body));
         }
     }
     let _ = fs::remove_file(&tmp);
-    runtime
-        .lock()
-        .unwrap()
-        .asset_upload_tickets
-        .get_mut(upload_id)
-        .map(|t| t.state = AssetUploadState::Failed);
-    respond_error(
-        &mut stream,
-        400,
-        error_codes::ASSET_UPLOAD_FAILED,
-        "asset upload failed",
-    )
+    {
+        let mut core = runtime.lock().unwrap();
+        if let Some(ticket) = core.file_upload_tickets.get_mut(upload_id) {
+            if ticket.state == FileUploadState::Uploading {
+                ticket.state = FileUploadState::Failed;
+            }
+        }
+    }
+    let message = match audience {
+        pedelec_core::FileTransferAudience::Asset => "asset upload failed",
+        pedelec_core::FileTransferAudience::Workspace => "workspace file upload failed",
+    };
+    respond_error(&mut stream, 400, audience.upload_failed(), message)
 }
 
 fn handle_deno_module_upload(
@@ -346,10 +381,10 @@ fn handle_download(
         .get("authorization")
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("");
-    let (target, expected_length, mime_type) = {
+    let (target, expected_length, mime_type, audience) = {
         let mut core = runtime.lock().unwrap();
-        core.expire_asset_downloads();
-        let ticket = match core.asset_download_tickets.get_mut(download_id) {
+        core.expire_file_downloads();
+        let ticket = match core.file_download_tickets.get_mut(download_id) {
             Some(ticket) => ticket,
             None => {
                 return respond_error(
@@ -360,145 +395,100 @@ fn handle_download(
                 )
             }
         };
-        if ticket.state == AssetDownloadState::Expired {
+        let audience = ticket.audience;
+        if ticket.state == FileDownloadState::Expired {
             return respond_error(
                 stream,
                 410,
-                error_codes::ASSET_DOWNLOAD_TICKET_EXPIRED,
+                audience.download_expired(),
                 "download ticket has expired",
             );
         }
-        if ticket.state != AssetDownloadState::Pending
+        if ticket.state != FileDownloadState::Pending
             || format!("{:x}", Sha256::digest(token.as_bytes())) != ticket.token_hash
         {
-            ticket.state = AssetDownloadState::Failed;
+            ticket.state = FileDownloadState::Failed;
             return respond_error(
                 stream,
                 401,
-                error_codes::ASSET_DOWNLOAD_UNAUTHORIZED,
+                audience.download_unauthorized(),
                 "download token is invalid",
             );
         }
-        let relative = match ticket.public_path.strip_prefix('/') {
-            Some(value)
-                if !value.is_empty()
-                    && !value.contains('\\')
-                    && !value
-                        .split('/')
-                        .any(|part| part.is_empty() || part == "." || part == "..") =>
-            {
-                value
+        let resolved =
+            revalidate_workspace_regular_file(&ticket.commit_root, &ticket.relative_path);
+        let file = match resolved {
+            Ok(file) if file.size_bytes == ticket.expected_size_bytes => file,
+            Err(WorkspaceFileFault::Invalid) => {
+                ticket.state = FileDownloadState::Failed;
+                return respond_error(stream, 400, audience.path_invalid(), "file path is invalid");
             }
             _ => {
-                ticket.state = AssetDownloadState::Failed;
-                return respond_error(
-                    stream,
-                    400,
-                    error_codes::ASSET_PATH_INVALID,
-                    "asset path is invalid",
-                );
+                ticket.state = FileDownloadState::Failed;
+                return respond_error(stream, 404, audience.read_failed(), "file is unavailable");
             }
         };
-        let root = workspace_assets_root(&ticket.workspace_path);
-        let target = relative
-            .split('/')
-            .fold(root.clone(), |path, part| path.join(part));
-        let metadata = match fs::symlink_metadata(&target) {
-            Ok(metadata)
-                if metadata.is_file()
-                    && !metadata.file_type().is_symlink()
-                    && metadata.len() <= MAX_ASSET_UPLOAD_BYTES =>
-            {
-                metadata
-            }
-            _ => {
-                ticket.state = AssetDownloadState::Failed;
-                return respond_error(
-                    stream,
-                    404,
-                    error_codes::ASSET_READ_FAILED,
-                    "asset is unavailable",
-                );
-            }
-        };
-        let canonical_root = match root.canonicalize() {
-            Ok(path) => path,
-            Err(_) => {
-                ticket.state = AssetDownloadState::Failed;
-                return respond_error(
-                    stream,
-                    404,
-                    error_codes::ASSET_READ_FAILED,
-                    "asset is unavailable",
-                );
-            }
-        };
-        let canonical_target = match target.canonicalize() {
-            Ok(path) if path.starts_with(&canonical_root) => path,
-            _ => {
-                ticket.state = AssetDownloadState::Failed;
-                return respond_error(
-                    stream,
-                    400,
-                    error_codes::ASSET_PATH_INVALID,
-                    "asset path is invalid",
-                );
-            }
-        };
-        ticket.state = AssetDownloadState::Downloading;
-        let mime = match canonical_target
-            .extension()
-            .and_then(|part| part.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "txt" | "md" | "csv" => "text/plain",
-            "json" => "application/json",
-            "pdf" => "application/pdf",
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "glb" => "model/gltf-binary",
-            _ => "application/octet-stream",
-        }
-        .to_string();
-        (canonical_target, metadata.len(), mime)
+        ticket.state = FileDownloadState::Downloading;
+        let mime = file_mime_type(&file.canonical_target);
+        (file.canonical_target, file.size_bytes, mime, audience)
     };
-    let result = (|| -> std::io::Result<()> {
-        let mut file = File::open(target)?;
+    let body = match File::open(&target)
+        .and_then(|mut file| read_exact_body(&mut file, expected_length))
+    {
+        Ok(body) => body,
+        Err(_) => {
+            runtime
+                .lock()
+                .unwrap()
+                .file_download_tickets
+                .get_mut(download_id)
+                .map(|ticket| {
+                    ticket.state = FileDownloadState::Failed;
+                });
+            return respond_error(
+                stream,
+                409,
+                audience.read_failed(),
+                "file changed during read",
+            );
+        }
+    };
+    let write_result = (|| -> std::io::Result<()> {
         write!(stream, "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, PUT, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nContent-Type: {mime_type}\r\nContent-Length: {expected_length}\r\n\r\n")?;
-        let mut remaining = expected_length;
-        let mut buf = [0u8; 64 * 1024];
-        while remaining > 0 {
-            let limit = remaining.min(64 * 1024) as usize;
-            let count = file.read(&mut buf[..limit])?;
-            if count == 0 {
-                break;
-            }
-            stream.write_all(&buf[..count])?;
-            remaining -= count as u64;
-        }
-        if remaining != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "asset changed during read",
-            ));
-        }
-        Ok(())
+        stream.write_all(&body)
     })();
     runtime
         .lock()
         .unwrap()
-        .asset_download_tickets
+        .file_download_tickets
         .get_mut(download_id)
         .map(|ticket| {
-            ticket.state = if result.is_ok() {
-                AssetDownloadState::Completed
+            ticket.state = if write_result.is_ok() {
+                FileDownloadState::Completed
             } else {
-                AssetDownloadState::Failed
+                FileDownloadState::Failed
             }
         });
-    result
+    write_result
+}
+
+fn read_exact_body(reader: &mut impl Read, expected: u64) -> std::io::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    let mut remaining = expected;
+    let mut buf = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let limit = remaining.min(buf.len() as u64) as usize;
+        let count = reader.read(&mut buf[..limit])?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file changed during read",
+            ));
+        }
+        body.extend_from_slice(&buf[..count]);
+        remaining -= count as u64;
+    }
+    Ok(body)
 }
 
 fn respond(stream: &mut TcpStream, status: u16, body: Option<&str>) -> std::io::Result<()> {
@@ -535,6 +525,7 @@ fn respond_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pedelec_core::finalize_asset_write;
 
     #[test]
     fn browser_asset_replacement_survives_shared_finalizer() {
@@ -557,7 +548,8 @@ mod tests {
     use chrono::Utc;
     use pedelec_core::{
         workspace_assets_root, workspace_deno_modules_root, workspace_tmp_root, AssetUploadState,
-        CoreRuntime, CreateAssetUploadInput, CreateDenoModuleUploadInput, DenoModuleSetupState,
+        CoreRuntime, CreateAssetUploadInput, CreateDenoModuleUploadInput,
+        CreateWorkspaceFileDownloadInput, CreateWorkspaceFileUploadInput, DenoModuleSetupState,
         DenoModuleState, DenoModuleUploadState, EffortLevel, ProviderCode, ProviderSessionState,
         ThreadState, ThreadStatus, WorkspaceKind,
     };
@@ -570,6 +562,8 @@ mod tests {
     fn upload_ticket_uses_private_asset_and_tmp_layout() {
         let temp = tempdir().unwrap();
         let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        initialize_workspace_runtime_tmp(&workspace_path);
         let thread_id = "thread_upload_layout".to_string();
         let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
         let mut runtime_guard = runtime.lock().unwrap();
@@ -645,7 +639,7 @@ mod tests {
             runtime
                 .lock()
                 .unwrap()
-                .asset_upload_tickets
+                .file_upload_tickets
                 .get(&ticket.upload_id)
                 .unwrap()
                 .state,
@@ -793,5 +787,413 @@ mod tests {
                 .state,
             DenoModuleUploadState::Failed
         );
+    }
+
+    #[test]
+    fn short_download_body_fails_before_a_success_response() {
+        let mut reader = std::io::Cursor::new(b"hi".to_vec());
+        assert!(read_exact_body(&mut reader, 4).is_err());
+    }
+
+    #[test]
+    fn workspace_upload_and_download_use_workspace_relative_paths() {
+        let temp = tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        initialize_workspace_runtime_tmp(&workspace_path);
+        let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime
+            .lock()
+            .unwrap()
+            .register_workspace_for_test("ws_http", &workspace_path, WorkspaceKind::Custom)
+            .unwrap();
+        let port = start_asset_upload_server(runtime.clone()).unwrap();
+
+        let payload = b"hello";
+        let ticket = runtime
+            .lock()
+            .unwrap()
+            .create_workspace_file_upload(CreateWorkspaceFileUploadInput {
+                workspace_id: "ws_http".into(),
+                target_path: None,
+                filename: "hello.txt".into(),
+                size_bytes: payload.len() as u64,
+                mime_type: "text/plain".into(),
+            })
+            .unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            stream,
+            "PUT /uploads/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
+            ticket.upload_id, ticket.token, payload.len()
+        )
+        .unwrap();
+        stream.write_all(payload).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 201"), "response: {response}");
+        assert!(response.contains(r#""path":"hello.txt""#));
+        assert!(!response.contains("upl_"));
+        assert_eq!(
+            std::fs::read(workspace_path.join("hello.txt")).unwrap(),
+            payload
+        );
+
+        let replaced = b"hello!";
+        let replace_ticket = runtime
+            .lock()
+            .unwrap()
+            .create_workspace_file_upload(CreateWorkspaceFileUploadInput {
+                workspace_id: "ws_http".into(),
+                target_path: Some("hello.txt".into()),
+                filename: "hello.txt".into(),
+                size_bytes: replaced.len() as u64,
+                mime_type: "text/plain".into(),
+            })
+            .unwrap();
+        let mut replace_stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            replace_stream,
+            "PUT /uploads/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer bad\r\nContent-Length: {}\r\n\r\n",
+            replace_ticket.upload_id, replaced.len()
+        )
+        .unwrap();
+        replace_stream.write_all(replaced).unwrap();
+        replace_stream.shutdown(Shutdown::Write).unwrap();
+        let mut rejected = String::new();
+        replace_stream.read_to_string(&mut rejected).unwrap();
+        assert!(rejected.starts_with("HTTP/1.1 401"), "response: {rejected}");
+        assert!(rejected.contains("WORKSPACE_FILE_UPLOAD_UNAUTHORIZED"));
+        assert_eq!(
+            std::fs::read(workspace_path.join("hello.txt")).unwrap(),
+            payload
+        );
+
+        let mut reuse = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            reuse,
+            "PUT /uploads/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
+            ticket.upload_id, ticket.token, payload.len()
+        )
+        .unwrap();
+        reuse.write_all(payload).unwrap();
+        reuse.shutdown(Shutdown::Write).unwrap();
+        let mut reused = String::new();
+        reuse.read_to_string(&mut reused).unwrap();
+        assert!(reused.starts_with("HTTP/1.1 401"), "response: {reused}");
+
+        let download = runtime
+            .lock()
+            .unwrap()
+            .create_workspace_file_download(CreateWorkspaceFileDownloadInput {
+                workspace_id: "ws_http".into(),
+                path: "hello.txt".into(),
+            })
+            .unwrap();
+        std::fs::write(workspace_path.join("hello.txt"), b"x").unwrap();
+        let mut download_stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            download_stream,
+            "GET /downloads/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\r\n",
+            download.download_id, download.token
+        )
+        .unwrap();
+        download_stream.shutdown(Shutdown::Write).unwrap();
+        let mut download_response = String::new();
+        download_stream
+            .read_to_string(&mut download_response)
+            .unwrap();
+        assert!(
+            !download_response.starts_with("HTTP/1.1 200"),
+            "response: {download_response}"
+        );
+        assert!(download_response.contains("WORKSPACE_FILE_READ_FAILED"));
+    }
+
+    fn initialize_workspace_runtime_tmp(workspace_path: &Path) {
+        std::fs::create_dir_all(workspace_tmp_root(workspace_path)).unwrap();
+    }
+
+    fn put_upload(port: u16, upload_id: &str, token: &str, payload: &[u8]) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            stream,
+            "PUT /uploads/{upload_id} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n",
+            payload.len()
+        )
+        .unwrap();
+        stream.write_all(payload).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn removed_workspace_root_is_not_recreated_by_upload() {
+        let temp = tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        let canonical = workspace_path.canonicalize().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime
+            .lock()
+            .unwrap()
+            .register_workspace_for_test("ws_removed", &canonical, WorkspaceKind::Custom)
+            .unwrap();
+        let port = start_asset_upload_server(runtime.clone()).unwrap();
+        let payload = b"hello";
+        let ticket = runtime
+            .lock()
+            .unwrap()
+            .create_workspace_file_upload(CreateWorkspaceFileUploadInput {
+                workspace_id: "ws_removed".into(),
+                target_path: None,
+                filename: "hello.txt".into(),
+                size_bytes: payload.len() as u64,
+                mime_type: "text/plain".into(),
+            })
+            .unwrap();
+        std::fs::remove_dir_all(&canonical).unwrap();
+
+        let response = put_upload(port, &ticket.upload_id, &ticket.token, payload);
+        assert!(
+            !response.starts_with("HTTP/1.1 201"),
+            "response: {response}"
+        );
+        assert!(
+            response.contains("WORKSPACE_FILE_UPLOAD_FAILED"),
+            "response: {response}"
+        );
+        assert!(!canonical.exists());
+        assert!(!canonical.join("hello.txt").exists());
+        let state = runtime
+            .lock()
+            .unwrap()
+            .file_upload_tickets
+            .get(&ticket.upload_id)
+            .unwrap()
+            .state;
+        assert_eq!(state, AssetUploadState::Failed);
+    }
+
+    #[test]
+    fn symlink_replaced_workspace_root_does_not_receive_the_upload() {
+        let temp = tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let canonical = workspace_path.canonicalize().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime
+            .lock()
+            .unwrap()
+            .register_workspace_for_test("ws_symlink", &canonical, WorkspaceKind::Custom)
+            .unwrap();
+        let port = start_asset_upload_server(runtime.clone()).unwrap();
+        let payload = b"hello";
+        let ticket = runtime
+            .lock()
+            .unwrap()
+            .create_workspace_file_upload(CreateWorkspaceFileUploadInput {
+                workspace_id: "ws_symlink".into(),
+                target_path: None,
+                filename: "hello.txt".into(),
+                size_bytes: payload.len() as u64,
+                mime_type: "text/plain".into(),
+            })
+            .unwrap();
+        std::fs::remove_dir_all(&canonical).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &canonical).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&outside, &canonical).is_err() {
+            return;
+        }
+
+        let response = put_upload(port, &ticket.upload_id, &ticket.token, payload);
+        assert!(
+            !response.starts_with("HTTP/1.1 201"),
+            "response: {response}"
+        );
+        assert!(!outside.join("hello.txt").exists());
+        assert!(!outside.join(".pedelec-runtime").exists());
+        let state = runtime
+            .lock()
+            .unwrap()
+            .file_upload_tickets
+            .get(&ticket.upload_id)
+            .unwrap()
+            .state;
+        assert_ne!(state, AssetUploadState::Completed);
+        let _ = std::fs::remove_dir(&canonical);
+    }
+
+    #[test]
+    fn staging_open_does_not_recreate_a_removed_workspace_root() {
+        let temp = tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        initialize_workspace_runtime_tmp(&workspace_path);
+        let canonical = workspace_path.canonicalize().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime.lock().unwrap().set_asset_upload_port(9);
+        runtime
+            .lock()
+            .unwrap()
+            .register_workspace_for_test("ws_staging_removed", &canonical, WorkspaceKind::Custom)
+            .unwrap();
+        let payload = b"hello";
+        let ticket = runtime
+            .lock()
+            .unwrap()
+            .create_workspace_file_upload(CreateWorkspaceFileUploadInput {
+                workspace_id: "ws_staging_removed".into(),
+                target_path: None,
+                filename: "hello.txt".into(),
+                size_bytes: payload.len() as u64,
+                mime_type: "text/plain".into(),
+            })
+            .unwrap();
+        runtime
+            .lock()
+            .unwrap()
+            .file_upload_tickets
+            .get_mut(&ticket.upload_id)
+            .unwrap()
+            .state = AssetUploadState::Uploading;
+        std::fs::remove_dir_all(&canonical).unwrap();
+
+        assert!(open_workspace_upload_staging_file(&canonical, &ticket.upload_id).is_err());
+        assert!(!canonical.exists());
+        assert!(!workspace_tmp_root(&canonical).exists());
+        assert!(!canonical.join("hello.txt").exists());
+        assert_ne!(
+            runtime
+                .lock()
+                .unwrap()
+                .file_upload_tickets
+                .get(&ticket.upload_id)
+                .unwrap()
+                .state,
+            AssetUploadState::Completed
+        );
+    }
+
+    #[test]
+    fn missing_tmp_root_is_not_recreated_by_upload() {
+        let temp = tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        initialize_workspace_runtime_tmp(&workspace_path);
+        let canonical = workspace_path.canonicalize().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime
+            .lock()
+            .unwrap()
+            .register_workspace_for_test("ws_missing_tmp", &canonical, WorkspaceKind::Custom)
+            .unwrap();
+        let port = start_asset_upload_server(runtime.clone()).unwrap();
+        let payload = b"hello";
+        let ticket = runtime
+            .lock()
+            .unwrap()
+            .create_workspace_file_upload(CreateWorkspaceFileUploadInput {
+                workspace_id: "ws_missing_tmp".into(),
+                target_path: None,
+                filename: "hello.txt".into(),
+                size_bytes: payload.len() as u64,
+                mime_type: "text/plain".into(),
+            })
+            .unwrap();
+        let tmp_root = workspace_tmp_root(&canonical);
+        std::fs::remove_dir_all(&tmp_root).unwrap();
+
+        let response = put_upload(port, &ticket.upload_id, &ticket.token, payload);
+        assert!(
+            !response.starts_with("HTTP/1.1 201"),
+            "response: {response}"
+        );
+        assert!(
+            response.contains("WORKSPACE_FILE_UPLOAD_FAILED"),
+            "response: {response}"
+        );
+        assert!(canonical.is_dir());
+        assert!(!tmp_root.exists());
+        assert!(!canonical.join("hello.txt").exists());
+        assert!(!asset_upload_temp_path(&canonical, &ticket.upload_id).exists());
+        assert_ne!(
+            runtime
+                .lock()
+                .unwrap()
+                .file_upload_tickets
+                .get(&ticket.upload_id)
+                .unwrap()
+                .state,
+            AssetUploadState::Completed
+        );
+    }
+
+    #[test]
+    fn symlink_replaced_tmp_root_does_not_receive_the_upload() {
+        let temp = tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        initialize_workspace_runtime_tmp(&workspace_path);
+        let canonical = workspace_path.canonicalize().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::new()));
+        runtime
+            .lock()
+            .unwrap()
+            .register_workspace_for_test("ws_tmp_symlink", &canonical, WorkspaceKind::Custom)
+            .unwrap();
+        let port = start_asset_upload_server(runtime.clone()).unwrap();
+        let payload = b"hello";
+        let ticket = runtime
+            .lock()
+            .unwrap()
+            .create_workspace_file_upload(CreateWorkspaceFileUploadInput {
+                workspace_id: "ws_tmp_symlink".into(),
+                target_path: None,
+                filename: "hello.txt".into(),
+                size_bytes: payload.len() as u64,
+                mime_type: "text/plain".into(),
+            })
+            .unwrap();
+        let tmp_root = workspace_tmp_root(&canonical);
+        std::fs::remove_dir_all(&tmp_root).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &tmp_root).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&outside, &tmp_root).is_err() {
+            return;
+        }
+
+        let response = put_upload(port, &ticket.upload_id, &ticket.token, payload);
+        assert!(
+            !response.starts_with("HTTP/1.1 201"),
+            "response: {response}"
+        );
+        assert!(response.contains("WORKSPACE_FILE_UPLOAD_FAILED"));
+        assert!(!outside.join("hello.txt").exists());
+        assert!(!outside
+            .join(format!("{}.upload", ticket.upload_id))
+            .exists());
+        assert!(!canonical.join("hello.txt").exists());
+        assert_ne!(
+            runtime
+                .lock()
+                .unwrap()
+                .file_upload_tickets
+                .get(&ticket.upload_id)
+                .unwrap()
+                .state,
+            AssetUploadState::Completed
+        );
+        let _ = std::fs::remove_dir(&tmp_root);
     }
 }

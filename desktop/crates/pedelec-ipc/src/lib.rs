@@ -3,7 +3,8 @@ pub use pedelec_core::DenoRuntimeDispatcher;
 use pedelec_core::{
     error_codes, wait_for_provider_readiness, AbortSessionSetupInput, CreateAssetDownloadInput,
     CreateAssetUploadInput, CreateDenoModuleUploadInput, CreateThreadInput,
-    CreateWorkspaceDenoModuleUploadInput, DenoExecutionIntent, DenoRunInput, DenoRunOutput,
+    CreateWorkspaceDenoModuleUploadInput, CreateWorkspaceFileDownloadInput,
+    CreateWorkspaceFileUploadInput, DenoExecutionIntent, DenoRunInput, DenoRunOutput,
     EndThreadInput, ListAssetsInput, PedelecError, PedelecSettings, PersistentRuntimeOperation,
     PrepareThreadInput, PrepareThreadOutput, PrepareWorkspaceDenoModulesInput,
     ProviderArtifactInput, ProviderArtifactKind, ProviderArtifactPayload, ProviderArtifactSource,
@@ -2465,6 +2466,41 @@ fn handle_core_ipc_request_with_services(
                                     .lock()
                                     .unwrap()
                                     .create_workspace_deno_module_upload(input, origin)
+                            });
+                    match result {
+                        Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                        Err(error) => error_response(&request.request_id, error),
+                    }
+                }
+                Err(error) => error_response(&request.request_id, error),
+            }
+        }
+        "create_workspace_file_upload" => {
+            match decode_payload::<CreateWorkspaceFileUploadInput>(&request) {
+                Ok(input) => {
+                    let result =
+                        authorize_workspace_request(&runtime, &request, &input.workspace_id)
+                            .and_then(|_| {
+                                runtime.lock().unwrap().create_workspace_file_upload(input)
+                            });
+                    match result {
+                        Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+                        Err(error) => error_response(&request.request_id, error),
+                    }
+                }
+                Err(error) => error_response(&request.request_id, error),
+            }
+        }
+        "create_workspace_file_download" => {
+            match decode_payload::<CreateWorkspaceFileDownloadInput>(&request) {
+                Ok(input) => {
+                    let result =
+                        authorize_workspace_request(&runtime, &request, &input.workspace_id)
+                            .and_then(|_| {
+                                runtime
+                                    .lock()
+                                    .unwrap()
+                                    .create_workspace_file_download(input)
                             });
                     match result {
                         Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
