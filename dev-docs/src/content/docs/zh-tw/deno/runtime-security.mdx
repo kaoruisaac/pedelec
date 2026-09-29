@@ -5,7 +5,7 @@ sidebar:
   order: 5
 ---
 
-Pedelec Desktop 擁有並內附固定版本的 Deno runtime。App 與 Agent 都不需要主機另行安裝 Deno。Agent 透過 `pedelec-deno` 執行；App 透過 SDK 的 `workspace.run()` 執行。Raw Deno 不是 Agent-facing 介面。
+Pedelec Desktop 管理固定版本的 Deno runtime。使用者不必自行安裝 Deno。Runtime 的取得與存放是 Desktop 的內部實作細節。App 與 Agent 都不需要主機另行安裝 Deno。Agent 透過 `pedelec-deno` 執行；App 透過 SDK 的 `workspace.run()` 執行。Raw Deno 不是 Agent-facing 介面。
 
 ## Workspace 邊界
 

@@ -83,10 +83,18 @@ export function assertValidDenoReleaseManifest(value) {
     if (artifact.artifact !== `deno-${target}.zip`) {
       throw new Error(`Unexpected artifact name for ${target}: "${artifact.artifact}".`);
     }
-    const expectedUrl =
+    if (artifact.url !== undefined) {
+      throw new Error(`Deno artifact for ${target} must use primaryUrl and fallbackUrl.`);
+    }
+    const expectedPrimary =
+      `https://runtime.pedelec.cc/deno/v${value.version}/${artifact.artifact}`;
+    if (artifact.primaryUrl !== expectedPrimary) {
+      throw new Error(`Deno artifact primary URL for ${target} does not match the pinned runtime.`);
+    }
+    const expectedFallback =
       `https://github.com/denoland/deno/releases/download/v${value.version}/${artifact.artifact}`;
-    if (artifact.url !== expectedUrl) {
-      throw new Error(`Deno artifact URL for ${target} does not match the pinned release.`);
+    if (artifact.fallbackUrl !== expectedFallback) {
+      throw new Error(`Deno artifact fallback URL for ${target} does not match the pinned release.`);
     }
     if (!/^[0-9a-f]{64}$/.test(artifact.archiveSha256 ?? "")) {
       throw new Error(`Invalid expected Deno artifact SHA-256 for ${target}.`);

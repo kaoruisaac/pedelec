@@ -247,6 +247,11 @@ pub fn provision_managed_runtime(
     provisioned
 }
 
+struct DownloadProgress {
+    percent: u8,
+    downloaded_bytes: u64,
+}
+
 fn provision_in_work(
     plan: &DenoArtifact,
     final_dir: &Path,
@@ -255,41 +260,14 @@ fn provision_in_work(
     on_state: &mut dyn FnMut(AppPreparationState),
 ) -> Result<PathBuf, ProvisionError> {
     let archive_path = work_dir.join("archive.zip");
-    let mut last_percent = 0u8;
-    downloader.download_to(
-        &plan.url,
-        plan.archive_size_bytes,
-        &archive_path,
-        &mut |downloaded, total| {
-            let percent = download_percent(downloaded, total);
-            if percent < last_percent || percent > 100 {
-                return;
-            }
-            last_percent = percent;
-            on_state(AppPreparationState::Downloading {
-                downloaded_bytes: downloaded,
-                total_bytes: total,
-                progress_percent: percent,
-            });
-        },
-    )?;
-
-    let received = fs::metadata(&archive_path).map_err(io_error)?.len();
-    if received != plan.archive_size_bytes {
-        return Err(ProvisionError::new(
-            "archive is not the pinned size after download",
-        ));
-    }
+    let mut progress = DownloadProgress {
+        percent: 0,
+        downloaded_bytes: 0,
+    };
+    download_verified_archive(plan, &archive_path, downloader, &mut progress, on_state)?;
     on_state(AppPreparationState::Finalizing {
         progress_percent: 100,
     });
-
-    let actual_sha256 = sha256_file(&archive_path)?;
-    if actual_sha256 != plan.archive_sha256 {
-        return Err(ProvisionError::new(
-            "archive checksum does not match pinned metadata",
-        ));
-    }
 
     let stage_dir = work_dir.join("stage");
     fs::create_dir_all(&stage_dir).map_err(io_error)?;
@@ -297,6 +275,127 @@ fn provision_in_work(
     extract_root_executable(&archive_path, &plan.executable_name, &staged_executable)?;
     make_executable(&staged_executable)?;
     publish_runtime_dir(&stage_dir, final_dir, &plan.executable_name)
+}
+
+fn download_verified_archive(
+    plan: &DenoArtifact,
+    archive_path: &Path,
+    downloader: &dyn ArchiveDownload,
+    progress: &mut DownloadProgress,
+    on_state: &mut dyn FnMut(AppPreparationState),
+) -> Result<(), ProvisionError> {
+    let sources = [
+        ("primary", plan.primary_url.as_str()),
+        ("fallback", plan.fallback_url.as_str()),
+    ];
+    let mut failures = Vec::new();
+    for (label, url) in sources {
+        if label == "fallback" {
+            eprintln!("runtime source fallback attempted");
+        }
+        discard_archive(archive_path)?;
+        match download_and_verify_source(plan, url, archive_path, downloader, progress, on_state) {
+            Ok(()) => {
+                if label == "fallback" {
+                    eprintln!("runtime source fallback succeeded");
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                let category = source_failure_category(&err);
+                eprintln!("runtime source {label} failed ({category}): {err}");
+                if let Err(cleanup) = discard_archive(archive_path) {
+                    return Err(ProvisionError::new(format!(
+                        "runtime source {label} failed ({category}): {err}; failed to discard archive: {cleanup}"
+                    )));
+                }
+                failures.push(format!("{label} ({category}): {err}"));
+            }
+        }
+    }
+    Err(ProvisionError::new(format!(
+        "runtime sources failed: {}",
+        failures.join("; ")
+    )))
+}
+
+fn download_and_verify_source(
+    plan: &DenoArtifact,
+    url: &str,
+    archive_path: &Path,
+    downloader: &dyn ArchiveDownload,
+    progress: &mut DownloadProgress,
+    on_state: &mut dyn FnMut(AppPreparationState),
+) -> Result<(), ProvisionError> {
+    downloader.download_to(
+        url,
+        plan.archive_size_bytes,
+        archive_path,
+        &mut |downloaded, total| {
+            report_download_progress(progress, downloaded, total, on_state);
+        },
+    )?;
+    let received = fs::metadata(archive_path).map_err(io_error)?.len();
+    if received != plan.archive_size_bytes {
+        return Err(ProvisionError::new(
+            "archive is not the pinned size after download",
+        ));
+    }
+    let actual_sha256 = sha256_file(archive_path)?;
+    if actual_sha256 != plan.archive_sha256 {
+        return Err(ProvisionError::new(
+            "archive checksum does not match pinned metadata",
+        ));
+    }
+    Ok(())
+}
+
+fn report_download_progress(
+    progress: &mut DownloadProgress,
+    downloaded: u64,
+    total: u64,
+    on_state: &mut dyn FnMut(AppPreparationState),
+) {
+    let percent = download_percent(downloaded, total);
+    if percent > 100 || percent < progress.percent {
+        return;
+    }
+    if percent == progress.percent && downloaded < progress.downloaded_bytes {
+        return;
+    }
+    progress.percent = percent;
+    progress.downloaded_bytes = downloaded;
+    on_state(AppPreparationState::Downloading {
+        downloaded_bytes: downloaded,
+        total_bytes: total,
+        progress_percent: percent,
+    });
+}
+
+fn source_failure_category(err: &ProvisionError) -> &'static str {
+    let message = err.to_string();
+    if message.contains("HTTP") {
+        "http"
+    } else if message.contains("content length") {
+        "content-length"
+    } else if message.contains("larger than")
+        || message.contains("smaller than")
+        || message.contains("not the pinned size")
+    {
+        "size"
+    } else if message.contains("checksum") {
+        "checksum"
+    } else {
+        "request"
+    }
+}
+
+fn discard_archive(path: &Path) -> Result<(), ProvisionError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(io_error(err)),
+    }
 }
 
 pub fn publish_runtime_dir(
@@ -458,6 +557,7 @@ mod tests {
         content_length: Option<u64>,
         calls: AtomicUsize,
         failures_remaining: AtomicUsize,
+        urls: Mutex<Vec<String>>,
     }
 
     impl MemoryDownload {
@@ -467,6 +567,7 @@ mod tests {
                 content_length: None,
                 calls: AtomicUsize::new(0),
                 failures_remaining: AtomicUsize::new(0),
+                urls: Mutex::new(Vec::new()),
             }
         }
     }
@@ -480,6 +581,7 @@ mod tests {
             on_progress: &mut dyn FnMut(u64, u64),
         ) -> Result<(), ProvisionError> {
             assert!(!url.is_empty());
+            self.urls.lock().unwrap().push(url.to_string());
             self.calls.fetch_add(1, Ordering::SeqCst);
             let failed = self
                 .failures_remaining
@@ -520,7 +622,11 @@ mod tests {
             target: "x86_64-pc-windows-msvc".to_string(),
             platform: "win32".to_string(),
             artifact: "deno-x86_64-pc-windows-msvc.zip".to_string(),
-            url: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip".to_string(),
+            primary_url: "https://runtime.pedelec.cc/deno/v2.9.5/deno-x86_64-pc-windows-msvc.zip"
+                .to_string(),
+            fallback_url:
+                "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip"
+                    .to_string(),
             archive_sha256: sha256_bytes(body),
             archive_size_bytes: body.len() as u64,
             executable_name: executable_name.to_string(),
@@ -656,14 +762,27 @@ mod tests {
         let mut plan = plan_for(&body, executable_name);
         plan.archive_sha256 = "a".repeat(64);
         let downloader = MemoryDownload::new(body);
-        let err = provision_managed_runtime(&plan, temp.path(), "1", &downloader, &mut |_| {})
-            .unwrap_err();
-        assert!(err.to_string().contains("checksum"));
+        let mut states = Vec::new();
+        let err = provision_managed_runtime(&plan, temp.path(), "1", &downloader, &mut |state| {
+            states.push(state)
+        })
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("checksum"));
+        assert!(message.contains("primary"));
+        assert!(message.contains("fallback"));
         let final_executable =
             managed_deno_executable_path(temp.path(), &plan.version, &plan.target, executable_name)
                 .unwrap();
         assert!(!final_executable.exists());
-        assert_eq!(downloader.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(downloader.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            downloader.urls.lock().unwrap().as_slice(),
+            [plan.primary_url.as_str(), plan.fallback_url.as_str()]
+        );
+        assert!(states
+            .iter()
+            .all(|state| !matches!(state, AppPreparationState::Finalizing { .. })));
     }
 
     #[test]
@@ -672,27 +791,24 @@ mod tests {
         let executable_name = deno_executable_file_name();
         let garbage = b"this is not a zip archive".to_vec();
         let plan = plan_for(&garbage, executable_name);
-        let err = provision_managed_runtime(
-            &plan,
-            temp.path(),
-            "1",
-            &MemoryDownload::new(garbage),
-            &mut |_| {},
-        )
-        .unwrap_err();
+        let garbage_download = MemoryDownload::new(garbage);
+        let err =
+            provision_managed_runtime(&plan, temp.path(), "1", &garbage_download, &mut |_| {})
+                .unwrap_err();
         assert!(err.to_string().contains("ZIP"));
+        assert_eq!(garbage_download.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            garbage_download.urls.lock().unwrap().as_slice(),
+            [plan.primary_url.as_str()]
+        );
 
         let nested = zip_archive(&[(&format!("nested/{executable_name}"), b"runtime")]);
         let plan = plan_for(&nested, executable_name);
-        let err = provision_managed_runtime(
-            &plan,
-            temp.path(),
-            "2",
-            &MemoryDownload::new(nested),
-            &mut |_| {},
-        )
-        .unwrap_err();
+        let nested_download = MemoryDownload::new(nested);
+        let err = provision_managed_runtime(&plan, temp.path(), "2", &nested_download, &mut |_| {})
+            .unwrap_err();
         assert!(err.to_string().contains("expected runtime executable"));
+        assert_eq!(nested_download.calls.load(Ordering::SeqCst), 1);
         let final_executable =
             managed_deno_executable_path(temp.path(), &plan.version, &plan.target, executable_name)
                 .unwrap();
@@ -705,15 +821,18 @@ mod tests {
         let executable_name = deno_executable_file_name();
         let body = zip_archive(&[(executable_name, b"managed-runtime")]);
         let plan = plan_for(&body, executable_name);
+        let downloader = MemoryDownload::new(body);
         let mut states = Vec::new();
-        let installed = provision_managed_runtime(
-            &plan,
-            temp.path(),
-            "7",
-            &MemoryDownload::new(body),
-            &mut |state| states.push(state),
-        )
-        .unwrap();
+        let installed =
+            provision_managed_runtime(&plan, temp.path(), "7", &downloader, &mut |state| {
+                states.push(state)
+            })
+            .unwrap();
+        assert_eq!(downloader.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            downloader.urls.lock().unwrap().as_slice(),
+            [plan.primary_url.as_str()]
+        );
         let expected =
             managed_deno_executable_path(temp.path(), &plan.version, &plan.target, executable_name)
                 .unwrap();
@@ -775,13 +894,20 @@ mod tests {
         let body = zip_archive(&[(executable_name, b"retried-runtime")]);
         let plan = plan_for(&body, executable_name);
         let downloader = MemoryDownload::new(body);
-        downloader.failures_remaining.store(1, Ordering::SeqCst);
+        downloader.failures_remaining.store(2, Ordering::SeqCst);
         let first = provision_managed_runtime(&plan, temp.path(), "1", &downloader, &mut |_| {});
-        assert!(first.is_err());
+        let message = first.unwrap_err().to_string();
+        assert!(message.contains("primary"));
+        assert!(message.contains("fallback"));
+        assert_eq!(downloader.calls.load(Ordering::SeqCst), 2);
         let installed =
             provision_managed_runtime(&plan, temp.path(), "2", &downloader, &mut |_| {}).unwrap();
         assert_eq!(fs::read(installed).unwrap(), b"retried-runtime");
-        assert_eq!(downloader.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(downloader.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            downloader.urls.lock().unwrap().last().map(String::as_str),
+            Some(plan.primary_url.as_str())
+        );
     }
 
     #[test]
@@ -878,5 +1004,320 @@ mod tests {
         assert_eq!(download_percent(199, 200), 99);
         assert_eq!(download_percent(200, 200), 100);
         assert!(download_percent(u64::MAX, u64::MAX) <= 100);
+    }
+
+    enum Route {
+        Fail(String),
+        Body {
+            bytes: Vec<u8>,
+            content_length: Option<u64>,
+        },
+        WritePartialThenFail {
+            bytes: Vec<u8>,
+            message: String,
+        },
+        ProgressThenFail {
+            progress: Vec<(u64, u64)>,
+            partial: Vec<u8>,
+            message: String,
+        },
+        ProgressThenBody {
+            progress: Vec<(u64, u64)>,
+            bytes: Vec<u8>,
+        },
+    }
+
+    struct RoutedDownload {
+        primary_url: String,
+        fallback_url: String,
+        primary: Route,
+        fallback: Route,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl ArchiveDownload for RoutedDownload {
+        fn download_to(
+            &self,
+            url: &str,
+            expected_size: u64,
+            destination: &Path,
+            on_progress: &mut dyn FnMut(u64, u64),
+        ) -> Result<(), ProvisionError> {
+            self.calls.lock().unwrap().push(url.to_string());
+            if url == self.fallback_url
+                && destination.exists()
+                && fs::metadata(destination).map_err(io_error)?.len() > 0
+            {
+                return Err(ProvisionError::new(
+                    "previous source archive was not discarded",
+                ));
+            }
+            let route = if url == self.primary_url {
+                &self.primary
+            } else if url == self.fallback_url {
+                &self.fallback
+            } else {
+                return Err(ProvisionError::new(format!("unexpected runtime url {url}")));
+            };
+            match route {
+                Route::Fail(message) => Err(ProvisionError::new(message.clone())),
+                Route::Body {
+                    bytes,
+                    content_length,
+                } => ingest_archive(
+                    &mut Cursor::new(bytes.as_slice()),
+                    *content_length,
+                    expected_size,
+                    destination,
+                    on_progress,
+                ),
+                Route::WritePartialThenFail { bytes, message } => {
+                    fs::write(destination, bytes).map_err(io_error)?;
+                    Err(ProvisionError::new(message.clone()))
+                }
+                Route::ProgressThenFail {
+                    progress,
+                    partial,
+                    message,
+                } => {
+                    for (downloaded, total) in progress {
+                        on_progress(*downloaded, *total);
+                    }
+                    fs::write(destination, partial).map_err(io_error)?;
+                    Err(ProvisionError::new(message.clone()))
+                }
+                Route::ProgressThenBody { progress, bytes } => {
+                    for (downloaded, total) in progress {
+                        on_progress(*downloaded, *total);
+                    }
+                    ingest_archive(
+                        &mut Cursor::new(bytes.as_slice()),
+                        None,
+                        expected_size,
+                        destination,
+                        on_progress,
+                    )
+                }
+            }
+        }
+    }
+
+    fn assert_fallback_published(states: &[AppPreparationState], installed: &Path) {
+        assert_eq!(fs::read(installed).unwrap(), b"managed-runtime");
+        let finalizing: Vec<_> = states
+            .iter()
+            .enumerate()
+            .filter(|(_, state)| matches!(state, AppPreparationState::Finalizing { .. }))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(finalizing.len(), 1);
+        let last_complete = states
+            .iter()
+            .rposition(|state| {
+                matches!(
+                    state,
+                    AppPreparationState::Downloading {
+                        progress_percent: 100,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(finalizing[0] > last_complete);
+    }
+
+    fn fallback_success(
+        primary: Route,
+        executable_name: &str,
+        body: Vec<u8>,
+    ) -> (
+        DenoArtifact,
+        Vec<AppPreparationState>,
+        PathBuf,
+        Vec<String>,
+        tempfile::TempDir,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let plan = plan_for(&body, executable_name);
+        let downloader = RoutedDownload {
+            primary_url: plan.primary_url.clone(),
+            fallback_url: plan.fallback_url.clone(),
+            primary,
+            fallback: Route::Body {
+                bytes: body,
+                content_length: None,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let mut states = Vec::new();
+        let installed =
+            provision_managed_runtime(&plan, temp.path(), "1", &downloader, &mut |state| {
+                states.push(state)
+            })
+            .unwrap();
+        let calls = downloader.calls.lock().unwrap().clone();
+        (plan, states, installed, calls, temp)
+    }
+
+    #[test]
+    fn primary_http_failure_uses_the_verified_fallback() {
+        let executable_name = deno_executable_file_name();
+        let body = zip_archive(&[(executable_name, b"managed-runtime")]);
+        let (plan, states, installed, calls, _temp) = fallback_success(
+            Route::Fail("runtime download failed with HTTP 404".into()),
+            executable_name,
+            body,
+        );
+        assert_eq!(
+            calls,
+            vec![plan.primary_url.clone(), plan.fallback_url.clone()]
+        );
+        assert_fallback_published(&states, &installed);
+    }
+
+    #[test]
+    fn primary_partial_download_is_discarded_before_fallback() {
+        let executable_name = deno_executable_file_name();
+        let body = zip_archive(&[(executable_name, b"managed-runtime")]);
+        let (plan, states, installed, calls, _temp) = fallback_success(
+            Route::WritePartialThenFail {
+                bytes: b"partial-primary".to_vec(),
+                message: "runtime download failed: connection reset".into(),
+            },
+            executable_name,
+            body,
+        );
+        assert_eq!(calls, vec![plan.primary_url, plan.fallback_url]);
+        assert_fallback_published(&states, &installed);
+    }
+
+    #[test]
+    fn primary_content_length_mismatch_uses_fallback() {
+        let executable_name = deno_executable_file_name();
+        let body = zip_archive(&[(executable_name, b"managed-runtime")]);
+        let (plan, states, installed, calls, _temp) = fallback_success(
+            Route::Body {
+                bytes: body.clone(),
+                content_length: Some(body.len() as u64 + 8),
+            },
+            executable_name,
+            body,
+        );
+        assert_eq!(calls, vec![plan.primary_url, plan.fallback_url]);
+        assert_fallback_published(&states, &installed);
+    }
+
+    #[test]
+    fn primary_size_mismatch_uses_fallback() {
+        let executable_name = deno_executable_file_name();
+        let body = zip_archive(&[(executable_name, b"managed-runtime")]);
+        let mut larger = body.clone();
+        larger.extend_from_slice(&[9, 9, 9, 9]);
+        let (plan, states, installed, calls, _temp) = fallback_success(
+            Route::Body {
+                bytes: larger,
+                content_length: None,
+            },
+            executable_name,
+            body,
+        );
+        assert_eq!(calls, vec![plan.primary_url, plan.fallback_url]);
+        assert_fallback_published(&states, &installed);
+    }
+
+    #[test]
+    fn primary_checksum_mismatch_uses_fallback_without_early_finalizing() {
+        let executable_name = deno_executable_file_name();
+        let body = zip_archive(&[(executable_name, b"managed-runtime")]);
+        let mut corrupt = body.clone();
+        corrupt[0] ^= 0xff;
+        let (plan, states, installed, calls, _temp) = fallback_success(
+            Route::Body {
+                bytes: corrupt,
+                content_length: None,
+            },
+            executable_name,
+            body,
+        );
+        assert_eq!(calls, vec![plan.primary_url, plan.fallback_url]);
+        assert_fallback_published(&states, &installed);
+    }
+
+    #[test]
+    fn visible_progress_does_not_decrease_across_fallback() {
+        let executable_name = deno_executable_file_name();
+        let body = zip_archive(&[(executable_name, b"managed-runtime")]);
+        let temp = tempfile::tempdir().unwrap();
+        let plan = plan_for(&body, executable_name);
+        let downloader = RoutedDownload {
+            primary_url: plan.primary_url.clone(),
+            fallback_url: plan.fallback_url.clone(),
+            primary: Route::ProgressThenFail {
+                progress: vec![(42, 100)],
+                partial: b"partial".to_vec(),
+                message: "runtime download failed: connection reset".into(),
+            },
+            fallback: Route::ProgressThenBody {
+                progress: vec![(10, 100), (30, 100), (43, 100)],
+                bytes: body,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let mut states = Vec::new();
+        let installed =
+            provision_managed_runtime(&plan, temp.path(), "1", &downloader, &mut |state| {
+                states.push(state)
+            })
+            .unwrap();
+        assert_eq!(fs::read(&installed).unwrap(), b"managed-runtime");
+        let percents: Vec<u8> = states
+            .iter()
+            .filter_map(|state| match state {
+                AppPreparationState::Downloading {
+                    progress_percent, ..
+                } => Some(*progress_percent),
+                _ => None,
+            })
+            .collect();
+        assert!(percents.contains(&42));
+        assert!(percents.contains(&43));
+        assert!(!percents.contains(&10));
+        assert!(!percents.contains(&30));
+        let mut previous = 0u8;
+        for percent in percents {
+            assert!(percent >= previous);
+            previous = percent;
+        }
+        assert_fallback_published(&states, &installed);
+    }
+
+    #[test]
+    fn both_sources_fail_without_publishing_an_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable_name = deno_executable_file_name();
+        let body = zip_archive(&[(executable_name, b"managed-runtime")]);
+        let plan = plan_for(&body, executable_name);
+        let downloader = RoutedDownload {
+            primary_url: plan.primary_url.clone(),
+            fallback_url: plan.fallback_url.clone(),
+            primary: Route::Fail("runtime download failed with HTTP 404".into()),
+            fallback: Route::Fail("runtime download failed: dns error".into()),
+            calls: Mutex::new(Vec::new()),
+        };
+        let err = provision_managed_runtime(&plan, temp.path(), "1", &downloader, &mut |_| {})
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("primary"));
+        assert!(message.contains("HTTP 404"));
+        assert!(message.contains("fallback"));
+        assert!(message.contains("dns error"));
+        assert_eq!(
+            downloader.calls.lock().unwrap().as_slice(),
+            [plan.primary_url.as_str(), plan.fallback_url.as_str()]
+        );
+        let final_executable =
+            managed_deno_executable_path(temp.path(), &plan.version, &plan.target, executable_name)
+                .unwrap();
+        assert!(!final_executable.exists());
     }
 }

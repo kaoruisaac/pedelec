@@ -5,7 +5,7 @@ sidebar:
   order: 5
 ---
 
-Pedelec Desktop owns and ships the pinned Deno runtime. Neither the application nor the Agent needs a host-installed Deno. Agent execution uses `pedelec-deno`; application execution uses the SDK's `workspace.run()`. Raw Deno is not the Agent-facing interface.
+Pedelec Desktop manages a pinned Deno runtime. Users do not need to install Deno themselves. How Desktop acquires and stores that runtime is an internal implementation detail. Neither the application nor the Agent needs a host-installed Deno. Agent execution uses `pedelec-deno`; application execution uses the SDK's `workspace.run()`. Raw Deno is not the Agent-facing interface.
 
 ## Workspace boundary
 

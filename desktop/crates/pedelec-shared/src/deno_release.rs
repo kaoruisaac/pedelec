@@ -19,14 +19,15 @@ pub struct DenoArtifact {
     pub target: String,
     pub platform: String,
     pub artifact: String,
-    pub url: String,
+    pub primary_url: String,
+    pub fallback_url: String,
     pub archive_sha256: String,
     pub archive_size_bytes: u64,
     pub executable_name: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawManifest {
     version: String,
     notice_resource: String,
@@ -35,11 +36,12 @@ struct RawManifest {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawArtifact {
     platform: String,
     artifact: String,
-    url: String,
+    primary_url: String,
+    fallback_url: String,
     archive_sha256: String,
     archive_size_bytes: u64,
 }
@@ -135,13 +137,16 @@ fn validate_raw_manifest(raw: &RawManifest) -> Result<(), String> {
                 artifact.artifact
             ));
         }
-        let expected_url = format!(
-            "https://github.com/denoland/deno/releases/download/v{}/{}",
-            raw.version, artifact.artifact
-        );
-        if artifact.url != expected_url {
+        let expected_primary = expected_primary_url(&raw.version, &artifact.artifact);
+        if artifact.primary_url != expected_primary {
             return Err(format!(
-                "Deno artifact URL for {target} does not match the pinned release."
+                "Deno artifact primary URL for {target} does not match the pinned runtime."
+            ));
+        }
+        let expected_fallback = expected_fallback_url(&raw.version, &artifact.artifact);
+        if artifact.fallback_url != expected_fallback {
+            return Err(format!(
+                "Deno artifact fallback URL for {target} does not match the pinned release."
             ));
         }
         if !is_sha256_hex(&artifact.archive_sha256) {
@@ -169,11 +174,20 @@ fn artifact_from_raw(
         target: target.to_string(),
         platform: artifact.platform,
         artifact: artifact.artifact,
-        url: artifact.url,
+        primary_url: artifact.primary_url,
+        fallback_url: artifact.fallback_url,
         archive_sha256: artifact.archive_sha256,
         archive_size_bytes: artifact.archive_size_bytes,
         executable_name,
     })
+}
+
+fn expected_primary_url(version: &str, artifact: &str) -> String {
+    format!("https://runtime.pedelec.cc/deno/v{version}/{artifact}")
+}
+
+fn expected_fallback_url(version: &str, artifact: &str) -> String {
+    format!("https://github.com/denoland/deno/releases/download/v{version}/{artifact}")
 }
 
 fn platform_for_target(target: &str) -> Result<&'static str, String> {
@@ -242,7 +256,23 @@ mod tests {
             assert_ne!(artifact.version, "latest");
             assert!(artifact.archive_size_bytes > 0);
             assert!(is_sha256_hex(&artifact.archive_sha256));
-            assert!(artifact.url.contains(&format!("/v{}/", artifact.version)));
+            assert_eq!(
+                artifact.primary_url,
+                expected_primary_url(&artifact.version, &artifact.artifact)
+            );
+            assert_eq!(
+                artifact.fallback_url,
+                expected_fallback_url(&artifact.version, &artifact.artifact)
+            );
+            assert!(artifact
+                .primary_url
+                .contains(&format!("/v{}/", artifact.version)));
+            assert!(artifact
+                .fallback_url
+                .contains(&format!("/v{}/", artifact.version)));
+            assert!(artifact.primary_url.ends_with(&artifact.artifact));
+            assert!(artifact.fallback_url.ends_with(&artifact.artifact));
+            assert_ne!(artifact.primary_url, artifact.fallback_url);
             assert!(artifact.executable_name == "deno" || artifact.executable_name == "deno.exe");
             assert!(!artifact.executable_name.contains("pedelec"));
         }
@@ -296,5 +326,54 @@ mod tests {
         assert!(parse_deno_release_manifest(&raw.to_string())
             .unwrap_err()
             .contains("exactly"));
+    }
+
+    #[test]
+    fn rejects_urls_that_do_not_match_the_pinned_identity() {
+        let mut raw: serde_json::Value = serde_json::from_str(MANIFEST_JSON).unwrap();
+        raw["artifacts"]["x86_64-pc-windows-msvc"]["primaryUrl"] = serde_json::json!(
+            "https://example.invalid/deno/v2.9.5/deno-x86_64-pc-windows-msvc.zip"
+        );
+        assert!(parse_deno_release_manifest(&raw.to_string())
+            .unwrap_err()
+            .contains("primary URL"));
+
+        let mut raw: serde_json::Value = serde_json::from_str(MANIFEST_JSON).unwrap();
+        raw["artifacts"]["x86_64-pc-windows-msvc"]["primaryUrl"] = serde_json::json!(
+            "https://runtime.pedelec.cc/deno/v9.9.9/deno-x86_64-pc-windows-msvc.zip"
+        );
+        assert!(parse_deno_release_manifest(&raw.to_string())
+            .unwrap_err()
+            .contains("primary URL"));
+
+        let mut raw: serde_json::Value = serde_json::from_str(MANIFEST_JSON).unwrap();
+        raw["artifacts"]["aarch64-apple-darwin"]["fallbackUrl"] = serde_json::json!(
+            "https://runtime.pedelec.cc/deno/v2.9.5/deno-aarch64-apple-darwin.zip"
+        );
+        assert!(parse_deno_release_manifest(&raw.to_string())
+            .unwrap_err()
+            .contains("fallback URL"));
+
+        let mut raw: serde_json::Value = serde_json::from_str(MANIFEST_JSON).unwrap();
+        raw["artifacts"]["x86_64-unknown-linux-gnu"]["fallbackUrl"] = serde_json::json!(
+            "https://github.com/denoland/deno/releases/download/v2.9.5/deno-other.zip"
+        );
+        assert!(parse_deno_release_manifest(&raw.to_string())
+            .unwrap_err()
+            .contains("fallback URL"));
+
+        let mut raw: serde_json::Value = serde_json::from_str(MANIFEST_JSON).unwrap();
+        raw["version"] = serde_json::json!("9.9.9");
+        assert!(parse_deno_release_manifest(&raw.to_string())
+            .unwrap_err()
+            .contains("primary URL"));
+
+        let mut raw: serde_json::Value = serde_json::from_str(MANIFEST_JSON).unwrap();
+        raw["artifacts"]["x86_64-apple-darwin"]["url"] = serde_json::json!(
+            "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-apple-darwin.zip"
+        );
+        assert!(parse_deno_release_manifest(&raw.to_string())
+            .unwrap_err()
+            .contains("url"));
     }
 }

@@ -76,7 +76,7 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | --- | --- | --- | --- |
 | `DENO_EXECUTION_TIMEOUT` | Workspace Deno code exceeded its positive timeout, which defaults to 60 seconds | Increase the timeout only when appropriate, or split/shorten the script | Yes after changing the work |
 | `DENO_EXECUTION_CANCELLED` | Workspace Deno execution was cancelled during shutdown or interruption | Reconcile partial Workspace writes before retrying | After the Workspace/runtime is usable |
-| `DENO_RUNTIME_UNAVAILABLE` | The bundled/cached Deno runtime cannot be located or started | Repair/reinstall the Desktop runtime and verify its packaged Deno asset | After runtime repair |
+| `DENO_RUNTIME_UNAVAILABLE` | The managed Deno runtime cannot be located or started | Restart Desktop so it can prepare the runtime again. Reinstall Desktop if preparation keeps failing | After the runtime is available |
 | `DENO_PROCESS_SPAWN_FAILED` | Desktop could not spawn the Deno process | Check Desktop installation, executable permissions, and runtime logs | After fixing the process environment |
 | `DENO_PROCESS_IO_FAILED` | Deno process stdin/stdout/stderr communication failed | Treat the operation as failed, inspect runtime logs, and reconcile partial writes | After transport/runtime recovery |
 | `DENO_MODULE_NAME_INVALID` | A logical Deno Module name is not a supported bare or scoped package-like specifier | Use a valid module name such as `scene-tools` or `@example/scene-tools` | After fixing the declaration |

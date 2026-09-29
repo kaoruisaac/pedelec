@@ -6,35 +6,40 @@
     "x86_64-pc-windows-msvc": {
       "platform": "win32",
       "artifact": "deno-x86_64-pc-windows-msvc.zip",
-      "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+      "primaryUrl": "https://runtime.pedelec.cc/deno/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+      "fallbackUrl": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
       "archiveSha256": "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a",
       "archiveSizeBytes": 42691248
     },
     "aarch64-pc-windows-msvc": {
       "platform": "win32",
       "artifact": "deno-aarch64-pc-windows-msvc.zip",
-      "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-pc-windows-msvc.zip",
+      "primaryUrl": "https://runtime.pedelec.cc/deno/v2.9.5/deno-aarch64-pc-windows-msvc.zip",
+      "fallbackUrl": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-pc-windows-msvc.zip",
       "archiveSha256": "73f20b3566a0a6e3f6912fd7bf5b3a7ccd04d68414baedea3b397437bdec6472",
       "archiveSizeBytes": 40905829
     },
     "aarch64-apple-darwin": {
       "platform": "darwin",
       "artifact": "deno-aarch64-apple-darwin.zip",
-      "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-apple-darwin.zip",
+      "primaryUrl": "https://runtime.pedelec.cc/deno/v2.9.5/deno-aarch64-apple-darwin.zip",
+      "fallbackUrl": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-apple-darwin.zip",
       "archiveSha256": "b796aadd131f6930560c1ee040cf0d6f53933fbb987464e9ff46bd7ea4830615",
       "archiveSizeBytes": 38511993
     },
     "x86_64-apple-darwin": {
       "platform": "darwin",
       "artifact": "deno-x86_64-apple-darwin.zip",
-      "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-apple-darwin.zip",
+      "primaryUrl": "https://runtime.pedelec.cc/deno/v2.9.5/deno-x86_64-apple-darwin.zip",
+      "fallbackUrl": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-apple-darwin.zip",
       "archiveSha256": "c1b8b89a81e91b2a8b3f96def3195d08cfe3a105651da7908d53061f7140510d",
       "archiveSizeBytes": 42346648
     },
     "x86_64-unknown-linux-gnu": {
       "platform": "linux",
       "artifact": "deno-x86_64-unknown-linux-gnu.zip",
-      "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-unknown-linux-gnu.zip",
+      "primaryUrl": "https://runtime.pedelec.cc/deno/v2.9.5/deno-x86_64-unknown-linux-gnu.zip",
+      "fallbackUrl": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-unknown-linux-gnu.zip",
       "archiveSha256": "8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530",
       "archiveSizeBytes": 41638854
     }

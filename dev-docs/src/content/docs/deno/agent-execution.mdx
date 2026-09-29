@@ -19,7 +19,7 @@ writes or selects JS/TS
     Workspace
 ```
 
-Pedelec Desktop ships a pinned Deno runtime. Users need not install Node.js, Bun, or Deno. `pedelec-deno` is the canonical Agent-facing JS/TS runtime. If it is unavailable, the Agent should report the failure instead of silently falling back to Node.js, Bun, raw Deno, or another runtime. Execution stays within the [Workspace security boundary](./runtime-security/).
+Pedelec Desktop manages a pinned Deno runtime. Users do not need to install Node.js, Bun, or Deno themselves. `pedelec-deno` is the canonical Agent-facing JS/TS runtime. If it is unavailable, the Agent should report the failure instead of silently falling back to Node.js, Bun, raw Deno, or another runtime. Execution stays within the [Workspace security boundary](./runtime-security/).
 
 ## Keep a script in the Workspace
 

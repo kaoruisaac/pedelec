@@ -76,7 +76,7 @@ try {
 | --- | --- | --- | --- |
 | `DENO_EXECUTION_TIMEOUT` | Workspace Deno code 超過 timeout；default 是 60 秒 | 適當時提高 timeout，或拆分/縮短 script | 修改工作後 |
 | `DENO_EXECUTION_CANCELLED` | Workspace Deno execution 在 shutdown 或 interruption 中被取消 | Retry 前先確認 Workspace 是否有 partial writes | Workspace/runtime 可用後 |
-| `DENO_RUNTIME_UNAVAILABLE` | Bundled/cached Deno runtime 找不到或無法啟動 | 修復/重新安裝 Desktop runtime，確認 packaged Deno asset | 修復 runtime 後 |
+| `DENO_RUNTIME_UNAVAILABLE` | 受管理的 Deno runtime 找不到或無法啟動 | 重新啟動 Desktop，讓它再次準備 runtime。若準備持續失敗，請重新安裝 Desktop | runtime 可用後 |
 | `DENO_PROCESS_SPAWN_FAILED` | Desktop 無法 spawn Deno process | 檢查 Desktop installation、executable permissions 與 runtime logs | 修復 process environment 後 |
 | `DENO_PROCESS_IO_FAILED` | Deno process 的 stdin/stdout/stderr communication 失敗 | 將 operation 視為失敗，查看 runtime logs 並確認 partial writes | transport/runtime 恢復後 |
 | `DENO_MODULE_NAME_INVALID` | Logical Deno Module name 不是支援的 bare 或 scoped package-like specifier | 使用 `scene-tools` 或 `@example/scene-tools` 等有效名稱 | 修正 declaration 後 |

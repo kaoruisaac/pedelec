@@ -71,7 +71,7 @@ Provider 是 session 使用的 agent backend，目前代碼包含 `codex`、`ant
 
 Provider 是否可用取決於使用者電腦。CLI provider 通常需要安裝 command、加入 Desktop App 能看到的 `PATH`，並完成登入。Ollama session 會使用 Pedelec 內附 agent executable、設定的 Ollama-compatible endpoint（default `http://127.0.0.1:11434`）、非空 API key（本機用 `ollama`）及已安裝的 model。
 
-Pedelec 的 Deno 有兩條路徑：Agent 透過 `pedelec-deno` 執行 JS/TS，Web App 透過 `workspace.run()` 直接執行已知的 Workspace 程式碼。`skills.denoModules` 提供只屬於該 Thread 的 Agent module snapshot；Workspace-run modules 則只供明確指定它們的單次執行使用。兩者不會相互繼承。Desktop 內附受限制的 Deno runtime；完整選擇方式與安全邊界請見 [Deno 總覽](../deno/overview/)。
+Pedelec 的 Deno 有兩條路徑：Agent 透過 `pedelec-deno` 執行 JS/TS，Web App 透過 `workspace.run()` 直接執行已知的 Workspace 程式碼。`skills.denoModules` 提供只屬於該 Thread 的 Agent module snapshot；Workspace-run modules 則只供明確指定它們的單次執行使用。兩者不會相互繼承。Desktop 管理受限制的 Deno runtime；完整選擇方式與安全邊界請見 [Deno 總覽](../deno/overview/)。
 
 ## `createSession()` 的資料流
 

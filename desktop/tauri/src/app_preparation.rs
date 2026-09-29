@@ -527,7 +527,11 @@ mod tests {
             target: "x86_64-pc-windows-msvc".into(),
             platform: "win32".into(),
             artifact: "deno-x86_64-pc-windows-msvc.zip".into(),
-            url: "https://example.invalid/runtime.zip".into(),
+            primary_url: "https://runtime.pedelec.cc/deno/v2.9.5/deno-x86_64-pc-windows-msvc.zip"
+                .into(),
+            fallback_url:
+                "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip"
+                    .into(),
             archive_sha256,
             archive_size_bytes: body.len() as u64,
             executable_name: deno_executable_file_name().into(),
@@ -543,15 +547,16 @@ mod tests {
         let downloader = Arc::new(FlakyDownload {
             body,
             calls: AtomicUsize::new(0),
-            failures_remaining: AtomicUsize::new(1),
+            failures_remaining: AtomicUsize::new(2),
         });
         let runs = Arc::new(AtomicU32::new(0));
         let preparation = AppPreparation::with_mode(true);
         let recorded = Arc::clone(&runs);
+        let provisioner = Arc::clone(&downloader);
         preparation.configure(
             temp.path().to_path_buf(),
             plan,
-            downloader,
+            provisioner,
             Arc::new(move |path| {
                 assert!(path.is_file());
                 recorded.fetch_add(1, Ordering::SeqCst);
@@ -561,6 +566,7 @@ mod tests {
 
         let first = preparation.bootstrap();
         assert!(first.is_err());
+        assert_eq!(downloader.calls.load(Ordering::SeqCst), 2);
         assert_eq!(runs.load(Ordering::SeqCst), 0);
         assert!(matches!(
             preparation.snapshot().state,
@@ -569,6 +575,7 @@ mod tests {
 
         let retried = preparation.retry();
         assert!(matches!(retried.state, AppPreparationState::Ready));
+        assert_eq!(downloader.calls.load(Ordering::SeqCst), 3);
         assert_eq!(runs.load(Ordering::SeqCst), 1);
 
         let again = preparation.retry();
