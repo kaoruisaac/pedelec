@@ -156,6 +156,7 @@ Underlying structured errors are preserved when available, so fallback codes may
 | `TOOL_TIMEOUT` | Core reached the App Tool's formal timeout while waiting for a tool result | Core/runtime error | A received structured error means the invocation ended; reconcile possible side effects rather than treating it as an in-flight retry |
 | `TOOL_HANDLER_ERROR` | Handler threw or rejected | Error result sent to agent | Log unexpected exception; return domain errors for expected cases |
 | `SUBMIT_TOOL_RESULT_FAILED` | SDK could not deliver handler result | `session.onError()` SDK event | Reconcile side effects; inspect disconnect/timeout/serialization |
+| `WEBMCP_REGISTRATION_FAILED` | `document.modelContext.registerTool` failed while binding App Tools | Rejected `webmcp()` promise | Fix the page registration failure. That call returns no binding and aborts tools registered earlier in the same call |
 
 A Core tool timeout can also lead to a session/runtime error or a later `SUBMIT_TOOL_RESULT_FAILED`. The browser handler is not forcibly cancelled.
 

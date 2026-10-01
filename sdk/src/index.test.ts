@@ -293,6 +293,48 @@ function preparedWorkspaceDenoModule(name = "scene-tools"): any {
   return module;
 }
 
+type CapturedWebMcpTool = {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  execute: (input: unknown, options: { signal: AbortSignal }) => unknown | Promise<unknown>;
+  timeoutMs?: unknown;
+  handler?: unknown;
+};
+
+type CapturedWebMcpRegistration = {
+  tool: CapturedWebMcpTool;
+  options?: { signal?: AbortSignal };
+};
+
+function installWebMcp(
+  pageWindow: MockWindow,
+  registerTool?: (tool: CapturedWebMcpTool, options?: { signal?: AbortSignal }) => unknown,
+) {
+  const registrations: CapturedWebMcpRegistration[] = [];
+  const modelContext = {
+    async registerTool(tool: CapturedWebMcpTool, options?: { signal?: AbortSignal }) {
+      registrations.push({ tool, options });
+      if (registerTool) await registerTool(tool, options);
+    },
+  };
+  (pageWindow.document as unknown as { modelContext: typeof modelContext }).modelContext = modelContext;
+  return { registrations, modelContext };
+}
+
+function webMcpPageTool(name = "get_current_page", handler?: (args: any) => unknown) {
+  return defineTool({
+    name,
+    description: `Read ${name}.`,
+    argsSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    ...(handler ? { handler } : {}),
+  });
+}
+
 async function startTurn(session: { sendText: (text: string) => Promise<void> }, pageWindow: MockWindow) {
   const send = session.sendText("hello");
   const request = pageWindow.lastSent();
@@ -3621,6 +3663,340 @@ describe("Pedelec SDK", () => {
     const sent = pageWindow.port.sent.length;
     await expect(session.listAssets()).rejects.toMatchObject({ code: "SESSION_ENDED", details: { sessionId: "thread_1" } });
     expect(pageWindow.port.sent).toHaveLength(sent);
+  });
+});
+
+describe("Pedelec.webmcp", () => {
+  let pageWindow: MockWindow;
+
+  beforeEach(() => {
+    pageWindow = installWindowMock();
+  });
+
+  afterEach(() => {
+    delete (globalThis as any).window;
+    delete (globalThis as any).chrome;
+  });
+
+  it("returns an unavailable binding when WebMCP is missing and does not need the extension", async () => {
+    const pedelec = new Pedelec();
+    const sentBefore = requestMessages(pageWindow.port).length;
+    const tool = webMcpPageTool("get_current_page", async () => ({ title: "Page" }));
+    const binding = await pedelec.webmcp({ skills: { tools: [tool] } });
+
+    expect(binding.available).toBe(false);
+    expect(() => binding.dispose()).not.toThrow();
+    expect(() => binding.dispose()).not.toThrow();
+    expect(requestMessages(pageWindow.port)).toHaveLength(sentBefore);
+
+    (pageWindow.document as any).modelContext = { registerTool: "unavailable" };
+    const notAFunction = await new Pedelec().webmcp({ skills: { tools: [tool] } });
+    expect(notAFunction.available).toBe(false);
+    expect(() => notAFunction.dispose()).not.toThrow();
+
+    (pageWindow as any).document = undefined;
+    const missingDocument = await new Pedelec().webmcp({ skills: { tools: [tool] } });
+    expect(missingDocument.available).toBe(false);
+
+    delete (globalThis as any).window;
+    const serverBinding = await new Pedelec().webmcp({ skills: { tools: [tool] } });
+    expect(serverBinding.available).toBe(false);
+    expect(() => serverBinding.dispose()).not.toThrow();
+  });
+
+  it("maps normalized tool fields onto one shared registration signal", async () => {
+    const { registrations } = installWebMcp(pageWindow);
+    const argsSchema = {
+      type: "object" as const,
+      properties: {
+        id: { type: "string" as const, description: "Original id." },
+      },
+      required: ["id"],
+    };
+    const pedelec = new Pedelec();
+    const binding = await pedelec.webmcp({
+      skills: {
+        tools: [
+          defineTool({
+            name: "load_item",
+            description: "Load one item.",
+            argsSchema,
+            timeoutMs: 1500,
+            handler: async (args: { id: string }) => ({ id: args.id }),
+          }),
+          webMcpPageTool("get_current_page", async () => ({ title: "Page" })),
+        ],
+      },
+    });
+
+    (argsSchema.properties.id as { description: string }).description = "Mutated id.";
+
+    expect(binding.available).toBe(true);
+    expect(registrations).toHaveLength(2);
+    expect(registrations[0]?.options?.signal).toBeInstanceOf(AbortSignal);
+    expect(registrations[1]?.options?.signal).toBe(registrations[0]?.options?.signal);
+    expect(Object.keys(registrations[0]!.tool).sort()).toEqual([
+      "description",
+      "execute",
+      "inputSchema",
+      "name",
+    ]);
+    expect(registrations[0]!.tool).toMatchObject({
+      name: "load_item",
+      description: "Load one item.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Original id." },
+        },
+        required: ["id"],
+      },
+    });
+    expect(typeof registrations[0]!.tool.execute).toBe("function");
+    expect(registrations[0]!.tool.timeoutMs).toBeUndefined();
+    expect(registrations[0]!.tool.handler).toBeUndefined();
+    expect(JSON.stringify(registrations[0]!.tool)).not.toContain("guidance");
+    expect(JSON.stringify(registrations[0]!.tool)).not.toContain("denoModules");
+  });
+
+  it("aborts only that binding's registrations when disposed", async () => {
+    const first = installWebMcp(pageWindow);
+    const pedelec = new Pedelec();
+    const binding = await pedelec.webmcp({
+      skills: {
+        tools: [
+          webMcpPageTool("get_current_page", async () => ({ title: "Page" })),
+          webMcpPageTool("get_selection", async () => ({ text: "" })),
+        ],
+      },
+    });
+    const firstSignal = first.registrations[0]?.options?.signal;
+    const secondRegistrations: CapturedWebMcpRegistration[] = [];
+    (pageWindow.document as any).modelContext = {
+      async registerTool(tool: CapturedWebMcpTool, options?: { signal?: AbortSignal }) {
+        secondRegistrations.push({ tool, options });
+      },
+    };
+    const other = await pedelec.webmcp({
+      skills: { tools: [webMcpPageTool("replace_text", async () => ({ ok: true }))] },
+    });
+
+    expect(binding.available).toBe(true);
+    expect(() => {
+      binding.dispose();
+      binding.dispose();
+      binding.dispose();
+    }).not.toThrow();
+    expect(firstSignal?.aborted).toBe(true);
+    expect(other.available).toBe(true);
+    expect(secondRegistrations[0]?.options?.signal?.aborted).toBe(false);
+    other.dispose();
+    expect(secondRegistrations[0]?.options?.signal?.aborted).toBe(true);
+  });
+
+  it("calls the shared handler with args only and propagates throw or reject", async () => {
+    const { registrations } = installWebMcp(pageWindow);
+    const calls: unknown[][] = [];
+    const pedelec = new Pedelec();
+    const binding = await pedelec.webmcp({
+      skills: {
+        tools: [
+          defineTool({
+            name: "load_item",
+            description: "Load one item.",
+            argsSchema: {
+              type: "object",
+              properties: { id: { type: "string" } },
+              required: ["id"],
+            },
+            handler(args: { id: string }) {
+              calls.push(Array.from(arguments));
+              return Promise.resolve({ id: args.id });
+            },
+          }),
+          defineTool({
+            name: "fail_sync",
+            description: "Fail immediately.",
+            argsSchema: { type: "object", properties: {}, required: [] },
+            handler() {
+              throw new Error("sync fail");
+            },
+          }),
+          defineTool({
+            name: "fail_async",
+            description: "Fail asynchronously.",
+            argsSchema: { type: "object", properties: {}, required: [] },
+            handler: async () => {
+              throw new Error("async fail");
+            },
+          }),
+        ],
+      },
+    });
+
+    const signal = new AbortController().signal;
+    await expect(registrations[0]!.tool.execute({ id: "item-1" }, { signal })).resolves.toEqual({
+      id: "item-1",
+    });
+    expect(calls).toEqual([[{ id: "item-1" }]]);
+    await expect(registrations[1]!.tool.execute({}, { signal })).rejects.toThrow("sync fail");
+    await expect(registrations[2]!.tool.execute({}, { signal })).rejects.toThrow("async fail");
+    binding.dispose();
+  });
+
+  it("rejects a missing inline handler before registration", async () => {
+    const { registrations } = installWebMcp(pageWindow);
+    const pedelec = new Pedelec();
+
+    await expect(
+      pedelec.webmcp({
+        skills: { tools: [webMcpPageTool("needs_handler")] },
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "WebMCP tool handler must be a function",
+      details: { toolName: "needs_handler" },
+    });
+    expect(registrations).toHaveLength(0);
+
+    delete (pageWindow.document as any).modelContext;
+    await expect(
+      pedelec.webmcp({
+        skills: { tools: [webMcpPageTool("still_required")] },
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "WebMCP tool handler must be a function",
+      details: { toolName: "still_required" },
+    });
+  });
+
+  it("rejects WebMCP names longer than 128 characters and keeps Pedelec name rules", async () => {
+    const { registrations } = installWebMcp(pageWindow);
+    const pedelec = new Pedelec();
+    const longName = `tool_${"a".repeat(124)}`;
+    expect(longName).toHaveLength(129);
+
+    await expect(
+      pedelec.webmcp({
+        skills: {
+          tools: [webMcpPageTool(longName, async () => ({ ok: true }))],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "WebMCP tool name must be at most 128 characters",
+      details: { toolName: longName },
+    });
+
+    const acceptedName = `tool_${"a".repeat(123)}`;
+    expect(acceptedName).toHaveLength(128);
+    const accepted = await pedelec.webmcp({
+      skills: { tools: [webMcpPageTool(acceptedName, async () => ({ ok: true }))] },
+    });
+    expect(accepted.available).toBe(true);
+    accepted.dispose();
+
+    for (const name of ["1tool", "bad/name", "has space"]) {
+      await expect(
+        pedelec.webmcp({
+          skills: { tools: [webMcpPageTool(name, async () => ({ ok: true }))] },
+        }),
+      ).rejects.toMatchObject({
+        code: "INVALID_INPUT",
+        message: "tool name is invalid",
+      });
+    }
+
+    const duplicate = webMcpPageTool("get_current_page", async () => ({ ok: true }));
+    await expect(
+      pedelec.webmcp({ skills: { tools: [duplicate, duplicate] } }),
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "duplicate tool name",
+      details: { toolName: "get_current_page" },
+    });
+    await expect(
+      pedelec.webmcp({
+        skills: {
+          tools: [
+            defineTool({
+              name: "blank_description",
+              description: "   ",
+              argsSchema: { type: "object", properties: {}, required: [] },
+              handler: async () => ({ ok: true }),
+            }),
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "tool description must be a non-empty string",
+    });
+    await expect(
+      pedelec.webmcp({
+        skills: {
+          tools: [
+            {
+              name: "legacy_tool",
+              description: "Legacy tool.",
+              input: { id: "string" },
+              argsSchema: { type: "object", properties: {}, required: [] },
+              handler: async () => ({ ok: true }),
+            } as any,
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: "tool input is no longer supported; use argsSchema",
+    });
+    expect(registrations.map((registration) => registration.tool.name)).toEqual([acceptedName]);
+  });
+
+  it("aborts partial registration and preserves an underlying Pedelec error", async () => {
+    let attempt = 0;
+    const { registrations } = installWebMcp(pageWindow, () => {
+      attempt += 1;
+      if (attempt === 2) throw new Error("second tool failed");
+    });
+    const pedelec = new Pedelec();
+    let returned = false;
+    await expect(
+      pedelec.webmcp({
+        skills: {
+          tools: [
+            webMcpPageTool("first_tool", async () => ({ ok: true })),
+            webMcpPageTool("second_tool", async () => ({ ok: true })),
+          ],
+        },
+      }).then((binding) => {
+        returned = binding.available;
+        return binding;
+      }),
+    ).rejects.toMatchObject({
+      code: "WEBMCP_REGISTRATION_FAILED",
+      message: "second tool failed",
+      details: { toolName: "second_tool" },
+    });
+    expect(returned).toBe(false);
+    expect(registrations[0]?.options?.signal?.aborted).toBe(true);
+    expect(registrations[1]?.options?.signal).toBe(registrations[0]?.options?.signal);
+
+    (pageWindow.document as any).modelContext = {
+      async registerTool() {
+        throw { code: "PAGE_TOOL_CONFLICT", message: "already registered", details: { owner: "page" } };
+      },
+    };
+    await expect(
+      pedelec.webmcp({
+        skills: { tools: [webMcpPageTool("conflict_tool", async () => ({ ok: true }))] },
+      }),
+    ).rejects.toMatchObject({
+      code: "PAGE_TOOL_CONFLICT",
+      message: "already registered",
+      details: { owner: "page" },
+    });
   });
 });
 

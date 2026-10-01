@@ -156,6 +156,7 @@ Underlying structured error 存在時會保留，所以 fallback code 可能被�
 | `TOOL_TIMEOUT` | Core 等待 tool result 已到達 App Tool 的正式 timeout | Core/runtime error | 已收到 structured error 代表 invocation 已結束；先 reconcile 可能的 side effect，不要把它當成 in-flight retry |
 | `TOOL_HANDLER_ERROR` | Handler throw/reject | 送給 agent 的 error result | Log unexpected exception；expected failure 回 domain error |
 | `SUBMIT_TOOL_RESULT_FAILED` | SDK 無法 delivery result | `session.onError()` SDK event | Reconcile side effect，檢查 disconnect/timeout/serialization |
+| `WEBMCP_REGISTRATION_FAILED` | 綁定 App Tools 時 `document.modelContext.registerTool` 失敗 | rejected `webmcp()` promise | 修正頁面註冊失敗。該次呼叫不回傳 binding，並 abort 同一批先前已註冊的 tools |
 
 Core tool timeout 也可能導致 session/runtime error 或後續 `SUBMIT_TOOL_RESULT_FAILED`。Browser handler 不會被強制 cancel。
 

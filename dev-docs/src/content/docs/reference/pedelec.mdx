@@ -101,6 +101,16 @@ const session = await pedelec.createSession({
 });
 ```
 
+## `webmcp()`
+
+```ts
+webmcp<const TTools extends readonly ToolDefinition[]>(
+  input: WebMcpInput<TTools>,
+): Promise<WebMcpBinding>
+```
+
+Registers the same App Tool definitions with `document.modelContext.registerTool` when the browser provides it. This method does not create a Session and does not require Extension or Desktop readiness. See the [Tools API](./tools/) for `WebMcpInput`, availability, `dispose()`, and the handler context limit.
+
 ## `openWorkspace()`
 
 ```ts

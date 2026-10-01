@@ -27,6 +27,7 @@ A web application can use Pedelec to:
 - open an application-managed workspace with the native directory picker or an explicit path;
 - send user instructions and receive streamed assistant text;
 - expose narrowly scoped browser-side tools to the agent;
+- register those same tools with WebMCP when the browser provides `document.modelContext`;
 - resume or end sessions; and
 - upload and list completed workspace assets; and
 - show connection, approval, provider, and lifecycle state in the UI.
@@ -203,6 +204,47 @@ await session.sendText("Please help me analyze the current page state");
 ```
 
 `sendText()` resolves after Core reports the matching semantic operation as completed. An `idle` status or bridge request response alone does not complete it. If the session is already handling a previous prompt, the new `sendText()` call is rejected to prevent multiple concurrent requests from running in the same session.
+
+## Share App Tools with WebMCP
+
+The same `defineTool()` definitions can be registered for a browser WebMCP agent. `webmcp()` does not start a Pedelec Session and does not require the Extension or Desktop. Pedelec binds the tools when `document.modelContext.registerTool` is available; otherwise `available` is `false`.
+
+```ts
+import { Pedelec, defineTool } from "@kaoruisaac/pedelec";
+
+const pedelec = new Pedelec();
+
+const getCurrentPage = defineTool({
+  name: "get_current_page",
+  description: "Read the current browser page title and URL.",
+  argsSchema: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  handler: async () => ({
+    title: document.title,
+    url: location.href,
+  }),
+});
+
+const tools = [getCurrentPage] as const;
+
+const webMcpBinding = await pedelec.webmcp({
+  skills: { tools },
+});
+
+const session = await pedelec.createSession({
+  skills: {
+    guidance: "Use browser tools when useful.",
+    tools,
+  },
+});
+
+webMcpBinding.dispose();
+```
+
+A handler shared by Session and WebMCP should depend only on `args` and ordinary application or browser state. WebMCP execution does not receive a Pedelec `ToolCallContext`.
 
 ## End and resume a session
 

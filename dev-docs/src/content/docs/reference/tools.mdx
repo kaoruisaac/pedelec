@@ -1,6 +1,6 @@
 ---
 title: Tools API
-description: Reference for defineTool, ToolDefinition, SkillsInput, handler types, tool-name inference, and serializable manifests.
+description: Reference for defineTool, ToolDefinition, SkillsInput, WebMCP binding, handler types, tool-name inference, and serializable manifests.
 sidebar:
   order: 3
 ---
@@ -37,7 +37,7 @@ const updateCounter = defineTool<
 });
 ```
 
-`defineTool()` itself does not perform validation. Session creation normalizes and validates the tool list.
+`defineTool()` itself does not perform validation. `createSession()` and `pedelec.webmcp()` normalize and validate the tool list.
 
 ## `defineDenoModule()`
 
@@ -133,7 +133,7 @@ type ToolDefinition<
 | `description` | Yes | Non-empty explanation of behavior, side effects, and selection criteria. |
 | `argsSchema` | Yes | Pedelec Tool Args Schema. Root must be an object. |
 | `timeoutMs` | No | Positive integer runtime wait limit. Core default is currently 60 seconds. |
-| `handler` | No | Inline browser handler retained by the SDK and not sent to Core. |
+| `handler` | No | Inline browser handler retained by the SDK and not sent to Core. Required for `pedelec.webmcp()`. |
 
 Names must be unique within a skills manifest.
 
@@ -251,6 +251,90 @@ For an incoming tool call:
 4. SDK-created `TOOL_HANDLER_NOT_FOUND` result.
 
 Handler exceptions become `TOOL_HANDLER_ERROR` results. Failure to deliver the result emits `SUBMIT_TOOL_RESULT_FAILED`.
+
+## `pedelec.webmcp()`
+
+```ts
+async webmcp<const TTools extends readonly ToolDefinition[]>(
+  input: WebMcpInput<TTools>,
+): Promise<WebMcpBinding>
+```
+
+Registers existing App Tool definitions with the browser WebMCP imperative API, `document.modelContext.registerTool`, when that function exists. This does not create a Pedelec Session and does not call the Extension, Desktop, Provider, or Core.
+
+```ts
+type WebMcpSkillsInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  tools: TTools;
+};
+
+type WebMcpInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  skills: WebMcpSkillsInput<TTools>;
+};
+
+type WebMcpBinding = {
+  available: boolean;
+  dispose(): void;
+};
+```
+
+`skills.tools` is the only skills field. `guidance` and `denoModules` are Session capabilities and are not part of this input. Every tool passed to `webmcp()` must include an inline `handler`. There is no `session.onTool()` step for this binding.
+
+```ts
+const tools = [getCurrentPage] as const;
+
+const binding = await pedelec.webmcp({
+  skills: { tools },
+});
+
+if (binding.available) {
+  // A browser WebMCP client can call the registered tools until dispose().
+}
+
+binding.dispose();
+```
+
+The same `tools` array can also be passed to `createSession()`.
+
+### Field mapping
+
+| App Tool | WebMCP registration |
+| --- | --- |
+| `name` | `name` |
+| `description` | `description` |
+| normalized `argsSchema` | `inputSchema` |
+| inline `handler` | `execute` |
+
+`timeoutMs` remains a Pedelec Session wait limit. WebMCP registration has no per-tool timeout, and this binding does not add one. Registration does not include `title`, `annotations`, `exposedTo`, `handler`, `guidance`, or `denoModules`.
+
+Names keep the Pedelec rule: a letter, then letters, digits, `_`, `.`, or `-`. WebMCP also requires the name to be at most 128 characters. `inputSchema` is the same normalized `argsSchema` clone that `createSession()` would send. Pedelec does not add `additionalProperties` or rewrite `required`, `enum`, or `oneOf`.
+
+### Availability
+
+`webmcp()` validates input first, then checks `document.modelContext.registerTool`. Invalid tools, duplicate names, an empty description, a name longer than 128 characters, or a missing inline handler still reject with `INVALID_INPUT`. A missing handler uses the message `WebMCP tool handler must be a function` and includes `toolName` in `details`.
+
+If there is no `window` or `document`, or `registerTool` is not a function, the method resolves:
+
+```ts
+{ available: false, dispose() {} }
+```
+
+It does not throw for an unsupported browser, does not load a polyfill, and does not use `navigator.modelContext` as its registration API. Pedelec binds tools when `document.modelContext.registerTool` is available; otherwise `available` is false.
+
+### Lifecycle
+
+One `webmcp()` call creates one `AbortController` and passes that same `signal` to every `registerTool`. `dispose()` aborts the signal. It is synchronous, safe to call more than once, and does not end a Session or contact Core. Disposing one binding does not remove tools registered by another `webmcp()` call or by other page scripts.
+
+If registration fails partway through the list, `webmcp()` aborts that shared signal and rejects. No binding is returned. The error code is `WEBMCP_REGISTRATION_FAILED` unless the failure is already a `PedelecError`, which is preserved. A name already registered by another script is left to `registerTool()`; Pedelec does not rename its tool or unregister someone else's.
+
+### Handler context
+
+WebMCP execution does not have a Pedelec Session ToolCallContext. Shared inline handlers should be context-independent.
+
+The adapter calls `handler(args)` and does not invent `sessionId`, `provider`, `turnId`, or `toolRequestId`. It also does not forward the WebMCP execution `AbortSignal` to the existing handler. A handler that reads `ctx.sessionId` still works for a Pedelec Session, but it is not a portable WebMCP handler.
 
 ## Tool Args Schema entry types
 

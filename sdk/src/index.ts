@@ -321,6 +321,23 @@ export type SkillsInput<
   denoModules?: readonly AgentDenoModuleDefinition[];
 };
 
+export type WebMcpSkillsInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  tools: TTools;
+};
+
+export type WebMcpInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  skills: WebMcpSkillsInput<TTools>;
+};
+
+export type WebMcpBinding = {
+  available: boolean;
+  dispose(): void;
+};
+
 export type ToolNameOf<TTools extends readonly ToolDefinition[]> = Extract<
   TTools[number]["name"],
   string
@@ -685,6 +702,7 @@ type StatusHandler = (status: PedelecSessionStatus, ctx: StatusEventContext) => 
 type EndedHandler = (ctx: EndedEventContext) => void;
 
 const TOOL_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_.-]*$/;
+const WEBMCP_TOOL_NAME_MAX_LENGTH = 128;
 
 export function defineTool<
   TArgs = unknown,
@@ -767,34 +785,39 @@ function normalizeWorkspaceDenoModules(value: unknown): PreparedWorkspaceDenoMod
   });
 }
 
-function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
-  const handlers = new Map<string, ToolSpecificHandler>();
-  if (value === undefined) return { handlers, denoModules: [] };
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw makeError("INVALID_INPUT", "skills must be an object");
-  }
+type NormalizeToolDefinitionsOptions = {
+  requireHandler?: boolean;
+  enforceWebMcpNameLimit?: boolean;
+};
 
-  const skills = value as Partial<SkillsInput>;
-  if (typeof skills.guidance !== "string") {
-    throw makeError("INVALID_INPUT", "skills.guidance must be a string");
-  }
-  if (!Array.isArray(skills.tools)) {
+type NormalizedToolDefinitions = {
+  tools: SerializableToolManifest[];
+  handlers: Map<string, ToolSpecificHandler>;
+};
+
+function normalizeToolDefinitions(
+  value: unknown,
+  options: NormalizeToolDefinitionsOptions = {},
+): NormalizedToolDefinitions {
+  if (!Array.isArray(value)) {
     throw makeError("INVALID_INPUT", "skills.tools must be an array");
   }
 
-  if (skills.denoModules !== undefined && !Array.isArray(skills.denoModules)) {
-    throw makeError("INVALID_INPUT", "skills.denoModules must be an array");
-  }
-
+  const handlers = new Map<string, ToolSpecificHandler>();
   const seen = new Set<string>();
-  const seenDenoModuleNames = new Set<string>();
-  const tools = skills.tools.map((tool, index) => {
+  const tools = value.map((tool, index) => {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
       throw makeError("INVALID_INPUT", "skills.tools entries must be objects", { index });
     }
     const rawTool = tool as Partial<ToolDefinition> & { input?: unknown };
     if (typeof rawTool.name !== "string" || !TOOL_NAME_PATTERN.test(rawTool.name)) {
       throw makeError("INVALID_INPUT", "tool name is invalid", { index, toolName: rawTool.name });
+    }
+    if (options.enforceWebMcpNameLimit && rawTool.name.length > WEBMCP_TOOL_NAME_MAX_LENGTH) {
+      throw makeError("INVALID_INPUT", "WebMCP tool name must be at most 128 characters", {
+        index,
+        toolName: rawTool.name,
+      });
     }
     if (seen.has(rawTool.name)) {
       throw makeError("INVALID_INPUT", "duplicate tool name", { toolName: rawTool.name });
@@ -816,6 +839,11 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
     if (rawTool.handler !== undefined && typeof rawTool.handler !== "function") {
       throw makeError("INVALID_INPUT", "tool handler must be a function", { toolName: rawTool.name });
     }
+    if (options.requireHandler && typeof rawTool.handler !== "function") {
+      throw makeError("INVALID_INPUT", "WebMCP tool handler must be a function", {
+        toolName: rawTool.name,
+      });
+    }
     if (rawTool.input !== undefined) {
       throw makeError("INVALID_INPUT", "tool input is no longer supported; use argsSchema", {
         toolName: rawTool.name,
@@ -831,6 +859,30 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
       ...(rawTool.timeoutMs === undefined ? {} : { timeoutMs: rawTool.timeoutMs }),
     };
   });
+
+  return { tools, handlers };
+}
+
+function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
+  if (value === undefined) return { handlers: new Map(), denoModules: [] };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw makeError("INVALID_INPUT", "skills must be an object");
+  }
+
+  const skills = value as Partial<SkillsInput>;
+  if (typeof skills.guidance !== "string") {
+    throw makeError("INVALID_INPUT", "skills.guidance must be a string");
+  }
+  if (!Array.isArray(skills.tools)) {
+    throw makeError("INVALID_INPUT", "skills.tools must be an array");
+  }
+
+  if (skills.denoModules !== undefined && !Array.isArray(skills.denoModules)) {
+    throw makeError("INVALID_INPUT", "skills.denoModules must be an array");
+  }
+
+  const { tools, handlers } = normalizeToolDefinitions(skills.tools);
+  const seenDenoModuleNames = new Set<string>();
 
   const denoModules = (skills.denoModules ?? []).map((module, index) => {
     if (!module || typeof module !== "object" || Array.isArray(module)) {
@@ -933,6 +985,71 @@ function normalizeToolArgsSchema(argsSchema: unknown, toolName: string): ToolArg
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+type WebMcpModelContextLike = {
+  registerTool(
+    tool: {
+      name: string;
+      description: string;
+      inputSchema: object;
+      execute: (input: unknown, options: { signal: AbortSignal }) => unknown | Promise<unknown>;
+    },
+    options?: {
+      signal?: AbortSignal;
+    },
+  ): Promise<void>;
+};
+
+type WebMcpDocumentLike = {
+  modelContext?: WebMcpModelContextLike;
+};
+
+type WebMcpUnaryHandler = (args: unknown) => unknown | Promise<unknown>;
+
+function normalizeWebMcpInput(value: unknown): NormalizedToolDefinitions {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw makeError("INVALID_INPUT", "input must be an object");
+  }
+  const input = value as { skills?: unknown };
+  if (!input.skills || typeof input.skills !== "object" || Array.isArray(input.skills)) {
+    throw makeError("INVALID_INPUT", "skills must be an object");
+  }
+  return normalizeToolDefinitions((input.skills as { tools?: unknown }).tools, {
+    requireHandler: true,
+    enforceWebMcpNameLimit: true,
+  });
+}
+
+function webMcpModelContext(pageWindow: Window | null): WebMcpModelContextLike | null {
+  const document = pageWindow?.document as (Document & WebMcpDocumentLike) | undefined;
+  const modelContext = document?.modelContext;
+  if (!modelContext || typeof modelContext.registerTool !== "function") return null;
+  return modelContext;
+}
+
+function unavailableWebMcpBinding(): WebMcpBinding {
+  return {
+    available: false,
+    dispose() {},
+  };
+}
+
+function invokeWebMcpHandler(handler: ToolSpecificHandler, args: unknown): unknown | Promise<unknown> {
+  // WebMCP has no Pedelec session. Call the shared handler with args only.
+  return (handler as WebMcpUnaryHandler)(args);
+}
+
+function webMcpRegistrationError(error: unknown, toolName: string | undefined): PedelecError {
+  const normalized = normalizeError(
+    error,
+    "WEBMCP_REGISTRATION_FAILED",
+    "WebMCP tool registration failed",
+  );
+  if (normalized.code === "WEBMCP_REGISTRATION_FAILED" && normalized.details === undefined && toolName) {
+    return makeError(normalized.code, normalized.message, { toolName });
+  }
+  return normalized;
 }
 
 export class PedelecWorkspace {
@@ -1128,6 +1245,47 @@ export class Pedelec {
   ): Promise<PedelecSession<ToolNameOf<TTools>>>;
   async createSession(input: CreateSessionInput = {}): Promise<PedelecSession<string>> {
     return this.createSessionInternal(input) as Promise<PedelecSession<string>>;
+  }
+
+  async webmcp<const TTools extends readonly ToolDefinition[]>(
+    input: WebMcpInput<TTools>,
+  ): Promise<WebMcpBinding> {
+    const normalized = normalizeWebMcpInput(input);
+    const modelContext = webMcpModelContext(this.pageWindow);
+    if (!modelContext) return unavailableWebMcpBinding();
+
+    const controller = new AbortController();
+    let registeringToolName: string | undefined;
+    try {
+      for (const tool of normalized.tools) {
+        registeringToolName = tool.name;
+        const handler = normalized.handlers.get(tool.name);
+        if (!handler) {
+          throw makeError("INVALID_INPUT", "WebMCP tool handler must be a function", {
+            toolName: tool.name,
+          });
+        }
+        await modelContext.registerTool(
+          {
+            name: tool.name,
+            description: tool.description,
+            inputSchema: tool.argsSchema,
+            execute: async (args) => invokeWebMcpHandler(handler, args),
+          },
+          { signal: controller.signal },
+        );
+      }
+    } catch (error) {
+      controller.abort();
+      throw webMcpRegistrationError(error, registeringToolName);
+    }
+
+    return {
+      available: true,
+      dispose() {
+        controller.abort();
+      },
+    };
   }
 
   /** @internal */

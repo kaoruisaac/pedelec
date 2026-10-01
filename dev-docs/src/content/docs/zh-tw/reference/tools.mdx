@@ -1,6 +1,6 @@
 ---
 title: Tools API
-description: defineTool、ToolDefinition、SkillsInput、handler types、tool-name inference 與 serializable manifests reference。
+description: defineTool、ToolDefinition、SkillsInput、WebMCP binding、handler types、tool-name inference 與 serializable manifests reference。
 sidebar:
   order: 3
 ---
@@ -37,7 +37,7 @@ const updateCounter = defineTool<
 });
 ```
 
-`defineTool()` 本身不做 validation；session creation 會 normalize/validate tools。
+`defineTool()` 本身不做 validation；`createSession()` 與 `pedelec.webmcp()` 會 normalize/validate tools。
 
 ## `defineDenoModule()`
 
@@ -133,7 +133,7 @@ type ToolDefinition<
 | `description` | Yes | Non-empty 行為、side effect 與選擇條件說明。 |
 | `argsSchema` | Yes | Pedelec Tool Args Schema；root 必須 object。 |
 | `timeoutMs` | No | Positive integer runtime wait limit；Core 目前預設 60 秒。 |
-| `handler` | No | SDK 保存在 browser、不送到 Core 的 inline handler。 |
+| `handler` | No | SDK 保存在 browser、不送到 Core 的 inline handler。`pedelec.webmcp()` 必須提供。 |
 
 同一 skills manifest 的 names 必須 unique。
 
@@ -251,6 +251,90 @@ Incoming tool call 依序：
 4. SDK-created `TOOL_HANDLER_NOT_FOUND` result。
 
 Handler exception 變成 `TOOL_HANDLER_ERROR` result；delivery failure emit `SUBMIT_TOOL_RESULT_FAILED`。
+
+## `pedelec.webmcp()`
+
+```ts
+async webmcp<const TTools extends readonly ToolDefinition[]>(
+  input: WebMcpInput<TTools>,
+): Promise<WebMcpBinding>
+```
+
+當 `document.modelContext.registerTool` 存在時，把既有 App Tool definitions 註冊成 browser WebMCP tools。這個 method 不會建立 Pedelec Session，也不會呼叫 Extension、Desktop、Provider 或 Core。
+
+```ts
+type WebMcpSkillsInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  tools: TTools;
+};
+
+type WebMcpInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  skills: WebMcpSkillsInput<TTools>;
+};
+
+type WebMcpBinding = {
+  available: boolean;
+  dispose(): void;
+};
+```
+
+`skills.tools` 是唯一的 skills 欄位。`guidance` 與 `denoModules` 屬於 Session，不在這個 input。傳給 `webmcp()` 的每個 tool 都必須有 inline `handler`；這條 binding 沒有 `session.onTool()`。
+
+```ts
+const tools = [getCurrentPage] as const;
+
+const binding = await pedelec.webmcp({
+  skills: { tools },
+});
+
+if (binding.available) {
+  // Browser WebMCP client 可以呼叫這些 tools，直到 dispose()。
+}
+
+binding.dispose();
+```
+
+同一份 `tools` 也可以再傳給 `createSession()`。
+
+### Field mapping
+
+| App Tool | WebMCP registration |
+| --- | --- |
+| `name` | `name` |
+| `description` | `description` |
+| normalized `argsSchema` | `inputSchema` |
+| inline `handler` | `execute` |
+
+`timeoutMs` 仍只是 Pedelec Session 的等待上限。WebMCP registration 沒有 per-tool timeout，這個 binding 也不另外加 timer。Registration 不包含 `title`、`annotations`、`exposedTo`、`handler`、`guidance` 或 `denoModules`。
+
+Name 沿用 Pedelec 規則：letter 開頭，之後只能是 letter、digit、`_`、`.`、`-`。WebMCP 另外要求 name 最多 128 個字元。`inputSchema` 是與 `createSession()` 相同的 normalized `argsSchema` clone。Pedelec 不會自動加入 `additionalProperties`，也不會改寫 `required`、`enum` 或 `oneOf`。
+
+### Availability
+
+`webmcp()` 先驗證 input，再檢查 `document.modelContext.registerTool`。無效 tool、重複 name、空白 description、超過 128 字元的 name，或缺少 inline handler，仍會以 `INVALID_INPUT` reject。缺少 handler 的 message 是 `WebMCP tool handler must be a function`，`details` 會帶 `toolName`。
+
+沒有 `window` 或 `document`，或 `registerTool` 不是 function 時，method resolve：
+
+```ts
+{ available: false, dispose() {} }
+```
+
+不支援的 browser 不會 throw，也不會載入 polyfill，也不使用 `navigator.modelContext` 作為註冊 API。Pedelec 只在 `document.modelContext.registerTool` 可用時綁定 tools；否則 `available` 為 false。
+
+### Lifecycle
+
+一次 `webmcp()` 建立一個 `AbortController`，並把同一個 `signal` 傳給每一次 `registerTool`。`dispose()` 會 abort 該 signal。它是同步的，可以重複呼叫，不會結束 Session，也不會聯絡 Core。Dispose 一個 binding 不會移除另一次 `webmcp()` 或其他 page script 註冊的 tools。
+
+如果註冊進行到一半失敗，`webmcp()` 會 abort 這個共用 signal 並 reject，不會回傳 binding。除非失敗本身已經是 `PedelecError`，否則 error code 是 `WEBMCP_REGISTRATION_FAILED`；既有的 `PedelecError` 會保留。其他 script 已經註冊的同名 tool 以 `registerTool()` 的結果為準；Pedelec 不會改名，也不會 unregister 別人的 tool。
+
+### Handler context
+
+WebMCP 執行不具備 Pedelec Session 的 ToolCallContext；要跨 Pedelec / WebMCP 共用的 inline handler 應只依賴 args 與一般 application/browser state。
+
+Adapter 只呼叫 `handler(args)`，不會製造 `sessionId`、`provider`、`turnId` 或 `toolRequestId`，也不會把 WebMCP execution `AbortSignal` 傳進既有 handler。會讀取 `ctx.sessionId` 的 handler 仍可用於 Pedelec Session，但它不是可移植的 WebMCP handler。
 
 ## Tool Args Schema entry types
 

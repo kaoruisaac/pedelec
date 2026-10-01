@@ -326,6 +326,54 @@ async function workspaceFileTransferTypes() {
   void downloaded;
 }
 
+async function sharedAppToolsBindToWebMcpAndSession() {
+  const pedelec = new Pedelec();
+  const sharedTool = defineTool({
+    name: "get_selection",
+    description: "Get selected text.",
+    argsSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    handler: async () => ({ text: "..." }),
+  });
+
+  const binding = await pedelec.webmcp({
+    skills: {
+      tools: [sharedTool] as const,
+    },
+  });
+  binding.available satisfies boolean;
+  binding.dispose();
+
+  const tools = [sharedTool] as const;
+  await pedelec.webmcp({
+    skills: { tools },
+  });
+  await pedelec.createSession({
+    skills: {
+      guidance: "Use available browser tools.",
+      tools,
+    },
+  });
+
+  await pedelec.webmcp({
+    skills: {
+      tools,
+      // @ts-expect-error WebMCP skills do not include guidance
+      guidance: "not part of WebMCP",
+    },
+  });
+  await pedelec.webmcp({
+    skills: {
+      tools,
+      // @ts-expect-error WebMCP skills do not include denoModules
+      denoModules: [spriteTools],
+    },
+  });
+}
+
 function directoryPickerIsRemoved() {
   const pedelec = new Pedelec();
   // @ts-expect-error directoryPicker was removed in favor of openWorkspace
@@ -355,6 +403,7 @@ void listAssetsHasPublicTypes;
 void availabilityHasPublicType;
 void workspacePublicTypeContract;
 void workspaceFileTransferTypes;
+void sharedAppToolsBindToWebMcpAndSession;
 void directoryPickerIsRemoved;
 void publicSecurityTypesAreRestricted;
 

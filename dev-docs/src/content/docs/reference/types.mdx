@@ -329,6 +329,29 @@ type SkillsInput<
 };
 ```
 
+### `WebMcpInput`
+
+```ts
+type WebMcpSkillsInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  tools: TTools;
+};
+
+type WebMcpInput<
+  TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
+> = {
+  skills: WebMcpSkillsInput<TTools>;
+};
+
+type WebMcpBinding = {
+  available: boolean;
+  dispose(): void;
+};
+```
+
+`pedelec.webmcp()` accepts tools only. It does not take `guidance` or `denoModules`. `dispose()` aborts that binding's WebMCP registrations. See the [Tools API](./tools/) for availability and handler context limits.
+
 ### `ToolNameOf`
 
 ```ts
