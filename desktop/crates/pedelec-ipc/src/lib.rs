@@ -45,6 +45,7 @@ mod antigravity;
 mod claude;
 mod opencode;
 mod pedelec_agent;
+mod selection;
 pub use antigravity::AntigravityRuntimeDispatcher;
 pub use claude::ClaudeRuntimeDispatcher;
 
@@ -341,8 +342,9 @@ impl PersistentRuntimeDispatcher for ProviderRuntimeDispatcher {
     }
 }
 
-/// Production Codex dispatcher. It owns no Core state beyond a shared handle,
-/// and never performs provider I/O while the Core mutex is held.
+/// Routes threads to selection-scoped Codex dispatchers. Each child retains
+/// its own controller and pumps, so refresh does not invalidate old traffic.
+/// Provider I/O never runs while the Core mutex is held.
 #[derive(Debug, Clone)]
 pub struct CodexRuntimeDispatcher {
     owner: ProviderRuntimeOwner,
@@ -350,6 +352,10 @@ pub struct CodexRuntimeDispatcher {
     program_override: Option<PathBuf>,
     process_cwd: PathBuf,
     typed_controller: Arc<Mutex<Option<Arc<CodexAppServerController>>>>,
+    selection: Option<pedelec_core::ProviderRuntimeSelection>,
+    registry_key: Option<String>,
+    router: Arc<crate::selection::SelectionRouter<CodexRuntimeDispatcher>>,
+    members: Arc<Mutex<HashSet<String>>>,
     event_pumps: Arc<Mutex<HashSet<u64>>>,
     traffic_pumps: Arc<Mutex<HashSet<u64>>>,
     stopped_generations: Arc<Mutex<HashSet<u64>>>,
@@ -363,6 +369,10 @@ impl CodexRuntimeDispatcher {
             program_override: None,
             process_cwd: std::env::temp_dir(),
             typed_controller: Arc::new(Mutex::new(None)),
+            selection: None,
+            registry_key: None,
+            router: Arc::new(crate::selection::SelectionRouter::default()),
+            members: Arc::new(Mutex::new(HashSet::new())),
             event_pumps: Arc::new(Mutex::new(HashSet::new())),
             traffic_pumps: Arc::new(Mutex::new(HashSet::new())),
             stopped_generations: Arc::new(Mutex::new(HashSet::new())),
@@ -400,42 +410,47 @@ impl CodexRuntimeDispatcher {
         let runtime_file = runtime_file.to_path_buf();
         let typed_controller = Arc::clone(&self.typed_controller);
         self.owner
-            .get_or_init(CODEX_RUNTIME_KEY, move || {
-                let program = match program_override {
-                    Some(program) => program,
-                    None => core_runtime
-                        .lock()
-                        .map_err(|_| {
-                            RuntimeRegistryError::Initialization(
-                                "Core runtime mutex was poisoned".to_string(),
-                            )
-                        })?
-                        .provider_executable_path(&pedelec_core::ProviderCode::Codex)
-                        .map_err(|error| {
-                            RuntimeRegistryError::Initialization(format!(
-                                "{} ({})",
-                                error.message, error.code
-                            ))
-                        })?,
-                };
-                let mut launch = CodexRuntimeLaunchConfig::new(program, process_cwd);
-                launch = launch.with_env("PEDELEC_PROVIDER", "codex");
-                launch = launch.with_env(
-                    "PEDELEC_CORE_IPC_RUNTIME_FILE",
-                    runtime_file.to_string_lossy().into_owned(),
-                );
-                if let Some(path) = std::env::var_os("PATH") {
-                    launch = launch.with_env("PATH", path);
-                }
-                let controller = CodexAppServerController::spawn(launch)
-                    .map_err(|error| RuntimeRegistryError::Initialization(error.to_string()))?;
-                *typed_controller.lock().map_err(|_| {
-                    RuntimeRegistryError::Initialization(
-                        "Codex controller mutex was poisoned".to_string(),
-                    )
-                })? = Some(Arc::clone(&controller));
-                Ok(controller as std::sync::Arc<dyn ProviderRuntimeController>)
-            })
+            .get_or_init(
+                self.registry_key
+                    .clone()
+                    .unwrap_or_else(|| CODEX_RUNTIME_KEY.to_string()),
+                move || {
+                    let program = match program_override {
+                        Some(program) => program,
+                        None => core_runtime
+                            .lock()
+                            .map_err(|_| {
+                                RuntimeRegistryError::Initialization(
+                                    "Core runtime mutex was poisoned".to_string(),
+                                )
+                            })?
+                            .provider_executable_path(&pedelec_core::ProviderCode::Codex)
+                            .map_err(|error| {
+                                RuntimeRegistryError::Initialization(format!(
+                                    "{} ({})",
+                                    error.message, error.code
+                                ))
+                            })?,
+                    };
+                    let mut launch = CodexRuntimeLaunchConfig::new(program, process_cwd);
+                    launch = launch.with_env("PEDELEC_PROVIDER", "codex");
+                    launch = launch.with_env(
+                        "PEDELEC_CORE_IPC_RUNTIME_FILE",
+                        runtime_file.to_string_lossy().into_owned(),
+                    );
+                    if let Some(path) = std::env::var_os("PATH") {
+                        launch = launch.with_env("PATH", path);
+                    }
+                    let controller = CodexAppServerController::spawn(launch)
+                        .map_err(|error| RuntimeRegistryError::Initialization(error.to_string()))?;
+                    *typed_controller.lock().map_err(|_| {
+                        RuntimeRegistryError::Initialization(
+                            "Codex controller mutex was poisoned".to_string(),
+                        )
+                    })? = Some(Arc::clone(&controller));
+                    Ok(controller as std::sync::Arc<dyn ProviderRuntimeController>)
+                },
+            )
             .map_err(|error| runtime_registry_error_to_pedelec(error, "startup"))?;
         self.typed_controller
             .lock()
@@ -478,8 +493,9 @@ impl CodexRuntimeDispatcher {
             }),
         );
         if let Ok(mut core) = self.core_runtime.lock() {
-            core.fail_persistent_runtime_except(
-                pedelec_core::ProviderCode::Codex,
+            crate::selection::fail_bound_runtime(
+                &mut core,
+                &self.members,
                 excluded_thread_id,
                 error,
             );
@@ -565,12 +581,18 @@ impl CodexRuntimeDispatcher {
                 provider: pedelec_core::ProviderCode::Codex,
                 runtime_generation: generation,
                 process_id: controller.process_id(),
+                selected_executable_path: self
+                    .selection
+                    .as_ref()
+                    .map(|s| s.executable_path.clone()),
+                selected_version: self.selection.as_ref().map(|s| s.version.clone()),
             },
         );
         let runtime = Arc::clone(&self.core_runtime);
         let current_controller = Arc::clone(&self.typed_controller);
         let event_pumps = Arc::clone(&self.event_pumps);
         let stopped_generations = Arc::clone(&self.stopped_generations);
+        let members = Arc::clone(&self.members);
         let generation = controller.generation();
         thread::spawn(move || {
             while let Ok(event) = controller.recv_event() {
@@ -784,7 +806,7 @@ impl CodexRuntimeDispatcher {
                             },
                         );
                         if let Ok(mut core) = runtime.lock() {
-                            core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, error);
+                            crate::selection::fail_bound_runtime(&mut core, &members, None, error);
                         }
                     }
                     CodexRuntimeEvent::Disconnected {
@@ -839,7 +861,7 @@ impl CodexRuntimeDispatcher {
                             }),
                         );
                         if let Ok(mut core) = runtime.lock() {
-                            core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, error);
+                            crate::selection::fail_bound_runtime(&mut core, &members, None, error);
                         }
                         mark_runtime_stopped(
                             &runtime,
@@ -872,6 +894,79 @@ impl CodexRuntimeDispatcher {
 
 impl PersistentRuntimeDispatcher for CodexRuntimeDispatcher {
     fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
+        if operation.provider() != &pedelec_core::ProviderCode::Codex {
+            return Err(PedelecError::new(
+                error_codes::PROVIDER_UNSUPPORTED,
+                "provider runtime received an operation for another provider",
+            ));
+        }
+        // Legacy protocol fixtures can bypass discovery; production always
+        // captures Core's completed scan before entering a generation.
+        if self.selection.is_none() && self.program_override.is_none() {
+            return self.router.dispatch(
+                &self.core_runtime,
+                &self.owner,
+                pedelec_core::ProviderCode::Codex,
+                operation,
+                |selection, key| {
+                    let mut child = Self::new(self.owner.clone(), self.core_runtime.clone());
+                    child.program_override = Some(selection.executable_path.clone());
+                    child.process_cwd = self.process_cwd.clone();
+
+                    child.selection = Some(selection);
+                    child.registry_key = Some(key);
+                    child
+                },
+                |child| {
+                    child
+                        .typed_controller
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_none_or(|c| c.is_healthy())
+                },
+                |child, operation| {
+                    let id = operation.thread_id().to_owned();
+                    let ending = matches!(operation, PersistentRuntimeOperation::EndSession { .. });
+                    let already_bound = child.members.lock().unwrap().contains(&id);
+                    let disconnected = child
+                        .typed_controller
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|c| !c.is_healthy());
+                    if !ending && already_bound && disconnected {
+                        child.fail_unhealthy_controller(None);
+                        return Err(PedelecError::new(
+                            error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+                            "bound provider runtime disconnected",
+                        ));
+                    }
+                    child.members.lock().unwrap().insert(id.clone());
+                    let result = child.dispatch_generation(operation);
+                    if ending || (!already_bound && result.is_err()) {
+                        child.members.lock().unwrap().remove(&id);
+                    }
+                    result
+                },
+            );
+        }
+        let id = operation.thread_id().to_owned();
+        let ending = matches!(operation, PersistentRuntimeOperation::EndSession { .. });
+        self.members.lock().unwrap().insert(id.clone());
+        let result = self.dispatch_generation(operation);
+        if ending {
+            self.members.lock().unwrap().remove(&id);
+        }
+        result
+    }
+}
+
+impl CodexRuntimeDispatcher {
+    fn dispatch_generation(
+        &self,
+        operation: PersistentRuntimeOperation,
+    ) -> Result<(), PedelecError> {
         if let PersistentRuntimeOperation::EndSession { session } = &operation {
             if session.provider != pedelec_core::ProviderCode::Codex {
                 return Err(PedelecError::new(
@@ -1044,6 +1139,13 @@ impl CodexRuntimeDispatcher {
     /// diagnostic before the owner closes its registry. The runtime is not
     /// stopped when the last Pedelec session ends.
     pub fn shutdown(&self) -> Vec<String> {
+        self.router
+            .for_each(|child| child.record_shutdown_diagnostic());
+        self.record_shutdown_diagnostic();
+        self.owner.shutdown()
+    }
+
+    fn record_shutdown_diagnostic(&self) {
         let controller = self
             .typed_controller
             .lock()
@@ -1060,7 +1162,6 @@ impl CodexRuntimeDispatcher {
                 "desktop shutdown",
             );
         }
-        self.owner.shutdown()
     }
 
     fn current_controller(&self) -> Option<Arc<CodexAppServerController>> {
@@ -1083,7 +1184,12 @@ impl CodexRuntimeDispatcher {
                     None,
                 );
                 if let Ok(mut core) = self.core_runtime.lock() {
-                    core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, error.clone());
+                    crate::selection::fail_bound_runtime(
+                        &mut core,
+                        &self.members,
+                        None,
+                        error.clone(),
+                    );
                 }
                 return Err(error);
             }
@@ -1105,7 +1211,7 @@ impl CodexRuntimeDispatcher {
                 let mapped =
                     runtime_disconnect_end_error(session, &error.to_string(), Some(&controller));
                 if let Ok(mut core) = self.core_runtime.lock() {
-                    core.fail_persistent_runtime(pedelec_core::ProviderCode::Codex, mapped);
+                    crate::selection::fail_bound_runtime(&mut core, &self.members, None, mapped);
                 }
                 Err(codex_error_to_pedelec_with_context(
                     error,
@@ -4502,6 +4608,162 @@ mod tests {
 
         let error = run_provider_command_captured(spec, Duration::from_secs(1)).unwrap_err();
         assert_eq!(error.code, error_codes::PROVIDER_PROCESS_START_FAILED);
+    }
+
+    #[test]
+    fn codex_in_place_upgrade_keeps_bound_process_and_retires_it_after_end() {
+        use pedelec_core::ProviderCode;
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_codex_resume_program(temp.path());
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        runtime.lock().unwrap().set_provider_selection_for_test(
+            ProviderCode::Codex,
+            program.clone(),
+            "0.147.0",
+        );
+        let old_selection = runtime
+            .lock()
+            .unwrap()
+            .provider_runtime_selection(&ProviderCode::Codex)
+            .unwrap();
+        let a = selection::test_session(&runtime, temp.path(), ProviderCode::Codex, "a");
+        let b = selection::test_session(&runtime, temp.path(), ProviderCode::Codex, "b");
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher = CodexRuntimeDispatcher::new(owner.clone(), runtime.clone());
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession { session: a.clone() })
+            .unwrap();
+        let old = dispatcher
+            .router
+            .state_for_test("a", |child| child.current_controller().unwrap());
+        // Replace the fake executable's behavior while retaining its path.
+        let script = if cfg!(windows) {
+            temp.path().join("fake-codex-resume.ps1")
+        } else {
+            program.clone()
+        };
+        fs::write(
+            &script,
+            fs::read_to_string(&script).unwrap().replace("123", "160"),
+        )
+        .unwrap();
+        runtime.lock().unwrap().set_provider_selection_for_test(
+            ProviderCode::Codex,
+            program.clone(),
+            "0.160.0",
+        );
+        assert_ne!(
+            old_selection.runtime_key(),
+            runtime
+                .lock()
+                .unwrap()
+                .provider_runtime_selection(&ProviderCode::Codex)
+                .unwrap()
+                .runtime_key()
+        );
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .list_providers()
+                .into_iter()
+                .find(|p| p.code == ProviderCode::Codex)
+                .unwrap()
+                .version
+                .as_deref(),
+            Some("0.160")
+        );
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession { session: a })
+            .unwrap();
+        assert_eq!(
+            dispatcher.router.state_for_test("a", |child| child
+                .current_controller()
+                .unwrap()
+                .process_id()),
+            old.process_id()
+        );
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession { session: b.clone() })
+            .unwrap();
+        let new = dispatcher
+            .router
+            .state_for_test("b", |child| child.current_controller().unwrap());
+        assert_ne!(old.process_id(), new.process_id());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while runtime.lock().unwrap().session_total_tokens("b") != Some(160)
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(runtime.lock().unwrap().session_total_tokens("a"), Some(123));
+        assert_eq!(runtime.lock().unwrap().session_total_tokens("b"), Some(160));
+        assert!(runtime.lock().unwrap().provider_runtime_diagnostic_history().iter().any(|d| matches!(d,
+            ProviderRuntimeDiagnostic::ProviderRuntimeStarted { selected_version: Some(v), selected_executable_path: Some(p), .. } if v == "0.160" && p == &program)));
+        dispatcher
+            .dispatch(selection::end_operation(ProviderCode::Codex, "a"))
+            .unwrap();
+        assert!(!old.is_healthy());
+        assert!(new.is_healthy());
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession { session: b })
+            .unwrap();
+        assert!(!dispatcher.router.has_binding_for_test("a"));
+        dispatcher.shutdown();
+        assert!(!new.is_healthy());
+    }
+
+    #[test]
+    fn disconnected_bound_thread_never_moves_to_a_replacement_process() {
+        use pedelec_core::{ProviderCode, ThreadStatus};
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_codex_resume_program(temp.path());
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        runtime.lock().unwrap().set_provider_selection_for_test(
+            ProviderCode::Codex,
+            program,
+            "0.160.0",
+        );
+        let a = selection::test_session(&runtime, temp.path(), ProviderCode::Codex, "a");
+        let b = selection::test_session(&runtime, temp.path(), ProviderCode::Codex, "b");
+        let owner = ProviderRuntimeOwner::new();
+        let dispatcher = CodexRuntimeDispatcher::new(owner, runtime.clone());
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession { session: a.clone() })
+            .unwrap();
+        let old = dispatcher
+            .router
+            .state_for_test("a", |child| child.current_controller().unwrap());
+        old.retire_for_protocol_error();
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession { session: b.clone() })
+            .unwrap();
+        let new = dispatcher
+            .router
+            .state_for_test("b", |child| child.current_controller().unwrap());
+        assert_ne!(old.process_id(), new.process_id());
+        {
+            let mut core = runtime.lock().unwrap();
+            core.thread_manager.thread_mut("a").unwrap().status = ThreadStatus::Running;
+            core.thread_manager.thread_mut("b").unwrap().status = ThreadStatus::Running;
+        }
+        let error = dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession { session: a })
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::PROVIDER_RUNTIME_DISCONNECTED);
+        assert_eq!(
+            runtime.lock().unwrap().thread_status("b"),
+            Some(ThreadStatus::Running)
+        );
+        assert!(new.is_healthy());
+        assert!(new.loaded_provider_thread_id("a").is_none());
+        dispatcher
+            .dispatch(PersistentRuntimeOperation::EnsureSession { session: b })
+            .unwrap();
+        dispatcher
+            .dispatch(selection::end_operation(ProviderCode::Codex, "a"))
+            .unwrap();
+        dispatcher.shutdown();
     }
 
     fn fake_codex_resume_program(directory: &Path) -> PathBuf {

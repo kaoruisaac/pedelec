@@ -74,6 +74,10 @@ pub struct AcpRuntimeDispatcher {
     program_override: Option<PathBuf>,
     process_cwd: PathBuf,
     typed_controller: Arc<Mutex<Option<Arc<AcpController>>>>,
+    selection: Option<pedelec_core::ProviderRuntimeSelection>,
+    registry_key: Option<String>,
+    router: Arc<crate::selection::SelectionRouter<AcpRuntimeDispatcher>>,
+    members: Arc<Mutex<HashSet<String>>>,
     workspaces: Arc<Mutex<HashMap<String, PathBuf>>>,
     event_pumps: Arc<Mutex<HashSet<u64>>>,
     traffic_pumps: Arc<Mutex<HashSet<u64>>>,
@@ -98,6 +102,10 @@ impl AcpRuntimeDispatcher {
             program_override: None,
             process_cwd: env::temp_dir(),
             typed_controller: Arc::new(Mutex::new(None)),
+            selection: None,
+            registry_key: None,
+            router: Arc::new(crate::selection::SelectionRouter::default()),
+            members: Arc::new(Mutex::new(HashSet::new())),
             workspaces: Arc::new(Mutex::new(HashMap::new())),
             event_pumps: Arc::new(Mutex::new(HashSet::new())),
             traffic_pumps: Arc::new(Mutex::new(HashSet::new())),
@@ -136,9 +144,8 @@ impl AcpRuntimeDispatcher {
             .entry(session.thread_id.clone())
             .or_insert_with(|| session.workspace_path.clone());
 
-        // A healthy app-lifetime controller remains authoritative even if a
-        // background provider refresh has since produced an incomplete scan.
-        // Only a replacement generation needs a newly scanned executable.
+        // This child owns one captured selection. The outer router chooses
+        // the child before this reuse check, including for newly admitted threads.
         if let Some(controller) = self
             .typed_controller
             .lock()
@@ -178,57 +185,66 @@ impl AcpRuntimeDispatcher {
             },
         };
         self.owner
-            .get_or_init(provider.runtime_key(), move || {
-                let mut launch =
-                    pedelec_runtime::AcpLaunchConfig::new(provider.label(), program, process_cwd)
-                        .arg("acp")
-                        .with_env("PEDELEC_PROVIDER", provider.code())
-                        .with_env(
-                            "PEDELEC_CORE_IPC_RUNTIME_FILE",
-                            runtime_file.to_string_lossy().into_owned(),
-                        );
-                if provider == AcpProviderKind::OpenCode {
-                    let config_content = opencode_acp_config_content()
-                        .map_err(|error| RuntimeRegistryError::Initialization(error.message))?;
-                    launch = launch
-                        .with_env(OPENCODE_CONFIG_CONTENT, config_content)
-                        .with_env(OPENCODE_PERMISSION, opencode_permission_overlay());
-                } else {
-                    launch = launch.with_client_capabilities(json!({
-                        "_meta": { "parameterizedModelPicker": true }
-                    }));
-                    if !cursor_pre_authenticated {
-                        launch = launch.with_authentication(AcpAuthentication::MethodId(
-                            "cursor_login".to_string(),
-                        ));
+            .get_or_init(
+                self.registry_key
+                    .clone()
+                    .unwrap_or_else(|| provider.runtime_key().to_string()),
+                move || {
+                    let mut launch = pedelec_runtime::AcpLaunchConfig::new(
+                        provider.label(),
+                        program,
+                        process_cwd,
+                    )
+                    .arg("acp")
+                    .with_env("PEDELEC_PROVIDER", provider.code())
+                    .with_env(
+                        "PEDELEC_CORE_IPC_RUNTIME_FILE",
+                        runtime_file.to_string_lossy().into_owned(),
+                    );
+                    if provider == AcpProviderKind::OpenCode {
+                        let config_content = opencode_acp_config_content()
+                            .map_err(|error| RuntimeRegistryError::Initialization(error.message))?;
+                        launch = launch
+                            .with_env(OPENCODE_CONFIG_CONTENT, config_content)
+                            .with_env(OPENCODE_PERMISSION, opencode_permission_overlay());
+                    } else {
+                        launch = launch.with_client_capabilities(json!({
+                            "_meta": { "parameterizedModelPicker": true }
+                        }));
+                        if !cursor_pre_authenticated {
+                            launch = launch.with_authentication(AcpAuthentication::MethodId(
+                                "cursor_login".to_string(),
+                            ));
+                        }
                     }
-                }
-                let path = pedelec_shared::paths::path_value_with_default_pedelec_dir()
-                    .map_err(|error| RuntimeRegistryError::Initialization(error.message))?;
-                launch = launch.with_env("PATH", path);
-                for (key, value) in launch_env {
-                    launch = launch.with_env(key, value);
-                }
-                let resolver = Arc::new(move |request: &AcpPermissionRequest| {
-                    resolve_workspace_permission(&workspaces, request)
-                });
-                let extension_handler = provider.is_cursor().then(|| {
-                    Arc::new(CursorExtensionRequestHandler) as Arc<dyn AcpExtensionRequestHandler>
-                });
-                let controller = AcpController::spawn_with_extension_handler(
-                    launch,
-                    resolver,
-                    extension_handler,
-                )
-                .map_err(|error| RuntimeRegistryError::Initialization(error.to_string()))?;
-                *typed.lock().map_err(|_| {
-                    RuntimeRegistryError::Initialization(format!(
-                        "{} controller mutex was poisoned",
-                        provider.label()
-                    ))
-                })? = Some(Arc::clone(&controller));
-                Ok(controller as Arc<dyn ProviderRuntimeController>)
-            })
+                    let path = pedelec_shared::paths::path_value_with_default_pedelec_dir()
+                        .map_err(|error| RuntimeRegistryError::Initialization(error.message))?;
+                    launch = launch.with_env("PATH", path);
+                    for (key, value) in launch_env {
+                        launch = launch.with_env(key, value);
+                    }
+                    let resolver = Arc::new(move |request: &AcpPermissionRequest| {
+                        resolve_workspace_permission(&workspaces, request)
+                    });
+                    let extension_handler = provider.is_cursor().then(|| {
+                        Arc::new(CursorExtensionRequestHandler)
+                            as Arc<dyn AcpExtensionRequestHandler>
+                    });
+                    let controller = AcpController::spawn_with_extension_handler(
+                        launch,
+                        resolver,
+                        extension_handler,
+                    )
+                    .map_err(|error| RuntimeRegistryError::Initialization(error.to_string()))?;
+                    *typed.lock().map_err(|_| {
+                        RuntimeRegistryError::Initialization(format!(
+                            "{} controller mutex was poisoned",
+                            provider.label()
+                        ))
+                    })? = Some(Arc::clone(&controller));
+                    Ok(controller as Arc<dyn ProviderRuntimeController>)
+                },
+            )
             .map_err(|error| registry_error(error, self.provider, session, provider_turn_id))?;
         self.typed_controller
             .lock()
@@ -434,12 +450,18 @@ impl AcpRuntimeDispatcher {
                 provider: self.provider.provider_code(),
                 runtime_generation: generation,
                 process_id: controller.process_id(),
+                selected_executable_path: self
+                    .selection
+                    .as_ref()
+                    .map(|s| s.executable_path.clone()),
+                selected_version: self.selection.as_ref().map(|s| s.version.clone()),
             },
         );
         let runtime = Arc::clone(&self.core_runtime);
         let typed = Arc::clone(&self.typed_controller);
         let event_pumps = Arc::clone(&self.event_pumps);
         let stopped = Arc::clone(&self.stopped_generations);
+        let members = Arc::clone(&self.members);
         let provider = self.provider;
         thread::spawn(move || {
             while let Ok(event) = controller.recv_event() {
@@ -457,7 +479,7 @@ impl AcpRuntimeDispatcher {
                 {
                     break;
                 }
-                handle_event(&runtime, &controller, provider, event);
+                handle_event_scoped(&runtime, &controller, provider, event, Some(&members));
             }
             if let Ok(mut pumps) = event_pumps.lock() {
                 pumps.remove(&generation);
@@ -546,8 +568,9 @@ impl AcpRuntimeDispatcher {
             .filter(|item| !item.is_healthy());
         if let Some(controller) = unhealthy {
             if let Ok(mut core) = self.core_runtime.lock() {
-                core.fail_persistent_runtime_except(
-                    self.provider.provider_code(),
+                crate::selection::fail_bound_runtime(
+                    &mut core,
+                    &self.members,
                     excluded,
                     PedelecError::with_details(
                         error_codes::PROVIDER_RUNTIME_DISCONNECTED,
@@ -560,6 +583,8 @@ impl AcpRuntimeDispatcher {
     }
 
     pub fn record_shutdown_diagnostic(&self) {
+        self.router
+            .for_each(|child| child.record_shutdown_diagnostic());
         if let Some(controller) = self
             .typed_controller
             .lock()
@@ -579,6 +604,83 @@ impl AcpRuntimeDispatcher {
 
 impl PersistentRuntimeDispatcher for AcpRuntimeDispatcher {
     fn dispatch(&self, operation: PersistentRuntimeOperation) -> Result<(), PedelecError> {
+        if operation.provider() != &self.provider.provider_code() {
+            return Err(PedelecError::new(
+                error_codes::PROVIDER_UNSUPPORTED,
+                "provider runtime received an operation for another provider",
+            ));
+        }
+        // Legacy protocol fixtures can bypass discovery; production always
+        // captures Core's completed scan before entering a generation.
+        if self.selection.is_none() && self.program_override.is_none() {
+            return self.router.dispatch(
+                &self.core_runtime,
+                &self.owner,
+                self.provider.provider_code(),
+                operation,
+                |selection, key| {
+                    let mut child = Self::new_for_provider(
+                        self.provider,
+                        self.owner.clone(),
+                        self.core_runtime.clone(),
+                    );
+                    child.program_override = Some(selection.executable_path.clone());
+                    child.process_cwd = self.process_cwd.clone();
+                    child.launch_env = self.launch_env.clone();
+                    child.selection = Some(selection);
+                    child.registry_key = Some(key);
+                    child
+                },
+                |child| {
+                    child
+                        .typed_controller
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_none_or(|c| c.is_healthy())
+                },
+                |child, operation| {
+                    let id = operation.thread_id().to_owned();
+                    let ending = matches!(operation, PersistentRuntimeOperation::EndSession { .. });
+                    let already_bound = child.members.lock().unwrap().contains(&id);
+                    let disconnected = child
+                        .typed_controller
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|c| !c.is_healthy());
+                    if !ending && already_bound && disconnected {
+                        child.fail_unhealthy_controller(None);
+                        return Err(PedelecError::new(
+                            error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+                            "bound provider runtime disconnected",
+                        ));
+                    }
+                    child.members.lock().unwrap().insert(id.clone());
+                    let result = child.dispatch_generation(operation);
+                    if ending || (!already_bound && result.is_err()) {
+                        child.members.lock().unwrap().remove(&id);
+                    }
+                    result
+                },
+            );
+        }
+        let id = operation.thread_id().to_owned();
+        let ending = matches!(operation, PersistentRuntimeOperation::EndSession { .. });
+        self.members.lock().unwrap().insert(id.clone());
+        let result = self.dispatch_generation(operation);
+        if ending {
+            self.members.lock().unwrap().remove(&id);
+        }
+        result
+    }
+}
+
+impl AcpRuntimeDispatcher {
+    fn dispatch_generation(
+        &self,
+        operation: PersistentRuntimeOperation,
+    ) -> Result<(), PedelecError> {
         let expected_provider = self.provider.provider_code();
         if operation.provider() != &expected_provider {
             return Err(PedelecError::with_details(
@@ -1650,11 +1752,22 @@ fn handle_provider_notification(
     }
 }
 
+#[cfg(test)]
 fn handle_event(
     runtime: &SharedCoreRuntime,
     controller: &AcpController,
     provider: AcpProviderKind,
     event: AcpRuntimeEvent,
+) {
+    handle_event_scoped(runtime, controller, provider, event, None);
+}
+
+fn handle_event_scoped(
+    runtime: &SharedCoreRuntime,
+    controller: &AcpController,
+    provider: AcpProviderKind,
+    event: AcpRuntimeEvent,
+    members: Option<&Mutex<HashSet<String>>>,
 ) {
     match event {
         AcpRuntimeEvent::SessionReady { .. } => {}
@@ -1850,7 +1963,11 @@ fn handle_event(
                 },
             );
             if let Ok(mut core) = runtime.lock() {
-                core.fail_persistent_runtime(provider.provider_code(), error);
+                if let Some(members) = members {
+                    crate::selection::fail_bound_runtime(&mut core, members, None, error);
+                } else {
+                    core.fail_persistent_runtime(provider.provider_code(), error);
+                }
             }
         }
         AcpRuntimeEvent::Disconnected {
@@ -1881,22 +1998,24 @@ fn handle_event(
                 },
             );
             if let Ok(mut core) = runtime.lock() {
-                core.fail_persistent_runtime(
-                    provider.provider_code(),
-                    PedelecError::with_details(
-                        error_codes::PROVIDER_RUNTIME_DISCONNECTED,
-                        format!("{} ACP runtime disconnected", provider.label()),
-                        json!({
-                            "provider": provider.code(),
-                            "operation": "runtime",
-                            "stage": "disconnect",
-                            "runtimeGeneration": generation,
-                            "processId": pid,
-                            "reason": reason_text.clone(),
-                            "attachments": attachment_details,
-                        }),
-                    ),
+                let error = PedelecError::with_details(
+                    error_codes::PROVIDER_RUNTIME_DISCONNECTED,
+                    format!("{} ACP runtime disconnected", provider.label()),
+                    json!({
+                        "provider": provider.code(),
+                        "operation": "runtime",
+                        "stage": "disconnect",
+                        "runtimeGeneration": generation,
+                        "processId": pid,
+                        "reason": reason_text.clone(),
+                        "attachments": attachment_details,
+                    }),
                 );
+                if let Some(members) = members {
+                    crate::selection::fail_bound_runtime(&mut core, members, None, error);
+                } else {
+                    core.fail_persistent_runtime(provider.provider_code(), error);
+                }
             }
             for attachment in attachments {
                 record(
@@ -3825,6 +3944,7 @@ mod tests {
                     provider: ProviderCode::OpenCode,
                     runtime_generation,
                     process_id,
+                    ..
                 } => Some((*runtime_generation, *process_id)),
                 _ => None,
             })
@@ -4062,6 +4182,114 @@ mod tests {
             tools: vec![],
             guidance: None,
         }
+    }
+
+    #[test]
+    fn opencode_and_cursor_in_place_upgrade_routes_and_retires_independent_generations() {
+        let temp = tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        let owner = ProviderRuntimeOwner::new();
+        let program = fake_opencode_program(temp.path());
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(if cfg!(windows) {
+            "../pedelec-runtime/tests/fixtures/fake_acp_agent.ps1"
+        } else {
+            "../pedelec-runtime/tests/fixtures/fake_acp_agent.sh"
+        });
+        let copy = temp.path().join(if cfg!(windows) {
+            "agent.ps1"
+        } else {
+            "agent.sh"
+        });
+        let source = fs::read_to_string(&fixture).unwrap();
+        fs::write(&copy, source.replace("acp-session-", "old-session-")).unwrap();
+        fs::write(
+            &program,
+            fs::read_to_string(&program)
+                .unwrap()
+                .replace(&fixture.display().to_string(), &copy.display().to_string()),
+        )
+        .unwrap();
+        let mut old_controllers = Vec::new();
+        let mut new_controllers = Vec::new();
+        for provider in [AcpProviderKind::OpenCode, AcpProviderKind::Cursor] {
+            fs::write(&copy, source.replace("acp-session-", "old-session-")).unwrap();
+            let code = provider.provider_code();
+            runtime.lock().unwrap().set_provider_selection_for_test(
+                code.clone(),
+                program.clone(),
+                "0.147.0",
+            );
+            let a_id = format!("{}-a", provider.code());
+            let b_id = format!("{}-b", provider.code());
+            let a = crate::selection::test_session(&runtime, temp.path(), code.clone(), &a_id);
+            let b = crate::selection::test_session(&runtime, temp.path(), code.clone(), &b_id);
+            let dispatcher =
+                AcpRuntimeDispatcher::new_for_provider(provider, owner.clone(), runtime.clone());
+            dispatcher
+                .dispatch(PersistentRuntimeOperation::EnsureSession { session: a.clone() })
+                .unwrap();
+            let old = dispatcher
+                .router
+                .state_for_test(&a_id, |d| d.any_controller().unwrap());
+            assert_eq!(
+                runtime
+                    .lock()
+                    .unwrap()
+                    .provider_session_state(&a_id)
+                    .unwrap()
+                    .provider_session_id
+                    .as_deref(),
+                Some("old-session-1")
+            );
+            fs::write(&copy, source.replace("acp-session-", "new-session-")).unwrap();
+            runtime.lock().unwrap().set_provider_selection_for_test(
+                code.clone(),
+                program.clone(),
+                "0.160.0",
+            );
+            dispatcher
+                .dispatch(PersistentRuntimeOperation::EnsureSession { session: a })
+                .unwrap();
+            assert_eq!(
+                dispatcher
+                    .router
+                    .state_for_test(&a_id, |d| d.any_controller().unwrap().process_id()),
+                old.process_id()
+            );
+            dispatcher
+                .dispatch(PersistentRuntimeOperation::EnsureSession { session: b.clone() })
+                .unwrap();
+            let new = dispatcher
+                .router
+                .state_for_test(&b_id, |d| d.any_controller().unwrap());
+            assert_ne!(old.process_id(), new.process_id());
+            assert_eq!(
+                runtime
+                    .lock()
+                    .unwrap()
+                    .provider_session_state(&b_id)
+                    .unwrap()
+                    .provider_session_id
+                    .as_deref(),
+                Some("new-session-1")
+            );
+            dispatcher
+                .dispatch(crate::selection::end_operation(code, &a_id))
+                .unwrap();
+            assert!(!old.is_healthy());
+            assert!(new.is_healthy());
+            dispatcher
+                .dispatch(PersistentRuntimeOperation::EnsureSession { session: b })
+                .unwrap();
+            old_controllers.push(old);
+            new_controllers.push(new);
+        }
+        assert_ne!(
+            new_controllers[0].process_id(),
+            new_controllers[1].process_id()
+        );
+        owner.shutdown();
+        assert!(new_controllers.iter().all(|c| !c.is_healthy()));
     }
 
     fn fake_opencode_program(directory: &Path) -> PathBuf {

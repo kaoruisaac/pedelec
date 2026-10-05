@@ -298,6 +298,8 @@ impl PedelecAgentRuntimeDispatcher {
                 provider: self.provider.clone(),
                 runtime_generation: generation,
                 process_id: controller.process_id(),
+                selected_executable_path: None,
+                selected_version: None,
             },
         );
         let runtime = Arc::clone(&self.core_runtime);

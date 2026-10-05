@@ -1970,6 +1970,10 @@ pub enum ProviderRuntimeDiagnostic {
         provider: ProviderCode,
         runtime_generation: u64,
         process_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_executable_path: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_version: Option<String>,
     },
     ProviderRuntimeStopped {
         provider: ProviderCode,
@@ -4302,6 +4306,44 @@ impl CoreRuntime {
             .collect())
     }
 
+    /// Captures path and recognized version from the same completed scan.
+    /// Runtime admission must capture this while holding the shared Core lock.
+    pub fn provider_runtime_selection(
+        &self,
+        provider: &ProviderCode,
+    ) -> Result<ProviderRuntimeSelection, PedelecError> {
+        let executable_path = self.provider_executable_path(provider)?;
+        let version = provider_version_display(
+            self.provider_scan
+                .get(provider)
+                .and_then(|scan| scan.version.as_ref())
+                .expect("validated executable has a recognized version"),
+        );
+        Ok(ProviderRuntimeSelection {
+            provider: provider.clone(),
+            executable_path,
+            version,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn set_provider_selection_for_test(
+        &mut self,
+        provider: ProviderCode,
+        path: PathBuf,
+        version: &str,
+    ) {
+        self.provider_scan.insert(
+            provider,
+            ProviderCli {
+                path: Some(path),
+                version: Some(parse_provider_version(version).expect("test version")),
+                ..ProviderCli::default()
+            },
+        );
+    }
+
     /// Returns only the executable selected and version-validated by the latest
     /// external provider scan. This intentionally does not resolve PATH again.
     pub fn provider_executable_path(
@@ -5344,7 +5386,9 @@ impl CoreRuntime {
         }
     }
 
-    fn fail_persistent_runtime_thread(&mut self, thread_id: &str, error: &PedelecError) {
+    /// Reduces failure for a thread bound to the affected runtime generation.
+    /// Dispatchers use this instead of failing other live provider generations.
+    pub fn fail_persistent_runtime_thread(&mut self, thread_id: &str, error: &PedelecError) {
         let Ok(status) = self
             .thread_manager
             .thread(thread_id)
@@ -11249,6 +11293,76 @@ fn provider_program_name(provider: &ProviderCode) -> &'static str {
     }
 }
 
+/// Immutable identity from one completed Core scan. Version participates even
+/// when an installation replaces its executable at the same path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRuntimeSelection {
+    pub provider: ProviderCode,
+    pub executable_path: PathBuf,
+    pub version: String,
+}
+
+#[cfg(test)]
+mod runtime_selection_tests {
+    use super::*;
+
+    #[test]
+    fn completed_scan_snapshot_changes_identity_on_in_place_upgrade() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        fs::write(&path, "fake executable").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut core = CoreRuntime::new();
+        core.set_provider_selection_for_test(ProviderCode::Codex, path.clone(), "0.147.0");
+        let old = core
+            .provider_runtime_selection(&ProviderCode::Codex)
+            .unwrap();
+        core.set_provider_selection_for_test(ProviderCode::Codex, path.clone(), "0.160.0");
+        let new = core
+            .provider_runtime_selection(&ProviderCode::Codex)
+            .unwrap();
+        assert_eq!(old.executable_path, new.executable_path);
+        assert_ne!(old.runtime_key(), new.runtime_key());
+        let info = core
+            .list_providers()
+            .into_iter()
+            .find(|p| p.code == ProviderCode::Codex)
+            .unwrap();
+        assert_eq!(info.version.as_deref(), Some(new.version.as_str()));
+        assert_eq!(
+            core.provider_executable_path(&ProviderCode::Codex).unwrap(),
+            new.executable_path
+        );
+        // The previously returned snapshot cannot change with Core's scan.
+        assert_eq!(old.version, "0.147");
+    }
+}
+
+impl ProviderRuntimeSelection {
+    pub fn runtime_key(&self) -> String {
+        let mut identity = Sha256::new();
+        for component in [
+            provider_code_as_str(&self.provider).as_bytes(),
+            self.executable_path.as_os_str().as_encoded_bytes(),
+            self.version.as_bytes(),
+        ] {
+            identity.update((component.len() as u64).to_le_bytes());
+            identity.update(component);
+        }
+        format!(
+            "{}:{:x}",
+            provider_code_as_str(&self.provider),
+            identity.finalize()
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProviderCli {
     path: Option<PathBuf>,
@@ -11511,15 +11625,9 @@ const MACOS_PATH_MARKER_END: &str = "__PEDELEC_PATH_END__";
 const MACOS_LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_shell_probe_arguments(shell_path: &Path) -> Vec<Vec<&'static str>> {
-    match shell_path.file_name().and_then(OsStr::to_str) {
-        Some("zsh") => vec![vec!["-l", "-i", "-c", MACOS_PATH_MARKER_COMMAND]],
-        Some("bash") => vec![
-            vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND],
-            vec!["-i", "-c", MACOS_PATH_MARKER_COMMAND],
-        ],
-        _ => vec![vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND]],
-    }
+fn macos_shell_probe_arguments(_shell_path: &Path) -> Vec<Vec<&'static str>> {
+    // PATH discovery must not intentionally run interactive shell startup files.
+    vec![vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND]]
 }
 
 #[cfg(target_os = "macos")]

@@ -528,6 +528,8 @@ mod tests {
                     provider: ProviderCode::Codex,
                     runtime_generation: generation,
                     process_id: generation as u32,
+                    selected_executable_path: None,
+                    selected_version: None,
                 },
             );
         }
@@ -737,12 +739,12 @@ mod tests {
         fs::create_dir_all(&login_dir).unwrap();
         fs::create_dir_all(&fallback_dir).unwrap();
 
-        let process_path = env::join_paths([&process_dir, &login_dir]).unwrap();
-        let login_path = env::join_paths([&login_dir]).unwrap();
+        let process_path = env::join_paths([&process_dir]).unwrap();
+        let login_path = env::join_paths([&login_dir, &process_dir]).unwrap();
         let merged = merge_provider_paths(
             Some(&process_path),
             Some(&login_path),
-            vec![fallback_dir.clone(), missing_dir],
+            vec![fallback_dir.clone(), login_dir.clone(), missing_dir],
         );
         let paths = env::split_paths(&merged).collect::<Vec<_>>();
 
@@ -773,22 +775,31 @@ mod tests {
     }
 
     #[test]
-    fn macos_shell_strategy_uses_interactive_login_for_zsh() {
+    fn macos_shell_strategy_uses_noninteractive_login_for_zsh() {
         assert_eq!(
             macos_shell_probe_arguments(Path::new("/opt/homebrew/bin/zsh")),
-            vec![vec!["-l", "-i", "-c", MACOS_PATH_MARKER_COMMAND]]
+            vec![vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND]]
         );
     }
 
     #[test]
-    fn macos_shell_strategy_probes_bash_login_and_interactive_separately() {
+    fn macos_shell_strategy_uses_only_noninteractive_login_for_bash() {
         assert_eq!(
             macos_shell_probe_arguments(Path::new("/usr/local/bin/bash")),
-            vec![
-                vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND],
-                vec!["-i", "-c", MACOS_PATH_MARKER_COMMAND],
-            ]
+            vec![vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND]]
         );
+    }
+
+    #[test]
+    fn macos_shell_strategies_never_use_interactive_mode() {
+        for shell in ["/bin/zsh", "/bin/bash", "/bin/sh", "/custom/shell"] {
+            let strategies = macos_shell_probe_arguments(Path::new(shell));
+            assert_eq!(strategies.len(), 1);
+            for args in strategies {
+                assert!(!args.contains(&"-i"), "interactive PATH probe for {shell}");
+                assert_eq!(args, vec!["-l", "-c", MACOS_PATH_MARKER_COMMAND]);
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -803,11 +814,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bash_login_success_is_preserved_when_interactive_probe_fails() {
+    fn bash_noninteractive_login_probe_extracts_marked_path() {
         let temp = tempfile::tempdir().unwrap();
         let shell = executable_shell_fixture(
             &temp,
-            "#!/bin/sh\nif [ \"$1\" = \"-l\" ]; then\n  printf 'warning\\n%s/login/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\n  exit 0\nfi\nexit 1\n",
+            "#!/bin/sh\n[ \"$#\" -eq 3 ] && [ \"$1\" = \"-l\" ] && [ \"$2\" = \"-c\" ] || exit 1\nprintf 'warning\\n'\nPATH=/login/bin\neval \"$3\"\n",
         );
 
         let path = resolve_macos_shell_path_with_strategies(
@@ -821,29 +832,47 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bash_interactive_success_is_preserved_when_login_probe_fails() {
+    fn failed_login_probe_keeps_process_and_fallback_paths_without_retry() {
         let temp = tempfile::tempdir().unwrap();
         let shell = executable_shell_fixture(
             &temp,
-            "#!/bin/sh\nif [ \"$1\" = \"-i\" ]; then\n  printf '%s/interactive/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\n  exit 0\nfi\nexit 1\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.calls\"\nif [ \"$1\" = \"-i\" ]; then\n  printf '%s/interactive/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\n  exit 0\nfi\nexit 1\n",
         );
 
         let path = resolve_macos_shell_path_with_strategies(
             &shell,
             Instant::now() + Duration::from_secs(1),
-        )
-        .unwrap();
+        );
 
-        assert_eq!(path, OsString::from("/interactive/bin"));
+        assert!(path.is_none());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("bash.calls")).unwrap(),
+            format!("-l\n-c\n{MACOS_PATH_MARKER_COMMAND}\n")
+        );
+
+        let process_dir = temp.path().join("process");
+        let fallback_dir = temp.path().join("fallback");
+        fs::create_dir_all(&process_dir).unwrap();
+        fs::create_dir_all(&fallback_dir).unwrap();
+        let process_path = env::join_paths([&process_dir]).unwrap();
+        let merged = merge_provider_paths(
+            Some(&process_path),
+            path.as_ref(),
+            vec![fallback_dir.clone()],
+        );
+        assert_eq!(
+            env::split_paths(&merged).collect::<Vec<_>>(),
+            vec![process_dir, fallback_dir]
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn bash_successful_probes_are_merged_and_deduplicated() {
+    fn bash_login_probe_paths_are_deduplicated() {
         let temp = tempfile::tempdir().unwrap();
         let shell = executable_shell_fixture(
             &temp,
-            "#!/bin/sh\nif [ \"$1\" = \"-l\" ]; then\n  printf '%s/login/bin:/shared/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\nelse\n  printf '%s/interactive/bin:/shared/bin%s\\n' '__PEDELEC_PATH_START__' '__PEDELEC_PATH_END__'\nfi\n",
+            "#!/bin/sh\n[ \"$#\" -eq 3 ] && [ \"$1\" = \"-l\" ] && [ \"$2\" = \"-c\" ] || exit 1\nPATH=/login/bin:/shared/bin:/login/bin\neval \"$3\"\n",
         );
 
         let path = resolve_macos_shell_path_with_strategies(
@@ -854,11 +883,7 @@ mod tests {
 
         assert_eq!(
             env::split_paths(&path).collect::<Vec<_>>(),
-            vec![
-                PathBuf::from("/login/bin"),
-                PathBuf::from("/shared/bin"),
-                PathBuf::from("/interactive/bin"),
-            ]
+            vec![PathBuf::from("/login/bin"), PathBuf::from("/shared/bin")]
         );
     }
 

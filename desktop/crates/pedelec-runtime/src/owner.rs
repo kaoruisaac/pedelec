@@ -70,6 +70,7 @@ impl std::error::Error for RuntimeRegistryError {}
 
 #[derive(Debug)]
 enum EntryState {
+    Retired,
     Vacant,
     Starting,
     Ready(Arc<dyn ProviderRuntimeController>),
@@ -112,9 +113,9 @@ impl ProviderRuntimeRegistry {
             return Err(RuntimeRegistryError::ShuttingDown);
         }
         let key = key.into();
-        let entry = {
+        let mut entry = {
             let mut state = self.state.lock().expect("runtime registry mutex poisoned");
-            Arc::clone(state.entries.entry(key).or_insert_with(|| {
+            Arc::clone(state.entries.entry(key.clone()).or_insert_with(|| {
                 Arc::new(RuntimeEntry {
                     state: Mutex::new(EntryState::Vacant),
                     changed: Condvar::new(),
@@ -129,6 +130,16 @@ impl ProviderRuntimeRegistry {
             }
             let mut entry_state = entry.state.lock().expect("runtime entry mutex poisoned");
             match &*entry_state {
+                EntryState::Retired => {
+                    drop(entry_state);
+                    let mut state = self.state.lock().expect("runtime registry mutex poisoned");
+                    entry = Arc::clone(state.entries.entry(key.clone()).or_insert_with(|| {
+                        Arc::new(RuntimeEntry {
+                            state: Mutex::new(EntryState::Vacant),
+                            changed: Condvar::new(),
+                        })
+                    }));
+                }
                 EntryState::Ready(controller) if controller.is_healthy() => {
                     return Ok(Arc::clone(controller));
                 }
@@ -208,7 +219,10 @@ impl ProviderRuntimeRegistry {
             .cloned()?;
         let result = match &*entry.state.lock().expect("runtime entry mutex poisoned") {
             EntryState::Ready(controller) => Some(Arc::clone(controller)),
-            EntryState::Vacant | EntryState::Starting | EntryState::Stopping => None,
+            EntryState::Retired
+            | EntryState::Vacant
+            | EntryState::Starting
+            | EntryState::Stopping => None,
         };
         result
     }
@@ -223,12 +237,69 @@ impl ProviderRuntimeRegistry {
             .get(&key)
             .cloned()?;
         let lifecycle = match &*entry.state.lock().expect("runtime entry mutex poisoned") {
+            EntryState::Retired => return None,
             EntryState::Vacant => RuntimeLifecycle::Stopped,
             EntryState::Starting => RuntimeLifecycle::Starting,
             EntryState::Ready(_) => RuntimeLifecycle::Ready,
             EntryState::Stopping => RuntimeLifecycle::Stopping,
         };
         Some(lifecycle)
+    }
+
+    /// Retires exactly one key. A tombstone redirects callers that already
+    /// captured this entry, so removing it cannot create two startup owners.
+    pub fn retire(&self, key: impl Into<ProviderRuntimeKey>) -> Result<(), String> {
+        self.retire_entry(key.into(), true)
+    }
+
+    fn retire_entry(&self, key: ProviderRuntimeKey, remove: bool) -> Result<(), String> {
+        let entry = self
+            .state
+            .lock()
+            .expect("runtime registry mutex poisoned")
+            .entries
+            .get(&key)
+            .cloned();
+        let Some(entry) = entry else {
+            return Ok(());
+        };
+        let mut state = entry.state.lock().expect("runtime entry mutex poisoned");
+        loop {
+            match &*state {
+                EntryState::Starting | EntryState::Stopping => {
+                    state = entry
+                        .changed
+                        .wait(state)
+                        .expect("runtime entry mutex poisoned");
+                }
+                EntryState::Retired => return Ok(()),
+                EntryState::Vacant | EntryState::Ready(_) => break,
+            }
+        }
+        let controller = match &*state {
+            EntryState::Ready(controller) => Some(Arc::clone(controller)),
+            _ => None,
+        };
+        *state = EntryState::Stopping;
+        drop(state);
+        let result = controller.map_or(Ok(()), |controller| controller.shutdown());
+        let mut state = entry.state.lock().expect("runtime entry mutex poisoned");
+        *state = if remove {
+            EntryState::Retired
+        } else {
+            EntryState::Vacant
+        };
+        let mut registry = self.state.lock().expect("runtime registry mutex poisoned");
+        if remove
+            && registry
+                .entries
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &entry))
+        {
+            registry.entries.remove(&key);
+        }
+        entry.changed.notify_all();
+        result
     }
 
     pub fn shutdown_all(&self) -> Vec<String> {
@@ -238,26 +309,13 @@ impl ProviderRuntimeRegistry {
             .lock()
             .expect("runtime registry mutex poisoned")
             .entries
-            .values()
+            .keys()
             .cloned()
             .collect::<Vec<_>>();
         let mut errors = Vec::new();
-        for entry in entries {
-            let controller = match &*entry.state.lock().expect("runtime entry mutex poisoned") {
-                EntryState::Ready(controller) => Some(Arc::clone(controller)),
-                EntryState::Vacant | EntryState::Starting | EntryState::Stopping => None,
-            };
-            if let Some(controller) = controller {
-                {
-                    let mut state = entry.state.lock().expect("runtime entry mutex poisoned");
-                    *state = EntryState::Stopping;
-                }
-                if let Err(error) = controller.shutdown() {
-                    errors.push(error);
-                }
-                let mut state = entry.state.lock().expect("runtime entry mutex poisoned");
-                *state = EntryState::Vacant;
-                entry.changed.notify_all();
+        for key in entries {
+            if let Err(error) = self.retire_entry(key, false) {
+                errors.push(error);
             }
         }
         errors
@@ -338,5 +396,163 @@ impl ProviderRuntimeOwner {
             operations.clear();
         }
         self.registry.shutdown_all()
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    use std::thread;
+
+    #[derive(Debug)]
+    struct Controller(Arc<AtomicUsize>);
+    impl ProviderRuntimeController for Controller {
+        fn shutdown(&self) -> Result<(), String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn targeted_retirement_preserves_other_generations_and_shutdown_closes_all() {
+        let registry = ProviderRuntimeRegistry::new();
+        let a = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(AtomicUsize::new(0));
+        for (key, stops) in [("a", a.clone()), ("b", b.clone())] {
+            registry
+                .get_or_init(key, || Ok(Arc::new(Controller(stops))))
+                .unwrap();
+        }
+        registry.retire("a").unwrap();
+        assert_eq!(a.load(Ordering::SeqCst), 1);
+        assert!(registry.get("a").is_none());
+        assert_eq!(registry.lifecycle("a"), None);
+        assert!(registry.get("b").is_some());
+        assert_eq!(b.load(Ordering::SeqCst), 0);
+        assert!(registry.shutdown_all().is_empty());
+        assert_eq!(b.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retirement_waits_for_startup_and_concurrent_restart_has_one_owner() {
+        let registry = ProviderRuntimeRegistry::new();
+        let stops = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let starting = {
+            let registry = registry.clone();
+            let stops = stops.clone();
+            thread::spawn(move || {
+                registry
+                    .get_or_init("a", || {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(Arc::new(Controller(stops)))
+                    })
+                    .unwrap()
+            })
+        };
+        started_rx.recv().unwrap();
+        let retiring = {
+            let registry = registry.clone();
+            thread::spawn(move || registry.retire("a").unwrap())
+        };
+        release_tx.send(()).unwrap();
+        starting.join().unwrap();
+        retiring.join().unwrap();
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handles = (0..8)
+            .map(|_| {
+                let registry = registry.clone();
+                let calls = calls.clone();
+                let stops = stops.clone();
+                thread::spawn(move || {
+                    registry
+                        .get_or_init("a", || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(Arc::new(Controller(stops)))
+                        })
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let controllers = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(controllers.iter().all(|c| Arc::ptr_eq(c, &controllers[0])));
+        registry.shutdown_all();
+        assert_eq!(stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn callers_wait_through_stopping_and_share_one_restarted_controller() {
+        #[derive(Debug)]
+        struct BlockingController {
+            started: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl ProviderRuntimeController for BlockingController {
+            fn shutdown(&self) -> Result<(), String> {
+                self.started.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                Ok(())
+            }
+        }
+        let registry = ProviderRuntimeRegistry::new();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        registry
+            .get_or_init("a", || {
+                Ok(Arc::new(BlockingController {
+                    started: started_tx,
+                    release: Mutex::new(release_rx),
+                }))
+            })
+            .unwrap();
+        let retiring = {
+            let registry = registry.clone();
+            thread::spawn(move || registry.retire("a").unwrap())
+        };
+        started_rx.recv().unwrap();
+        assert_eq!(registry.lifecycle("a"), Some(RuntimeLifecycle::Stopping));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let handles = (0..8)
+            .map(|_| {
+                let registry = registry.clone();
+                let calls = calls.clone();
+                let stops = stops.clone();
+                let queued = queued_tx.clone();
+                thread::spawn(move || {
+                    queued.send(()).unwrap();
+                    registry
+                        .get_or_init("a", || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(Arc::new(Controller(stops)))
+                        })
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for _ in 0..8 {
+            queued_rx.recv().unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        release_tx.send(()).unwrap();
+        retiring.join().unwrap();
+        let controllers = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(controllers.iter().all(|c| Arc::ptr_eq(c, &controllers[0])));
+        registry.shutdown_all();
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
     }
 }

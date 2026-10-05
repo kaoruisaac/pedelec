@@ -488,6 +488,8 @@ impl AntigravityRuntimeDispatcher {
                 provider: ProviderCode::Antigravity,
                 runtime_generation: controller.generation(),
                 process_id: controller.process_id(),
+                selected_executable_path: None,
+                selected_version: None,
             },
         );
         let runtime = Arc::clone(&self.core_runtime);
@@ -2238,6 +2240,68 @@ mod tests {
         }
         records.extend(receiver.try_iter());
         records
+    }
+
+    #[test]
+    fn provider_refresh_preserves_existing_thread_and_new_thread_uses_new_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_dir = temp.path().join("old");
+        let new_dir = temp.path().join("new");
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+        let old_program = fake_program(&old_dir);
+        let new_program = fake_program(&new_dir);
+        let runtime = Arc::new(Mutex::new(pedelec_core::CoreRuntime::new()));
+        runtime.lock().unwrap().set_provider_selection_for_test(
+            ProviderCode::Antigravity,
+            old_program.clone(),
+            "1.1.6",
+        );
+        let a = crate::selection::test_session(
+            &runtime,
+            temp.path(),
+            ProviderCode::Antigravity,
+            "agy-old",
+        );
+        let b = crate::selection::test_session(
+            &runtime,
+            temp.path(),
+            ProviderCode::Antigravity,
+            "agy-new",
+        );
+        let owner = ProviderRuntimeOwner::new();
+        let start_log = temp.path().join("starts.log");
+        let dispatcher = AntigravityRuntimeDispatcher::new(owner.clone(), runtime.clone())
+            .with_env_for_test("FAKE_AGY_START_LOG", start_log.as_os_str());
+        let old = dispatcher.controller_for(&a).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !start_log.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(start_log.exists());
+        fs::remove_file(old_program).unwrap();
+        runtime.lock().unwrap().set_provider_selection_for_test(
+            ProviderCode::Antigravity,
+            new_program.clone(),
+            "1.2.0",
+        );
+        assert_eq!(
+            dispatcher.controller_for(&a).unwrap().process_id(),
+            old.process_id()
+        );
+        let new = dispatcher.controller_for(&b).unwrap();
+        assert_ne!(old.process_id(), new.process_id());
+        assert_eq!(
+            runtime
+                .lock()
+                .unwrap()
+                .provider_runtime_selection(&ProviderCode::Antigravity)
+                .unwrap()
+                .executable_path,
+            new_program
+        );
+        assert!(old.is_healthy());
+        owner.shutdown();
     }
 
     fn fake_program(directory: &Path) -> PathBuf {

@@ -53,8 +53,10 @@ desktop.ini
 .agent_temp/
 .design/
 .playwright-mcp/
+.serena/
 
 # Agents
+.codex/config.toml
 AGENTS.md
 CLAUDE.md
 .pedelec-runtime
