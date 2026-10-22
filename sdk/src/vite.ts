@@ -10,7 +10,7 @@ import {
 } from "./deno-module-internal.js";
 
 const PACKAGE_NAME = "@kaoruisaac/pedelec";
-const DEFINE_DENO_MODULE_NAME = "defineDenoModule";
+const DEFINE_RUNTIME_MODULE_NAMES = new Set(["defineRuntimeModule", "defineDenoModule"]);
 const ARTIFACT_HASH_VERSION = "pedelec-deno-module-artifact-v1";
 const SCRIPT_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 const DECLARATION_LIKE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".d.ts", ".json"]);
@@ -1212,9 +1212,9 @@ function findDenoModuleImportNames(sourceFile: ts.SourceFile): Set<string> {
     const namedBindings = statement.importClause.namedBindings;
     if (!namedBindings || !ts.isNamedImports(namedBindings)) continue;
     for (const element of namedBindings.elements) {
-      if (element.isTypeOnly || element.propertyName?.text !== DEFINE_DENO_MODULE_NAME && element.name.text !== DEFINE_DENO_MODULE_NAME) continue;
+      if (element.isTypeOnly) continue;
       const importedName = element.propertyName?.text ?? element.name.text;
-      if (importedName === DEFINE_DENO_MODULE_NAME) names.add(element.name.text);
+      if (DEFINE_RUNTIME_MODULE_NAMES.has(importedName)) names.add(element.name.text);
     }
   }
   return names;

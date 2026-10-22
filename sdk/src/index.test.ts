@@ -78,7 +78,7 @@ function requestMessages(port: MockRuntimePort): any[] {
 }
 
 function sdkHelloMessage() {
-  return { type: "sdk_hello", sdkVersion: SDK_VERSION };
+  return { type: "sdk_hello", sdkVersion: SDK_VERSION, runtimeFullAccess: false };
 }
 
 function setPageHidden(pageWindow: MockWindow): void {

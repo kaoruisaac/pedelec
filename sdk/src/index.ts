@@ -13,6 +13,7 @@ const SDK_HELLO_MESSAGE_TYPE = "sdk_hello";
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 
 export type PedelecOptions = {
+  runtimeFullAccess?: boolean;
   bridgeTimeoutMs?: number;
 };
 
@@ -52,13 +53,16 @@ export type ProviderArtifact = {
   toolCallId?: string;
 };
 
-export type DenoModuleDefinition<TName extends string = string> = {
+export type RuntimeModuleDefinition<TName extends string = string> = {
   name: TName;
   description?: string;
   entry: string;
   usage?: string;
   preferStdinExecution?: boolean;
 };
+
+/** @deprecated Use RuntimeModuleDefinition. */
+export type DenoModuleDefinition<TName extends string = string> = RuntimeModuleDefinition<TName>;
 
 type AgentDenoModuleDefinition<TName extends string = string> =
   DenoModuleDefinition<TName> & {
@@ -318,6 +322,8 @@ export type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
+  runtimeModules?: readonly AgentDenoModuleDefinition[];
+  /** @deprecated Use runtimeModules. */
   denoModules?: readonly AgentDenoModuleDefinition[];
 };
 
@@ -360,11 +366,15 @@ type SerializableDenoModuleManifest = {
 export type SerializableSkillsManifest = {
   guidance: string;
   tools: SerializableToolManifest[];
+  runtimeModules?: SerializableDenoModuleManifest[];
+  /** @deprecated Use runtimeModules. Legacy wire field. */
   denoModules?: SerializableDenoModuleManifest[];
 };
 
 export type WorkspaceRunOptions = {
   timeoutMs?: number;
+  runtimeModules?: readonly RuntimeModuleDefinition[];
+  /** @deprecated Use runtimeModules. */
   denoModules?: readonly DenoModuleDefinition[];
 };
 
@@ -379,6 +389,7 @@ export type WorkspaceRunResult = {
 type CreateSessionSharedInput<
   TTools extends readonly ToolDefinition[] = readonly ToolDefinition[],
 > = {
+  runtimeFullAccess?: boolean;
   skills?: SkillsInput<TTools>;
   autoEndOnDisconnect?: boolean;
 };
@@ -414,6 +425,8 @@ export type PedelecSettings = {
 };
 
 export type ApprovalStatus = {
+  /** Explicit Full Runtime Access user grant reported by the Extension. */
+  runtimeFullAccessApproved?: boolean;
   installed: boolean;
   approved: boolean;
   origin: string | null;
@@ -714,10 +727,27 @@ export function defineTool<
   return tool;
 }
 
-export function defineDenoModule<const TModule extends DenoModuleDefinition>(
+export function defineRuntimeModule<const TModule extends RuntimeModuleDefinition>(
   module: TModule,
 ): TModule {
   return module;
+}
+
+/** @deprecated Use defineRuntimeModule. */
+export const defineDenoModule = defineRuntimeModule;
+
+function resolveRuntimeModules(options: { runtimeModules?: unknown; denoModules?: unknown }): unknown {
+  if ("runtimeModules" in options && "denoModules" in options) {
+    throw makeError("INVALID_INPUT", "runtimeModules and denoModules cannot be combined");
+  }
+  return options.runtimeModules ?? options.denoModules;
+}
+
+function normalizeRuntimeFullAccess(value: unknown): boolean {
+  if (value !== undefined && typeof value !== "boolean") {
+    throw makeError("INVALID_INPUT", "runtimeFullAccess must be a boolean");
+  }
+  return value === true;
 }
 
 type NormalizedSkillsInput = {
@@ -877,14 +907,15 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
     throw makeError("INVALID_INPUT", "skills.tools must be an array");
   }
 
-  if (skills.denoModules !== undefined && !Array.isArray(skills.denoModules)) {
+  const modules = resolveRuntimeModules(skills);
+  if (modules !== undefined && !Array.isArray(modules)) {
     throw makeError("INVALID_INPUT", "skills.denoModules must be an array");
   }
 
   const { tools, handlers } = normalizeToolDefinitions(skills.tools);
   const seenDenoModuleNames = new Set<string>();
 
-  const denoModules = (skills.denoModules ?? []).map((module, index) => {
+  const denoModules = ((modules ?? []) as readonly AgentDenoModuleDefinition[]).map((module, index) => {
     if (!module || typeof module !== "object" || Array.isArray(module)) {
       throw makeError("INVALID_INPUT", "skills.denoModules entries must be objects", { index });
     }
@@ -1149,7 +1180,7 @@ export class PedelecWorkspace {
 
     let modules: PreparedWorkspaceDenoModule[];
     try {
-      modules = normalizeWorkspaceDenoModules(options.denoModules);
+      modules = normalizeWorkspaceDenoModules(resolveRuntimeModules(options));
     } catch (error) {
       return Promise.reject(error);
     }
@@ -1218,6 +1249,7 @@ export class Pedelec {
   private readonly pageWindow: Window | null;
   private readonly channelId: string;
   private readonly bridgeTimeoutMs: number;
+  private readonly runtimeFullAccess: boolean;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly sessions = new Map<string, PedelecSession<string>>();
   private readonly lastSeqBySession = new Map<string, number>();
@@ -1227,6 +1259,7 @@ export class Pedelec {
   private lastReportedPageActive: boolean | null = null;
 
   constructor(options: PedelecOptions = {}) {
+    this.runtimeFullAccess = normalizeRuntimeFullAccess(options.runtimeFullAccess);
     this.pageWindow = typeof window === "undefined" ? null : window;
     this.channelId = createChannelId();
     this.bridgeTimeoutMs = Math.max(1, options.bridgeTimeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS);
@@ -1293,12 +1326,20 @@ export class Pedelec {
     input: CreateSessionInput<TTools> = {} as CreateSessionInput<TTools>,
     workspace?: PedelecWorkspace,
   ): Promise<PedelecSession<ToolNameOf<TTools>>> {
+    const runtimeFullAccess = normalizeRuntimeFullAccess(input?.runtimeFullAccess);
+    if (runtimeFullAccess && !this.runtimeFullAccess) {
+      throw makeError("INVALID_INPUT", "Session runtimeFullAccess requires an Instance with runtimeFullAccess enabled");
+    }
+    if (this.runtimeFullAccess && !(await this.getApprovalStatus()).approved) {
+      throw makeError("RUNTIME_FULL_ACCESS_NOT_APPROVED", "This Instance requires explicit Full Runtime Access approval");
+    }
     const resolvedOrPromise = this.resolveCreateSessionInput(input);
     const resolvedInput =
       resolvedOrPromise instanceof Promise ? await resolvedOrPromise : resolvedOrPromise;
 
     const result = await this.request<unknown>("create_session", {
       input: {
+        runtimeFullAccess,
         provider: resolvedInput.provider,
         model: resolvedInput.model,
         effort: resolvedInput.effort,
@@ -1308,6 +1349,14 @@ export class Pedelec {
         autoEndOnDisconnect: resolvedInput.autoEndOnDisconnect,
       },
     });
+    // Check the raw acknowledgment before other response validation so a known
+    // thread can still be cleaned up when a peer returns an invalid mode flag.
+    if (runtimeFullAccess && (!isPlainObject(result) || result.runtimeFullAccessApplied !== true)) {
+      if (isPlainObject(result) && typeof result.sessionId === "string" && result.sessionId.trim()) {
+        await this.abortSessionSetup(result.sessionId);
+      }
+      throw makeError("SDK_PROTOCOL_ERROR", "The connected Pedelec Extension/Desktop did not confirm Full Runtime Access", { feature: "runtimeFullAccess" });
+    }
     const normalizedResult = normalizeCreateSessionResponse(result);
 
     if (workspace && normalizedResult.workspace.workspaceId !== workspace.workspaceIdInternal) {
@@ -1501,7 +1550,7 @@ export class Pedelec {
   async getApprovalStatus(): Promise<ApprovalStatus> {
     try {
       const result = await this.request<ApprovalStatus>("get_approval_status");
-      return result;
+      return { ...result, approved: result.approved === true && (!this.runtimeFullAccess || result.runtimeFullAccessApproved === true) };
     } catch (err) {
       const error = normalizeError(err, "EXTENSION_UNAVAILABLE", "Pedelec extension is unavailable.");
       if (error.code === "EXTENSION_UNAVAILABLE" || error.code === "EXTENSION_DISCONNECTED") {
@@ -1679,7 +1728,7 @@ export class Pedelec {
 
   private postSdkHello(port: RuntimePort): void {
     try {
-      port.postMessage({ type: SDK_HELLO_MESSAGE_TYPE, sdkVersion: SDK_VERSION });
+      port.postMessage({ type: SDK_HELLO_MESSAGE_TYPE, sdkVersion: SDK_VERSION, runtimeFullAccess: this.runtimeFullAccess });
     } catch (err) {
       const error = normalizeError(err, "EXTENSION_DISCONNECTED", "Pedelec extension disconnected.");
       this.handleDisconnect(port, error);
