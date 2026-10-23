@@ -324,6 +324,7 @@ export default function App() {
             model: selectedModel,
             ...(selectedEffort ? { effort: selectedEffort } : {}),
             skills: createDemoSkills(),
+            runtimeFullAccess: true,
           }
         : {
             provider: provider() as ProviderCode,
@@ -1362,7 +1363,7 @@ function initializeClient(setClient: (client: Pedelec | null) => void): Connecti
     typeof window !== "undefined" &&
     typeof (globalThis as { chrome?: { runtime?: { connect?: unknown } } }).chrome?.runtime?.connect === "function";
   try {
-    const sdk = new Pedelec();
+    const sdk = new Pedelec({ runtimeFullAccess: true });
     setClient(sdk);
     return {
       sdk: "initialized",
