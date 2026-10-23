@@ -1,8 +1,13 @@
 [package]
 name = "pedelec-deno"
+default-run = "pedelec-deno"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+
+[[bin]]
+name = "pedelec-ts-runtime"
+path = "src/bin/pedelec-ts-runtime.rs"
 
 [dependencies]
 chrono.workspace = true
@@ -10,3 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 pedelec-core.workspace = true
 pedelec-ipc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

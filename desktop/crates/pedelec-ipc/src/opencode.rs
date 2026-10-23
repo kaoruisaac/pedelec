@@ -1448,7 +1448,7 @@ fn is_pedelec_helper_execution(tool_call: &Value) -> bool {
     let mut descriptions = Vec::new();
     collect_command_descriptions(tool_call, &mut descriptions);
     descriptions.into_iter().any(|description| {
-        ["pedelec-deno", "pedelec-cli"]
+        ["pedelec-ts-runtime", "pedelec-deno", "pedelec-cli"]
             .iter()
             .any(|helper| contains_helper_name(description, helper))
     })
@@ -2295,6 +2295,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::OpenCode,
@@ -2475,6 +2477,7 @@ mod tests {
         );
 
         for tool_call in [
+            json!({ "kind": "execute", "command": "pedelec-ts-runtime --thread-id t000004 run -" }),
             json!({ "kind": "execute", "rawInput": { "command": "pedelec-deno --thread-id t000004 run scripts/task.ts" } }),
             json!({ "kind": "execute", "command": "pedelec-deno --thread-id t000004 run -" }),
             json!({ "kind": "execute", "title": "pedelec-cli --thread-id t000004 tool-spec ask_user" }),
@@ -2535,6 +2538,8 @@ mod tests {
                     .unwrap();
                     core.thread_manager.insert_thread(
                         ThreadState {
+                            runtime_full_access: false,
+                            runtime_authorization: None,
                             thread_id: id.clone(),
                             workspace_id,
                             provider: provider.clone(),
@@ -2653,6 +2658,8 @@ mod tests {
             .unwrap();
             core.thread_manager.insert_thread(
                 ThreadState {
+                    runtime_full_access: false,
+                    runtime_authorization: None,
                     thread_id: "thread-cursor-config".into(),
                     workspace_id: "workspace-cursor-config".into(),
                     provider: ProviderCode::Cursor,
@@ -2901,6 +2908,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "thread-cursor".into(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::Cursor,
@@ -3079,6 +3088,8 @@ mod tests {
                     .unwrap();
                 core.thread_manager.insert_thread(
                     ThreadState {
+                        runtime_full_access: false,
+                        runtime_authorization: None,
                         thread_id: thread_id.clone(),
                         provider: provider.provider_code(),
                         effort_level: Some(EffortLevel::Default),
@@ -3723,6 +3734,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "thread-open".into(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::OpenCode,
@@ -3994,6 +4007,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::OpenCode,
@@ -4130,6 +4145,8 @@ mod tests {
             .unwrap();
         core.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.to_string(),
                 workspace_id,
                 provider,

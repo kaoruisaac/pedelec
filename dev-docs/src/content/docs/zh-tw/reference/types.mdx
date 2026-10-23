@@ -32,6 +32,7 @@ import type {
 
 ```ts
 type PedelecOptions = {
+  runtimeFullAccess?: boolean;
   bridgeTimeoutMs?: number;
 };
 ```
@@ -76,6 +77,7 @@ type CreateSessionInput<
       model?: never;
       effort?: never;
       skills?: SkillsInput<TTools>;
+      runtimeFullAccess?: boolean;
       autoEndOnDisconnect?: boolean;
     }
   | {
@@ -84,6 +86,7 @@ type CreateSessionInput<
       effort?: Effort;
       effortLevel?: never;
       skills?: SkillsInput<TTools>;
+      runtimeFullAccess?: boolean;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -116,6 +119,9 @@ class PedelecWorkspace {
 
 ```ts
 type WorkspaceRunOptions = {
+  runtimeModules?: readonly RuntimeModuleDefinition[];
+  /** @deprecated Use runtimeModules. Do not provide both fields. */
+  denoModules?: readonly RuntimeModuleDefinition[];
   timeoutMs?: number;
 };
 ```
@@ -160,6 +166,8 @@ type PedelecSettings = {
 type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
+  agentSessionsApproved?: boolean;
+  runtimeFullAccessApproved?: boolean;
   origin: string | null;
   appConnected: boolean;
 };
@@ -293,10 +301,10 @@ type ToolDefinition<
 };
 ```
 
-### `DenoModuleDefinition`
+### `RuntimeModuleDefinition`
 
 ```ts
-type DenoModuleDefinition<TName extends string = string> = {
+type RuntimeModuleDefinition<TName extends string = string> = {
   name: TName;
   entry: string;
   description?: string;
@@ -310,8 +318,8 @@ type DenoModuleDefinition<TName extends string = string> = {
 Session skills 使用較嚴格的 shape：`description` 與 `usage` 都必須是 non-empty string。Workspace run 可以使用 minimal base declaration，但每個 module 都必須包含 prepared Vite artifact。
 
 ```ts
-type AgentDenoModuleDefinition<TName extends string = string> =
-  DenoModuleDefinition<TName> & {
+type AgentModuleDefinition<TName extends string = string> =
+  RuntimeModuleDefinition<TName> & {
     description: string;
     usage: string;
   };
@@ -325,7 +333,9 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
-  denoModules?: readonly AgentDenoModuleDefinition[];
+  runtimeModules?: readonly AgentModuleDefinition[];
+  /** @deprecated Use runtimeModules. Do not provide both fields. */
+  denoModules?: readonly AgentModuleDefinition[];
 };
 ```
 
@@ -350,7 +360,7 @@ type WebMcpBinding = {
 };
 ```
 
-`pedelec.webmcp()` 只接受 tools，不接受 `guidance` 或 `denoModules`。`dispose()` 會取消該 binding 的 WebMCP registrations。Availability 與 handler context 限制請見 [Tools API](./tools/)。
+`pedelec.webmcp()` 只接受 tools，不接受 `guidance` 或 `runtimeModules`。`dispose()` 會取消該 binding 的 WebMCP registrations。Availability 與 handler context 限制請見 [Tools API](./tools/)。
 
 ### `ToolNameOf`
 
@@ -576,3 +586,15 @@ type EndedEventContext = PedelecEventContext & {
 ```
 
 Base context optional field 只在 relevant event 存在。ID 要視為 opaque；timestamp 是 browser diagnostics，不是 security claim。
+
+## 舊 Module API 相容性
+
+`DenoModuleDefinition`、`defineDenoModule()` 與 `denoModules` 仍可使用，TypeScript 以 `@deprecated` 提示。請改用 `RuntimeModuleDefinition`、`defineRuntimeModule()` 與 `runtimeModules`。同一個 skills/options 物件只能指定其中一種欄位；即使是空陣列，同時帶兩個欄位也會回 `INVALID_INPUT`。內部 `SerializableSkillsManifest.denoModules` wire 欄位維持不變。
+
+```ts
+import { defineDenoModule, defineRuntimeModule, type DenoModuleDefinition } from "@kaoruisaac/pedelec";
+const legacy: DenoModuleDefinition = defineDenoModule({ name: "project-tools", entry: "./agent/project-tools.ts" });
+await workspace.run('import "project-tools";', { denoModules: [legacy] });
+const modern = defineRuntimeModule({ name: "project-tools", entry: "./agent/project-tools.ts" });
+await workspace.run('import "project-tools";', { runtimeModules: [modern] });
+```

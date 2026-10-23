@@ -1565,10 +1565,30 @@ impl DenoRuntimeDispatcher for RejectDenoRuntimeDispatcher {
 /// runtime to a particular desktop toolkit.
 pub trait CoreIpcPlatformServices: Send + Sync + 'static {
     fn pick_directory(&self) -> Result<Option<PathBuf>, PedelecError>;
+
+    /// Verify the request against an out-of-band managed Native session.
+    /// Implementations must bind the authenticated Extension connection, SDK
+    /// Instance requirement and current Agent/Full Access grants. Neither
+    /// callerOrigin nor payload approval booleans are evidence of authority.
+    /// Return the Core-issued capability stored in that managed session.
+    /// For revoke requests, authenticate the session even after its grant has
+    /// been withdrawn. Legacy/unconfigured transports fail closed.
+    fn authorize_extension_runtime_request(
+        &self,
+        _request: &CoreIpcRequest,
+    ) -> Result<pedelec_core::ExtensionRuntimeAuthorization, PedelecError> {
+        Err(PedelecError::new(
+            error_codes::INVALID_INPUT,
+            "trusted Extension Runtime authorization is unavailable",
+        ))
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct NoopCoreIpcPlatformServices;
+
+mod native_runtime;
+pub use native_runtime::{attest_native_runtime_request, NativeRuntimePlatformServices};
 
 impl CoreIpcPlatformServices for NoopCoreIpcPlatformServices {
     fn pick_directory(&self) -> Result<Option<PathBuf>, PedelecError> {
@@ -2013,6 +2033,12 @@ pub fn start_core_ipc_server_with_runtime_path_services_dispatchers(
         pid: std::process::id(),
     };
     let runtime_file_path = runtime_file_path.into();
+    let platform_services: Arc<dyn CoreIpcPlatformServices> =
+        Arc::new(NativeRuntimePlatformServices::install(
+            platform_services,
+            runtime.clone(),
+            &runtime_file_path,
+        )?);
     write_runtime_file(&runtime_file_path, &runtime_file)?;
     runtime
         .lock()
@@ -2467,19 +2493,54 @@ fn handle_core_ipc_request_with_services(
     let response = match request.r#type.as_str() {
         "open_workspace" => handle_open_workspace_request(&request, runtime, platform_services),
         "create_thread" => match decode_payload::<CreateThreadInput>(&request) {
-            Ok(input) => match match request.caller_origin.as_deref() {
-                Some(origin) => runtime.lock().unwrap().create_sdk_thread(
-                    input,
-                    origin,
-                    request.caller_sdk_version.as_deref(),
-                ),
-                None => runtime.lock().unwrap().create_thread(input),
+            Ok(input) => match if input.runtime_full_access {
+                platform_services
+                    .authorize_extension_runtime_request(&request)
+                    .and_then(|authorization| {
+                        ensure_runtime_authorization_origin(&request, &authorization)?;
+                        runtime
+                            .lock()
+                            .unwrap()
+                            .create_trusted_extension_thread(input, &authorization)
+                    })
+            } else {
+                match request.caller_origin.as_deref() {
+                    Some(origin) => runtime.lock().unwrap().create_sdk_thread(
+                        input,
+                        origin,
+                        request.caller_sdk_version.as_deref(),
+                    ),
+                    None => runtime.lock().unwrap().create_thread(input),
+                }
             } {
                 Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
                 Err(err) => error_response(&request.request_id, err),
             },
             Err(err) => error_response(&request.request_id, err),
         },
+        "revoke_runtime_full_access" => {
+            let result = platform_services
+                .authorize_extension_runtime_request(&request)
+                .and_then(|authorization| {
+                    ensure_runtime_authorization_origin(&request, &authorization)?;
+                    runtime
+                        .lock()
+                        .unwrap()
+                        .revoke_extension_runtime_full_access(&authorization)
+                });
+            match result {
+                Ok(thread_ids) => {
+                    for thread_id in &thread_ids {
+                        deno_dispatcher.cancel_thread(thread_id);
+                    }
+                    ok_response(
+                        &request.request_id,
+                        serde_json::json!({ "revoked": true, "threadIds": thread_ids }),
+                    )
+                }
+                Err(error) => error_response(&request.request_id, error),
+            }
+        }
         "list_providers" => match wait_for_provider_readiness(&runtime) {
             Ok(()) => match runtime.lock().unwrap().list_sdk_providers() {
                 Ok(providers) => ok_response(&request.request_id, serde_json::json!(providers)),
@@ -2730,6 +2791,19 @@ fn handle_core_ipc_request_with_services(
         Some(paths) => sanitize_sdk_error_response(response, &paths),
         None => response,
     }
+}
+
+fn ensure_runtime_authorization_origin(
+    request: &CoreIpcRequest,
+    authorization: &pedelec_core::ExtensionRuntimeAuthorization,
+) -> Result<(), PedelecError> {
+    if request.caller_origin.as_deref() != Some(authorization.origin()) {
+        return Err(PedelecError::new(
+            error_codes::IPC_UNAUTHORIZED,
+            "Runtime authorization does not match the caller Origin",
+        ));
+    }
+    Ok(())
 }
 
 fn handle_open_workspace_request(
@@ -3905,6 +3979,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "thread-codex".into(),
                 workspace_id: workspace_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
@@ -4081,6 +4157,8 @@ mod tests {
         std::fs::create_dir_all(pedelec_core::thread_skills_root(&workspace, thread_id)).unwrap();
         runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id: workspace_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
@@ -4149,6 +4227,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id: workspace_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
@@ -4251,6 +4331,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id: workspace_id.into(),
                 provider: pedelec_core::ProviderCode::Codex,
@@ -4845,6 +4927,8 @@ done
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             pedelec_core::ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id: format!("workspace-{thread_id}"),
                 provider: pedelec_core::ProviderCode::Codex,
@@ -4868,6 +4952,9 @@ done
         runtime
     }
 }
+
+#[cfg(test)]
+mod runtime_access_tests;
 
 #[cfg(test)]
 mod deno_ipc_tests {
@@ -4928,6 +5015,8 @@ mod deno_ipc_tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id,
                 provider: ProviderCode::Codex,
@@ -4960,6 +5049,7 @@ mod deno_ipc_tests {
         let created = runtime_guard
             .create_sdk_thread(
                 CreateThreadInput {
+                    runtime_full_access: false,
                     provider: ProviderCode::Codex,
                     effort_level: None,
                     model: Some("managed-test-model".into()),
@@ -5488,6 +5578,8 @@ mod deno_ipc_tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "thread-module-ipc".into(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,

@@ -124,7 +124,9 @@ pub fn resolve_server_config_from(
             .or_else(|| env_file_path(&file_env, "PEDELEC_CLI_PATH")),
         pedelec_deno_path: inputs
             .pedelec_deno_path
+            .or_else(|| env_path("PEDELEC_TS_RUNTIME_PATH"))
             .or_else(|| env_path("PEDELEC_DENO_PATH"))
+            .or_else(|| env_file_path(&file_env, "PEDELEC_TS_RUNTIME_PATH"))
             .or_else(|| env_file_path(&file_env, "PEDELEC_DENO_PATH")),
         core_runtime_file: inputs
             .core_runtime_file

@@ -155,13 +155,20 @@ test("checksum verification fails on mismatch", () => {
   );
 });
 
-test("public helper names contain pedelec-deno but never raw deno", () => {
+test("public helper names contain both runtime commands but never raw deno", () => {
   assert.deepEqual(publicHelperBinaryNames("win32"), [
     "pedelec-cli.exe",
+    "pedelec-ts-runtime.exe",
     "pedelec-deno.exe",
     "pedelec-agent.exe",
     "pedelec-native-host.exe",
   ]);
+  for (const platform of ["win32", "darwin", "linux"]) {
+    const suffix = platform === "win32" ? ".exe" : "";
+    const names = publicHelperBinaryNames(platform);
+    assert.ok(names.includes(`pedelec-ts-runtime${suffix}`));
+    assert.ok(names.includes(`pedelec-deno${suffix}`));
+  }
   assert.ok(PUBLIC_HELPER_BINARY_STEMS.includes("pedelec-deno"));
   assert.ok(!PUBLIC_HELPER_BINARY_STEMS.includes(RAW_DENO_BINARY_STEM));
   assert.equal(platformExecutableName("win32"), "deno.exe");

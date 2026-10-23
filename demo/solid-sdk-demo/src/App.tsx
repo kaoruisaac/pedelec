@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import { ProviderCode, Pedelec, PedelecWorkspace, defineTool, type Effort, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema, type WorkspaceRunResult, defineDenoModule } from "@kaoruisaac/pedelec";
+import { ProviderCode, Pedelec, PedelecWorkspace, defineTool, type Effort, type ProviderInfo, type PedelecError, type PedelecSession, type PedelecSessionStatus, type Asset, type ToolArgsSchema, type WorkspaceRunResult, defineRuntimeModule } from "@kaoruisaac/pedelec";
 
 const MAX_EVENTS = 300;
 const MAX_ASSET_SIZE_BYTES = 100 * 1024 * 1024;
@@ -108,7 +108,7 @@ await Deno.writeTextFile(
 console.log("workspace-run-demo.txt created");
 `.trim();
 
-const workspaceInspector = defineDenoModule({
+const workspaceInspector = defineRuntimeModule({
   name: "workspace-inspector",
   entry: "./workspace-inspector.ts",
 });
@@ -160,8 +160,8 @@ function createDemoSkills() {
         timeoutMs: 60000,
       }),
     ],
-    denoModules: [
-      defineDenoModule({
+    runtimeModules: [
+      defineRuntimeModule({
         name: "memory-manager",
         description: "when you need to remember something, you can use this tool",
         entry: "./note-generator.ts",
@@ -445,10 +445,10 @@ export default function App() {
     try {
       const result = await workspace.run(workspaceInspectorScript, {
         timeoutMs: 60_000,
-        denoModules: [workspaceInspector],
+        runtimeModules: [workspaceInspector],
       });
       setWorkspaceRunResult(result);
-      appendGlobalEvent("workspace_run_deno_module_resolved", {
+      appendGlobalEvent("workspace_run_runtime_module_resolved", {
         exitCode: result.exitCode,
         stdoutTruncated: result.stdoutTruncated,
         stderrTruncated: result.stderrTruncated,
@@ -1170,7 +1170,7 @@ export default function App() {
                       disabled={workspaceOperation() !== "idle"}
                       onClick={() => void runWorkspaceModuleDemo()}
                     >
-                      {workspaceOperation() === "run" ? "Running..." : "Run Deno Module demo"}
+                      {workspaceOperation() === "run" ? "Running..." : "Run Runtime Module demo"}
                     </button>
                   </div>
                   <Show when={workspaceRunResult()}>

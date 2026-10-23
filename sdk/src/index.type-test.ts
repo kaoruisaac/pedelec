@@ -3,6 +3,8 @@ import {
   PedelecWorkspace,
   defineTool,
   defineDenoModule,
+  defineRuntimeModule,
+  type RuntimeModuleDefinition,
   type DenoModuleDefinition,
   type ChatEventContext,
   type ChatDeltaEventContext,
@@ -416,3 +418,25 @@ const baseContext: PedelecEventContext = {
 };
 
 void baseContext;
+
+const runtimeTools = defineRuntimeModule({
+  name: "runtime-tools", entry: "./helpers.ts", description: "Helpers", usage: 'import "runtime-tools";',
+});
+const runtimeName: "runtime-tools" = runtimeTools.name;
+const runtimeDefinition: RuntimeModuleDefinition<"runtime-tools"> = runtimeTools;
+void runtimeName;
+void runtimeDefinition;
+// @ts-expect-error Runtime Module entry is required
+ defineRuntimeModule({ name: "missing-entry" });
+// @ts-expect-error Instance flag must be boolean
+new Pedelec({ runtimeFullAccess: "true" });
+async function runtimePublicContracts(workspace: PedelecWorkspace) {
+  const client = new Pedelec({ runtimeFullAccess: true });
+  await client.createSession({ runtimeFullAccess: true, skills: { guidance: "", tools: [], runtimeModules: [runtimeTools] } });
+  await client.createSession({ model: "model", runtimeFullAccess: true });
+  await workspace.createSession({ provider: "codex", runtimeFullAccess: true, skills: { guidance: "", tools: [], runtimeModules: [runtimeTools] } });
+  await workspace.run("", { runtimeModules: [runtimeTools] });
+  // @ts-expect-error Session flag must be boolean
+  await client.createSession({ runtimeFullAccess: 1 });
+}
+void runtimePublicContracts;

@@ -15,5 +15,14 @@
   "approvedSiteTitle": { "message": "已允許的網站" },
   "approvedSiteDescription": { "message": "此來源可以透過擴充功能建立本機 Pedelec Agent 工作階段。" },
   "revokeApproval": { "message": "撤銷允許" },
-  "unknownProviderError": { "message": "未知的 Provider 錯誤" }
+  "unknownProviderError": { "message": "未知的 Provider 錯誤" },
+  "allowAgentSessions": { "message": "允許代理工作階段" },
+  "agentSessionsDescription": { "message": "允許此網站建立及控制本機代理工作階段。" },
+  "allowFullRuntimeAccess": { "message": "允許 Runtime 完整存取權限" },
+  "fullRuntimeAccessDescription": { "message": "允許腳本存取工作區外的檔案、使用網路、讀取環境變數及執行本機程式。" },
+  "fullRuntimeAccessWarning": { "message": "此執行個體需要 Runtime 完整存取權限。僅核准代理工作階段會使授權不完整，createSession() 將失敗。" },
+  "authorizationIncomplete": { "message": "授權不完整" },
+  "reviewPermissions": { "message": "檢視權限" },
+  "revokeFullAccess": { "message": "撤銷完整存取權限" },
+  "revokeAgentSessions": { "message": "撤銷代理工作階段授權" }
 }

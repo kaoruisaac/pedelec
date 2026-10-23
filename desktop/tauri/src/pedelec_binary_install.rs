@@ -190,6 +190,18 @@ pub fn pedelec_tool_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_tool_binary_name()))
 }
 
+pub fn pedelec_ts_runtime_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "pedelec-ts-runtime.exe"
+    } else {
+        "pedelec-ts-runtime"
+    }
+}
+
+pub fn pedelec_ts_runtime_install_path() -> Result<PathBuf, PedelecError> {
+    Ok(pedelec_home_dir()?.join(pedelec_ts_runtime_binary_name()))
+}
+
 pub fn pedelec_deno_binary_name() -> &'static str {
     if cfg!(windows) {
         "pedelec-deno.exe"
@@ -251,6 +263,31 @@ pub fn install_pedelec_tool_from_paths(
     )
 }
 
+pub fn install_pedelec_ts_runtime_from_path(
+    source: impl AsRef<Path>,
+) -> Result<BinaryInstallOutcome, PedelecError> {
+    install_binary_from_paths(
+        source,
+        pedelec_ts_runtime_install_path()?,
+        "pedelec-ts-runtime",
+        "cannot install pedelec-ts-runtime binary",
+        LockedTargetPolicy::DeferOnWindowsExecutableLock,
+    )
+}
+
+pub fn install_pedelec_ts_runtime_from_paths(
+    source: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+) -> Result<BinaryInstallOutcome, PedelecError> {
+    install_binary_from_paths(
+        source,
+        target,
+        "pedelec-ts-runtime",
+        "cannot install pedelec-ts-runtime binary",
+        LockedTargetPolicy::DeferOnWindowsExecutableLock,
+    )
+}
+
 pub fn install_pedelec_deno_from_path(
     source: impl AsRef<Path>,
 ) -> Result<BinaryInstallOutcome, PedelecError> {
@@ -259,7 +296,7 @@ pub fn install_pedelec_deno_from_path(
         pedelec_deno_install_path()?,
         "pedelec-deno",
         "cannot install pedelec-deno binary",
-        LockedTargetPolicy::Fail,
+        LockedTargetPolicy::DeferOnWindowsExecutableLock,
     )
 }
 
@@ -272,7 +309,7 @@ pub fn install_pedelec_deno_from_paths(
         target,
         "pedelec-deno",
         "cannot install pedelec-deno binary",
-        LockedTargetPolicy::Fail,
+        LockedTargetPolicy::DeferOnWindowsExecutableLock,
     )
 }
 
@@ -313,8 +350,30 @@ fn install_binary_from_paths(
         binary_label,
         install_error_message,
         locked_target_policy,
-        |source, target| fs::copy(source, target),
+        |source, target| copy_binary_for_install(source, target),
     )
+}
+
+fn copy_binary_for_install(source: &Path, target: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let staged = target.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let bytes = fs::copy(source, &staged)?;
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+            fs::rename(&staged, target)?;
+            Ok(bytes)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&staged);
+        }
+        result
+    }
+    #[cfg(not(unix))]
+    {
+        fs::copy(source, target)
+    }
 }
 
 fn install_binary_from_paths_with_copy<F>(
@@ -379,7 +438,7 @@ where
             cfg!(windows),
         ) {
             #[cfg(debug_assertions)]
-            eprintln!("pedelec-native-host update deferred because installed executable is in use");
+            eprintln!("{binary_label} update deferred because installed executable is in use");
             return Ok(BinaryInstallOutcome {
                 path: target.to_path_buf(),
                 status: BinaryInstallStatus::Deferred,
@@ -634,6 +693,90 @@ mod tests {
     }
 
     #[test]
+    fn runtime_helpers_install_and_upgrade_both_public_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("resource");
+        for name in [pedelec_ts_runtime_binary_name(), pedelec_deno_binary_name()] {
+            let target = temp.path().join("installed").join(name);
+            let install: fn(&PathBuf, &PathBuf) -> Result<BinaryInstallOutcome, PedelecError> =
+                if name == pedelec_ts_runtime_binary_name() {
+                    |source, target| install_pedelec_ts_runtime_from_paths(source, target)
+                } else {
+                    |source, target| install_pedelec_deno_from_paths(source, target)
+                };
+            fs::write(&source, b"version-one").unwrap();
+            assert_eq!(
+                install(&source, &target).unwrap().status,
+                BinaryInstallStatus::Installed
+            );
+            assert_eq!(
+                install(&source, &target).unwrap().status,
+                BinaryInstallStatus::Unchanged
+            );
+            fs::write(&source, b"version-two").unwrap();
+            assert_eq!(
+                install(&source, &target).unwrap().status,
+                BinaryInstallStatus::Installed
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"version-two");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                    0o755
+                );
+            }
+        }
+        assert_eq!(
+            pedelec_ts_runtime_install_path()
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            pedelec_ts_runtime_binary_name()
+        );
+    }
+
+    #[test]
+    fn runtime_upgrade_preserves_helpers_held_by_running_agents() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("resource");
+        fs::write(&source, b"new-runtime").unwrap();
+        for name in [pedelec_ts_runtime_binary_name(), pedelec_deno_binary_name()] {
+            let target = temp.path().join(name);
+            fs::write(&target, b"old-runtime").unwrap();
+            let mut options = fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // An agent holding an executable permits reads but prevents replacement.
+                options.share_mode(1);
+            }
+            let mut running = options.open(&target).unwrap();
+            let outcome = if name == pedelec_ts_runtime_binary_name() {
+                install_pedelec_ts_runtime_from_paths(&source, &target)
+            } else {
+                install_pedelec_deno_from_paths(&source, &target)
+            }
+            .unwrap();
+            let mut old_bytes = Vec::new();
+            running.read_to_end(&mut old_bytes).unwrap();
+            assert_eq!(old_bytes, b"old-runtime");
+            #[cfg(windows)]
+            {
+                assert_eq!(outcome.status, BinaryInstallStatus::Deferred);
+                assert_eq!(fs::read(&target).unwrap(), b"old-runtime");
+            }
+            #[cfg(unix)]
+            {
+                assert_eq!(outcome.status, BinaryInstallStatus::Installed);
+                assert_eq!(fs::read(&target).unwrap(), b"new-runtime");
+            }
+        }
+    }
+
+    #[test]
     fn unchanged_binary_does_not_invoke_copy() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -723,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn only_windows_sharing_violation_for_native_host_may_be_deferred() {
+    fn only_windows_executable_sharing_violation_may_be_deferred() {
         assert!(should_defer_locked_target(
             LockedTargetPolicy::DeferOnWindowsExecutableLock,
             true,

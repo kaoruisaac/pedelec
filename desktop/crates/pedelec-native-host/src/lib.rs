@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 const CORE_READY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 const CORE_READY_MAX_WAIT: Duration = Duration::from_secs(10);
 
+#[cfg(test)]
+mod runtime_admission_tests;
+
 pub fn run() -> io::Result<()> {
     run_chrome_native_host(None)
 }
@@ -44,7 +47,7 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
             }
         };
 
-        let request = match native_message_to_core_request(message) {
+        let request = match admit_native_message(message, runtime_file_path.as_deref()) {
             Ok(request) => request,
             Err(response) => {
                 let mut stdout = stdout.lock().unwrap();
@@ -114,6 +117,43 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
     }
 
     Ok(())
+}
+
+// This function is exclusively called on Chrome's nativeMessaging pipe, never
+// on ordinary IPC. Grant fields are constructed by Extension background, after
+// deriving Origin from onConnectExternal.sender and reading persisted approval.
+fn admit_native_message(
+    message: Value,
+    runtime_path: Option<&Path>,
+) -> Result<CoreIpcRequest, NativeProtocolResponse> {
+    let grant = message.get("nativeRuntimeGrant").cloned();
+    let mut request = native_message_to_core_request(message)?;
+    if request.r#type == "revoke_runtime_full_access"
+        || (request.r#type == "create_thread"
+            && request
+                .payload
+                .as_ref()
+                .is_some_and(|p| p["runtimeFullAccess"] == true))
+    {
+        let result = (|| {
+            let grant = grant.ok_or_else(|| {
+                PedelecError::new(
+                    error_codes::IPC_UNAUTHORIZED,
+                    "Extension Runtime grant envelope is required",
+                )
+            })?;
+            ensure_core_runtime_available(runtime_path)?;
+            let path = match runtime_path {
+                Some(p) => p.to_path_buf(),
+                None => default_runtime_file_path()?,
+            };
+            pedelec_ipc::attest_native_runtime_request(&mut request, grant, &path)
+        })();
+        if let Err(error) = result {
+            return Err(native_error_response(&request.request_id, error));
+        }
+    }
+    Ok(request)
 }
 
 fn duplicate_subscription_response(
@@ -232,6 +272,7 @@ fn native_message_to_core_request(
                 "effortLevel",
                 "skills",
                 "workspaceId",
+                "runtimeFullAccess",
             ],
         ))),
         "send_text"
@@ -282,6 +323,7 @@ fn native_message_to_core_request(
         ))),
         // The connectivity probe deliberately has no caller-controlled payload.
         "ping" => Some(serde_json::json!({})),
+        "revoke_runtime_full_access" => Some(serde_json::json!({})),
         "submit_tool_result" => {
             if let Some(value) = object.remove("toolRequestId") {
                 object.insert("requestId".to_string(), value);
@@ -979,6 +1021,26 @@ mod tests {
     }
 
     #[test]
+    fn full_access_request_is_forwarded_without_fabricating_authorization() {
+        let request = native_message_to_core_request(json!({
+            "type": "create_thread", "requestId": "runtime", "provider": "codex",
+            "callerOrigin": "https://app.example.test", "runtimeFullAccess": true,
+            "runtimeFullAccessApproved": true, "runtimeFullAccessApplied": true,
+        }))
+        .unwrap();
+        let payload = request.payload.unwrap();
+        assert_eq!(payload["runtimeFullAccess"], true);
+        assert!(payload.get("runtimeFullAccessApproved").is_none());
+        assert!(payload.get("runtimeFullAccessApplied").is_none());
+        let revoke = native_message_to_core_request(json!({
+            "type": "revoke_runtime_full_access", "requestId": "revoke",
+            "callerOrigin": "https://app.example.test", "origin": "https://victim.example.test",
+        }))
+        .unwrap();
+        assert_eq!(revoke.payload, Some(json!({})));
+    }
+
+    #[test]
     fn phase09_native_protocol_converts_full_mock_lifecycle_without_http_transport() {
         let create = native_message_to_core_request(json!({
             "type": "create_thread",
@@ -1422,6 +1484,8 @@ mod tests {
             .unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id,
                 provider: ProviderCode::Codex,

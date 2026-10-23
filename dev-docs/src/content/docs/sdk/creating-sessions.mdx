@@ -76,7 +76,7 @@ const explicitSession = await pedelec.createSession({
 
 `model` is trimmed and used directly. Model-only requests are valid and use provider-default effort behavior. `effort` requires `model`, and explicit mode cannot include `effortLevel`. The SDK and Extension pass the declarative values through, while Core validates provider support and stores the final immutable snapshot. The SDK does not maintain a model catalog; availability, model validity, effort support, and entitlement remain provider-dependent.
 
-For explicit model mode, Core returns `explicitModelConfigApplied: true`. The SDK requires this acknowledgment before uploading Deno Modules or exposing the session; an older Extension/Desktop combination is aborted and reported as incompatible instead of silently using profile semantics.
+For explicit model mode, Core returns `explicitModelConfigApplied: true`. The SDK requires this acknowledgment before uploading Runtime Modules or exposing the session; an older Extension/Desktop combination is aborted and reported as incompatible instead of silently using profile semantics.
 
 ## Skills
 
@@ -95,9 +95,9 @@ const session = await pedelec.createSession({
 
 Desktop Settings is the model source only in profile mode. Explicit model mode does not read or merge with a Desktop profile.
 
-## Deno Modules
+## Runtime Modules
 
-Configure the Vite plugin, then mount modules for an Agent Session through `skills.denoModules`:
+Configure the Vite plugin, then mount modules for an Agent Session through `skills.runtimeModules`:
 
 ```ts
 // vite.config.ts
@@ -108,9 +108,9 @@ export default defineConfig({ plugins: [pedelecVitePlugin()] });
 ```
 
 ```ts
-import { defineDenoModule } from "@kaoruisaac/pedelec";
+import { defineRuntimeModule } from "@kaoruisaac/pedelec";
 
-const projectTools = defineDenoModule({
+const projectTools = defineRuntimeModule({
   name: "project-tools",
   description: "Utilities for project data processing.",
   entry: "./agent/project-tools.ts",
@@ -122,12 +122,12 @@ const session = await pedelec.createSession({
   skills: {
     guidance: "Use project-tools for project data tasks.",
     tools: [],
-    denoModules: [projectTools],
+    runtimeModules: [projectTools],
   },
 });
 ```
 
-Session Deno Modules are scoped to that Thread's Agent. See [Deno in Pedelec](../deno/overview/) for choosing an execution path, [Deno Modules](../deno/modules/) for preparation and use, and [Tools API](../reference/tools/) for exact contracts.
+Session Runtime Modules are scoped to that Thread's Agent. See [TypeScript Runtime in Pedelec](../deno/overview/) for choosing an execution path, [Runtime Modules](../deno/modules/) for preparation and use, and [Tools API](../reference/tools/) for exact contracts.
 
 ## Ollama
 
@@ -144,3 +144,21 @@ session.onChat((_text, context) => {
 ```
 
 `autoEndOnDisconnect` remains available for lifecycle control. Tool type inference is unchanged.
+
+
+## Explicit Full Runtime Access
+
+Sandbox is the default. Full Access requires three separate conditions: an Instance created with `runtimeFullAccess: true`, explicit user approval of both **Allow Agent Sessions** and **Allow Full Runtime Access** in the Extension, and `runtimeFullAccess: true` on session creation.
+
+```ts
+const privileged = new Pedelec({ runtimeFullAccess: true });
+// After the user explicitly grants both permissions in the Extension:
+const sandbox = await privileged.createSession({ runtimeFullAccess: false });
+const full = await privileged.createSession({ runtimeFullAccess: true });
+```
+
+Review the Extension permissions before creating sessions. An Instance requesting Full Access cannot create any session with only the Agent Sessions grant, including a Sandbox session. A standard Instance cannot request a Full Access session, even if another Instance on the same Origin has permission. Ordinary Origin approval never substitutes for the Full Access grant; the Popup offers an additional permission review with Full Access unchecked by default. `getApprovalStatus()` only reads status and does not open that review.
+
+The Thread mode is fixed at creation and preserved on resume. Instances on the same Origin and Threads in the same Workspace retain their own requested modes. `workspace.run()` always stays Sandbox, and Provider sandbox settings are unchanged. Full Access changes the TypeScript Runtime's OS permissions only. Revoking the Full Access grant rejects subsequent high-privilege execution and attempts to cancel affected running processes; unrelated Origins retain their grants.
+
+Upgrade the SDK, Extension, and Desktop together when using Full Access. Missing mode acknowledgment is an error, never a successful downgrade. See [Error Codes](../reference/error-codes/) for authorization and protocol failures.

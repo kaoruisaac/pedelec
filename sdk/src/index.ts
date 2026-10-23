@@ -64,8 +64,8 @@ export type RuntimeModuleDefinition<TName extends string = string> = {
 /** @deprecated Use RuntimeModuleDefinition. */
 export type DenoModuleDefinition<TName extends string = string> = RuntimeModuleDefinition<TName>;
 
-type AgentDenoModuleDefinition<TName extends string = string> =
-  DenoModuleDefinition<TName> & {
+type AgentRuntimeModuleDefinition<TName extends string = string> =
+  RuntimeModuleDefinition<TName> & {
     description: string;
     usage: string;
   };
@@ -322,9 +322,9 @@ export type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
-  runtimeModules?: readonly AgentDenoModuleDefinition[];
+  runtimeModules?: readonly AgentRuntimeModuleDefinition[];
   /** @deprecated Use runtimeModules. */
-  denoModules?: readonly AgentDenoModuleDefinition[];
+  denoModules?: readonly AgentRuntimeModuleDefinition[];
 };
 
 export type WebMcpSkillsInput<
@@ -356,7 +356,7 @@ export type SerializableToolManifest = {
   timeoutMs?: number;
 };
 
-type SerializableDenoModuleManifest = {
+type SerializableRuntimeModuleManifest = {
   name: string;
   description: string;
   usage: string;
@@ -366,9 +366,9 @@ type SerializableDenoModuleManifest = {
 export type SerializableSkillsManifest = {
   guidance: string;
   tools: SerializableToolManifest[];
-  runtimeModules?: SerializableDenoModuleManifest[];
+  runtimeModules?: SerializableRuntimeModuleManifest[];
   /** @deprecated Use runtimeModules. Legacy wire field. */
-  denoModules?: SerializableDenoModuleManifest[];
+  denoModules?: SerializableRuntimeModuleManifest[];
 };
 
 export type WorkspaceRunOptions = {
@@ -740,7 +740,7 @@ function resolveRuntimeModules(options: { runtimeModules?: unknown; denoModules?
   if ("runtimeModules" in options && "denoModules" in options) {
     throw makeError("INVALID_INPUT", "runtimeModules and denoModules cannot be combined");
   }
-  return options.runtimeModules ?? options.denoModules;
+  return "runtimeModules" in options ? options.runtimeModules : options.denoModules;
 }
 
 function normalizeRuntimeFullAccess(value: unknown): boolean {
@@ -753,22 +753,22 @@ function normalizeRuntimeFullAccess(value: unknown): boolean {
 type NormalizedSkillsInput = {
   manifest?: SerializableSkillsManifest;
   handlers: Map<string, ToolSpecificHandler>;
-  denoModules: PreparedDenoModuleForSession[];
+  runtimeModules: PreparedRuntimeModuleForSession[];
 };
 
-type PreparedDenoModuleForSession = {
+type PreparedRuntimeModuleForSession = {
   name: string;
   runtimeSource: string;
   typesSource: string;
 };
 
-type PreparedWorkspaceDenoModule = {
+type PreparedWorkspaceRuntimeModule = {
   name: string;
   runtimeSource: string;
   typesSource: string;
 };
 
-function normalizeWorkspaceDenoModules(value: unknown): PreparedWorkspaceDenoModule[] {
+function normalizeWorkspaceDenoModules(value: unknown): PreparedWorkspaceRuntimeModule[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) {
     throw makeError("INVALID_INPUT", "options.denoModules must be an array");
@@ -894,7 +894,7 @@ function normalizeToolDefinitions(
 }
 
 function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
-  if (value === undefined) return { handlers: new Map(), denoModules: [] };
+  if (value === undefined) return { handlers: new Map(), runtimeModules: [] };
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw makeError("INVALID_INPUT", "skills must be an object");
   }
@@ -913,9 +913,9 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
   }
 
   const { tools, handlers } = normalizeToolDefinitions(skills.tools);
-  const seenDenoModuleNames = new Set<string>();
+  const seenRuntimeModuleNames = new Set<string>();
 
-  const denoModules = ((modules ?? []) as readonly AgentDenoModuleDefinition[]).map((module, index) => {
+  const runtimeModules = ((modules ?? []) as readonly AgentRuntimeModuleDefinition[]).map((module, index) => {
     if (!module || typeof module !== "object" || Array.isArray(module)) {
       throw makeError("INVALID_INPUT", "skills.denoModules entries must be objects", { index });
     }
@@ -927,12 +927,12 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
         moduleName: rawModule.name,
       });
     }
-    if (seenDenoModuleNames.has(rawModule.name)) {
+    if (seenRuntimeModuleNames.has(rawModule.name)) {
       throw makeError("INVALID_INPUT", "duplicate Deno Module name", {
         moduleName: rawModule.name,
       });
     }
-    seenDenoModuleNames.add(rawModule.name);
+    seenRuntimeModuleNames.add(rawModule.name);
 
     if (typeof rawModule.description !== "string" || rawModule.description.trim().length === 0) {
       throw makeError("INVALID_INPUT", "Deno Module description must be a non-empty string", {
@@ -978,9 +978,10 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
     manifest: {
       guidance: skills.guidance,
       tools,
-      ...(denoModules.length > 0
+      ...(runtimeModules.length > 0
         ? {
-            denoModules: denoModules.map(({ name, description, usage, preferStdinExecution }) => ({
+            // Legacy Extension wire field; normalized data uses Runtime names.
+            denoModules: runtimeModules.map(({ name, description, usage, preferStdinExecution }) => ({
               name,
               description,
               usage,
@@ -990,7 +991,7 @@ function normalizeSkillsInput(value: unknown): NormalizedSkillsInput {
         : {}),
     },
     handlers,
-    denoModules: denoModules.map(({ name, artifact }) => ({
+    runtimeModules: runtimeModules.map(({ name, artifact }) => ({
       name,
       runtimeSource: artifact.runtimeSource,
       typesSource: artifact.typesSource,
@@ -1178,7 +1179,7 @@ export class PedelecWorkspace {
       return Promise.reject(makeError("INVALID_INPUT", "timeoutMs must be a positive integer"));
     }
 
-    let modules: PreparedWorkspaceDenoModule[];
+    let modules: PreparedWorkspaceRuntimeModule[];
     try {
       modules = normalizeWorkspaceDenoModules(resolveRuntimeModules(options));
     } catch (error) {
@@ -1330,9 +1331,8 @@ export class Pedelec {
     if (runtimeFullAccess && !this.runtimeFullAccess) {
       throw makeError("INVALID_INPUT", "Session runtimeFullAccess requires an Instance with runtimeFullAccess enabled");
     }
-    if (this.runtimeFullAccess && !(await this.getApprovalStatus()).approved) {
-      throw makeError("RUNTIME_FULL_ACCESS_NOT_APPROVED", "This Instance requires explicit Full Runtime Access approval");
-    }
+    // Admission belongs to the Extension: create_session must reach its pending
+    // approval queue so the first Full Instance request can open the Popup.
     const resolvedOrPromise = this.resolveCreateSessionInput(input);
     const resolvedInput =
       resolvedOrPromise instanceof Promise ? await resolvedOrPromise : resolvedOrPromise;
@@ -1381,10 +1381,10 @@ export class Pedelec {
     }
 
     try {
-      for (const module of resolvedInput.denoModules) {
+      for (const module of resolvedInput.runtimeModules) {
         await this.uploadDenoModuleArtifact(normalizedResult.sessionId, module);
       }
-      if (resolvedInput.denoModules.length > 0) {
+      if (resolvedInput.runtimeModules.length > 0) {
         await this.completeSessionSetup(normalizedResult.sessionId);
       }
     } catch (error) {
@@ -1412,7 +1412,7 @@ export class Pedelec {
 
   private async uploadDenoModuleArtifact(
     sessionId: string,
-    module: PreparedDenoModuleForSession,
+    module: PreparedRuntimeModuleForSession,
   ): Promise<void> {
     await this.uploadDenoModuleArtifactWithTicket(
       module,
@@ -1424,7 +1424,7 @@ export class Pedelec {
   /** @internal */
   async uploadWorkspaceDenoModuleArtifact(
     workspaceId: string,
-    module: PreparedWorkspaceDenoModule,
+    module: PreparedWorkspaceRuntimeModule,
   ): Promise<void> {
     await this.uploadDenoModuleArtifactWithTicket(
       module,
@@ -1434,7 +1434,7 @@ export class Pedelec {
   }
 
   private async uploadDenoModuleArtifactWithTicket(
-    module: PreparedDenoModuleForSession | PreparedWorkspaceDenoModule,
+    module: PreparedRuntimeModuleForSession | PreparedWorkspaceRuntimeModule,
     ticketType: "create_deno_module_upload" | "create_workspace_deno_module_upload",
     ticketPayload: Record<string, unknown>,
   ): Promise<void> {
@@ -1756,7 +1756,7 @@ export class Pedelec {
         effort?: Effort;
         skills?: SerializableSkillsManifest;
         inlineToolHandlers: Map<string, ToolSpecificHandler>;
-        denoModules: PreparedDenoModuleForSession[];
+        runtimeModules: PreparedRuntimeModuleForSession[];
         autoEndOnDisconnect: boolean;
       }
     | Promise<{
@@ -1766,7 +1766,7 @@ export class Pedelec {
     effort?: Effort;
     skills?: SerializableSkillsManifest;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
-    denoModules: PreparedDenoModuleForSession[];
+    runtimeModules: PreparedRuntimeModuleForSession[];
     autoEndOnDisconnect: boolean;
   }> {
     const raw = (input ?? {}) as {
@@ -1802,7 +1802,7 @@ export class Pedelec {
         effort,
         skills: normalizedSkills.manifest,
         inlineToolHandlers: normalizedSkills.handlers,
-        denoModules: normalizedSkills.denoModules,
+        runtimeModules: normalizedSkills.runtimeModules,
         autoEndOnDisconnect,
       };
     }
@@ -1830,7 +1830,7 @@ export class Pedelec {
       effortLevel,
       skills: normalizedSkills.manifest,
       inlineToolHandlers: normalizedSkills.handlers,
-      denoModules: normalizedSkills.denoModules,
+      runtimeModules: normalizedSkills.runtimeModules,
       autoEndOnDisconnect,
     };
   }
@@ -1903,7 +1903,7 @@ export class Pedelec {
     effortLevel?: EffortLevel;
     skills?: SerializableSkillsManifest;
     inlineToolHandlers: Map<string, ToolSpecificHandler>;
-    denoModules: PreparedDenoModuleForSession[];
+    runtimeModules: PreparedRuntimeModuleForSession[];
     autoEndOnDisconnect: boolean;
   }> {
     const settings = await this.getSettings();
@@ -1921,7 +1921,7 @@ export class Pedelec {
       effortLevel,
       skills: normalizedSkills.manifest,
       inlineToolHandlers: normalizedSkills.handlers,
-      denoModules: normalizedSkills.denoModules,
+      runtimeModules: normalizedSkills.runtimeModules,
       autoEndOnDisconnect,
     };
   }

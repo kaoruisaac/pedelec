@@ -91,9 +91,9 @@ npm install ../path/to/pedelec/sdk
 
 ---
 
-## Deno Modules
+## Runtime Modules
 
-Vite applications can package local or installed JavaScript/TypeScript libraries for Agent-authored `pedelec-deno` scripts.
+Vite applications can package local or installed JavaScript/TypeScript libraries for Agent-authored `pedelec-ts-runtime` scripts.
 
 ### Setup
 
@@ -110,15 +110,15 @@ export default defineConfig({
 ### Authoring
 
 ```ts
-import { Pedelec, defineDenoModule } from "@kaoruisaac/pedelec";
+import { Pedelec, defineRuntimeModule } from "@kaoruisaac/pedelec";
 
 const pedelec = new Pedelec();
 const session = await pedelec.createSession({
   skills: {
     guidance: "Use sprite-tools for sprite authoring tasks.",
     tools: [],
-    denoModules: [
-      defineDenoModule({
+    runtimeModules: [
+      defineRuntimeModule({
         name: "sprite-tools",
         description: "Sprite authoring and preview utilities.",
         entry: "./agent/sprite-tools.ts",
@@ -133,7 +133,7 @@ const session = await pedelec.createSession({
 For an installed package, use its package specifier as the build-time entry:
 
 ```ts
-defineDenoModule({
+defineRuntimeModule({
   name: "gsap",
   description: "Animation utilities.",
   entry: "gsap",
@@ -145,9 +145,9 @@ defineDenoModule({
 
 The generated declaration describes the module's Agent-facing API, so implementation-only dependency types are omitted. Module-owned types are supported; packages that expose dependency-owned or Node-specific external types directly in their public API are not guaranteed to produce a standalone declaration in V1. `name` is the Agent import specifier, and `usage` is required common-case guidance. `createSession()` transfers the prepared artifact automatically; a session keeps an immutable module snapshot, and `session.end()`/`session.resume()` reuse it while Core still knows the thread.
 
-Deno Modules are imported inside JavaScript/TypeScript run with `pedelec-deno`. They are different from `skills.tools`, whose browser/App RPC capabilities use `pedelec-cli` tool-spec and tool-call commands.
+Runtime Modules are imported inside JavaScript/TypeScript run with `pedelec-ts-runtime`. They are different from `skills.tools`, whose browser/App RPC capabilities use `pedelec-cli` tool-spec and tool-call commands.
 
-Set the optional `preferStdinExecution: true` when short scripts primarily use a module and should be steered toward stdin execution. Host Context then adds that module's concrete `runCommandTemplate` (`@'\n<typescript-source>\n'@ | pedelec-deno --thread-id <thread-id> run -`), so the Agent only needs to replace the TypeScript source placeholder instead of deciding how to serialize stdin. This is a preference, not a restriction: file-backed execution remains valid, and omitting the field or setting it to `false` preserves the default behavior. It does not change bundling, artifact contents, or runtime permissions.
+Set optional `preferStdinExecution: true` when short scripts primarily use a module. Host Context then exposes `preferredExecution: "stdin"` for that module; the Agent uses the global `runStdinCommand` with `pedelec-ts-runtime`. This is a preference: file-backed execution remains valid. Omitting the field or setting it to `false` preserves default authoring behavior. It does not change bundling, artifacts, or permissions.
 
 ---
 
@@ -311,7 +311,7 @@ const session = await workspace.createSession({
 const workspace = await pedelec.openWorkspace("C:\\workspace\\project-a");
 ```
 
-Pedelec initializes `.pedelec-runtime` for Workspace-owned runtime data without clearing project files or existing private data. Assets, logs, and temporary data are Workspace-level, while generated Session skills and Deno Module state are isolated per Thread. Applications should not depend on the private `.pedelec-runtime` subdirectory layout. Explicit Workspaces are application-managed, are never deleted by Pedelec, and can own multiple Sessions. An explicit path must not overlap Pedelec's managed workspace root.
+Pedelec initializes `.pedelec-runtime` for Workspace-owned runtime data without clearing project files or existing private data. Assets, logs, and temporary data are Workspace-level, while generated Session skills and Runtime Module state are isolated per Thread. Applications should not depend on the private `.pedelec-runtime` subdirectory layout. Explicit Workspaces are application-managed, are never deleted by Pedelec, and can own multiple Sessions. An explicit path must not overlap Pedelec's managed workspace root.
 
 ### Managed convenience
 
@@ -339,7 +339,7 @@ const text = await workspace.readFile("README.md", "text");
 
 `session.uploadAsset()`, `readAsset()`, and `listAssets()` stay available as Session-scoped conveniences. Their root is `.pedelec-runtime/assets`, which suits provider artifacts and Agent-shared assets. Use the Workspace methods for general filesystem access.
 
-`workspace.run(script, options?)` executes application-supplied Deno code in the Workspace:
+`workspace.run(script, options?)` executes application-supplied TypeScript code in the Workspace:
 
 ```ts
 const result = await workspace.run(
@@ -359,21 +359,21 @@ The default timeout is 60 seconds; `timeoutMs` must be a positive integer. The r
 
 Multiple Sessions, Agent/provider operations, and `workspace.run()` executions may operate concurrently in the same Workspace. A second turn on the same Session is still rejected while that Session is busy. Pedelec does not provide filesystem-level locking, snapshots, transactions, or conflict resolution between concurrent Workspace actors. Applications are responsible for coordinating shared file access when required.
 
-Session `skills.denoModules` belong to the Session/Thread that declares them and are available only to Agent-side `pedelec-deno` execution for that Thread. Workspace runs accept the same Vite-prepared declarations explicitly:
+Session `skills.runtimeModules` belong to the Session/Thread that declares them and are available only to Agent-side `pedelec-ts-runtime` execution for that Thread. Workspace runs accept the same Vite-prepared declarations explicitly:
 
 ```ts
-const sceneTools = defineDenoModule({
+const sceneTools = defineRuntimeModule({
   name: "scene-tools",
   entry: "./deno/scene-tools.ts",
 });
 
 const result = await workspace.run(
   `import { buildScene } from "scene-tools";\nawait buildScene();`,
-  { denoModules: [sceneTools] },
+  { runtimeModules: [sceneTools] },
 );
 ```
 
-`workspace.run()` does not inherit any Session Deno Modules, and Sessions do not inherit modules used by Workspace runs. The Vite-prepared package is cached privately per Workspace and authorized SDK origin; each run receives an import map containing exactly its requested names. A ready module name is immutable for the lifetime of the Core process, and Workspace-run modules never appear in Agent Host Context. The private Workspace-run cache is reset when Core restarts; project files, assets, and Thread module snapshots are preserved.
+`workspace.run()` does not inherit any Session Runtime Modules, and Sessions do not inherit modules used by Workspace runs. The Vite-prepared package is cached privately per Workspace and authorized SDK origin; each run receives an import map containing exactly its requested names. A ready module name is immutable for the lifetime of the Core process, and Workspace-run modules never appear in Agent Host Context. The private Workspace-run cache is reset when Core restarts; project files, assets, and Thread module snapshots are preserved.
 
 The Workspace handle outlives an individual Session conceptually. Ending a Session does not close or delete a custom Workspace, and Pedelec does not delete it during app cleanup. Managed Workspaces remain under Desktop cleanup ownership and are not promised to disappear immediately when a Thread ends. The browser capability is runtime-scoped; reopen the custom Workspace after a Desktop/Core restart when necessary. `pedelec.resumeSession(sessionId)` returns a Session that already includes `session.workspace`; the application does not need to call `openWorkspace()` separately. Same-handle `session.resume()` preserves the existing Workspace handle, subject to the existing Core/thread and transport caveats.
 
@@ -449,7 +449,7 @@ const modelSession = await pedelec.createSession({
 
 Model-only requests are valid and use the provider's default effort behavior. `effort` requires `model`; `model` cannot be combined with `effortLevel`. The SDK does not expose or maintain a model catalog, and it does not translate the identifier into provider CLI flags. Model validity, effort support, and account entitlement remain provider-dependent, so an invalid or unavailable configuration may fail when the provider starts.
 
-Explicit model requests require an `explicitModelConfigApplied` acknowledgment from Core before the SDK exposes the session or starts Deno Module setup. If the connected Extension/Desktop is too old to provide that acknowledgment, the SDK aborts the newly created setup and reports a compatibility error instead of silently using a different configuration.
+Explicit model requests require an `explicitModelConfigApplied` acknowledgment from Core before the SDK exposes the session or starts Runtime Module setup. If the connected Extension/Desktop is too old to provide that acknowledgment, the SDK aborts the newly created setup and reports a compatibility error instead of silently using a different configuration.
 
 Currently supported provider codes in the SDK:
 
@@ -465,3 +465,27 @@ Currently supported provider codes in the SDK:
 Ollama sessions are executed by the bundled `pedelec-agent`. In profile mode, the selected Ollama effort profile must contain a model; otherwise Core returns `MODEL_REQUIRED`. In explicit model mode, `{ model }` supplies the model directly. Ollama currently does not accept an explicit `effort`. Low and high profiles are optional, but there is no fallback between profiles.
 
 `getSettings()` returns only `{ defaultProvider }`. It never exposes provider settings, effort arguments, credentials, or model names.
+
+
+## Explicit Full Runtime Access
+
+Sandbox is the default. Full Access requires three separate conditions: an Instance created with `runtimeFullAccess: true`, explicit user approval of both **Allow Agent Sessions** and **Allow Full Runtime Access** in the Extension, and `runtimeFullAccess: true` on session creation.
+
+The first `createSession()` automatically opens the approval Popup when required grants are missing. Choosing only Agent Sessions leaves a Full Instance incomplete and rejects either Session mode with `CREATE_SESSION_NOT_APPROVED`. `getApprovalStatus()` and `checkAvailability()` only read approval state.
+
+```ts
+const privileged = new Pedelec({ runtimeFullAccess: true });
+// After the user explicitly grants both permissions in the Extension:
+const sandbox = await privileged.createSession({ runtimeFullAccess: false });
+const full = await privileged.createSession({ runtimeFullAccess: true });
+```
+
+Review the Extension permissions before creating sessions. An Instance requesting Full Access cannot create any session with only the Agent Sessions grant, including a Sandbox session. A standard Instance cannot request a Full Access session, even if another Instance on the same Origin has permission. Ordinary Origin approval never substitutes for the Full Access grant; the Popup offers an additional permission review with Full Access unchecked by default. `getApprovalStatus()` only reads status and does not open that review.
+
+The Thread mode is fixed at creation and preserved on resume. Instances on the same Origin and Threads in the same Workspace retain their own requested modes. `workspace.run()` always stays Sandbox, and Provider sandbox settings are unchanged. Full Access changes the TypeScript Runtime's OS permissions only. Revoking the Full Access grant rejects subsequent high-privilege execution and attempts to cancel affected running processes; unrelated Origins retain their grants.
+
+Upgrade the SDK, Extension, and Desktop together when using Full Access. Missing mode acknowledgment is an error, never a successful downgrade. See [Error Codes](https://kaoruisaac.github.io/pedelec/reference/error-codes/) for authorization and protocol failures.
+
+## Runtime compatibility
+
+New code uses `defineRuntimeModule`, `RuntimeModuleDefinition`, and `runtimeModules`. `defineDenoModule`, `DenoModuleDefinition`, and `denoModules` remain supported deprecated aliases. Never pass both module fields in one options object (`INVALID_INPUT`). `pedelec-ts-runtime --thread-id <id> run scripts/task.ts` and stdin `run -` are the standard CLI; `pedelec-deno` is a legal legacy alias with identical behavior. Actual `Deno.*` APIs, `DENO_DIR`, Deno flags, and `DENO_*` error codes retain their existing meanings.

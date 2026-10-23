@@ -9,8 +9,9 @@ use crate::pedelec_binary_install::BinaryInstallOutcome;
 use crate::pedelec_binary_install::{
     ensure_user_path_contains_pedelec_dir, install_pedelec_agent_from_path,
     install_pedelec_deno_from_path, install_pedelec_native_host_from_path,
-    install_pedelec_tool_from_path, pedelec_agent_binary_name, pedelec_deno_binary_name,
-    pedelec_native_host_binary_name, pedelec_tool_binary_name, prepend_pedelec_dir_to_process_path,
+    install_pedelec_tool_from_path, install_pedelec_ts_runtime_from_path,
+    pedelec_agent_binary_name, pedelec_deno_binary_name, pedelec_native_host_binary_name,
+    pedelec_tool_binary_name, pedelec_ts_runtime_binary_name, prepend_pedelec_dir_to_process_path,
     write_app_launch_config_for_current_exe,
 };
 use crate::pedelec_native_registration::register_chrome_native_messaging_host;
@@ -141,6 +142,14 @@ pub fn run() {
             })?;
             let pedelec_tool_source = bundled_binary_path(app, pedelec_tool_binary_name())?;
             let pedelec_agent_source = bundled_binary_path(app, pedelec_agent_binary_name())?;
+            let runtime_source = bundled_binary_path(app, pedelec_ts_runtime_binary_name())?;
+            let _runtime_outcome =
+                install_pedelec_ts_runtime_from_path(&runtime_source).map_err(|err| {
+                    tauri::Error::from(std::io::Error::other(format!(
+                        "cannot install pedelec-ts-runtime: {}",
+                        err.message
+                    )))
+                })?;
             let pedelec_deno_source = bundled_binary_path(app, pedelec_deno_binary_name())?;
             let _pedelec_tool_outcome = install_pedelec_tool_from_path(&pedelec_tool_source)
                 .map_err(|err| {
@@ -365,6 +374,8 @@ impl DesktopServices {
                 Ok(())
             },
             move || {
+                // The shared IPC initializer composes NativeRuntimePlatformServices
+                // around this toolkit adapter for authenticated Native admission.
                 let ipc_handle = start_core_ipc_server_with_services_dispatchers(
                     runtime_for_ipc,
                     Arc::new(TauriCoreIpcPlatformServices::new(app_for_ipc)),
@@ -972,6 +983,8 @@ mod debug_send_text_tests {
             .unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "t000001".into(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,

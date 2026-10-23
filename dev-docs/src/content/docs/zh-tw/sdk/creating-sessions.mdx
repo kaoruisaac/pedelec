@@ -72,15 +72,15 @@ const session = await pedelec.createSession({ provider: "codex", model: "gpt-x",
 
 只有 `model` 時使用 provider default effort；`effort` 必須搭配 `model`，explicit mode 不可包含 `effortLevel`。SDK 與 Extension 傳遞 declarative values，Core 驗證 provider 支援並 snapshot 最終 args。Model validity、effort support、availability 與 entitlement 仍由 provider 決定。
 
-Explicit model 必須收到 Core 的 `explicitModelConfigApplied: true` acknowledgment，SDK 才會開始 Deno Module upload 或公開 session。若連線的 Extension/Desktop 太舊，SDK 會 best-effort abort 新 setup 並回報 compatibility error。
+Explicit model 必須收到 Core 的 `explicitModelConfigApplied: true` acknowledgment，SDK 才會開始 Runtime Module upload 或公開 session。若連線的 Extension/Desktop 太舊，SDK 會 best-effort abort 新 setup 並回報 compatibility error。
 
 ## Skills 與 Ollama
 
 Profile mode 可搭配 `skills`；application-owned workspace 透過 `openWorkspace()` 選取，再使用 `workspace.createSession()`。Desktop Settings 只在 profile mode 提供 model。Ollama profile 沒有 model 時回傳 `MODEL_REQUIRED`；explicit `{ model }` 不需要 profile model，且 Ollama 目前不接受 explicit `effort`。Low/High 不會 fallback 到 Default profile。
 
-## Deno Modules
+## Runtime Modules
 
-先在 Vite 設定 plugin，再透過 `skills.denoModules` 將 module 掛到 Agent Session：
+先在 Vite 設定 plugin，再透過 `skills.runtimeModules` 將 module 掛到 Agent Session：
 
 ```ts
 // vite.config.ts
@@ -91,9 +91,9 @@ export default defineConfig({ plugins: [pedelecVitePlugin()] });
 ```
 
 ```ts
-import { defineDenoModule } from "@kaoruisaac/pedelec";
+import { defineRuntimeModule } from "@kaoruisaac/pedelec";
 
-const projectTools = defineDenoModule({
+const projectTools = defineRuntimeModule({
   name: "project-tools",
   description: "Utilities for project data processing.",
   entry: "./agent/project-tools.ts",
@@ -105,15 +105,33 @@ const session = await pedelec.createSession({
   skills: {
     guidance: "Use project-tools for project data tasks.",
     tools: [],
-    denoModules: [projectTools],
+    runtimeModules: [projectTools],
   },
 });
 ```
 
-Session Deno Modules 只供該 Thread 的 Agent 使用。[Deno 總覽](../deno/overview/)說明如何選擇執行路徑；[Deno Modules](../deno/modules/)說明準備與使用方式；[Tools API](../reference/tools/)提供精確契約。
+Session Runtime Modules 只供該 Thread 的 Agent 使用。[Runtime 總覽](../deno/overview/)說明如何選擇執行路徑；[Runtime Modules](../deno/modules/)說明準備與使用方式；[Tools API](../reference/tools/)提供精確契約。
 
 ## Metadata 與 resume
 
 Profile mode 的新 session 與 event context 會提供 normalized `effortLevel`；explicit model mode 的 `effortLevel` 為 `undefined`，因為它沒有選擇 Desktop profile。model 不會新增為 session/event public field；Core 只在 thread 的 `effort_args` 保存最終 snapshot。新建立的 `resumeSession(sessionId)` handle 可能無法恢復 provider 或 effort metadata，但 Core 仍使用已儲存的 command snapshot。
 
 Tool type inference 與 `autoEndOnDisconnect` 行為維持不變。
+
+
+## 明確授權 Full Runtime Access
+
+預設為 Sandbox。Full Access 必須同時具備三個條件：以 `runtimeFullAccess: true` 建立 Instance、使用者在 Extension 明確核准 **Allow Agent Sessions** 與 **Allow Full Runtime Access**，以及建立 Session 時指定 `runtimeFullAccess: true`。
+
+```ts
+const privileged = new Pedelec({ runtimeFullAccess: true });
+// 使用者在 Extension 明確核准兩項權限後：
+const sandbox = await privileged.createSession({ runtimeFullAccess: false });
+const full = await privileged.createSession({ runtimeFullAccess: true });
+```
+
+請先檢視 Extension 權限再建立 Session。要求 Full Access 的 Instance 若只有 Agent Sessions grant，連 Sandbox Session 也不能建立。普通 Instance 即使與已授權 Instance 位於相同 Origin，仍不能建立 Full Access Session。一般 Origin 核准不能取代 Full Access grant；Popup 會提供額外權限審查，Full Access 預設不勾選。`getApprovalStatus()` 只讀狀態，不會開啟審查。
+
+Thread mode 在建立後固定，resume 沿用。同 Origin 的 Instances 與同 Workspace 的 Threads 各自保留其要求的模式。`workspace.run()` 永遠維持 Sandbox；Provider sandbox 設定不變。Full Access 只改變 TypeScript Runtime 的 OS 權限。撤銷 Full Access grant 會拒絕後續高權限執行，並盡力取消受影響的執行中程序；其他 Origin 的 grant 不受影響。
+
+使用 Full Access 時請一併更新 SDK、Extension 與 Desktop。缺少 mode acknowledgment 時必須報錯，不能靜默降級成功。授權與協議失敗請見 [Error Codes](../reference/error-codes/)。

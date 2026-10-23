@@ -35,7 +35,7 @@ pub fn run() {
     );
     match serde_json::to_string(&response) {
         Ok(payload) => println!("{payload}"),
-        Err(err) => eprintln!("cannot serialize pedelec-deno response: {err}"),
+        Err(err) => eprintln!("cannot serialize pedelec-ts-runtime response: {err}"),
     }
 }
 
@@ -148,7 +148,7 @@ fn send_deno_request(request: CoreIpcRequest, runtime_file_path: Option<&Path>) 
 }
 
 const DENO_CLI_USAGE: &str =
-    "usage: pedelec-deno --thread-id <pedelec_thread_id> run <workspace-relative-script|-> [-- <script-args...>]";
+    "usage: pedelec-ts-runtime --thread-id <pedelec_thread_id> run <workspace-relative-script|-> [-- <script-args...>]";
 
 pub fn parse_deno_cli_args(args: &[String]) -> Result<DenoCliCommand, PedelecError> {
     let thread_id = parse_thread_id_arg(args)?;
@@ -157,7 +157,7 @@ pub fn parse_deno_cli_args(args: &[String]) -> Result<DenoCliCommand, PedelecErr
     }
 
     let entrypoint = args.get(4).ok_or_else(|| {
-        deno_args_error("pedelec-deno run requires a workspace-relative entrypoint.")
+        deno_args_error("pedelec-ts-runtime run requires a workspace-relative entrypoint.")
     })?;
     validate_entrypoint(entrypoint)?;
 
@@ -187,7 +187,7 @@ fn parse_thread_id_arg(args: &[String]) -> Result<String, PedelecError> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| deno_args_error("pedelec-deno requires a non-empty --thread-id value."))
+        .ok_or_else(|| deno_args_error("pedelec-ts-runtime requires a non-empty --thread-id value."))
 }
 
 fn validate_entrypoint(entrypoint: &str) -> Result<(), PedelecError> {
@@ -199,7 +199,7 @@ fn validate_entrypoint(entrypoint: &str) -> Result<(), PedelecError> {
         || entrypoint.chars().any(char::is_control)
     {
         return Err(deno_args_error(
-            "pedelec-deno requires a non-empty workspace-relative entrypoint.",
+            "pedelec-ts-runtime requires a non-empty workspace-relative entrypoint.",
         ));
     }
 

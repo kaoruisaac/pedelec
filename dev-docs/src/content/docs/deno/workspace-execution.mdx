@@ -1,5 +1,5 @@
 ---
-title: Workspace Deno Execution
+title: Workspace Runtime Execution
 description: Run deterministic Workspace code directly from an approved Web application.
 sidebar:
   order: 4
@@ -25,12 +25,12 @@ The result exposes stdout, stderr, exit code, and truncation flags. See the [Ped
 
 Direct runs fit an Export button that generates files, loading and normalizing project metadata, preprocessing before sending context to an Agent, validation before save, a known local migration, or building a derived manifest.
 
-## Reuse a Deno Module in one run
+## Reuse a Runtime Module in one run
 
 ```ts
-import { defineDenoModule } from "@kaoruisaac/pedelec";
+import { defineRuntimeModule } from "@kaoruisaac/pedelec";
 
-const projectTools = defineDenoModule({
+const projectTools = defineRuntimeModule({
   name: "project-tools",
   entry: "./deno/project-tools.ts",
 });
@@ -40,17 +40,17 @@ const result = await workspace.run(
     import { buildManifest } from "project-tools";
     await buildManifest();
   `,
-  { denoModules: [projectTools] },
+  { runtimeModules: [projectTools] },
 );
 ```
 
 Workspace-only declarations need no Agent-facing `description` or `usage`. Modules are supplied explicitly per run; only requested modules are mounted. Pedelec may privately reuse prepared packages while its runtime cache remains valid. There is no public Workspace module registry.
 
 ```text
-Session / Thread → skills.denoModules → Agent-side pedelec-deno only
-Workspace run   → workspace.run({ denoModules }) → application execution only
+Session / Thread → skills.runtimeModules → Agent-side pedelec-ts-runtime only
+Workspace run   → workspace.run({ runtimeModules }) → application execution only
 ```
 
-`workspace.run()` never inherits Session Deno Modules. Session creation never inherits modules from previous Workspace runs, and Workspace-run modules do not appear in Agent Host Context.
+`workspace.run()` never inherits Session Runtime Modules. Session creation never inherits modules from previous Workspace runs, and Workspace-run modules do not appear in Agent Host Context.
 
-Workspace Deno execution may run concurrently with Agent/provider work and other `workspace.run()` calls in the same Workspace. Pedelec does not coordinate filesystem conflicts between those actors. See [PedelecWorkspace](../reference/pedelec-workspace/).
+Workspace Runtime execution may run concurrently with Agent/provider work and other `workspace.run()` calls in the same Workspace. Pedelec does not coordinate filesystem conflicts between those actors. See [PedelecWorkspace](../reference/pedelec-workspace/).

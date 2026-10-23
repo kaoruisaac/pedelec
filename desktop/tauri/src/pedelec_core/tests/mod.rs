@@ -15,9 +15,9 @@ mod tests {
         let instruction = build_pedelec_bootstrap_instruction();
         assert!(instruction.contains("Pedelec Host Context is generated integration context"));
         assert!(instruction.contains("Use Pedelec App Tools through their listed"));
-        assert!(instruction.contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
+        assert!(instruction.contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
         assert!(instruction.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
-        assert!(instruction.contains("Deno Modules are imported from `pedelec-deno` scripts"));
+        assert!(instruction.contains("Deno Modules are imported from `pedelec-ts-runtime` scripts"));
         assert!(instruction.contains("readSpecCommand` / `callCommand"));
         assert!(instruction.contains("Invoke each listed Pedelec App Tool call once"));
         assert!(instruction.contains("Before accessing local files outside the declared workspace, ask the user for permission"));
@@ -54,7 +54,7 @@ mod tests {
         assert!(agent.contains("name: pedelec-runtime"));
         assert!(agent.contains("mainAgent: true"));
         assert!(agent.contains("Pedelec Host Context is generated integration context"));
-        assert!(agent.contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
+        assert!(agent.contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
         assert!(agent.contains("Invoke each listed Pedelec App Tool call once"));
         assert!(agent.contains("consume the structured result or error returned by Pedelec"));
         assert!(!agent.contains("Exact-retry"));
@@ -2482,6 +2482,7 @@ mod tests {
 
         let default_thread = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -2500,6 +2501,7 @@ mod tests {
 
         let low_thread = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Low),
                 model: None,
@@ -2534,6 +2536,7 @@ mod tests {
 
         let error = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Ollama,
                 effort_level: Some(EffortLevel::Low),
                 model: None,
@@ -2567,6 +2570,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: Some("  explicit-model  ".into()),
@@ -2598,6 +2602,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: Some("explicit-model".into()),
@@ -2639,6 +2644,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Antigravity,
                 effort_level: None,
                 model: Some("agy-model".into()),
@@ -2670,6 +2676,7 @@ mod tests {
         let output = runtime
             .create_sdk_thread(
                 CreateThreadInput {
+                    runtime_full_access: false,
                     provider: ProviderCode::Cursor,
                     effort_level: None,
                     model: Some("grok-4.7".into()),
@@ -2714,6 +2721,7 @@ mod tests {
 
         for input in [
             CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -2722,6 +2730,7 @@ mod tests {
                 workspace_id: None,
             },
             CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Low),
                 model: Some("explicit-model".into()),
@@ -2730,6 +2739,7 @@ mod tests {
                 workspace_id: None,
             },
             CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Ollama,
                 effort_level: None,
                 model: Some("qwen3:30b".into()),
@@ -2738,6 +2748,7 @@ mod tests {
                 workspace_id: None,
             },
             CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Antigravity,
                 effort_level: None,
                 model: Some("agy-model".into()),
@@ -2746,6 +2757,7 @@ mod tests {
                 workspace_id: None,
             },
             CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Cursor,
                 effort_level: None,
                 model: Some("grok-4.7".into()),
@@ -2774,6 +2786,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Antigravity,
                 effort_level: None,
                 model: Some("explicit-model".into()),
@@ -2810,6 +2823,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Ollama,
                 effort_level: None,
                 model: Some("qwen3:30b".into()),
@@ -2857,6 +2871,7 @@ mod tests {
 
         let error = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: Some("  \n".into()),
@@ -2885,6 +2900,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::High),
                 model: None,
@@ -2920,6 +2936,7 @@ mod tests {
         };
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -3308,6 +3325,8 @@ mod tests {
             .with_timezone(&Utc);
 
         let state = ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: "thread_abc123".into(),
             workspace_id: "workspace-abc123".into(),
             provider: ProviderCode::Codex,
@@ -3340,6 +3359,8 @@ mod tests {
     fn provider_instruction_omits_app_configuration_without_skills() {
         let now = chrono::Utc::now();
         let thread = ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: "thread_no_tools_md".into(),
             workspace_id: "thread_no_tools_md-workspace".into(),
             provider: ProviderCode::Codex,
@@ -3368,9 +3389,9 @@ mod tests {
         assert!(!instruction.contains("tools.md"));
         assert!(!instruction.contains("pedelec-cli tool-call"));
         assert!(instruction.contains(
-            "pedelec-deno --thread-id thread_no_tools_md run <workspace-relative-script-path>"
+            "pedelec-ts-runtime --thread-id thread_no_tools_md run <workspace-relative-script-path>"
         ));
-        assert!(instruction.contains("pedelec-deno --thread-id thread_no_tools_md run -"));
+        assert!(instruction.contains("pedelec-ts-runtime --thread-id thread_no_tools_md run -"));
         assert!(!instruction.contains("canonical JavaScript/TypeScript runtime"));
         assert!(!instruction.contains("Do not silently fall back to another JavaScript runtime"));
     }
@@ -3379,6 +3400,8 @@ mod tests {
     fn provider_instruction_serializes_app_configuration() {
         let now = chrono::Utc::now();
         let thread = ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: "thread_with_tools_md".into(),
             workspace_id: "thread_with_tools_md-workspace".into(),
             provider: ProviderCode::Codex,
@@ -3404,22 +3427,22 @@ mod tests {
             "pedelec-cli --thread-id thread_with_tools_md tool-call get_app_state '<json_args>'"
         ));
         assert!(instruction.contains(
-            "pedelec-deno --thread-id thread_with_tools_md run <workspace-relative-script-path>"
+            "pedelec-ts-runtime --thread-id thread_with_tools_md run <workspace-relative-script-path>"
         ));
-        assert!(instruction.contains("pedelec-deno --thread-id thread_with_tools_md run -"));
+        assert!(instruction.contains("pedelec-ts-runtime --thread-id thread_with_tools_md run -"));
         assert!(!instruction.contains("For script arguments, append `-- <args...>`"));
         assert!(!instruction.contains("Do not silently fall back to another JavaScript runtime"));
         assert!(persistent.contains(
-            "pedelec-deno --thread-id thread_with_tools_md run <workspace-relative-script-path>"
+            "pedelec-ts-runtime --thread-id thread_with_tools_md run <workspace-relative-script-path>"
         ));
-        assert!(persistent.contains("pedelec-deno --thread-id thread_with_tools_md run -"));
-        assert!(persistent.contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
+        assert!(persistent.contains("pedelec-ts-runtime --thread-id thread_with_tools_md run -"));
+        assert!(persistent.contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
         assert!(persistent.contains("pedelec-cli --thread-id thread_with_tools_md tool-call"));
         let cursor_first_prompt =
             build_persistent_user_prompt_with_bootstrap(&persistent, "first task");
-        assert!(cursor_first_prompt.contains("pedelec-deno"));
+        assert!(cursor_first_prompt.contains("pedelec-ts-runtime"));
         assert!(cursor_first_prompt
-            .contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
+            .contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
         assert!(cursor_first_prompt.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
         assert!(!instruction.contains("[Pedelec Runtime Rules]"));
         assert!(!instruction
@@ -3432,6 +3455,8 @@ mod tests {
     fn provider_instruction_preserves_empty_tools_guidance_and_escapes_structure() {
         let now = chrono::Utc::now();
         let thread = ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: "thread_empty_tools".into(),
             workspace_id: "thread_empty_tools-workspace".into(),
             provider: ProviderCode::Codex,
@@ -3913,6 +3938,7 @@ mod tests {
             .workspace_id;
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -3959,6 +3985,7 @@ mod tests {
         runtime
             .create_sdk_thread(
                 CreateThreadInput {
+                    runtime_full_access: false,
                     provider: ProviderCode::Codex,
                     effort_level: None,
                     model: None,
@@ -3993,6 +4020,7 @@ mod tests {
         runtime
             .create_sdk_thread(
                 CreateThreadInput {
+                    runtime_full_access: false,
                     provider: ProviderCode::Codex,
                     effort_level: None,
                     model: None,
@@ -4027,6 +4055,7 @@ mod tests {
             .workspace_id;
 
         let invalid_skills = CreateThreadInput {
+            runtime_full_access: false,
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
@@ -4095,6 +4124,7 @@ mod tests {
 
         let first = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -4105,6 +4135,7 @@ mod tests {
             .unwrap();
         let second = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Claude,
                 effort_level: None,
                 model: None,
@@ -4159,6 +4190,7 @@ mod tests {
             .workspace_id;
 
         let result = runtime.create_thread(CreateThreadInput {
+            runtime_full_access: false,
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
@@ -4208,6 +4240,7 @@ mod tests {
             .workspace_id;
         let custom_thread = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -5739,6 +5772,8 @@ mod tests {
         fs::write(workspace.join("assets/result.json"), b"user project file").unwrap();
         let now = chrono::Utc::now();
         let thread = ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: "thread_asset_isolation".into(),
             workspace_id: "thread_asset_isolation-workspace".into(),
             provider: ProviderCode::Codex,
@@ -5786,6 +5821,7 @@ mod tests {
             ..CoreRuntime::default()
         };
         let input = CreateThreadInput {
+            runtime_full_access: false,
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
@@ -5823,6 +5859,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -5858,6 +5895,8 @@ mod tests {
         let now = chrono::Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "t000001".into(),
                 workspace_id: "workspace-existing-thread".into(),
                 provider: ProviderCode::Codex,
@@ -5877,6 +5916,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -5903,6 +5943,7 @@ mod tests {
             ..CoreRuntime::default()
         };
         let input = CreateThreadInput {
+            runtime_full_access: false,
             provider: ProviderCode::Codex,
             effort_level: None,
             model: None,
@@ -5947,6 +5988,7 @@ mod tests {
         };
         let thread = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -6172,6 +6214,8 @@ mod tests {
         let now = chrono::Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
@@ -6347,6 +6391,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -6390,6 +6435,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -6428,6 +6474,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -6463,6 +6510,7 @@ mod tests {
 
         let output = runtime
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: None,
                 model: None,
@@ -6808,6 +6856,8 @@ mod tests {
             .unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
@@ -6889,6 +6939,8 @@ mod tests {
             .unwrap_or_default();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 provider: provider.clone(),
                 effort_level: Some(EffortLevel::Default),
@@ -7673,6 +7725,8 @@ mod tests {
         let now = chrono::Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: second.into(),
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
@@ -8143,6 +8197,8 @@ mod tests {
         let now = Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,
@@ -8305,6 +8361,8 @@ mod tests {
         let now = Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "thread-a".into(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,
@@ -8826,6 +8884,8 @@ mod tests {
         let now = Utc::now();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "workspace-provider-active".into(),
                 workspace_id: workspace_id.clone(),
                 provider: ProviderCode::Codex,

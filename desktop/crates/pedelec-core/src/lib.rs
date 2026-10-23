@@ -18,6 +18,9 @@ use uuid::Uuid;
 pub mod effort_wizard;
 pub use effort_wizard::*;
 
+#[cfg(test)]
+mod runtime_access_tests;
+
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 #[cfg(windows)]
@@ -817,6 +820,11 @@ fn workspace_canonical_identity(path: &Path) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadState {
+    /// Fixed at creation. Revocation disables execution without downgrading this mode.
+    #[serde(default)]
+    pub runtime_full_access: bool,
+    #[serde(skip)]
+    pub runtime_authorization: Option<RuntimeAuthorization>,
     pub thread_id: String,
     pub workspace_id: String,
     pub provider: ProviderCode,
@@ -1440,6 +1448,8 @@ impl ThreadEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadInput {
+    #[serde(default)]
+    pub runtime_full_access: bool,
     pub provider: ProviderCode,
     #[serde(default)]
     pub effort_level: Option<EffortLevel>,
@@ -1474,6 +1484,7 @@ pub struct CreateThreadToolInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadOutput {
+    pub runtime_full_access_applied: bool,
     pub thread_id: String,
     pub workspace_id: String,
     /// Custom Workspace paths are safe to expose to the SDK after Core has
@@ -1511,7 +1522,7 @@ pub struct SendTextOutput {
     pub operation_id: String,
 }
 
-/// Public helper input for the local `pedelec-deno` command.  This type is
+/// Public helper input for the local `pedelec-ts-runtime` command.  This type is
 /// deliberately kept in Core rather than the browser SDK: a Deno run is an
 /// internal provider/runtime operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1588,6 +1599,79 @@ pub enum DenoExecutionOwner {
     },
 }
 
+/// Revocable in-process capability shared by Core and its admitted executions.
+/// Deserialization cannot manufacture one. Restored Full Access threads fail closed.
+#[derive(Debug, Clone)]
+pub struct RuntimeAuthorization(Arc<RuntimeGrant>);
+
+#[derive(Debug)]
+struct RuntimeGrant {
+    active: std::sync::atomic::AtomicBool,
+    spawn_gate: Mutex<()>,
+}
+
+impl PartialEq for RuntimeAuthorization {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for RuntimeAuthorization {}
+
+impl RuntimeAuthorization {
+    fn new() -> Self {
+        Self(Arc::new(RuntimeGrant {
+            active: std::sync::atomic::AtomicBool::new(true),
+            spawn_gate: Mutex::new(()),
+        }))
+    }
+    pub fn is_active(&self) -> bool {
+        self.0.active.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn revoke(&self) {
+        // Serialize with process creation: once revoke returns, no prepared
+        // intent carrying this generation can start another OS process.
+        let _gate = self.0.spawn_gate.lock();
+        self.0
+            .active
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+    pub fn while_active<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, PedelecError>,
+    ) -> Result<T, PedelecError> {
+        let _gate = self
+            .0
+            .spawn_gate
+            .lock()
+            .map_err(|_| runtime_access_denied())?;
+        if !self.is_active() {
+            return Err(runtime_access_denied());
+        }
+        action()
+    }
+}
+
+/// Issued by the in-process Native grant adapter. Store only in its managed
+/// Extension session, never in runtime.json or a browser-controlled payload.
+#[derive(Debug, Clone)]
+pub struct ExtensionRuntimeAuthorization {
+    origin: String,
+    grant: RuntimeAuthorization,
+}
+
+impl ExtensionRuntimeAuthorization {
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+}
+
+fn runtime_access_denied() -> PedelecError {
+    PedelecError::new(
+        error_codes::INVALID_INPUT,
+        "Runtime Full Access requires a trusted Extension session and an active explicit grant",
+    )
+}
+
 /// The validated, authoritative execution intent passed from Core to the
 /// Desktop-owned runtime. `workspace_path` always comes from an authoritative
 /// Core Workspace resource, while file entrypoints are resolved by Core before
@@ -1597,6 +1681,11 @@ pub enum DenoExecutionOwner {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DenoExecutionIntent {
+    #[serde(default)]
+    pub runtime_full_access: bool,
+    /// In-process capability: never accepted from a serialized CLI/IPC intent.
+    #[serde(skip)]
+    pub runtime_authorization: Option<RuntimeAuthorization>,
     pub thread_id: String,
     pub owner: DenoExecutionOwner,
     pub workspace_path: PathBuf,
@@ -1715,6 +1804,8 @@ pub struct SubscribeThreadInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadSnapshot {
+    #[serde(default)]
+    pub runtime_full_access: bool,
     pub thread_id: String,
     /// Internal transport identity used by SDK resume hydration.  It is not
     /// part of the public Session event context.
@@ -2191,6 +2282,7 @@ impl ProviderReadiness {
 
 #[derive(Debug, Default)]
 pub struct CoreRuntime {
+    pub runtime_full_access_grants: HashMap<String, RuntimeAuthorization>,
     pub thread_manager: ThreadManager,
     pub workspace_manager: WorkspaceManager,
     /// Authoritative Core Workspace resources.  `workspace_manager` owns
@@ -2432,6 +2524,8 @@ impl CoreRuntime {
             workspace_id: input.workspace_id.clone(),
             run_id: run_id.clone(),
             intent: DenoExecutionIntent {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: String::new(),
                 owner: DenoExecutionOwner::Workspace {
                     workspace_id: input.workspace_id,
@@ -3986,6 +4080,9 @@ impl CoreRuntime {
         &mut self,
         input: CreateThreadInput,
     ) -> Result<CreateThreadOutput, PedelecError> {
+        if input.runtime_full_access {
+            return Err(runtime_access_denied());
+        }
         self.create_thread_with_sdk_origin(input, None, None)
     }
 
@@ -3995,12 +4092,98 @@ impl CoreRuntime {
         caller_origin: &str,
         caller_sdk_version: Option<&str>,
     ) -> Result<CreateThreadOutput, PedelecError> {
+        if input.runtime_full_access {
+            return Err(runtime_access_denied());
+        }
         let origin = normalize_sdk_origin(caller_origin)?;
         let sdk_version = caller_sdk_version
             .map(str::trim)
             .filter(|version| !version.is_empty())
             .map(ToOwned::to_owned);
         self.create_thread_with_sdk_origin(input, Some(origin), sdk_version)
+    }
+
+    /// Only the trusted Native admission adapter may call this after validating
+    /// the managed Extension session, its Instance request and both user grants.
+    /// Never route caller-supplied origin/approval booleans directly here.
+    pub fn create_trusted_extension_thread(
+        &mut self,
+        input: CreateThreadInput,
+        authorization: &ExtensionRuntimeAuthorization,
+    ) -> Result<CreateThreadOutput, PedelecError> {
+        let origin = &authorization.origin;
+        if !authorization.grant.is_active()
+            || self.runtime_full_access_grants.get(origin) != Some(&authorization.grant)
+        {
+            return Err(runtime_access_denied());
+        }
+        self.create_thread_with_sdk_origin(input, Some(origin.clone()), None)
+    }
+
+    /// Invoked out of band after the trusted Native adapter validates both
+    /// user grants. No wire request can issue these capabilities.
+    pub fn grant_extension_runtime_full_access(
+        &mut self,
+        verified_origin: &str,
+    ) -> Result<ExtensionRuntimeAuthorization, PedelecError> {
+        let origin = normalize_sdk_origin(verified_origin)?;
+        let grant = self
+            .runtime_full_access_grants
+            .entry(origin.clone())
+            .or_insert_with(RuntimeAuthorization::new);
+        if !grant.is_active() {
+            *grant = RuntimeAuthorization::new();
+        }
+        Ok(ExtensionRuntimeAuthorization {
+            origin,
+            grant: grant.clone(),
+        })
+    }
+
+    pub fn revoke_extension_runtime_full_access(
+        &mut self,
+        authorization: &ExtensionRuntimeAuthorization,
+    ) -> Result<Vec<String>, PedelecError> {
+        if self.runtime_full_access_grants.get(&authorization.origin) != Some(&authorization.grant)
+        {
+            return Err(runtime_access_denied());
+        }
+        self.revoke_runtime_full_access(&authorization.origin)
+    }
+
+    /// Irreversibly disables existing Full Access capabilities for this Origin.
+    /// The caller also cancels these thread IDs through the Desktop runtime owner.
+    pub fn revoke_runtime_full_access(
+        &mut self,
+        verified_origin: &str,
+    ) -> Result<Vec<String>, PedelecError> {
+        let origin = normalize_sdk_origin(verified_origin)?;
+        if let Some(grant) = self.runtime_full_access_grants.get(&origin) {
+            grant.revoke();
+        }
+        let mut ids = Vec::new();
+        for thread in self.thread_manager.threads.values() {
+            if thread.runtime_full_access && thread.sdk_origin.as_deref() == Some(origin.as_str()) {
+                if let Some(authorization) = &thread.runtime_authorization {
+                    authorization.revoke();
+                }
+                ids.push(thread.thread_id.clone());
+            }
+        }
+        Ok(ids)
+    }
+
+    fn ensure_runtime_full_access_active(&self, thread_id: &str) -> Result<(), PedelecError> {
+        let thread = self.thread_manager.thread(thread_id)?;
+        if thread.runtime_full_access
+            && !thread
+                .runtime_authorization
+                .as_ref()
+                .is_some_and(RuntimeAuthorization::is_active)
+        {
+            return Err(runtime_access_denied());
+        }
+        Ok(())
     }
 
     fn create_thread_with_sdk_origin(
@@ -4089,6 +4272,15 @@ impl CoreRuntime {
 
         let now = Utc::now();
         let state = ThreadState {
+            runtime_full_access: input.runtime_full_access,
+            runtime_authorization: if input.runtime_full_access {
+                sdk_origin
+                    .as_ref()
+                    .and_then(|origin| self.runtime_full_access_grants.get(origin))
+                    .cloned()
+            } else {
+                None
+            },
             thread_id: thread_id.clone(),
             workspace_id: workspace_id.clone(),
             provider: input.provider,
@@ -4119,6 +4311,7 @@ impl CoreRuntime {
             .emit_status_changed(&thread_id, ThreadStatus::Idle);
 
         Ok(CreateThreadOutput {
+            runtime_full_access_applied: input.runtime_full_access,
             thread_id,
             workspace_id: workspace_id.clone(),
             workspace_path: self
@@ -4829,7 +5022,7 @@ impl CoreRuntime {
         thread_id: &str,
     ) -> Result<PersistentProviderSessionIntent, PedelecError> {
         // Provider startup/reconnect must observe the same immutable module
-        // snapshot as `pedelec-deno`; a Ready state alone is not sufficient if
+        // snapshot as `pedelec-ts-runtime`; a Ready state alone is not sufficient if
         // the package or import map was removed or corrupted meanwhile.
         self.validate_deno_module_runtime_snapshot(thread_id)?;
         let thread = self.thread_manager.thread(thread_id)?.clone();
@@ -5776,6 +5969,7 @@ impl CoreRuntime {
         &mut self,
         input: ResumeThreadInput,
     ) -> Result<ResumeThreadOutput, PedelecError> {
+        self.ensure_runtime_full_access_active(&input.thread_id)?;
         self.ensure_deno_module_setup_ready(&input.thread_id)?;
         let status = self.thread_manager.thread(&input.thread_id)?.status.clone();
         match status {
@@ -5901,6 +6095,7 @@ impl CoreRuntime {
         &self,
         input: DenoRunInput,
     ) -> Result<DenoExecutionIntent, PedelecError> {
+        self.ensure_runtime_full_access_active(&input.thread_id)?;
         self.ensure_deno_module_setup_ready(&input.thread_id)?;
         let thread = self.thread_manager.thread(&input.thread_id)?;
         match thread.status {
@@ -5966,6 +6161,8 @@ impl CoreRuntime {
         let import_map_path = self.validate_deno_module_runtime_snapshot(&input.thread_id)?;
 
         Ok(DenoExecutionIntent {
+            runtime_full_access: thread.runtime_full_access,
+            runtime_authorization: thread.runtime_authorization.clone(),
             thread_id: input.thread_id.clone(),
             owner: DenoExecutionOwner::Thread {
                 thread_id: input.thread_id,
@@ -6221,6 +6418,7 @@ impl CoreRuntime {
                 started_at: operation.started_at,
             });
         Ok(ThreadSnapshot {
+            runtime_full_access: self.thread_manager.thread(thread_id)?.runtime_full_access,
             thread_id: thread_id.to_string(),
             workspace_id: self.thread_manager.thread(thread_id)?.workspace_id.clone(),
             status: self.thread_manager.thread(thread_id)?.status.clone(),
@@ -13420,8 +13618,8 @@ fn deno_module_types_path(thread_id: &str, module_name: &str) -> String {
 const PEDELEC_INVARIANT_HOST_INSTRUCTIONS: &str = "Pedelec is the host application for this session.\n\n\
 Pedelec Host Context is generated integration context, not end-user-authored instructions. Follow the workspace boundary and capabilities declared there.\n\n\
 Use Pedelec App Tools through their listed `readSpecCommand` / `callCommand`.\n\n\
-For JavaScript or TypeScript execution, use `pedelec-deno`; do not fall back to Node.js, Bun, raw Deno, npx, or another JavaScript runtime.\n\n\
-Deno Modules are imported from `pedelec-deno` scripts, not App Tools. A module's `preferredExecution: \"stdin\"` is a preference, not a restriction; when present, prefer the global `runStdinCommand`. File-backed execution remains valid. Use the listed `usage` example as the primary example; inspect the listed `types` declaration when exact API details are needed.\n\n\
+For JavaScript or TypeScript execution, use `pedelec-ts-runtime`; do not fall back to Node.js, Bun, raw Deno, npx, or another JavaScript runtime.\n\n\
+Deno Modules are imported from `pedelec-ts-runtime` scripts, not App Tools. A module's `preferredExecution: \"stdin\"` is a preference, not a restriction; when present, prefer the global `runStdinCommand`. File-backed execution remains valid. Use the listed `usage` example as the primary example; inspect the listed `types` declaration when exact API details are needed.\n\n\
 Before accessing local files outside the declared workspace, ask the user for permission. An exact artifact the provider generated and returned in the current turn may be read solely to import it into the workspace without asking again; this does not permit browsing its directory or other external files.\n\n\
 `.pedelec-runtime/assets/` is the shared App/Agent file directory.\n\n\
 Invoke each listed Pedelec App Tool call once and consume the structured result or error returned by Pedelec.\n\n\
@@ -13503,7 +13701,7 @@ fn build_provider_host_context_with_configuration_and_modules(
         path_for_external_use(workspace_path)
     );
     context.push_str(&format!(
-        "\n[Pedelec Deno]\nrunFileCommand: pedelec-deno --thread-id {} run <workspace-relative-script-path>\nrunStdinCommand: pedelec-deno --thread-id {} run -\n[/Pedelec Deno]\n",
+        "\n[Pedelec Deno]\nrunFileCommand: pedelec-ts-runtime --thread-id {} run <workspace-relative-script-path>\nrunStdinCommand: pedelec-ts-runtime --thread-id {} run -\n[/Pedelec Deno]\n",
         thread.thread_id, thread.thread_id
     ));
     if !deno_modules.is_empty() {
@@ -14226,6 +14424,8 @@ mod deno_tests {
         fs::create_dir_all(thread_skills_root(workspace, thread_id)).unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id: thread_id.into(),
                 provider: ProviderCode::Codex,
@@ -14420,6 +14620,8 @@ mod deno_tests {
     fn persistent_host_context_describes_modules_without_authoring_entries() {
         let temp = tempfile::tempdir().unwrap();
         let thread = ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: "thread-deno-context".into(),
             workspace_id: "thread-deno-context".into(),
             provider: ProviderCode::Codex,
@@ -14455,17 +14657,17 @@ mod deno_tests {
         let workspace_path = format!("Workspace Path: {}", path_for_external_use(temp.path()));
         assert!(context.contains(&workspace_path));
         assert!(context.contains(
-            "runFileCommand: pedelec-deno --thread-id thread-deno-context run <workspace-relative-script-path>"
+            "runFileCommand: pedelec-ts-runtime --thread-id thread-deno-context run <workspace-relative-script-path>"
         ));
         assert!(
-            context.contains("runStdinCommand: pedelec-deno --thread-id thread-deno-context run -")
+            context.contains("runStdinCommand: pedelec-ts-runtime --thread-id thread-deno-context run -")
         );
         assert!(context.contains("index.d.ts"));
         assert!(context.contains("\"preferredExecution\": \"stdin\""));
         assert!(!context.contains("runCommandTemplate"));
         assert!(!context.contains("@'"));
         assert!(!context.contains("preferStdinExecution"));
-        assert!(context.contains("pedelec-deno"));
+        assert!(context.contains("pedelec-ts-runtime"));
         assert!(!context.contains("canonical JavaScript/TypeScript runtime"));
         assert!(!context.contains("Do not silently fall back"));
         assert!(!context.contains("authoritative Pedelec workspace root"));
@@ -14480,6 +14682,8 @@ mod deno_tests {
     fn host_context_omits_empty_module_block_and_sorts_module_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let thread = ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: "thread-deno-order".into(),
             workspace_id: "thread-deno-order".into(),
             provider: ProviderCode::Codex,
@@ -14501,9 +14705,9 @@ mod deno_tests {
         );
         assert!(!empty.contains("[Pedelec Deno Modules]"));
         assert!(empty.contains(
-            "runFileCommand: pedelec-deno --thread-id thread-deno-order run <workspace-relative-script-path>"
+            "runFileCommand: pedelec-ts-runtime --thread-id thread-deno-order run <workspace-relative-script-path>"
         ));
-        assert!(empty.contains("runStdinCommand: pedelec-deno --thread-id thread-deno-order run -"));
+        assert!(empty.contains("runStdinCommand: pedelec-ts-runtime --thread-id thread-deno-order run -"));
 
         let modules = vec![
             DenoModuleState {
@@ -14546,6 +14750,8 @@ mod deno_tests {
     fn module_only_host_context_keeps_shared_guidance_without_app_tools() {
         let temp = tempfile::tempdir().unwrap();
         let thread = ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: "thread-deno-guidance".into(),
             workspace_id: "thread-deno-guidance".into(),
             provider: ProviderCode::Codex,
@@ -14612,16 +14818,16 @@ mod deno_tests {
     #[test]
     fn bootstrap_keeps_the_compact_invariant_contract() {
         let instruction = build_pedelec_bootstrap_instruction();
-        assert!(instruction.contains("For JavaScript or TypeScript execution, use `pedelec-deno`"));
+        assert!(instruction.contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
         assert!(instruction.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
-        assert!(instruction.contains("Deno Modules are imported from `pedelec-deno` scripts"));
+        assert!(instruction.contains("Deno Modules are imported from `pedelec-ts-runtime` scripts"));
         assert!(instruction.contains("readSpecCommand` / `callCommand"));
         assert!(instruction.contains("Invoke each listed Pedelec App Tool call once"));
         assert!(instruction.contains("consume the structured result or error returned by Pedelec"));
         assert!(!instruction.contains("Exact-retry"));
         assert!(!instruction.contains("TOOL_TIMEOUT"));
         assert!(!instruction.contains("authoritative Pedelec workspace root"));
-        assert!(!instruction.contains("pedelec-deno module-spec"));
+        assert!(!instruction.contains("pedelec-ts-runtime module-spec"));
         assert!(!instruction.contains("ambiguous transport failure"));
         assert!(!instruction.contains("PEDELEC_PREPARED"));
     }
@@ -15030,6 +15236,7 @@ mod deno_tests {
             ..CoreRuntime::default()
         };
         let input = |workspace_id: &str| CreateThreadInput {
+            runtime_full_access: false,
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
@@ -15137,6 +15344,7 @@ mod deno_tests {
 
     fn sprite_tools_thread_input(workspace_id: &str) -> CreateThreadInput {
         CreateThreadInput {
+            runtime_full_access: false,
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
@@ -15368,6 +15576,7 @@ mod deno_tests {
             ..CoreRuntime::default()
         };
         let input = CreateThreadInput {
+            runtime_full_access: false,
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
@@ -15427,6 +15636,7 @@ mod deno_tests {
         let custom_thread = custom_runtime
             .create_sdk_thread(
                 CreateThreadInput {
+                    runtime_full_access: false,
                     provider: ProviderCode::Codex,
                     effort_level: Some(EffortLevel::Default),
                     model: None,

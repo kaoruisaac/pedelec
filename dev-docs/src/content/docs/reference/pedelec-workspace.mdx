@@ -1,6 +1,6 @@
 ---
 title: PedelecWorkspace API
-description: Workspace capability reference for paths, sessions, filesystem listing, Deno execution, lifecycle, and safety.
+description: Workspace capability reference for paths, sessions, filesystem listing, TypeScript execution, lifecycle, and safety.
 sidebar:
   order: 3
 ---
@@ -94,19 +94,19 @@ Reads one Workspace-relative regular file, including paths under `.pedelec-runti
 
 ## `run(script, options?)`
 
-For usage, start with [Workspace Deno Execution](../deno/workspace-execution/). The exact API contract follows.
+For usage, start with [Workspace Runtime Execution](../deno/workspace-execution/). The exact API contract follows.
 
 ```ts
 run(
   script: string,
   options?: {
     timeoutMs?: number;
-    denoModules?: readonly DenoModuleDefinition[];
+    runtimeModules?: readonly RuntimeModuleDefinition[];
   },
 ): Promise<WorkspaceRunResult>
 ```
 
-Runs application-supplied Deno code in this Workspace. The default timeout is 60 seconds; an override must be a positive integer.
+Runs application-supplied TypeScript code in this Workspace. The default timeout is 60 seconds; an override must be a positive integer.
 
 ```ts
 const result = await workspace.run(
@@ -120,17 +120,17 @@ if (result.stdoutTruncated || result.stderrTruncated) {
 const value = JSON.parse(result.stdout);
 ```
 
-The `denoModules` option mounts Vite-prepared modules for this run. A Workspace-only declaration only needs the logical import name and build-time entry:
+The `runtimeModules` option mounts Vite-prepared modules for this run. A Workspace-only declaration only needs the logical import name and build-time entry:
 
 ```ts
-const sceneTools = defineDenoModule({
+const sceneTools = defineRuntimeModule({
   name: "scene-tools",
   entry: "./deno/scene-tools.ts",
 });
 
 const result = await workspace.run(
   `import { buildScene } from "scene-tools";\nawait buildScene();`,
-  { denoModules: [sceneTools] },
+  { runtimeModules: [sceneTools] },
 );
 ```
 
@@ -140,9 +140,9 @@ The result is raw Deno output: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`
 
 ## Security boundary
 
-`workspace.run()` is a direct capability for the approved Web application. Its Deno code has read and write access to the Workspace, but has no network, host environment, subprocess execution, FFI, or `sys` permission. No-remote, cached-only, and no-npm runtime restrictions continue to apply. This is not unrestricted host code execution and is not an Agent-mediated action.
+`workspace.run()` is a direct capability for the approved Web application. Its TypeScript code has read and write access to the Workspace, but has no network, host environment, subprocess execution, FFI, or `sys` permission. No-remote, cached-only, and no-npm runtime restrictions continue to apply. This is not unrestricted host code execution and is not an Agent-mediated action.
 
-Session `skills.denoModules` remain owned by the Session/Thread that declared them and are available to Agent-side `pedelec-deno` execution for that Thread. Workspace-run modules are a separate, explicit per-run capability: `workspace.run()` does not inherit a Session import map, and `workspace.createSession()` does not inherit modules previously used by `workspace.run()`. Workspace-run modules never appear in Agent Host Context. Core resets the private Workspace-run cache when its runtime restarts; project files, assets, and Thread module snapshots are not cleared.
+Session `skills.runtimeModules` remain owned by the Session/Thread that declared them and are available to Agent-side `pedelec-ts-runtime` execution for that Thread. Workspace-run modules are a separate, explicit per-run capability: `workspace.run()` does not inherit a Session import map, and `workspace.createSession()` does not inherit modules previously used by `workspace.run()`. Workspace-run modules never appear in Agent Host Context. Core resets the private Workspace-run cache when its runtime restarts; project files, assets, and Thread module snapshots are not cleared.
 
 ## Concurrency and lifetime
 
@@ -151,3 +151,5 @@ Multiple Sessions, Agent/provider operations, and `workspace.run()` executions m
 Custom Workspaces are opened explicitly, can outlive and be shared by multiple Sessions, and are never deleted by Pedelec when a Session ends or during app cleanup. Managed Workspaces are created by `Pedelec.createSession()` and remain under Desktop cleanup ownership; Thread end does not imply immediate deletion. The browser capability is runtime-scoped, so reopen a custom Workspace after a Desktop/Core restart when needed.
 
 `resumeSession(sessionId)` returns a Session that already includes `session.workspace`; do not separately call `openWorkspace()` for a resumed Session. Same-handle `session.resume()` preserves its existing Workspace handle, subject to the documented transport, Core thread, and recorded Workspace caveats.
+
+`workspace.run()` always runs in Sandbox, even beside a Full Access Thread in this Workspace. Supplying both `runtimeModules` and legacy `denoModules` rejects with `INVALID_INPUT`.

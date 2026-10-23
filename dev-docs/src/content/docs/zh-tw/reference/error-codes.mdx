@@ -70,21 +70,21 @@ try {
 | `SDK_TRANSPORT_ERROR` | Generic bridge failure | 查看 message/details，驗證 Extension/native/Core | 視 operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape 或 request type 不相容 | 對齊 component versions，回報 reproducible mismatch | 通常修復前不可 |
 
-## Workspace Deno execution
+## Workspace Runtime execution
 
 | Code | Meaning | Recommended response | Retry? |
 | --- | --- | --- | --- |
-| `DENO_EXECUTION_TIMEOUT` | Workspace Deno code 超過 timeout；default 是 60 秒 | 適當時提高 timeout，或拆分/縮短 script | 修改工作後 |
-| `DENO_EXECUTION_CANCELLED` | Workspace Deno execution 在 shutdown 或 interruption 中被取消 | Retry 前先確認 Workspace 是否有 partial writes | Workspace/runtime 可用後 |
+| `DENO_EXECUTION_TIMEOUT` | Workspace TypeScript code 超過 timeout；default 是 60 秒 | 適當時提高 timeout，或拆分/縮短 script | 修改工作後 |
+| `DENO_EXECUTION_CANCELLED` | Workspace Runtime execution 在 shutdown 或 interruption 中被取消 | Retry 前先確認 Workspace 是否有 partial writes | Workspace/runtime 可用後 |
 | `DENO_RUNTIME_UNAVAILABLE` | 受管理的 Deno runtime 找不到或無法啟動 | 重新啟動 Desktop，讓它再次準備 runtime。若準備持續失敗，請重新安裝 Desktop | runtime 可用後 |
 | `DENO_PROCESS_SPAWN_FAILED` | Desktop 無法 spawn Deno process | 檢查 Desktop installation、executable permissions 與 runtime logs | 修復 process environment 後 |
 | `DENO_PROCESS_IO_FAILED` | Deno process 的 stdin/stdout/stderr communication 失敗 | 將 operation 視為失敗，查看 runtime logs 並確認 partial writes | transport/runtime 恢復後 |
-| `DENO_MODULE_NAME_INVALID` | Logical Deno Module name 不是支援的 bare 或 scoped package-like specifier | 使用 `scene-tools` 或 `@example/scene-tools` 等有效名稱 | 修正 declaration 後 |
-| `DENO_MODULE_SETUP_INCOMPLETE` | Requested Workspace 或 Session Deno Module 尚未 ready，或同一個 module identity 的 setup/upload 仍在 pending | 完成或重試該 module 的 setup。其他 Workspace 活動不會阻擋它 | 該 module setup 完成後 |
+| `DENO_MODULE_NAME_INVALID` | Logical Runtime Module name 不是支援的 bare 或 scoped package-like specifier | 使用 `scene-tools` 或 `@example/scene-tools` 等有效名稱 | 修正 declaration 後 |
+| `DENO_MODULE_SETUP_INCOMPLETE` | Requested Workspace 或 Session Runtime Module 尚未 ready，或同一個 module identity 的 setup/upload 仍在 pending | 完成或重試該 module 的 setup。其他 Workspace 活動不會阻擋它 | 該 module setup 完成後 |
 | `DENO_MODULE_NOT_FOUND` | Requested module 不在 owning Workspace scope 或 Thread snapshot 的 declaration 中 | 將 module 加入明確的 run/setup request，或建立新的 Session snapshot | 修正 request 後 |
 | `DENO_MODULE_ALREADY_READY` | Ready module package 在目前 Core runtime scope 內不可變更 | 使用既有 package；新 implementation 請使用新的 logical module name | 只在改用新 name 後 |
 | `DENO_MODULE_ARTIFACT_TOO_LARGE` | Prepared runtime/declaration envelope 超過 100 MiB upload limit | 減小 bundled artifact，或拆分 module | artifact 縮小後 |
-| `DENO_MODULE_ARTIFACT_INVALID` | Uploaded Deno Module envelope 或 runtime/declaration sources 無效 | 使用 Vite plugin 重新 build 後重試 | rebuild 後 |
+| `DENO_MODULE_ARTIFACT_INVALID` | Uploaded Runtime Module envelope 或 runtime/declaration sources 無效 | 使用 Vite plugin 重新 build 後重試 | rebuild 後 |
 | `DENO_MODULE_MATERIALIZATION_FAILED` | Core 無法安全 commit 或 validate private module package | 檢查 filesystem/runtime health；不要把 private path 暴露給使用者 | 修復 filesystem/runtime 後 |
 | `DENO_MODULE_UPLOAD_SERVER_UNAVAILABLE` | Local bounded upload endpoint 無法使用 | 重啟或修復 Desktop/Core runtime | upload endpoint ready 後 |
 | `DENO_MODULE_UPLOAD_TICKET_EXPIRED` | Short-lived module upload ticket 已過期 | 重新取得 setup/upload ticket | 使用新 ticket 後 |
@@ -196,3 +196,15 @@ Asset failure 可能發生在 SDK request、loopback upload `PUT`、download `GE
 | `WORKSPACE_FILE_NOT_REGULAR` | 目標是 directory、symlink、junction 或其他非 regular file | 改選 regular file |
 | `WORKSPACE_PATH_INVALID` | path 是 absolute、含 `..`，或不是合法的 Workspace-relative path | 使用沒有前導 slash 的相對 path，分隔字元為 `/` |
 | `WORKSPACE_FILE_TEXT_DECODE_FAILED` / `WORKSPACE_FILE_INVALID_JSON` | SDK 無法 decode UTF-8 或 parse JSON | 改用 `file` 或修正內容 |
+
+## Runtime Full Access
+
+| Code | 含義 | 處理方式 |
+| --- | --- | --- |
+| `INVALID_INPUT` | Session Full Access 缺少 Instance opt-in、flag 型別錯誤，或同時帶兩種 module 欄位 | 修正輸入 |
+| `RUNTIME_FULL_ACCESS_NOT_APPROVED` | 舊版 SDK 的 Instance 授權預先檢查錯誤 | 新版會開啟核准流程；只核准 Agent Sessions 時回報 `CREATE_SESSION_NOT_APPROVED` |
+| `CREATE_SESSION_NOT_APPROVED` | Extension 拒絕授權或缺少 Native mode 確認 | 檢查權限及 Extension/Desktop 版本 |
+| `SDK_PROTOCOL_ERROR` | SDK 未收到 `runtimeFullAccessApplied: true` | 更新 Extension/Desktop，不可靜默降級 |
+| `RUNTIME_FULL_ACCESS_UNSUPPORTED` | Native 未確認撤銷 | 更新 Desktop；撤銷持續排隊重試 |
+
+既有 `DENO_*` 錯誤碼字面值保留當前引擎與相容契約的含義。

@@ -79,6 +79,14 @@ pub fn pedelec_tool_binary_name() -> &'static str {
         "pedelec-cli"
     }
 }
+pub fn pedelec_ts_runtime_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "pedelec-ts-runtime.exe"
+    } else {
+        "pedelec-ts-runtime"
+    }
+}
+
 pub fn pedelec_deno_binary_name() -> &'static str {
     if cfg!(windows) {
         "pedelec-deno.exe"
@@ -186,6 +194,10 @@ fn validate_executable_name(value: &str) -> Result<(), PedelecError> {
 pub fn pedelec_tool_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_tool_binary_name()))
 }
+pub fn pedelec_ts_runtime_install_path() -> Result<PathBuf, PedelecError> {
+    Ok(pedelec_home_dir()?.join(pedelec_ts_runtime_binary_name()))
+}
+
 pub fn pedelec_deno_install_path() -> Result<PathBuf, PedelecError> {
     Ok(pedelec_home_dir()?.join(pedelec_deno_binary_name()))
 }

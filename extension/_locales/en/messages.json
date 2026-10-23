@@ -15,5 +15,14 @@
   "approvedSiteTitle": { "message": "Approved Site" },
   "approvedSiteDescription": { "message": "This origin can create local Pedelec agent sessions through the extension." },
   "revokeApproval": { "message": "Revoke Approval" },
-  "unknownProviderError": { "message": "Unknown provider error" }
+  "unknownProviderError": { "message": "Unknown provider error" },
+  "allowAgentSessions": { "message": "Allow Agent Sessions" },
+  "agentSessionsDescription": { "message": "Allow this site to create and control local agent sessions." },
+  "allowFullRuntimeAccess": { "message": "Allow Full Runtime Access" },
+  "fullRuntimeAccessDescription": { "message": "Allow scripts to access files outside the workspace, use the network, read environment variables, and run local programs." },
+  "fullRuntimeAccessWarning": { "message": "This instance requires Full Runtime Access. Approving only Agent Sessions will leave authorization incomplete, and createSession() will fail." },
+  "authorizationIncomplete": { "message": "Authorization Incomplete" },
+  "reviewPermissions": { "message": "Review Permissions" },
+  "revokeFullAccess": { "message": "Revoke Full Access" },
+  "revokeAgentSessions": { "message": "Revoke Agent Sessions" }
 }

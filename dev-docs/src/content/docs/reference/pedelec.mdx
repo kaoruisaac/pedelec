@@ -19,6 +19,7 @@ new Pedelec(options?: PedelecOptions)
 
 ```ts
 type PedelecOptions = {
+  runtimeFullAccess?: boolean;
   bridgeTimeoutMs?: number;
 };
 ```
@@ -27,6 +28,7 @@ type PedelecOptions = {
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
+| `options.runtimeFullAccess` | `boolean` | `false` | Request explicit Full Runtime Access for this Instance; Session opt-in and both Extension grants are also required. |
 | `options.bridgeTimeoutMs` | `number` | `30_000` | Maximum wait for an Extension bridge response. Values below 1 are clamped to 1. |
 
 The constructor attempts to connect to the Pedelec Chrome Extension immediately. Construct it only in a browser page after hydration.
@@ -54,17 +56,21 @@ Creates a new Core session and subscribes the current SDK channel to it.
 ```ts
 type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
   | {
-      provider: ProviderCode;
-      model?: string;
-      effortLevel?: "default" | "low" | "high";
+      provider?: ProviderCode;
+      effortLevel?: EffortLevel;
+      model?: never;
+      effort?: never;
       skills?: SkillsInput<TTools>;
+      runtimeFullAccess?: boolean;
       autoEndOnDisconnect?: boolean;
     }
   | {
-      provider?: undefined;
-      model?: string;
-      effortLevel?: "default" | "low" | "high";
+      provider?: ProviderCode;
+      model: string;
+      effort?: Effort;
+      effortLevel?: never;
       skills?: SkillsInput<TTools>;
+      runtimeFullAccess?: boolean;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -312,3 +318,21 @@ When the Extension port disconnects, requests already sent through that port rej
 - [Tools API](./tools/)
 - [Types](./types/)
 - [Error codes](./error-codes/)
+
+
+## Explicit Full Runtime Access
+
+Sandbox is the default. Full Access requires three separate conditions: an Instance created with `runtimeFullAccess: true`, explicit user approval of both **Allow Agent Sessions** and **Allow Full Runtime Access** in the Extension, and `runtimeFullAccess: true` on session creation.
+
+```ts
+const privileged = new Pedelec({ runtimeFullAccess: true });
+// After the user explicitly grants both permissions in the Extension:
+const sandbox = await privileged.createSession({ runtimeFullAccess: false });
+const full = await privileged.createSession({ runtimeFullAccess: true });
+```
+
+Review the Extension permissions before creating sessions. An Instance requesting Full Access cannot create any session with only the Agent Sessions grant, including a Sandbox session. A standard Instance cannot request a Full Access session, even if another Instance on the same Origin has permission. Ordinary Origin approval never substitutes for the Full Access grant; the Popup offers an additional permission review with Full Access unchecked by default. `getApprovalStatus()` only reads status and does not open that review.
+
+The Thread mode is fixed at creation and preserved on resume. Instances on the same Origin and Threads in the same Workspace retain their own requested modes. `workspace.run()` always stays Sandbox, and Provider sandbox settings are unchanged. Full Access changes the TypeScript Runtime's OS permissions only. Revoking the Full Access grant rejects subsequent high-privilege execution and attempts to cancel affected running processes; unrelated Origins retain their grants.
+
+Upgrade the SDK, Extension, and Desktop together when using Full Access. Missing mode acknowledgment is an error, never a successful downgrade. See [Error Codes](../reference/error-codes/) for authorization and protocol failures.

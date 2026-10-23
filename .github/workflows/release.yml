@@ -413,7 +413,7 @@ jobs:
         shell: pwsh
         run: |
           $resourceDir = Join-Path $PWD "desktop/tauri/binaries"
-          $expected = @("pedelec-cli.exe", "pedelec-deno.exe", "pedelec-agent.exe", "pedelec-native-host.exe")
+          $expected = @("pedelec-cli.exe", "pedelec-ts-runtime.exe", "pedelec-deno.exe", "pedelec-agent.exe", "pedelec-native-host.exe")
           foreach ($name in $expected) {
             $path = Join-Path $resourceDir $name
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -543,11 +543,13 @@ jobs:
           }
 
           require_deb_entry '/binaries/pedelec-cli$' 'pedelec-cli'
+          require_deb_entry '/binaries/pedelec-ts-runtime$' 'pedelec-ts-runtime'
           require_deb_entry '/binaries/pedelec-deno$' 'pedelec-deno'
           require_deb_entry '/binaries/pedelec-agent$' 'pedelec-agent'
           require_deb_entry '/binaries/pedelec-native-host$' 'pedelec-native-host'
           require_deb_entry '/third-party-notices/DENO-LICENSE\.txt$' 'Deno license notice'
           require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-cli$' 'executable pedelec-cli'
+          require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-ts-runtime$' 'executable pedelec-ts-runtime'
           require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-deno$' 'executable pedelec-deno'
           require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-agent$' 'executable pedelec-agent'
           require_deb_entry '^-rwx[^ ]*[[:space:]].*/binaries/pedelec-native-host$' 'executable pedelec-native-host'
@@ -633,7 +635,7 @@ jobs:
             exit 1
           fi
 
-          for helper_name in pedelec-cli pedelec-deno pedelec-agent pedelec-native-host; do
+          for helper_name in pedelec-cli pedelec-ts-runtime pedelec-deno pedelec-agent pedelec-native-host; do
             helpers=()
             while IFS= read -r -d '' helper; do
               helpers+=("$helper")

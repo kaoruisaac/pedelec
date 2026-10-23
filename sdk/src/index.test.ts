@@ -3,6 +3,7 @@ import { PEDELEC_EXTENSION_ID } from "./extension-id";
 import {
   Pedelec,
   defineDenoModule,
+  defineRuntimeModule,
   defineTool,
   type PedelecAvailability,
   type ToolCallContext,
@@ -548,7 +549,127 @@ describe("Pedelec SDK", () => {
     expect(session.effortLevel).toBe("high");
   });
 
-  it("keeps prepared Deno sources private and uploads them before returning a session", async () => {
+  it("keeps the deprecated function as the same runtime implementation", () => {
+    expect(defineDenoModule).toBe(defineRuntimeModule);
+    const module = { name: "helpers", entry: "./helpers.ts" };
+    expect(defineRuntimeModule(module)).toBe(module);
+  });
+
+  it.each([null, "true", 1, {}, []])("rejects non-boolean Full Access flags: %j", async (value) => {
+    expect(() => new Pedelec({ runtimeFullAccess: value as any })).toThrow();
+    const client = new Pedelec();
+    await expect(client.createSession({ provider: "codex", runtimeFullAccess: value as any }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(requestMessages(pageWindow.port)).toEqual([]);
+  });
+
+  it("rejects Session Full Access before creating a Thread when the Instance did not opt in", async () => {
+    const client = new Pedelec({ runtimeFullAccess: false });
+    await expect(client.createSession({ provider: "codex", runtimeFullAccess: true }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(requestMessages(pageWindow.port)).toEqual([]);
+  });
+
+  it("retains the constructor requirement on reconnect even if the options object changes", async () => {
+    const options = { runtimeFullAccess: true };
+    const client = new Pedelec(options);
+    options.runtimeFullAccess = false;
+    expect(pageWindow.port.sent[0]).toMatchObject({ type: "sdk_hello", sdkVersion: SDK_VERSION, runtimeFullAccess: true });
+    pageWindow.port.disconnect();
+    const nextPort = new MockRuntimePort();
+    pageWindow.queuePort(nextPort);
+    const status = client.getApprovalStatus();
+    expect(nextPort.sent[0]).toMatchObject({ type: "sdk_hello", sdkVersion: SDK_VERSION, runtimeFullAccess: true });
+    respondOk(pageWindow, pageWindow.lastSent(), { installed: true, approved: true, runtimeFullAccessApproved: true, appConnected: true, origin: pageWindow.location.origin });
+    await expect(status).resolves.toMatchObject({ approved: true });
+  });
+
+  it("lets Full Instances enter Extension approval without a status preflight", async () => {
+    const client = new Pedelec({ runtimeFullAccess: true });
+    const create = client.createSession({ provider: "codex", runtimeFullAccess: false });
+    expect(pageWindow.lastSent()).toMatchObject({ type: "create_session" });
+    const rejected = expect(create).rejects.toMatchObject({ code: "CREATE_SESSION_NOT_APPROVED" });
+    respondError(pageWindow, pageWindow.lastSent(), "CREATE_SESSION_NOT_APPROVED");
+    await rejected;
+  });
+
+  it.each([undefined, false, "true"])("keeps availability read-only and rejects incomplete grants: %j", async (grant) => {
+    const client = new Pedelec({ runtimeFullAccess: true });
+    const availability = client.checkAvailability();
+    respondOk(pageWindow, pageWindow.lastSent(), { installed: true, approved: true,
+      runtimeFullAccessApproved: grant, appConnected: true, origin: pageWindow.location.origin });
+    await expect(availability).resolves.toMatchObject({ available: false, approval: { approved: false } });
+    expect(requestMessages(pageWindow.port).some((request) => request.type === "create_session")).toBe(false);
+  });
+
+  it.each([
+    { provider: "codex", runtimeFullAccess: false },
+    { provider: "codex", runtimeFullAccess: true },
+    { provider: "codex", model: "test-model", effort: "high", runtimeFullAccess: true },
+    { runtimeFullAccess: true },
+    { model: "test-model", runtimeFullAccess: true },
+  ] as const)("preserves Full Access across model/profile/default-provider paths: %j", async (input) => {
+    const client = new Pedelec({ runtimeFullAccess: true });
+    const create = client.createSession(input);
+    await nextTick();
+    if (!("provider" in input)) {
+      expect(pageWindow.lastSent().type).toBe("get_settings");
+      respondOk(pageWindow, pageWindow.lastSent(), { defaultProvider: "codex" });
+      await nextTick();
+      expect(pageWindow.lastSent().type).toBe("list_providers");
+      respondOk(pageWindow, pageWindow.lastSent(), [{ code: "codex", name: "Codex", available: true, isDefault: true, error: null }]);
+      await nextTick();
+    }
+    const request = pageWindow.lastSent();
+    expect(request).toMatchObject({ type: "create_session", input: { runtimeFullAccess: input.runtimeFullAccess } });
+    respondOk(pageWindow, request, { sessionId: "full-access", runtimeFullAccessApplied: input.runtimeFullAccess, explicitModelConfigApplied: true });
+    await expect(create).resolves.toMatchObject({ sessionId: "full-access" });
+  });
+
+  it.each([undefined, false, "true"])("aborts a Full Access Session without a true mode acknowledgment: %j", async (ack) => {
+    const client = new Pedelec({ runtimeFullAccess: true });
+    const create = client.createSession({ provider: "codex", runtimeFullAccess: true });
+    const rejected = expect(create).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR", details: { feature: "runtimeFullAccess" } });
+    await nextTick();
+    respondOk(pageWindow, pageWindow.lastSent(), { sessionId: "unconfirmed-full-access", runtimeFullAccessApplied: ack });
+    await nextTick();
+    expect(pageWindow.lastSent()).toMatchObject({ type: "abort_session_setup", sessionId: "unconfirmed-full-access" });
+    respondError(pageWindow, pageWindow.lastSent(), "CLEANUP_FAILED");
+    await rejected;
+  });
+
+  it("forwards Workspace Session mode and rejects ambiguous module options before transport", async () => {
+    const client = new Pedelec({ runtimeFullAccess: true });
+    const open = client.openWorkspace();
+    respondOk(pageWindow, pageWindow.lastSent(), { workspace: { workspaceId: "workspace-full", path: null } });
+    const workspace = await open;
+    const create = workspace.createSession({ provider: "codex", runtimeFullAccess: true });
+    await nextTick();
+    expect(pageWindow.lastSent()).toMatchObject({ type: "create_session", input: { workspaceId: "workspace-full", runtimeFullAccess: true } });
+    respondOk(pageWindow, pageWindow.lastSent(), { sessionId: "workspace-thread", workspace: { workspaceId: "workspace-full", path: null }, runtimeFullAccessApplied: true });
+    await create;
+    const count = requestMessages(pageWindow.port).length;
+    await expect(workspace.run("", { runtimeModules: [], denoModules: [] })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(requestMessages(pageWindow.port)).toHaveLength(count);
+    // Module authoring does not grant Full Access to workspace.run().
+    const run = workspace.run("", { runtimeModules: [] });
+    expect(pageWindow.lastSent().runtimeFullAccess).toBeUndefined();
+    respondOk(pageWindow, pageWindow.lastSent(), { exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false });
+    await run;
+  });
+
+  it.each([
+    { runtimeModules: [], denoModules: [] },
+    { runtimeModules: undefined, denoModules: [] },
+    { runtimeModules: null },
+  ])("rejects invalid or ambiguous Session module options: %j", async (modules) => {
+    const client = new Pedelec();
+    await expect(client.createSession({ provider: "codex", skills: { guidance: "", tools: [], ...modules } as any }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(requestMessages(pageWindow.port)).toEqual([]);
+  });
+
+  it.each(["runtimeModules", "denoModules"] as const)("uploads private Session artifacts via %s", async (moduleKey) => {
     const previousFetch = globalThis.fetch;
     const fetchCalls: Array<{ url: string; body: string; size: number }> = [];
     globalThis.fetch = async (input, init) => {
@@ -573,7 +694,7 @@ describe("Pedelec SDK", () => {
         skills: {
           guidance: "Use sprite-tools.",
           tools: [],
-          denoModules: [module],
+          [moduleKey]: [module],
         },
       });
       const createRequest = pageWindow.lastSent();
@@ -3532,7 +3653,7 @@ describe("Pedelec SDK", () => {
     await expect(workspace.run("x", { timeoutMs: 0 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
   });
 
-  it("prepares Workspace Deno Modules once and mounts only the requested names per run", async () => {
+  it.each(["runtimeModules", "denoModules"] as const)("prepares and uploads Workspace modules via %s", async (moduleKey) => {
     const previousFetch = globalThis.fetch;
     const fetchCalls: string[] = [];
     globalThis.fetch = async (input, init) => {
@@ -3556,7 +3677,7 @@ describe("Pedelec SDK", () => {
 
       const firstRun = workspace.run(
         `import { buildScene } from "scene-tools";\nawait buildScene();`,
-        { denoModules: [module], timeoutMs: 60_000 },
+        { [moduleKey]: [module], timeoutMs: 60_000 },
       );
       const prepareRequest = pageWindow.lastSent();
       expect(prepareRequest).toMatchObject({
@@ -3599,7 +3720,7 @@ describe("Pedelec SDK", () => {
       await expect(firstRun).resolves.toMatchObject({ exitCode: 0, stdout: "ok" });
       expect(fetchCalls).toHaveLength(1);
 
-      const secondRun = workspace.run("import 'scene-tools';", { denoModules: [module] });
+      const secondRun = workspace.run("import 'scene-tools';", { [moduleKey]: [module] });
       const secondPrepareRequest = pageWindow.lastSent();
       expect(secondPrepareRequest).toMatchObject({
         type: "prepare_workspace_deno_modules",

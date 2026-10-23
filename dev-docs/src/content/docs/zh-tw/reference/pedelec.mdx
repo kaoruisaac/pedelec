@@ -19,6 +19,7 @@ new Pedelec(options?: PedelecOptions)
 
 ```ts
 type PedelecOptions = {
+  runtimeFullAccess?: boolean;
   bridgeTimeoutMs?: number;
 };
 ```
@@ -27,6 +28,7 @@ type PedelecOptions = {
 
 | Parameter | Type | Default | 說明 |
 | --- | --- | --- | --- |
+| `options.runtimeFullAccess` | `boolean` | `false` | 此 Instance 要求明確 Full Runtime Access；仍需 Session opt-in 與 Extension 兩項 grants。 |
 | `options.bridgeTimeoutMs` | `number` | `30_000` | 等待 Extension bridge response 的最長時間；小於 1 會 clamp 成 1。 |
 
 Constructor 會立即嘗試連到 Pedelec Chrome Extension。只能在 hydration 後的 browser page 建立。
@@ -54,17 +56,21 @@ createSession<const TTools extends readonly ToolDefinition[]>(
 ```ts
 type CreateSessionInput<TTools extends readonly ToolDefinition[]> =
   | {
-      provider: ProviderCode;
-      model?: string;
-      effortLevel?: "default" | "low" | "high";
+      provider?: ProviderCode;
+      effortLevel?: EffortLevel;
+      model?: never;
+      effort?: never;
       skills?: SkillsInput<TTools>;
+      runtimeFullAccess?: boolean;
       autoEndOnDisconnect?: boolean;
     }
   | {
-      provider?: undefined;
-      model?: string;
-      effortLevel?: "default" | "low" | "high";
+      provider?: ProviderCode;
+      model: string;
+      effort?: Effort;
+      effortLevel?: never;
       skills?: SkillsInput<TTools>;
+      runtimeFullAccess?: boolean;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -287,3 +293,21 @@ Extension port disconnect 時，已透過該 port 送出的 request 會 reject�
 - [Tools API](./tools/)
 - [Types](./types/)
 - [Error Codes](./error-codes/)
+
+
+## 明確授權 Full Runtime Access
+
+預設為 Sandbox。Full Access 必須同時具備三個條件：以 `runtimeFullAccess: true` 建立 Instance、使用者在 Extension 明確核准 **Allow Agent Sessions** 與 **Allow Full Runtime Access**，以及建立 Session 時指定 `runtimeFullAccess: true`。
+
+```ts
+const privileged = new Pedelec({ runtimeFullAccess: true });
+// 使用者在 Extension 明確核准兩項權限後：
+const sandbox = await privileged.createSession({ runtimeFullAccess: false });
+const full = await privileged.createSession({ runtimeFullAccess: true });
+```
+
+請先檢視 Extension 權限再建立 Session。要求 Full Access 的 Instance 若只有 Agent Sessions grant，連 Sandbox Session 也不能建立。普通 Instance 即使與已授權 Instance 位於相同 Origin，仍不能建立 Full Access Session。一般 Origin 核准不能取代 Full Access grant；Popup 會提供額外權限審查，Full Access 預設不勾選。`getApprovalStatus()` 只讀狀態，不會開啟審查。
+
+Thread mode 在建立後固定，resume 沿用。同 Origin 的 Instances 與同 Workspace 的 Threads 各自保留其要求的模式。`workspace.run()` 永遠維持 Sandbox；Provider sandbox 設定不變。Full Access 只改變 TypeScript Runtime 的 OS 權限。撤銷 Full Access grant 會拒絕後續高權限執行，並盡力取消受影響的執行中程序；其他 Origin 的 grant 不受影響。
+
+使用 Full Access 時請一併更新 SDK、Extension 與 Desktop。缺少 mode acknowledgment 時必須報錯，不能靜默降級成功。授權與協議失敗請見 [Error Codes](../reference/error-codes/)。

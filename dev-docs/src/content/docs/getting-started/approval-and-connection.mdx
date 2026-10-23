@@ -17,6 +17,8 @@ const status = await pedelec.getApprovalStatus();
 type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
+  agentSessionsApproved?: boolean;
+  runtimeFullAccessApproved?: boolean;
   origin: string | null;
   appConnected: boolean;
 };
@@ -38,7 +40,7 @@ Because several causes map to the same result, label this state “Pedelec exten
 
 ### `approved`
 
-`true` means the current origin is already recorded as approved in extension-local storage.
+`true` means the current Instance has all requested Origin grants in Extension-local storage: Agent Sessions, and Full Runtime Access when requested.
 
 Approval is scoped to an origin, which includes scheme, hostname, and port. A development port change can require approval again.
 
@@ -77,6 +79,8 @@ const workspace = await pedelec.openWorkspace();
 ```
 
 The extension queues the request, opens its popup, and waits for the user to approve or reject the site. After approval, the queued operation continues automatically.
+
+This also applies to `new Pedelec({ runtimeFullAccess: true })`: its first `createSession()` opens the approval popup when either grant is missing. Both Agent Sessions and Full Runtime Access must be approved, even for a Session with `runtimeFullAccess: false`. Selecting only Agent Sessions displays Authorization Incomplete and rejects the pending operation with `CREATE_SESSION_NOT_APPROVED`. With both grants, Session `false` creates Sandbox mode and `true` requires Native confirmation of Full Access. A Standard Instance requesting a Full Session fails immediately with `INVALID_INPUT`.
 
 The approval request has a timeout. Closing the popup without completing approval is treated as a rejection or incomplete approval.
 
@@ -165,3 +169,21 @@ async function connectPedelec() {
 A robust connection screen presents the failing layer and the corrective action rather than one generic “connection failed” message.
 
 Next, read [Creating the client](../sdk/client/) for client lifetime and bridge-timeout behavior.
+
+
+## Explicit Full Runtime Access
+
+Sandbox is the default. Full Access requires three separate conditions: an Instance created with `runtimeFullAccess: true`, explicit user approval of both **Allow Agent Sessions** and **Allow Full Runtime Access** in the Extension, and `runtimeFullAccess: true` on session creation.
+
+```ts
+const privileged = new Pedelec({ runtimeFullAccess: true });
+// After the user explicitly grants both permissions in the Extension:
+const sandbox = await privileged.createSession({ runtimeFullAccess: false });
+const full = await privileged.createSession({ runtimeFullAccess: true });
+```
+
+Review the Extension permissions before creating sessions. An Instance requesting Full Access cannot create any session with only the Agent Sessions grant, including a Sandbox session. A standard Instance cannot request a Full Access session, even if another Instance on the same Origin has permission. Ordinary Origin approval never substitutes for the Full Access grant; the Popup offers an additional permission review with Full Access unchecked by default. `getApprovalStatus()` only reads status and does not open that review.
+
+The Thread mode is fixed at creation and preserved on resume. Instances on the same Origin and Threads in the same Workspace retain their own requested modes. `workspace.run()` always stays Sandbox, and Provider sandbox settings are unchanged. Full Access changes the TypeScript Runtime's OS permissions only. Revoking the Full Access grant rejects subsequent high-privilege execution and attempts to cancel affected running processes; unrelated Origins retain their grants.
+
+Upgrade the SDK, Extension, and Desktop together when using Full Access. Missing mode acknowledgment is an error, never a successful downgrade. See [Error Codes](../reference/error-codes/) for authorization and protocol failures.

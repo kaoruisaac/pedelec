@@ -32,6 +32,7 @@ import type {
 
 ```ts
 type PedelecOptions = {
+  runtimeFullAccess?: boolean;
   bridgeTimeoutMs?: number;
 };
 ```
@@ -76,6 +77,7 @@ type CreateSessionInput<
       model?: never;
       effort?: never;
       skills?: SkillsInput<TTools>;
+      runtimeFullAccess?: boolean;
       autoEndOnDisconnect?: boolean;
     }
   | {
@@ -84,6 +86,7 @@ type CreateSessionInput<
       effort?: Effort;
       effortLevel?: never;
       skills?: SkillsInput<TTools>;
+      runtimeFullAccess?: boolean;
       autoEndOnDisconnect?: boolean;
     };
 ```
@@ -116,6 +119,9 @@ class PedelecWorkspace {
 
 ```ts
 type WorkspaceRunOptions = {
+  runtimeModules?: readonly RuntimeModuleDefinition[];
+  /** @deprecated Use runtimeModules. Do not provide both fields. */
+  denoModules?: readonly RuntimeModuleDefinition[];
   timeoutMs?: number;
 };
 ```
@@ -160,6 +166,8 @@ type PedelecSettings = {
 type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
+  agentSessionsApproved?: boolean;
+  runtimeFullAccessApproved?: boolean;
   origin: string | null;
   appConnected: boolean;
 };
@@ -293,10 +301,10 @@ type ToolDefinition<
 };
 ```
 
-### `DenoModuleDefinition`
+### `RuntimeModuleDefinition`
 
 ```ts
-type DenoModuleDefinition<TName extends string = string> = {
+type RuntimeModuleDefinition<TName extends string = string> = {
   name: TName;
   entry: string;
   description?: string;
@@ -310,8 +318,8 @@ type DenoModuleDefinition<TName extends string = string> = {
 Session skills use the stricter shape below: `description` and `usage` must both be non-empty strings. Workspace runs may use the minimal base declaration, but every module must contain a prepared Vite artifact.
 
 ```ts
-type AgentDenoModuleDefinition<TName extends string = string> =
-  DenoModuleDefinition<TName> & {
+type AgentModuleDefinition<TName extends string = string> =
+  RuntimeModuleDefinition<TName> & {
     description: string;
     usage: string;
   };
@@ -325,7 +333,9 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
-  denoModules?: readonly AgentDenoModuleDefinition[];
+  runtimeModules?: readonly AgentModuleDefinition[];
+  /** @deprecated Use runtimeModules. Do not provide both fields. */
+  denoModules?: readonly AgentModuleDefinition[];
 };
 ```
 
@@ -350,7 +360,7 @@ type WebMcpBinding = {
 };
 ```
 
-`pedelec.webmcp()` accepts tools only. It does not take `guidance` or `denoModules`. `dispose()` aborts that binding's WebMCP registrations. See the [Tools API](./tools/) for availability and handler context limits.
+`pedelec.webmcp()` accepts tools only. It does not take `guidance` or `runtimeModules`. `dispose()` aborts that binding's WebMCP registrations. See the [Tools API](./tools/) for availability and handler context limits.
 
 ### `ToolNameOf`
 
@@ -576,3 +586,17 @@ type EndedEventContext = PedelecEventContext & {
 ```
 
 Fields marked optional in the base context are present only when relevant. Treat IDs as opaque and timestamps as browser diagnostics, not security claims.
+
+## Legacy module compatibility
+
+`DenoModuleDefinition`, `defineDenoModule()` and `denoModules` remain usable and are marked `@deprecated` in TypeScript. Migrate to `RuntimeModuleDefinition`, `defineRuntimeModule()` and `runtimeModules`. Supply exactly one module field per skills/options object; supplying both rejects with `INVALID_INPUT`, even when either list is empty. The internal `SerializableSkillsManifest.denoModules` wire field remains unchanged.
+
+```ts
+// Existing integrations remain valid:
+import { defineDenoModule, defineRuntimeModule, type DenoModuleDefinition } from "@kaoruisaac/pedelec";
+const legacy: DenoModuleDefinition = defineDenoModule({ name: "project-tools", entry: "./agent/project-tools.ts" });
+await workspace.run('import "project-tools";', { denoModules: [legacy] });
+// New integrations:
+const modern = defineRuntimeModule({ name: "project-tools", entry: "./agent/project-tools.ts" });
+await workspace.run('import "project-tools";', { runtimeModules: [modern] });
+```

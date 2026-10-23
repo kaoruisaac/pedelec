@@ -1686,7 +1686,7 @@ mod tests {
         assert!(preparation.contains("[Session Preparation]"));
         assert!(preparation.contains("[Pedelec Host Context]"));
         assert!(preparation.contains(&format!(
-            "runFileCommand: pedelec-deno --thread-id {thread_id} run <workspace-relative-script-path>"
+            "runFileCommand: pedelec-ts-runtime --thread-id {thread_id} run <workspace-relative-script-path>"
         )));
         assert!(!preparation.contains("For JavaScript or TypeScript execution"));
         assert!(!preparation.contains("readSpecCommand` / `callCommand"));
@@ -2113,6 +2113,7 @@ mod tests {
             .lock()
             .unwrap()
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Antigravity,
                 effort_level: Some(EffortLevel::Default),
                 model: None,

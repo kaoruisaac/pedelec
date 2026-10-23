@@ -30,6 +30,7 @@ test("release verification rejects raw Deno and accepts helper binaries", () => 
   assert.doesNotThrow(() =>
     assertNoRawDeno([
       "binaries/pedelec-cli.exe",
+      "binaries/pedelec-ts-runtime.exe",
       "binaries/pedelec-deno.exe",
       "binaries/pedelec-agent.exe",
       "binaries/pedelec-native-host.exe",
@@ -39,6 +40,16 @@ test("release verification rejects raw Deno and accepts helper binaries", () => 
     () => assertHelpersPresent(publicHelperBinaryNames("win32"), ["binaries/pedelec-deno.exe"]),
     /missing staged Pedelec helper: pedelec-cli.exe/,
   );
+});
+
+test("bundles must contain both runtime command names on each platform", () => {
+  for (const platform of ["win32", "darwin", "linux"]) {
+    const expected = publicHelperBinaryNames(platform);
+    for (const stem of ["pedelec-ts-runtime", "pedelec-deno"]) {
+      const files = expected.filter((name) => !name.startsWith(`${stem}.`) && name !== stem);
+      assert.throws(() => assertHelpersPresent(expected, files), new RegExp(`missing staged Pedelec helper: ${stem}`));
+    }
+  }
 });
 
 test("a directory containing raw Deno fails release verification", async () => {
@@ -173,6 +184,7 @@ test("Windows updater payload listing rejects raw Deno inside the installer", ()
     "Type = Nsis",
     "Path = pedelec-app.exe",
     "Path = binaries\\pedelec-cli.exe",
+    "Path = binaries\\pedelec-ts-runtime.exe",
     "Path = binaries\\pedelec-deno.exe",
     "Path = binaries\\pedelec-agent.exe",
     "Path = binaries\\pedelec-native-host.exe",
@@ -181,6 +193,7 @@ test("Windows updater payload listing rejects raw Deno inside the installer", ()
   assert.deepEqual(clean, [
     "pedelec-app.exe",
     "binaries\\pedelec-cli.exe",
+    "binaries\\pedelec-ts-runtime.exe",
     "binaries\\pedelec-deno.exe",
     "binaries\\pedelec-agent.exe",
     "binaries\\pedelec-native-host.exe",
@@ -220,6 +233,7 @@ function cleanInstallerListing(archivePath) {
   return [
     `Path = ${archivePath}`,
     "Path = binaries\\pedelec-cli.exe",
+    "Path = binaries\\pedelec-ts-runtime.exe",
     "Path = binaries\\pedelec-deno.exe",
     "Path = binaries\\pedelec-agent.exe",
     "Path = binaries\\pedelec-native-host.exe",
@@ -340,6 +354,7 @@ test("raw Deno inside the local NSIS payload fails release verification", async 
     await assert.rejects(
       assertWindowsNsisPayload(archivePath, async () => [
         `Path = ${archivePath}`,
+        "Path = binaries\\pedelec-ts-runtime.exe",
         "Path = binaries\\pedelec-deno.exe",
         "Path = binaries\\deno.exe",
       ].join("\n")),

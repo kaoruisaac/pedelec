@@ -70,21 +70,21 @@ The tables below document common codes from the SDK and current bridge/runtime. 
 | `SDK_TRANSPORT_ERROR` | Generic bridge request failure | Inspect `message/details`; verify Extension/native/Core | Depends on operation |
 | `SDK_PROTOCOL_ERROR` | Response/event shape or request type did not match SDK expectations | Align component versions; report reproducible mismatch | Usually not until versions/config fixed |
 
-## Workspace Deno execution
+## Workspace Runtime execution
 
 | Code | Meaning | Recommended response | Retry? |
 | --- | --- | --- | --- |
-| `DENO_EXECUTION_TIMEOUT` | Workspace Deno code exceeded its positive timeout, which defaults to 60 seconds | Increase the timeout only when appropriate, or split/shorten the script | Yes after changing the work |
-| `DENO_EXECUTION_CANCELLED` | Workspace Deno execution was cancelled during shutdown or interruption | Reconcile partial Workspace writes before retrying | After the Workspace/runtime is usable |
+| `DENO_EXECUTION_TIMEOUT` | Workspace TypeScript code exceeded its positive timeout, which defaults to 60 seconds | Increase the timeout only when appropriate, or split/shorten the script | Yes after changing the work |
+| `DENO_EXECUTION_CANCELLED` | Workspace Runtime execution was cancelled during shutdown or interruption | Reconcile partial Workspace writes before retrying | After the Workspace/runtime is usable |
 | `DENO_RUNTIME_UNAVAILABLE` | The managed Deno runtime cannot be located or started | Restart Desktop so it can prepare the runtime again. Reinstall Desktop if preparation keeps failing | After the runtime is available |
 | `DENO_PROCESS_SPAWN_FAILED` | Desktop could not spawn the Deno process | Check Desktop installation, executable permissions, and runtime logs | After fixing the process environment |
 | `DENO_PROCESS_IO_FAILED` | Deno process stdin/stdout/stderr communication failed | Treat the operation as failed, inspect runtime logs, and reconcile partial writes | After transport/runtime recovery |
-| `DENO_MODULE_NAME_INVALID` | A logical Deno Module name is not a supported bare or scoped package-like specifier | Use a valid module name such as `scene-tools` or `@example/scene-tools` | After fixing the declaration |
-| `DENO_MODULE_SETUP_INCOMPLETE` | A requested Workspace or Session Deno Module is not ready, or setup/upload for that same module identity is still pending | Finish or retry that module's setup. Other Workspace activity does not block it | Yes after that module's setup is complete |
+| `DENO_MODULE_NAME_INVALID` | A logical Runtime Module name is not a supported bare or scoped package-like specifier | Use a valid module name such as `scene-tools` or `@example/scene-tools` | After fixing the declaration |
+| `DENO_MODULE_SETUP_INCOMPLETE` | A requested Workspace or Session Runtime Module is not ready, or setup/upload for that same module identity is still pending | Finish or retry that module's setup. Other Workspace activity does not block it | Yes after that module's setup is complete |
 | `DENO_MODULE_NOT_FOUND` | The requested module was not declared in the owning Workspace scope or Thread snapshot | Include the module in the explicit run/setup request or create a new Session snapshot | After correcting the request |
 | `DENO_MODULE_ALREADY_READY` | A ready module package is immutable for the current Core runtime scope | Use the existing package or choose a new logical module name for a new implementation | Only with a new name |
 | `DENO_MODULE_ARTIFACT_TOO_LARGE` | The prepared runtime/declaration envelope exceeds the 100 MiB upload limit | Reduce the bundled artifact or split the module | After reducing the artifact |
-| `DENO_MODULE_ARTIFACT_INVALID` | The uploaded Deno Module envelope or its runtime/declaration sources are invalid | Rebuild with the Vite plugin and retry | After rebuilding |
+| `DENO_MODULE_ARTIFACT_INVALID` | The uploaded Runtime Module envelope or its runtime/declaration sources are invalid | Rebuild with the Vite plugin and retry | After rebuilding |
 | `DENO_MODULE_MATERIALIZATION_FAILED` | Core could not safely commit or validate the private module package | Inspect filesystem/runtime health without exposing private paths to users | After fixing the filesystem/runtime issue |
 | `DENO_MODULE_UPLOAD_SERVER_UNAVAILABLE` | The local bounded upload endpoint is unavailable | Restart or repair the Desktop/Core runtime | After the upload endpoint is ready |
 | `DENO_MODULE_UPLOAD_TICKET_EXPIRED` | The short-lived module upload ticket expired | Request a fresh setup/upload ticket | Yes with a fresh ticket |
@@ -196,3 +196,15 @@ Asset failures can occur while creating an SDK request, during loopback upload `
 | `WORKSPACE_FILE_NOT_REGULAR` | Target is a directory, symlink, junction, or other non-regular file | Choose a regular file |
 | `WORKSPACE_PATH_INVALID` | Path is absolute, traverses with `..`, or otherwise is not a Workspace-relative path | Use a relative `/`-separated path without a leading slash |
 | `WORKSPACE_FILE_TEXT_DECODE_FAILED` / `WORKSPACE_FILE_INVALID_JSON` | SDK could not decode UTF-8 or parse JSON | Use `file` or correct the contents |
+
+## Runtime Full Access
+
+| Code | Meaning | Recovery |
+| --- | --- | --- |
+| `INVALID_INPUT` | Session Full Access without Instance opt-in, invalid flag type, or both module fields | Correct the input |
+| `RUNTIME_FULL_ACCESS_NOT_APPROVED` | Legacy SDK preflight error for incomplete Instance grants | Current SDK opens approval; Agent-only approval returns `CREATE_SESSION_NOT_APPROVED` |
+| `CREATE_SESSION_NOT_APPROVED` | Extension rejects authorization or missing Native mode confirmation | Review permissions and update Extension/Desktop |
+| `SDK_PROTOCOL_ERROR` | SDK did not receive `runtimeFullAccessApplied: true` | Update Extension/Desktop; never downgrade silently |
+| `RUNTIME_FULL_ACCESS_UNSUPPORTED` | Native did not acknowledge revocation | Update Desktop; pending revocation remains queued |
+
+Existing `DENO_*` error code literals remain stable for the current engine and compatibility contract.

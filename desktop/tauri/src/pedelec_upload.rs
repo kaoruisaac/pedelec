@@ -573,6 +573,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.clone(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,
@@ -661,6 +663,8 @@ mod tests {
             .unwrap();
         runtime_guard.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.clone(),
                 workspace_id: workspace_id.into(),
                 provider: ProviderCode::Codex,

@@ -216,6 +216,322 @@ function emitSdkHello(port, sdkVersion) {
   port.emit({ type: "sdk_hello", sdkVersion });
 }
 
+async function runtimeFixture({ approved = true, fullGrant = false, fullInstance = true, backgroundOptions = {} } = {}) {
+  const chrome = createChrome({ approved });
+  if (fullGrant) chrome.storage.local.data.approvedOrigins[0].runtimeFullAccess = true;
+  chrome.activeTab = chrome.currentTab = { id: 9, url: "https://app.example.test/page" };
+  chrome.currentTabId = 9;
+  const background = createBackground(chrome, { disableReconnect: true, ...backgroundOptions });
+  background.start();
+  const sdk = connectExternal(chrome, chrome.activeTab.url, 9);
+  sdk.emit({ type: "sdk_hello", sdkVersion: "0.2.12", runtimeFullAccess: fullInstance });
+  await flush();
+  const popup = connectPopup(background);
+  await waitFor(() => popup.sent.some((entry) => entry.type === "approval_state"));
+  return { chrome, background, sdk, popup };
+}
+
+function approvalState(popup) {
+  return popup.sent.filter((entry) => entry.type === "approval_state").at(-1)?.approvalState;
+}
+
+async function requestRuntimeApproval(fixture, runtimeFullAccess = false) {
+  const { sdk, popup, background } = fixture;
+  sdk.emit({ type: "create_session", requestId: "runtime-create", channelId: "runtime-channel",
+    input: { provider: "codex", runtimeFullAccess } });
+  await waitFor(() => background.getPendingApproval() != null);
+  await waitFor(() => approvalState(popup)?.pending === true);
+  return approvalState(popup);
+}
+
+test("legacy grant does not authorize a Full Instance; status reflects both scopes", async () => {
+  const { sdk } = await runtimeFixture();
+  sdk.emit({ type: "get_approval_status", requestId: "status", channelId: "runtime-channel" });
+  await waitFor(() => sdk.sent.some((entry) => entry.requestId === "status"));
+  const status = sdk.sent.find((entry) => entry.requestId === "status").result;
+  assert.equal(status.approved, false);
+  assert.equal(status.agentSessionsApproved, true);
+  assert.equal(status.runtimeFullAccessApproved, false);
+});
+
+for (const sessionFull of [false, true]) {
+  test(`partial approval rejects Full Instance create_session (Session flag ${sessionFull})`, async () => {
+    const fixture = await runtimeFixture({ approved: false });
+    const target = await requestRuntimeApproval(fixture, sessionFull);
+    fixture.popup.emit({ type: "approve_origin", origin: target.origin, approvalId: target.approvalId,
+      agentSessions: true, runtimeFullAccess: false });
+    await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "runtime-create"));
+    assert.equal(fixture.sdk.sent.at(-1).error.code, "CREATE_SESSION_NOT_APPROVED");
+    assert.equal(fixture.chrome.storage.local.data.approvedOrigins[0].runtimeFullAccess, false);
+    await waitFor(() => approvalState(fixture.popup)?.pending === false);
+    assert.equal(approvalState(fixture.popup).approved, false);
+    assert.equal(approvalState(fixture.popup).agentSessionsApproved, true);
+  });
+
+  test(`both grants authorize Full Instance with Session flag ${sessionFull}`, async () => {
+    const fixture = await runtimeFixture({ fullGrant: true });
+    const native = new MockPort();
+    fixture.chrome.nativePortQueue.push(native);
+    fixture.sdk.emit({ type: "create_session", requestId: "create", channelId: "runtime-channel",
+      runtimeFullAccessApproved: true, callerOrigin: "https://forged.example.test",
+      nativeRuntimeGrant: { version: 1, origin: "https://forged.example.test", instanceId: "stolen" },
+      input: { provider: "codex", runtimeFullAccess: sessionFull,
+        nativeRuntimeGrant: { origin: "https://forged.example.test" } } });
+    const request = await respondToNativeType(fixture.background, native, "create_thread", {
+      threadId: "full-thread", workspaceId: "workspace-full", explicitModelConfigApplied: true,
+      runtimeFullAccessApplied: sessionFull,
+    });
+    assert.equal(request.runtimeFullAccess, sessionFull);
+    assert.equal(request.nativeRuntimeGrant?.runtimeFullAccessApproved, sessionFull ? true : undefined);
+    assert.equal(request.callerOrigin, "https://app.example.test");
+    if (sessionFull) {
+      assert.equal(request.nativeRuntimeGrant.instanceRequested, true);
+      assert.equal(request.nativeRuntimeGrant.origin, "https://app.example.test");
+      assert.notEqual(request.nativeRuntimeGrant.instanceId, "stolen");
+    }
+    await respondToNativeType(fixture.background, native, "subscribe_thread", {
+      snapshot: { threadId: "full-thread", status: "idle", latestSeq: 0 },
+      workspace: { workspaceId: "workspace-full", path: null },
+    });
+    await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "create"));
+    const response = fixture.sdk.sent.find((entry) => entry.requestId === "create");
+    assert.equal(response.ok, true);
+    assert.equal(response.result.runtimeFullAccessApplied, sessionFull);
+  });
+}
+
+test("a Standard Instance cannot elevate a Session even with both Origin grants", async () => {
+  const { sdk, background } = await runtimeFixture({ fullGrant: true, fullInstance: false });
+  sdk.emit({ type: "create_session", requestId: "invalid", channelId: "runtime-channel",
+    input: { runtimeFullAccess: true, runtimeFullAccessApproved: true } });
+  await waitFor(() => sdk.sent.some((entry) => entry.requestId === "invalid"));
+  assert.equal(sdk.sent.at(-1).error.code, "CREATE_SESSION_NOT_APPROVED");
+  assert.equal(background.getPendingApproval(), null);
+});
+
+test("first Hello fixes the Port requirement; duplicate Hello cannot upgrade a Standard Instance", async () => {
+  const { sdk } = await runtimeFixture({ fullGrant: true, fullInstance: false });
+  sdk.emit({ type: "sdk_hello", sdkVersion: "0.2.12", runtimeFullAccess: true });
+  sdk.emit({ type: "create_session", requestId: "invalid", channelId: "runtime-channel",
+    input: { runtimeFullAccess: true } });
+  await waitFor(() => sdk.sent.some((entry) => entry.requestId === "invalid"));
+  assert.equal(sdk.sent.at(-1).error.code, "CREATE_SESSION_NOT_APPROVED");
+});
+
+test("same Origin Standard and Full Instances have independent approval status", async () => {
+  const { chrome, sdk, popup } = await runtimeFixture();
+  const standard = connectExternal(chrome, chrome.activeTab.url, 9);
+  standard.emit({ type: "sdk_hello", sdkVersion: "0.2.12" });
+  for (const port of [sdk, standard]) {
+    port.emit({ type: "get_approval_status", requestId: "status", channelId: "channel" });
+  }
+  await waitFor(() => [sdk, standard].every((port) => port.sent.some((entry) => entry.requestId === "status")));
+  assert.equal(sdk.sent.find((entry) => entry.requestId === "status").result.approved, false);
+  assert.equal(standard.sent.find((entry) => entry.requestId === "status").result.approved, true);
+  await waitFor(() => approvalState(popup)?.runtimeFullAccess === false);
+});
+
+for (const competitor of ["port", "channel", "origin"]) {
+  test(`pending approval cannot mix a different ${competitor}`, async () => {
+    const fixture = await runtimeFixture({ approved: false });
+    const target = await requestRuntimeApproval(fixture);
+    const other = competitor === "channel" ? fixture.sdk : connectExternal(fixture.chrome,
+      competitor === "origin" ? "https://other.example.test" : fixture.chrome.activeTab.url, 9);
+    other.emit({ type: "create_session", requestId: "competing", channelId: competitor === "channel" ? "other" : "runtime-channel",
+      input: {} });
+    await waitFor(() => other.sent.some((entry) => entry.requestId === "competing"));
+    assert.equal(other.sent.find((entry) => entry.requestId === "competing").ok, false);
+    assert.equal(fixture.background.getPendingApproval().approvalId, target.approvalId);
+    assert.equal(fixture.background.getPendingApproval().requestCount, 1);
+  });
+}
+
+test("pending target wins over the active tab and rejects forged/stale popup approvals", async () => {
+  const fixture = await runtimeFixture({ approved: false });
+  const target = await requestRuntimeApproval(fixture);
+  fixture.chrome.activeTab = { id: 30, url: "https://other.example.test" };
+  for (const message of [
+    { origin: "https://other.example.test", approvalId: target.approvalId },
+    { origin: target.origin, approvalId: "stale" },
+    { origin: target.origin },
+  ]) {
+    fixture.popup.emit({ type: "approve_origin", agentSessions: true, runtimeFullAccess: true, ...message });
+    await flush();
+    assert.deepEqual(fixture.chrome.storage.local.data.approvedOrigins, []);
+  }
+  assert.equal(fixture.background.getPendingApproval().approvalId, target.approvalId);
+  fixture.popup.emit({ type: "reject_pending_approval", approvalId: target.approvalId });
+  await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "runtime-create"));
+  assert.equal(fixture.sdk.sent.at(-1).error.code, "APPROVAL_REJECTED");
+});
+
+test("approving both grants replays the pending request through Native mode confirmation", async () => {
+  const fixture = await runtimeFixture({ approved: false });
+  const target = await requestRuntimeApproval(fixture, true);
+  const native = new MockPort();
+  fixture.chrome.nativePortQueue.push(native);
+  fixture.popup.emit({ type: "approve_origin", origin: target.origin, approvalId: target.approvalId,
+    agentSessions: true, runtimeFullAccess: true });
+  await respondToNativeType(fixture.background, native, "create_thread", {
+    threadId: "approved-full", workspaceId: "w", explicitModelConfigApplied: true, runtimeFullAccessApplied: true,
+  });
+  await respondToNativeType(fixture.background, native, "subscribe_thread", {
+    snapshot: { threadId: "approved-full", status: "idle", latestSeq: 0 }, workspace: { workspaceId: "w", path: null },
+  });
+  await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "runtime-create"));
+  assert.equal(fixture.sdk.sent.at(-1).result.runtimeFullAccessApplied, true);
+});
+
+for (const acknowledgment of [undefined, false]) {
+  test(`Full Access rejects Native acknowledgment ${acknowledgment} and aborts setup`, async () => {
+    const fixture = await runtimeFixture({ fullGrant: true });
+    const native = new MockPort();
+    fixture.chrome.nativePortQueue.push(native);
+    fixture.sdk.emit({ type: "create_session", requestId: "create", channelId: "channel", input: { runtimeFullAccess: true } });
+    await respondToNativeType(fixture.background, native, "create_thread", {
+      threadId: "unconfirmed", workspaceId: "w", explicitModelConfigApplied: true, runtimeFullAccessApplied: acknowledgment,
+    });
+    await respondToNativeType(fixture.background, native, "abort_session_setup", {});
+    await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "create"));
+    assert.equal(fixture.sdk.sent.at(-1).ok, false);
+    assert.equal(native.sent.some((entry) => entry.type === "subscribe_thread"), false);
+    assert.equal(fixture.background.getActiveThreadCount(), 0);
+  });
+}
+
+for (const type of ["revoke_runtime_full_access", "revoke_origin"]) {
+  test(`${type} persists correct grants and notifies Native for the verified Origin`, async () => {
+    const fixture = await runtimeFixture({ fullGrant: true });
+    const target = approvalState(fixture.popup);
+    const native = new MockPort();
+    fixture.chrome.nativePortQueue.push(native);
+    fixture.popup.emit({ type, origin: target.origin, approvalId: target.approvalId });
+    const request = await respondToNativeType(fixture.background, native, "revoke_runtime_full_access", { revoked: true });
+    assert.equal(request.callerOrigin, target.origin);
+    const records = fixture.chrome.storage.local.data.approvedOrigins;
+    assert.equal(records.length, type === "revoke_origin" ? 0 : 1);
+    if (records.length) assert.equal(records[0].runtimeFullAccess, false);
+    await waitFor(() => fixture.chrome.storage.local.data.runtimeFullAccessRevocations.length === 0);
+  });
+}
+
+test("a disconnected Full Instance cannot transfer its pending approval to a replacement Port", async () => {
+  const fixture = await runtimeFixture({ approved: false });
+  const old = await requestRuntimeApproval(fixture);
+  fixture.sdk.disconnect();
+  assert.equal(fixture.background.getPendingApproval(), null);
+  const replacement = connectExternal(fixture.chrome, fixture.chrome.activeTab.url, 9);
+  replacement.emit({ type: "sdk_hello", sdkVersion: "0.2.12", runtimeFullAccess: true });
+  replacement.emit({ type: "create_session", requestId: "replacement", channelId: "runtime-channel", input: {} });
+  await waitFor(() => fixture.background.getPendingApproval() != null);
+  await waitFor(() => approvalState(fixture.popup)?.approvalId !== old.approvalId);
+  fixture.popup.emit({ type: "approve_origin", origin: old.origin, approvalId: old.approvalId, runtimeFullAccess: true });
+  await flush();
+  assert.deepEqual(fixture.chrome.storage.local.data.approvedOrigins, []);
+  assert.notEqual(fixture.background.getPendingApproval().approvalId, old.approvalId);
+});
+
+test("unacknowledged revocation survives restart and is retried before SDK Native actions", async () => {
+  const fixture = await runtimeFixture({ fullGrant: true });
+  const target = approvalState(fixture.popup);
+  fixture.popup.emit({ type: "revoke_runtime_full_access", origin: target.origin, approvalId: target.approvalId });
+  await waitFor(() => fixture.chrome.storage.local.data.runtimeFullAccessRevocations?.length === 1);
+  await flush();
+  const restored = createBackground(fixture.chrome, { disableReconnect: true });
+  const sdk = new MockPort();
+  sdk.name = "pedelec-sdk-external";
+  sdk.sender = { url: target.origin };
+  restored.handleSdkExternalConnect(sdk);
+  const native = new MockPort();
+  fixture.chrome.nativePortQueue.push(native);
+  sdk.emit({ type: "open_workspace", requestId: "after-restart", channelId: "channel" });
+  await respondToNativeType(restored, native, "revoke_runtime_full_access", { revoked: true });
+  await respondToNativeType(restored, native, "open_workspace", { workspace: null });
+  await waitFor(() => sdk.sent.some((entry) => entry.requestId === "after-restart"));
+  assert.equal(native.sent[0].type, "revoke_runtime_full_access");
+  assert.equal(sdk.sent.at(-1).ok, true);
+});
+
+test("revocation racing a Native create invalidates the acknowledgment and aborts the thread", async () => {
+  const fixture = await runtimeFixture({ fullGrant: true });
+  const native = new MockPort();
+  fixture.chrome.nativePortQueue.push(native);
+  fixture.sdk.emit({ type: "create_session", requestId: "racing", channelId: "channel", input: { runtimeFullAccess: true } });
+  await waitFor(() => native.sent.some((entry) => entry.type === "create_thread"));
+  const target = approvalState(fixture.popup);
+  fixture.popup.emit({ type: "revoke_runtime_full_access", origin: target.origin, approvalId: target.approvalId });
+  await respondToNativeType(fixture.background, native, "revoke_runtime_full_access", { revoked: true });
+  await respondToNativeType(fixture.background, native, "create_thread", {
+    threadId: "racing-thread", workspaceId: "w", explicitModelConfigApplied: true, runtimeFullAccessApplied: true,
+  });
+  await respondToNativeType(fixture.background, native, "abort_session_setup", {});
+  await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "racing"));
+  assert.equal(fixture.sdk.sent.at(-1).ok, false);
+  assert.equal(fixture.background.getActiveThreadCount(), 0);
+});
+
+for (const finish of ["close", "timeout"]) {
+  test(`Full Instance approval ${finish} preserves rejection behavior`, async () => {
+    const fixture = await runtimeFixture({ approved: false, backgroundOptions: { approvalTimeoutMs: 20 } });
+    await requestRuntimeApproval(fixture);
+    if (finish === "close") fixture.popup.disconnect();
+    else await delay(30);
+    await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "runtime-create"));
+    assert.equal(fixture.sdk.sent.at(-1).error.code, finish === "close" ? "APPROVAL_REJECTED" : "APPROVAL_TIMEOUT");
+    assert.equal(fixture.background.getPendingApproval(), null);
+  });
+}
+
+test("Native revocation timeout keeps the retry durable and releases the request", async () => {
+  const fixture = await runtimeFixture({ fullGrant: true, backgroundOptions: { runtimeRevocationTimeoutMs: 10 } });
+  const native = new MockPort();
+  fixture.chrome.nativePortQueue.push(native);
+  const target = approvalState(fixture.popup);
+  fixture.popup.emit({ type: "revoke_runtime_full_access", origin: target.origin, approvalId: target.approvalId });
+  await waitFor(() => native.sent.some((entry) => entry.type === "revoke_runtime_full_access"));
+  await delay(20);
+  assert.equal(fixture.background.getNativeRequestCount(), 0);
+  assert.deepEqual(fixture.chrome.storage.local.data.runtimeFullAccessRevocations, [target.origin]);
+  assert.match(fixture.background.getState().error, /timed out/);
+});
+
+test("a queued revocation for a different Origin does not block this Origin's Sandbox work", async () => {
+  const fixture = await runtimeFixture({ fullInstance: false });
+  fixture.chrome.storage.local.data.runtimeFullAccessRevocations = ["https://other.example.test"];
+  const native = new MockPort();
+  fixture.chrome.nativePortQueue.push(native);
+  fixture.sdk.emit({ type: "open_workspace", requestId: "unrelated", channelId: "channel" });
+  await waitFor(() => native.sent.some((entry) => entry.type === "revoke_runtime_full_access"));
+  const revocation = native.sent.find((entry) => entry.type === "revoke_runtime_full_access");
+  fixture.background.handleNativeMessage({ type: "response", requestId: revocation.requestId, ok: false,
+    error: { code: "UNSUPPORTED", message: "Old Native" } });
+  await respondToNativeType(fixture.background, native, "open_workspace", { workspace: null });
+  await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "unrelated"));
+  assert.equal(fixture.sdk.sent.at(-1).ok, true);
+  assert.deepEqual(fixture.chrome.storage.local.data.runtimeFullAccessRevocations, ["https://other.example.test"]);
+});
+
+test("revoking a legacy Agent Sessions grant does not require new Native support", async () => {
+  const fixture = await runtimeFixture({ fullInstance: false });
+  const target = approvalState(fixture.popup);
+  fixture.popup.emit({ type: "revoke_origin", origin: target.origin, approvalId: target.approvalId });
+  await waitFor(() => fixture.chrome.storage.local.data.approvedOrigins.length === 0);
+  assert.deepEqual(fixture.chrome.storage.local.data.runtimeFullAccessRevocations, []);
+  assert.equal(fixture.background.getState().error, null);
+});
+
+test("a forged popup sender cannot receive state or change grants", async () => {
+  const fixture = await runtimeFixture({ approved: false });
+  const fake = new MockPort();
+  fake.name = "popup";
+  fake.sender = { id: "external", url: "https://app.example.test" };
+  fixture.background.handlePopupConnect(fake);
+  fake.emit({ type: "approve_origin", origin: "https://app.example.test", runtimeFullAccess: true });
+  await flush();
+  assert.deepEqual(fake.sent, []);
+  assert.deepEqual(fixture.chrome.storage.local.data.approvedOrigins, []);
+});
+
 async function respondToNativeType(background, nativePort, type, result, ok = true) {
   await waitFor(() => nativePort.sent.some((message) => message.type === type), `${type} was not sent`);
   const request = [...nativePort.sent].reverse().find((message) => message.type === type);
@@ -1276,7 +1592,7 @@ test("resume_session reattaches an ended thread without issuing Core resume", as
     type: "end_session",
     sessionId: "thread_ended_reattach",
   });
-  await respondToNative(background, native, {});
+  await respondToNativeType(background, native, "end_thread", {});
   await waitFor(() => sdk.sent.some((message) => message.requestId === "end_reattach"));
   await waitFor(() => background.getSdkRouteCount() === 0 && background.getActiveThreadCount() === 0);
 

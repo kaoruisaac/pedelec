@@ -185,6 +185,22 @@
         justify-content: flex-end;
       }
 
+      [hidden] { display: none !important; }
+      .permission { display: flex; align-items: flex-start; gap: 10px; border: 1px solid #cbd3df; border-radius: 8px; background: #fff; padding: 10px; cursor: pointer; }
+      .permission input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: #1769aa; }
+      .permission span { display: grid; gap: 4px; }
+      .permission strong { font-size: 13px; }
+      #full-permissions { display: grid; gap: 10px; }
+      .permission small { color: #5b6779; font-size: 12px; line-height: 1.4; }
+      .actions { flex-wrap: wrap; }
+      .runtime-warning { border: 1px solid #dc6803; border-radius: 7px; background: #fffaeb; padding: 10px; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      @media (prefers-color-scheme: dark) {
+        .permission { border-color: #3b4656; background: #202631; }
+        .permission small { color: #b7c0ce; }
+        .runtime-warning { border-color: #855d20; background: #3b2a14; }
+      }
+
       button {
         border: 1px solid #b9c3d1;
         border-radius: 6px;
@@ -312,16 +328,30 @@
         <h2 data-i18n="approveSiteTitle">Approve This Site</h2>
         <div id="origin" class="origin"></div>
         <p data-i18n="approveSiteDescription">Approving this origin allows this site to create local Pedelec agent sessions through the extension.</p>
+        <div id="full-permissions" hidden>
+          <label class="permission">
+            <input id="allow-agent" type="checkbox" checked />
+            <span><strong data-i18n="allowAgentSessions">Allow Agent Sessions</strong><small data-i18n="agentSessionsDescription">Allow this site to create and control local agent sessions.</small></span>
+          </label>
+          <label class="permission">
+            <input id="allow-full" type="checkbox" />
+            <span><strong data-i18n="allowFullRuntimeAccess">Allow Full Runtime Access</strong><small data-i18n="fullRuntimeAccessDescription">Allow scripts to access files outside the workspace, use the network, read environment variables, and run local programs.</small></span>
+          </label>
+          <p id="full-warning" class="runtime-warning" data-i18n="fullRuntimeAccessWarning">This instance requires Full Runtime Access. Approving only Agent Sessions will leave authorization incomplete, and createSession() will fail.</p>
+        </div>
         <div class="actions">
           <button id="reject" type="button" data-i18n="reject">Reject</button>
           <button id="approve" type="button" class="primary" data-i18n="approve">Approve</button>
         </div>
       </section>
       <section id="revocation" class="approval" hidden>
-        <h2 data-i18n="approvedSiteTitle">Approved Site</h2>
+        <h2 id="authorization-title" data-i18n="approvedSiteTitle">Approved Site</h2>
         <div id="approved-origin" class="origin"></div>
         <p data-i18n="approvedSiteDescription">This origin can create local Pedelec agent sessions through the extension.</p>
+        <p id="authorization-incomplete" class="runtime-warning" data-i18n="fullRuntimeAccessWarning" hidden></p>
         <div class="actions">
+          <button id="review-permissions" type="button" class="primary" data-i18n="reviewPermissions" hidden>Review Permissions</button>
+          <button id="revoke-full" type="button" class="danger" data-i18n="revokeFullAccess" hidden>Revoke Full Access</button>
           <button id="revoke" type="button" class="danger" data-i18n="revokeApproval">Revoke Approval</button>
         </div>
       </section>

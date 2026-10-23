@@ -17,6 +17,8 @@ const status = await pedelec.getApprovalStatus();
 type ApprovalStatus = {
   installed: boolean;
   approved: boolean;
+  agentSessionsApproved?: boolean;
+  runtimeFullAccessApproved?: boolean;
   origin: string | null;
   appConnected: boolean;
 };
@@ -38,7 +40,7 @@ type ApprovalStatus = {
 
 ### `approved`
 
-`true` 表示目前 origin 已記錄在 Extension local storage 的核准清單。
+`true` 表示目前 Instance 要求的 Origin grants 均已核准；Full Instance 必須包含 Full Runtime Access grant。
 
 Approval 以 origin 為單位，origin 包含 scheme、hostname 與 port。開發 port 改變時可能需要重新核准。
 
@@ -77,6 +79,8 @@ const workspace = await pedelec.openWorkspace();
 ```
 
 Extension 會暫存 request、開啟 popup，等待使用者 approve 或 reject。核准後，原本等待的操作會自動繼續。
+
+`new Pedelec({ runtimeFullAccess: true })` 也使用相同流程：缺少任一 grant 時，第一次 `createSession()` 會自動開啟 Popup。即使 Session 設為 `runtimeFullAccess: false`，仍須核准 Agent Sessions 與 Full Runtime Access。只核准 Agent Sessions 時，Popup 顯示 Authorization Incomplete，等待中的操作以 `CREATE_SESSION_NOT_APPROVED` 結束。雙 grant 核准後，Session `false` 建立 Sandbox，`true` 則須取得 Native 的 Full Access 確認。Standard Instance 要求 Full Session 仍立即回報 `INVALID_INPUT`。
 
 Approval request 有 timeout。Popup 被關閉但沒有完成操作，也會被視為拒絕或未完成。
 
@@ -163,3 +167,21 @@ async function connectPedelec() {
 穩健的 connection screen 應顯示失敗層級與具體修復方式，而不是只有一個「連線失敗」。
 
 下一步閱讀[建立 Client](../sdk/client/)，了解 client lifetime 與 bridge timeout。
+
+
+## 明確授權 Full Runtime Access
+
+預設為 Sandbox。Full Access 必須同時具備三個條件：以 `runtimeFullAccess: true` 建立 Instance、使用者在 Extension 明確核准 **Allow Agent Sessions** 與 **Allow Full Runtime Access**，以及建立 Session 時指定 `runtimeFullAccess: true`。
+
+```ts
+const privileged = new Pedelec({ runtimeFullAccess: true });
+// 使用者在 Extension 明確核准兩項權限後：
+const sandbox = await privileged.createSession({ runtimeFullAccess: false });
+const full = await privileged.createSession({ runtimeFullAccess: true });
+```
+
+請先檢視 Extension 權限再建立 Session。要求 Full Access 的 Instance 若只有 Agent Sessions grant，連 Sandbox Session 也不能建立。普通 Instance 即使與已授權 Instance 位於相同 Origin，仍不能建立 Full Access Session。一般 Origin 核准不能取代 Full Access grant；Popup 會提供額外權限審查，Full Access 預設不勾選。`getApprovalStatus()` 只讀狀態，不會開啟審查。
+
+Thread mode 在建立後固定，resume 沿用。同 Origin 的 Instances 與同 Workspace 的 Threads 各自保留其要求的模式。`workspace.run()` 永遠維持 Sandbox；Provider sandbox 設定不變。Full Access 只改變 TypeScript Runtime 的 OS 權限。撤銷 Full Access grant 會拒絕後續高權限執行，並盡力取消受影響的執行中程序；其他 Origin 的 grant 不受影響。
+
+使用 Full Access 時請一併更新 SDK、Extension 與 Desktop。缺少 mode acknowledgment 時必須報錯，不能靜默降級成功。授權與協議失敗請見 [Error Codes](../reference/error-codes/)。

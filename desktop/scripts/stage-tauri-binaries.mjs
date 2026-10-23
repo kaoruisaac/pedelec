@@ -100,15 +100,21 @@ export async function stageHelperBinaries({
   platform = process.platform,
   arch = process.arch,
   run = runCommand,
+  sign = signExecutable,
 }) {
   resolveDenoTarget({ helperTarget, platform, arch });
   const helperBinaryNames = publicHelperBinaryNames(platform);
+  // Both runtime executable names are built by the pedelec-deno package.
+  const helperPackages = [...new Set(helperBinaryNames.map((name) =>
+    name.replace(/\.exe$/, "").replace(/^pedelec-ts-runtime$/, "pedelec-deno"),
+  ))];
   const cargoArgs = [
     "build",
     "--manifest-path",
     join(desktopDir, "Cargo.toml"),
     "--release",
-    ...helperBinaryNames.flatMap((name) => ["--package", name.replace(/\.exe$/, "")]),
+    ...helperPackages.flatMap((name) => ["--package", name]),
+    "--bins",
   ];
   if (helperTarget) {
     cargoArgs.push("--target", helperTarget);
@@ -128,7 +134,7 @@ export async function stageHelperBinaries({
       : join(desktopDir, "target", "release");
     await copyHelperBinaries(profileDir, resourceDir, helperBinaryNames);
     for (const name of helperBinaryNames) {
-      signExecutable(join(resourceDir, name), name);
+      sign(join(resourceDir, name), name);
     }
     await removeStaleRawDeno(resourceDir);
   } finally {

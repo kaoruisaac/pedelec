@@ -1643,6 +1643,7 @@ mod tests {
             .lock()
             .unwrap()
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Claude,
                 effort_level: Some(EffortLevel::Default),
                 model: None,

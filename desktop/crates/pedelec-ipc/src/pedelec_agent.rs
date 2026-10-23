@@ -918,6 +918,11 @@ fn build_launch_config(
             launch = launch.with_env("PEDELEC_CLI_PATH", cli_path.into_os_string());
         }
     }
+    if let Ok(runtime_path) = pedelec_shared::paths::pedelec_ts_runtime_install_path() {
+        if runtime_path.is_file() {
+            launch = launch.with_env("PEDELEC_TS_RUNTIME_PATH", runtime_path.into_os_string());
+        }
+    }
     if let Ok(deno_path) = pedelec_shared::paths::pedelec_deno_install_path() {
         if deno_path.is_file() {
             launch = launch.with_env("PEDELEC_DENO_PATH", deno_path.into_os_string());
@@ -1254,6 +1259,34 @@ mod tests {
                     json!(pedelec_shared::paths::pedelec_agent_binary_name())
                 );
             }
+        }
+    }
+
+    #[test]
+    fn launch_config_exports_installed_pedelec_ts_runtime_path_when_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_file = temp.path().join("core-runtime.json");
+        let settings = PedelecSettings::default();
+        let launch = build_launch_config(
+            temp.path().join("pedelec-agent"),
+            temp.path().to_path_buf(),
+            &ProviderCode::Codex,
+            "codex",
+            &settings,
+            &runtime_file,
+            &[],
+        )
+        .unwrap();
+        let expected = pedelec_shared::paths::pedelec_ts_runtime_install_path().unwrap();
+        let configured = launch
+            .env
+            .iter()
+            .find(|(key, _)| key == "PEDELEC_TS_RUNTIME_PATH")
+            .map(|(_, value)| PathBuf::from(value.as_os_str()));
+        if expected.is_file() {
+            assert_eq!(configured, Some(expected));
+        } else {
+            assert_eq!(configured, None);
         }
     }
 
@@ -2137,6 +2170,7 @@ mod tests {
             .lock()
             .unwrap()
             .create_thread(CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Ollama,
                 effort_level: Some(EffortLevel::Default),
                 model: None,

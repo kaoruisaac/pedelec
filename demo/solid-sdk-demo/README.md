@@ -16,7 +16,7 @@ It demonstrates:
 - `session.workspace.path` visibility without exposing a Desktop-managed absolute path
 - `workspace.listFiles()`, `workspace.listFolders()`, and `workspace.run()` with raw output/truncation flags
 - a plain `workspace.run()` demo that creates or overwrites `.pedelec-runtime/assets/workspace-run-demo.txt`; the file records the execution minute and second
-- an explicit `workspace.run(..., { denoModules })` demo that passes the `workspace-inspector` module and prints immediate Workspace files/folders
+- an explicit `workspace.run(..., { runtimeModules })` demo that passes the `workspace-inspector` module and prints immediate Workspace files/folders
 
 ## Install
 
@@ -80,3 +80,7 @@ Workspace runs do not inherit the Session's `memory-manager` module. `memory-man
 - `Approval rejected`: approve this origin from the Pedelec extension popup before creating or resuming a session.
 - `Session busy`: wait for the active session to finish before sending another message.
 - `Session ended`: resume the ended active session or create/resume another session before sending text.
+
+## Runtime permissions
+
+The Demo uses `defineRuntimeModule` / `runtimeModules` and keeps the default Sandbox Instance and Sessions. It does not request Full Access. `workspace.run()` remains Sandbox regardless of other Threads. To build a separate privileged integration, require explicit Instance opt-in, Extension approval of both Agent Sessions and Full Runtime Access, and Session opt-in; see the SDK session and Runtime security documentation. Existing `defineDenoModule` / `denoModules` integrations remain supported deprecated aliases, covered by SDK compatibility tests.

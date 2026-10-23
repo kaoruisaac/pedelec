@@ -244,8 +244,10 @@ async function triggerHotUpdate(server: ViteDevServer, file: string) {
 }
 
 describe("pedelecVitePlugin", () => {
-  it("finds the SDK declaration and embeds deterministic runtime and declaration artifacts", async () => {
+  it.each(["defineRuntimeModule", "defineDenoModule"])("finds the SDK declaration and embeds deterministic runtime and declaration artifacts (%s)", async (apiName) => {
     const directory = await createFixture();
+    const source = await readFile(join(directory, "main.ts"), "utf8");
+    await writeFile(join(directory, "main.ts"), source.replaceAll("defineDenoModule", apiName));
     await withServer(directory, async (server) => {
       const code = await transformFile(server, join(directory, "main.ts"));
       const artifact = extractArtifact(code);
@@ -312,11 +314,11 @@ describe("pedelecVitePlugin", () => {
     });
   });
 
-  it("transforms an aliased defineDenoModule import on a valid declaration", async () => {
+  it.each(["defineRuntimeModule", "defineDenoModule"])("transforms an aliased defineDenoModule import on a valid declaration (%s)", async (apiName) => {
     const directory = await createFixture();
     await writeFile(
       join(directory, "main.ts"),
-      `import { defineDenoModule as declareModule } from "@kaoruisaac/pedelec";\nexport const module = declareModule({ name: "sprite-tools", description: "Preview sprites.", entry: "./agent/module.ts", usage: "import { preview } from \\"sprite-tools\\";" });\n`,
+      `import { ${apiName} as declareModule } from "@kaoruisaac/pedelec";\nexport const module = declareModule({ name: "sprite-tools", description: "Preview sprites.", entry: "./agent/module.ts", usage: "import { preview } from \\"sprite-tools\\";" });\n`,
     );
     await withServer(directory, async (server) => {
       const artifact = extractArtifact(await transformFile(server, join(directory, "main.ts")));
@@ -874,8 +876,10 @@ describe("pedelecVitePlugin", () => {
     });
   });
 
-  it("prepares modules during a production Vite build", async () => {
+  it.each(["defineRuntimeModule", "defineDenoModule"])("prepares modules during a production Vite build (%s)", async (apiName) => {
     const directory = await createFixture();
+    const source = await readFile(join(directory, "main.ts"), "utf8");
+    await writeFile(join(directory, "main.ts"), source.replaceAll("defineDenoModule", apiName));
     const output = await build({
       configFile: false,
       root: directory,

@@ -1,13 +1,13 @@
 ---
-title: Deno Runtime & Security
+title: Runtime & Security
 description: Understand the shared Workspace execution boundary.
 sidebar:
   order: 5
 ---
 
-Pedelec Desktop manages a pinned Deno runtime. Users do not need to install Deno themselves. How Desktop acquires and stores that runtime is an internal implementation detail. Neither the application nor the Agent needs a host-installed Deno. Agent execution uses `pedelec-deno`; application execution uses the SDK's `workspace.run()`. Raw Deno is not the Agent-facing interface.
+Pedelec Desktop manages a pinned Deno runtime. Users do not need to install Deno themselves. How Desktop acquires and stores that runtime is an internal implementation detail. Neither the application nor the Agent needs a host-installed Deno. Agent execution uses `pedelec-ts-runtime`; application execution uses the SDK's `workspace.run()`. Raw Deno is not the Agent-facing interface.
 
-## Workspace boundary
+## Default Sandbox boundary
 
 Scripts have Workspace-scoped read and write access. They cannot read or write arbitrary host paths outside the Workspace. Pedelec's private runtime files are implementation details; use public Workspace APIs and logical module names instead of depending on their layout.
 
@@ -16,3 +16,17 @@ The runtime also denies network, host environment, subprocess, FFI, and `sys` ac
 Script arguments cannot increase permissions. For example, passing `--allow-net` after the script argument separator only puts that string in `Deno.args`; it does not grant network access.
 
 `workspace.run()` is a direct capability of an [approved Web application](../getting-started/approval-and-connection/) to run deterministic code against the opened Workspace. It remains inside Pedelec's restricted Deno sandbox and does not provide unrestricted host execution. See the [PedelecWorkspace reference](../reference/pedelec-workspace/) for exact security and admission behavior.
+
+## Full Access Thread boundary
+
+An explicitly authorized Full Access Thread can read/write outside the Workspace, access the host environment, use the network, subprocesses, FFI, `sys`, and remote/npm modules, subject to the executing OS user's permissions. Full Access removes Sandbox flags such as `--no-remote`, `--cached-only`, and `--no-npm`, and preserves the host environment; it is more than adding `--allow-all`.
+
+Entry files must still be inside the Workspace, or supplied on stdin. The Agent CLI still accepts only the permitted `run` grammar; Full Access does not enable arbitrary Agent shell commands. Pedelec retains Thread identity checks, cancellation, the 60-second default timeout, output caps, and import-map validation. Native IPC and Extension grants enforce authorization; a page-supplied flag cannot grant access.
+
+Each invocation owns a separate OS process container. Stopping a Thread, revoking its Origin's Full Access grant, reaching the execution timeout, or shutting down Desktop also terminates normally inherited subprocesses and descendants. Remaining descendants are cleaned up when the Deno parent exits normally. Other Threads and Workspace runs keep their own lifetimes.
+
+Full Access is not an OS sandbox. Scripts that deliberately escape a process group, start a daemon through another service, or use other privileges may leave processes outside this cleanup boundary. Cancellation cannot undo host operations already performed. Cleanup is best effort; failures are reported in `processTreeCleanupError` diagnostics, and output collection failures in `captureError`, while cancellation and timeout keep their existing error codes.
+
+`Deno.*`, `DENO_DIR`, Deno CLI flags, and existing `DENO_*` error codes retain their engine/compatibility meaning. The `deno/` documentation URLs are retained for existing links.
+
+The production Native Host attests each Full Access admission using a Desktop-generated local key. Desktop verifies the complete request, Origin, Instance and both grants, rejects expired or replayed attestations, and then issues the Core capability. A page cannot obtain this capability by sending `callerOrigin` or an approval boolean to ordinary IPC. This boundary protects against browser callers; programs already running as the Desktop OS user remain trusted. Revocations are saved by the Extension and retried before subsequent Native operations, including reconnects; failures for another Origin do not deny ordinary operations for the current caller.

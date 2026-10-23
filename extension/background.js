@@ -84,6 +84,11 @@ function createBackground(runtimeChrome, options = {}) {
   const sdkWorkspaceBySession = new Map();
   const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
   let pendingApproval = null;
+  let nextApprovalId = 1;
+  let approvalOperation = Promise.resolve();
+  const popupApprovalStates = new WeakMap();
+  const grantEpochByOrigin = new Map();
+  let revocationOperation = Promise.resolve();
   let providerErrorOperation = Promise.resolve();
   let activeSdkTabId = null;
   let providerErrorByTab = Object.create(null);
@@ -327,15 +332,20 @@ function createBackground(runtimeChrome, options = {}) {
   function applySdkPortHello(port, message) {
     const context = sdkContextsByPort.get(port);
     if (!context) return;
+    // The first Hello fixes the Instance's requirement for this Port's lifetime.
+    if (!context.runtimeRequirementFixed) {
+      context.runtimeFullAccess = message?.runtimeFullAccess === true;
+      context.runtimeRequirementFixed = true;
+    }
     clearSdkHandshakeTimeout(context);
     context.handshakeReceived = true;
     context.sdkVersion = typeof message?.sdkVersion === "string" ? message.sdkVersion : null;
     context.outdated = isPeerVersionOutdated(getExtensionVersion(), context.sdkVersion);
     syncSdkWarningForTab(context.tabId);
+    broadcastPopupApprovalState();
   }
 
   async function handleSdkVersionHandshake(port, message) {
-    applySdkPortHello(port, message);
     await broadcastVersionWarningStates();
     await maybeOpenVersionWarningPopup();
     scheduleDesktopCompatibilityProbe();
@@ -544,59 +554,43 @@ function createBackground(runtimeChrome, options = {}) {
       origin: pendingApproval.origin,
       requestedAt: pendingApproval.requestedAt,
       requestCount: pendingApproval.requests.length,
+      runtimeFullAccess: pendingApproval.runtimeFullAccess,
+      approvalId: pendingApproval.approvalId,
     };
   }
 
   async function getPopupApprovalState() {
-    let pending = getPendingApprovalState();
-    if (pending?.origin) {
-      return {
-        ...pending,
-        approved: false,
-        pending: true,
-      };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const pending = pendingApproval;
+      if (pending) {
+        const grants = await originGrants(pending.origin, pending.runtimeFullAccess);
+        if (pending !== pendingApproval) continue;
+        return { ...getPendingApprovalState(), ...grants, pending: true };
+      }
+      const { origin, tabId } = await getActiveTabApprovalTarget();
+      if (pendingApproval) continue;
+      if (!origin) return { origin: null, approved: false, pending: false };
+      // Prefer the most recently connected matching Instance in the active tab.
+      const context = [...sdkContextsByPort.values()].reverse().find((entry) =>
+        entry.origin === origin && entry.tabId === tabId);
+      const runtimeFullAccess = context?.runtimeFullAccess === true;
+      const grants = await originGrants(origin, runtimeFullAccess);
+      if (pendingApproval || (context && ![...sdkContextsByPort.values()].includes(context))) continue;
+      return { origin, runtimeFullAccess, ...grants, pending: false,
+        approvalId: context?.approvalId ?? `origin:${origin}` };
     }
-
-    const origin = await getActiveTabOrigin();
-    pending = getPendingApprovalState();
-    if (pending?.origin) {
-      return {
-        ...pending,
-        approved: false,
-        pending: true,
-      };
-    }
-
-    if (!origin) {
-      return {
-        origin: null,
-        approved: false,
-        pending: false,
-      };
-    }
-
-    return {
-      origin,
-      approved: await isOriginApproved(origin),
-      pending: false,
-    };
+    throw { code: "APPROVAL_STATE_CHANGED", message: "The approval target changed. Reopen the popup." };
   }
 
   async function postPopupApprovalState(port) {
     try {
       let approvalState = await getPopupApprovalState();
-      const pending = getPendingApprovalState();
-      if (!approvalState.pending && pending?.origin) {
-        approvalState = {
-          ...pending,
-          approved: false,
-          pending: true,
-        };
+      if (pendingApproval && approvalState.approvalId !== pendingApproval.approvalId) {
+        approvalState = await getPopupApprovalState();
       }
+      popupApprovalStates.set(port, approvalState);
       port.postMessage({ type: "approval_state", approvalState });
-    } catch (_err) {
-      popupPorts.delete(port);
-    }
+    } catch (_err) { popupPorts.delete(port); }
   }
 
   function broadcastPopupApprovalState() {
@@ -1054,24 +1048,67 @@ function createBackground(runtimeChrome, options = {}) {
       : [];
   }
 
-  async function isOriginApproved(origin) {
-    if (!origin) return false;
-    const records = await readApprovedOrigins();
-    return records.some((record) => record.origin === origin);
+  async function originGrants(origin, runtimeFullAccess = false) {
+    const record = (await readApprovedOrigins()).find((entry) => entry.origin === origin);
+    const agentSessionsApproved = Boolean(record);
+    const runtimeFullAccessApproved = agentSessionsApproved && record.runtimeFullAccess === true;
+    return { agentSessionsApproved, runtimeFullAccessApproved,
+      approved: agentSessionsApproved && (!runtimeFullAccess || runtimeFullAccessApproved) };
   }
 
-  async function approveOrigin(origin) {
+  async function approveOrigin(origin, runtimeFullAccess = false) {
     const records = await readApprovedOrigins();
+    const previous = records.find((record) => record.origin === origin);
     const withoutOrigin = records.filter((record) => record.origin !== origin);
-    withoutOrigin.push({ origin, approvedAt: Date.now() });
+    withoutOrigin.push({ origin, approvedAt: Date.now(),
+      runtimeFullAccess: runtimeFullAccess || previous?.runtimeFullAccess === true });
     await storageSet({ [APPROVED_ORIGINS_STORAGE_KEY]: withoutOrigin });
   }
 
-  async function revokeOrigin(origin) {
+  async function revokeOrigin(origin, fullAccessOnly = false) {
+    // Invalidate in-flight creates before waiting for storage or Native.
+    grantEpochByOrigin.set(origin, (grantEpochByOrigin.get(origin) || 0) + 1);
     const records = await readApprovedOrigins();
+    const revocations = await storageGet("runtimeFullAccessRevocations");
+    const needsRevocation = records.some((record) => record.origin === origin && record.runtimeFullAccess === true) ||
+      (revocations.runtimeFullAccessRevocations || []).includes(origin);
     await storageSet({
-      [APPROVED_ORIGINS_STORAGE_KEY]: records.filter((record) => record.origin !== origin),
+      runtimeFullAccessRevocations: [...new Set([...(revocations.runtimeFullAccessRevocations || []),
+        ...(needsRevocation ? [origin] : [])])],
+      [APPROVED_ORIGINS_STORAGE_KEY]: fullAccessOnly
+        ? records.map((record) => record.origin === origin ? { ...record, runtimeFullAccess: false } : record)
+        : records.filter((record) => record.origin !== origin),
     });
+    // Native must persist revocation and cancel running Full Access work for this Origin.
+    if (needsRevocation) await withNativeOperation(() => flushRuntimeRevocations(origin));
+  }
+
+  function flushRuntimeRevocations(originFilter) {
+    const operation = revocationOperation.then(async () => {
+      const stored = await storageGet("runtimeFullAccessRevocations");
+      let callerError = null;
+      for (const origin of stored.runtimeFullAccessRevocations || []) {
+        try {
+          const result = await sendNativeRequest("revoke_runtime_full_access", {}, {
+            callerOrigin: origin, nativeRuntimeGrant: { version: 1, origin, revoke: true },
+          },
+            { timeoutMs: options.runtimeRevocationTimeoutMs ?? 5000 });
+          if (result?.revoked !== true) {
+            throw { code: "RUNTIME_FULL_ACCESS_UNSUPPORTED", message: "Native did not confirm Runtime access revocation." };
+          }
+          const latest = await storageGet("runtimeFullAccessRevocations");
+          await storageSet({ runtimeFullAccessRevocations:
+            (latest.runtimeFullAccessRevocations || []).filter((entry) => entry !== origin) });
+        } catch (error) {
+          // Retry every durable withdrawal on reconnect, but a stale/old Native
+          // for another Origin must not deny this caller's ordinary operations.
+          if (origin === originFilter) callerError = error;
+        }
+      }
+      if (callerError) throw callerError;
+    });
+    revocationOperation = operation.catch(() => {});
+    return operation;
   }
 
   function originFromSender(sender) {
@@ -1096,20 +1133,21 @@ function createBackground(runtimeChrome, options = {}) {
     }
   }
 
-  async function getActiveTabOrigin() {
+  async function getActiveTabApprovalTarget() {
     const tabsApi = runtimeChrome.tabs;
-    if (!tabsApi?.query) return null;
+    if (!tabsApi?.query) return {};
 
     return new Promise((resolve) => {
       let settled = false;
       const done = (tabs) => {
         if (settled) return;
         settled = true;
-        resolve(originFromUrl(Array.isArray(tabs) ? tabs[0]?.url : null));
+        const tab = Array.isArray(tabs) ? tabs[0] : null;
+        resolve({ origin: originFromUrl(tab?.url), tabId: normalizeTabId(tab?.id) });
       };
 
       try {
-        const maybePromise = tabsApi.query({ active: true, currentWindow: true }, done);
+        const maybePromise = tabsApi.query({ active: true, lastFocusedWindow: true }, done);
         if (maybePromise?.then) {
           maybePromise.then(done, () => done([]));
         }
@@ -1119,35 +1157,31 @@ function createBackground(runtimeChrome, options = {}) {
     });
   }
 
-  async function approvePopupOrigin(origin) {
-    const normalizedOrigin = originFromUrl(origin);
-    if (!normalizedOrigin) {
-      throw {
-        code: "INVALID_ORIGIN",
-        message: "A valid http or https origin is required.",
-      };
+  async function approvePopupOrigin(origin, selection = {}, approvalId) {
+    const target = await getPopupApprovalState();
+    if (!target.origin || origin !== target.origin ||
+        (approvalId !== undefined && approvalId !== target.approvalId) ||
+        (target.runtimeFullAccess && approvalId !== target.approvalId)) {
+      throw { code: "INVALID_ORIGIN", message: "The displayed approval request is no longer current." };
     }
-
-    if (pendingApproval?.origin === normalizedOrigin) {
-      await approvePendingApproval();
+    const full = target.runtimeFullAccess && selection.runtimeFullAccess === true;
+    if (selection.agentSessions === false) return;
+    if (pendingApproval?.approvalId === target.approvalId) {
+      await approvePendingApproval(full);
       return;
     }
-
-    await approveOrigin(normalizedOrigin);
+    await approveOrigin(target.origin, full);
     broadcastPopupApprovalState();
   }
 
-  async function revokePopupOrigin(origin) {
-    const normalizedOrigin = originFromUrl(origin);
-    if (!normalizedOrigin) {
-      throw {
-        code: "INVALID_ORIGIN",
-        message: "A valid http or https origin is required.",
-      };
+  async function revokePopupOrigin(origin, fullAccessOnly = false, approvalId) {
+    const target = await getPopupApprovalState();
+    if (!target.origin || origin !== target.origin ||
+        (approvalId !== undefined && approvalId !== target.approvalId)) {
+      throw { code: "INVALID_ORIGIN", message: "The displayed approval request is no longer current." };
     }
-
-    await revokeOrigin(normalizedOrigin);
-    broadcastPopupApprovalState();
+    try { await revokeOrigin(target.origin, fullAccessOnly); }
+    finally { broadcastPopupApprovalState(); }
   }
 
   async function openApprovalPopup() {
@@ -1292,7 +1326,7 @@ function createBackground(runtimeChrome, options = {}) {
     });
   }
 
-  function sendNativeRequest(type, payload = {}, metadata = {}, { quiet = false } = {}) {
+  function sendNativeRequest(type, payload = {}, metadata = {}, { quiet = false, timeoutMs = 0 } = {}) {
     if (!connectNative({ quiet })) {
       return Promise.reject({
         code: "NATIVE_HOST_UNAVAILABLE",
@@ -1304,10 +1338,20 @@ function createBackground(runtimeChrome, options = {}) {
     const message = { ...payload, type, requestId, ...metadata };
 
     return new Promise((resolve, reject) => {
-      pendingRequests.set(requestId, { resolve, reject });
+      const timer = timeoutMs > 0 ? setTimeout(() => {
+        pendingRequests.delete(requestId);
+        reject({ code: "NATIVE_REQUEST_TIMEOUT", message: "Native Runtime revocation timed out." });
+        maybeDisconnectNativeIfIdle();
+      }, timeoutMs) : null;
+      timer?.unref?.();
+      pendingRequests.set(requestId, {
+        resolve: (result) => { clearTimeout(timer); resolve(result); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
       try {
         nativePort.postMessage(message);
       } catch (err) {
+        clearTimeout(timer);
         pendingRequests.delete(requestId);
         const error = normalizeError(err, "NATIVE_CONNECTION_CLOSED", "Native host disconnected.");
         reject(error);
@@ -1486,25 +1530,33 @@ function createBackground(runtimeChrome, options = {}) {
     broadcastPopupApprovalState();
   }
 
-  async function approvePendingApproval() {
+  async function approvePendingApproval(runtimeFullAccess = false) {
     if (!pendingApproval) return;
     const current = pendingApproval;
     pendingApproval = null;
     clearTimeout(current.timeoutId);
-
     try {
-      await approveOrigin(current.origin);
-      broadcastPopupApprovalState();
+      await approveOrigin(current.origin, runtimeFullAccess);
       for (const request of current.requests) {
-        handleSdkMessage(request.port, request.message, { skipApproval: true });
+        const context = sdkContextsByPort.get(request.port);
+        if (!context) continue;
+        if (!(await originGrants(current.origin, current.runtimeFullAccess)).approved) {
+          postSdkResponse(request.port, request.channelId, request.requestId, false, null, {
+            code: "CREATE_SESSION_NOT_APPROVED",
+            message: "This Instance also requires Full Runtime Access approval.",
+          });
+        } else {
+          // Recheck grants on replay, including revocations after this decision.
+          void handleSdkMessage(request.port, request.message);
+        }
       }
     } catch (err) {
       const error = normalizeError(err, "STORAGE_ERROR", "Could not approve this site.");
       for (const request of current.requests) {
         postSdkResponse(request.port, request.channelId, request.requestId, false, null, error);
       }
-      broadcastPopupApprovalState();
     }
+    broadcastPopupApprovalState();
   }
 
   async function ensureApprovedOrQueue(port, message, context) {
@@ -1520,9 +1572,10 @@ function createBackground(runtimeChrome, options = {}) {
       return false;
     }
 
-    if (await isOriginApproved(origin)) return true;
+    if ((await originGrants(origin, context.runtimeFullAccess)).approved) return true;
 
-    if (pendingApproval && pendingApproval.origin !== origin) {
+    if (pendingApproval && (pendingApproval.origin !== origin || pendingApproval.port !== port ||
+        pendingApproval.channelId !== channelId || pendingApproval.runtimeFullAccess !== (context.runtimeFullAccess === true))) {
       postSdkResponse(port, channelId, requestId, false, null, {
         code: "CREATE_SESSION_NOT_APPROVED",
         message: "Another site is already waiting for Pedelec approval.",
@@ -1553,6 +1606,10 @@ function createBackground(runtimeChrome, options = {}) {
 
     pendingApproval = {
       origin,
+      port,
+      channelId,
+      runtimeFullAccess: context.runtimeFullAccess === true,
+      approvalId: `pending:${nextApprovalId++}`,
       requestedAt: Date.now(),
       requests: [pendingRequest],
       timeoutId,
@@ -1982,11 +2039,23 @@ function createBackground(runtimeChrome, options = {}) {
     return status;
   }
 
-  function sendSdkNativeRequest(context, type, payload = {}, metadata = {}) {
+  async function sendSdkNativeRequest(context, type, payload = {}, metadata = {}) {
     if (!context?.origin || typeof context.origin !== "string") {
       return Promise.reject({ code: "SDK_ORIGIN_UNAVAILABLE", message: "The SDK caller origin is unavailable." });
     }
-    return sendNativeRequest(type, payload, { callerOrigin: context.origin, ...metadata });
+    // Deliver persisted revocations before any SDK action can run on a reconnected host.
+    await flushRuntimeRevocations(context.origin);
+    const grants = type === "create_thread" && payload.runtimeFullAccess === true
+      ? await originGrants(context.origin, context.runtimeFullAccess) : null;
+    if (grants && (!context.runtimeFullAccess || !grants.approved || !context.approvalId)) {
+      throw { code: "CREATE_SESSION_NOT_APPROVED", message: "Full Runtime Access approval is required." };
+    }
+    return sendNativeRequest(type, payload, { ...metadata, callerOrigin: context.origin,
+      ...(grants ? { nativeRuntimeGrant: { version: 1, origin: context.origin,
+        instanceId: context.approvalId, instanceRequested: context.runtimeFullAccess === true,
+        agentSessionsApproved: grants.agentSessionsApproved,
+        runtimeFullAccessApproved: grants.runtimeFullAccessApproved } } : {}),
+    });
   }
 
   function projectSdkSettings(value) {
@@ -2093,6 +2162,7 @@ function createBackground(runtimeChrome, options = {}) {
     }
 
     if (message?.type === SDK_HELLO_MESSAGE_TYPE) {
+      applySdkPortHello(port, message);
       void enqueueVersionWarningOperation(() => handleSdkVersionHandshake(port, message));
       return;
     }
@@ -2100,6 +2170,7 @@ function createBackground(runtimeChrome, options = {}) {
     const requestId = message?.requestId || "";
     const channelId = message?.channelId || "";
     const context = sdkContextsByPort.get(port) || {};
+    context.runtimeRequirementFixed = true;
     try {
       if (!requestId) {
         throw { code: "SDK_PROTOCOL_ERROR", message: "requestId is required" };
@@ -2110,7 +2181,6 @@ function createBackground(runtimeChrome, options = {}) {
 
       if (message.type === "get_approval_status") {
         const origin = context.origin || null;
-        const approved = origin ? await isOriginApproved(origin) : false;
         let appConnected = false;
         try {
           const ping = await withNativeOperation(() => pingDesktop());
@@ -2122,9 +2192,13 @@ function createBackground(runtimeChrome, options = {}) {
           await broadcastVersionWarningStates();
           await maybeOpenVersionWarningPopup();
         });
+        const grants = await originGrants(origin, context.runtimeFullAccess);
+        const approved = Boolean(origin) && grants.approved;
         postSdkResponse(port, channelId, requestId, true, {
           installed: true,
           approved,
+          agentSessionsApproved: grants.agentSessionsApproved,
+          runtimeFullAccessApproved: grants.runtimeFullAccessApproved,
           origin,
           appConnected,
         });
@@ -2132,12 +2206,23 @@ function createBackground(runtimeChrome, options = {}) {
       }
 
       if (message.type === "create_session") {
+        if (message.input?.runtimeFullAccess !== undefined && typeof message.input.runtimeFullAccess !== "boolean") {
+          throw { code: "INVALID_INPUT", message: "runtimeFullAccess must be a boolean." };
+        }
+        if (message.input?.runtimeFullAccess === true && !context.runtimeFullAccess) {
+          throw { code: "CREATE_SESSION_NOT_APPROVED", message: "This Instance did not request Full Runtime Access." };
+        }
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
         }
         await withNativeOperation(async () => {
           const input = message.input || {};
+          const grantEpoch = grantEpochByOrigin.get(context.origin) || 0;
+          if ((context.approvalRequired || context.runtimeFullAccess) &&
+              !(await originGrants(context.origin, context.runtimeFullAccess)).approved) {
+            throw { code: "CREATE_SESSION_NOT_APPROVED", message: "Full Runtime Access approval is required." };
+          }
           const result = await sendSdkNativeRequest(context, "create_thread", {
             provider: input.provider,
             model: input.model,
@@ -2145,9 +2230,22 @@ function createBackground(runtimeChrome, options = {}) {
             effortLevel: input.effortLevel,
             skills: input.skills,
             ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
-          }, message.callerSdkVersion === undefined
-            ? {}
-            : { callerSdkVersion: message.callerSdkVersion });
+            ...(input.runtimeFullAccess === undefined ? {} : { runtimeFullAccess: input.runtimeFullAccess }),
+          }, {
+            ...(message.callerSdkVersion === undefined ? {} : { callerSdkVersion: message.callerSdkVersion }),
+          });
+          const requestedFullAccess = input.runtimeFullAccess === true;
+          if ((requestedFullAccess && result?.runtimeFullAccessApplied !== true) ||
+              (!requestedFullAccess && result?.runtimeFullAccessApplied === true) ||
+              grantEpoch !== (grantEpochByOrigin.get(context.origin) || 0) ||
+              sdkContextsByPort.get(port) !== context ||
+              ((context.approvalRequired || context.runtimeFullAccess) &&
+                !(await originGrants(context.origin, context.runtimeFullAccess)).approved)) {
+            if (typeof result?.threadId === "string") {
+              await sendSdkNativeRequest(context, "abort_session_setup", { threadId: result.threadId }).catch(() => {});
+            }
+            throw { code: "CREATE_SESSION_NOT_APPROVED", message: "Native did not confirm the authorized Runtime mode." };
+          }
           const projected = projectSdkCreateSessionResult(result);
           const sessionId = projected.sessionId;
           sdkWorkspaceBySession.set(sessionId, projected.workspace);
@@ -2161,6 +2259,12 @@ function createBackground(runtimeChrome, options = {}) {
           });
           try {
             await subscribeThreadForContext(sessionId, context);
+            if (grantEpoch !== (grantEpochByOrigin.get(context.origin) || 0) ||
+                sdkContextsByPort.get(port) !== context ||
+                ((context.approvalRequired || context.runtimeFullAccess) &&
+                  !(await originGrants(context.origin, context.runtimeFullAccess)).approved)) {
+              throw { code: "CREATE_SESSION_NOT_APPROVED", message: "Session authorization changed during setup." };
+            }
           } catch (err) {
             await sendSdkNativeRequest(context, "abort_session_setup", { threadId: sessionId }).catch(() => {});
             removeSdkSession(port, channelId, sessionId);
@@ -2172,6 +2276,7 @@ function createBackground(runtimeChrome, options = {}) {
             sessionId,
             workspace: projected.workspace,
             explicitModelConfigApplied: projected.explicitModelConfigApplied,
+            ...(typeof result.runtimeFullAccessApplied === "boolean" ? { runtimeFullAccessApplied: result.runtimeFullAccessApplied } : {}),
           });
         });
         return;
@@ -2614,6 +2719,8 @@ function createBackground(runtimeChrome, options = {}) {
 
   function handlePopupConnect(port) {
     if (port.name !== "popup") return;
+    if (port.sender && (port.sender.id !== runtimeChrome.runtime.id ||
+        port.sender.url !== runtimeChrome.runtime.getURL?.("popup.html"))) return;
 
     popupPorts.add(port);
     port.postMessage({ type: "state", state });
@@ -2635,12 +2742,21 @@ function createBackground(runtimeChrome, options = {}) {
         } else if (message?.type === "get_popup_approval_state") {
           await postPopupApprovalState(port);
         } else if (message?.type === "approve_origin") {
-          await approvePopupOrigin(message.origin);
+          const displayed = popupApprovalStates.get(port);
+          if (message.runtimeFullAccess === true && (!displayed?.runtimeFullAccess ||
+              message.approvalId !== displayed.approvalId)) throw { code: "INVALID_ORIGIN", message: "Invalid Full Access approval target." };
+          const action = approvalOperation.then(() => approvePopupOrigin(message.origin, message, message.approvalId));
+          approvalOperation = action.catch(() => {});
+          await action;
           await postPopupApprovalState(port);
-        } else if (message?.type === "revoke_origin") {
-          await revokePopupOrigin(message.origin);
+        } else if (message?.type === "revoke_origin" || message?.type === "revoke_runtime_full_access") {
+          const action = approvalOperation.then(() => revokePopupOrigin(message.origin,
+            message.type === "revoke_runtime_full_access", message.approvalId));
+          approvalOperation = action.catch(() => {});
+          await action;
           await postPopupApprovalState(port);
         } else if (message?.type === "reject_pending_approval") {
+          if (message.approvalId !== undefined && message.approvalId !== pendingApproval?.approvalId) return;
           rejectPendingApproval({
             code: "APPROVAL_REJECTED",
             message: "Pedelec approval was rejected.",
@@ -2675,6 +2791,7 @@ function createBackground(runtimeChrome, options = {}) {
     sdkChannelsByPort.set(port, new Map());
     sdkContextsByPort.set(port, {
       origin: context.origin || null,
+      approvalId: `instance:${nextApprovalId++}`,
       approvalRequired: Boolean(context.approvalRequired),
     });
 
@@ -2695,6 +2812,8 @@ function createBackground(runtimeChrome, options = {}) {
     sdkChannelsByPort.set(port, new Map());
     sdkContextsByPort.set(port, {
       origin,
+      approvalId: `instance:${nextApprovalId++}`,
+      runtimeFullAccess: false,
       approvalRequired: true,
       tabId: tabIdFromSender(port.sender),
       pageActive: false,

@@ -24,6 +24,8 @@ fn insert_thread(
 ) {
     runtime.thread_manager.insert_thread(
         ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: thread_id.into(),
             workspace_id: workspace_id.into(),
             provider: ProviderCode::Codex,

@@ -232,6 +232,8 @@ pub(crate) fn test_session(
     }
     core.thread_manager.insert_thread(
         pedelec_core::ThreadState {
+            runtime_full_access: false,
+            runtime_authorization: None,
             thread_id: id.into(),
             workspace_id,
             provider: provider.clone(),

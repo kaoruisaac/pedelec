@@ -12,5 +12,6 @@ pedelec-ipc.workspace = true
 pedelec-shared.workspace = true
 
 [dev-dependencies]
+pedelec-runtime.workspace = true
 chrono.workspace = true
 tempfile.workspace = true

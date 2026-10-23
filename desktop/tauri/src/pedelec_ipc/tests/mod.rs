@@ -443,6 +443,7 @@ mod tests {
             ThreadSubscription {
                 events: event_rx,
                 snapshot: ThreadSnapshot {
+                    runtime_full_access: false,
                     thread_id: "thread_cutoff".into(),
                     workspace_id: "workspace-cutoff".into(),
                     status: ThreadStatus::Idle,
@@ -1855,6 +1856,7 @@ mod tests {
         };
 
         let result = runtime.create_thread(CreateThreadInput {
+            runtime_full_access: false,
             provider: ProviderCode::Codex,
             effort_level: Some(EffortLevel::Default),
             model: None,
@@ -2186,6 +2188,8 @@ mod tests {
             .unwrap();
         runtime.thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: thread_id.into(),
                 workspace_id,
                 provider: ProviderCode::Codex,
@@ -2477,6 +2481,8 @@ mod tests {
             .unwrap();
         runtime.lock().unwrap().thread_manager.insert_thread(
             ThreadState {
+                runtime_full_access: false,
+                runtime_authorization: None,
                 thread_id: "thread_asset_auth".into(),
                 workspace_id: opened.workspace_id.clone(),
                 provider: ProviderCode::Codex,

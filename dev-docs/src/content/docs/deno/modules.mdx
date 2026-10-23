@@ -1,16 +1,16 @@
 ---
-title: Deno Modules
+title: Runtime Modules
 description: Supply reusable developer-owned implementation to Agent or Workspace execution.
 sidebar:
   order: 3
 ---
 
-A plain Agent script leaves implementation to the Agent. A Deno Module puts reusable implementation under developer control: the Agent imports a typed API and writes only the orchestration or glue needed for the task. Applications can use the same authoring model for direct Workspace runs.
+A plain Agent script leaves implementation to the Agent. A Runtime Module puts reusable implementation under developer control: the Agent imports a typed API and writes only the orchestration or glue needed for the task. Applications can use the same authoring model for direct Workspace runs.
 
 ```ts
-import { defineDenoModule } from "@kaoruisaac/pedelec";
+import { defineRuntimeModule } from "@kaoruisaac/pedelec";
 
-const projectTools = defineDenoModule({
+const projectTools = defineRuntimeModule({
   name: "project-tools",
   description: "Utilities for project data processing.",
   entry: "./agent/project-tools.ts",
@@ -22,7 +22,7 @@ const session = await pedelec.createSession({
   skills: {
     guidance: "Use project-tools for project data tasks.",
     tools: [],
-    denoModules: [projectTools],
+    runtimeModules: [projectTools],
   },
 });
 ```
@@ -39,10 +39,10 @@ entry → pedelecVitePlugin() → bundled runtime implementation
 
 Configure `pedelecVitePlugin()` in the Web application's Vite config. It prepares local files or installed package-backed implementations and bundles runtime dependencies before execution. `entry` is build-time information; Desktop/Core does not resolve the original project path. The generated `index.d.ts` is the public API the Agent can inspect when `usage` is insufficient. The implementation bundle is not the normal API reference.
 
-Supported Node built-ins work through Deno's Node compatibility layer, including canonical `node:` imports. This grants no extra permissions. Runtime npm, JSR, or remote package fetching is unavailable. The [Tools API](../reference/tools/) describes exact preparation and type-generation behavior.
+Supported Node built-ins work through Deno's Node compatibility layer, including canonical `node:` imports. This grants no extra permissions. In Sandbox, runtime npm, JSR, or remote package fetching is unavailable. The [Tools API](../reference/tools/) describes exact preparation and type-generation behavior.
 
 ## Stdin preference and lifecycle
 
-`preferStdinExecution` is an **Agent authoring hint, not a runtime restriction**. Host Context represents `true` as `preferredExecution: "stdin"`, and the Agent should prefer the global `runStdinCommand` for short glue code. File-backed scripts remain valid. The shared Host Context contract includes no provider-specific shell syntax. The hint does not change artifacts, bundling, or Deno permissions, and has no effect on application-controlled `workspace.run()`.
+`preferStdinExecution` is an **Agent authoring hint, not a runtime restriction**. Host Context represents `true` as `preferredExecution: "stdin"`, and the Agent should prefer the global `runStdinCommand` for short glue code. File-backed scripts remain valid. The shared Host Context contract includes no provider-specific shell syntax. The hint does not change artifacts, bundling, or Runtime permissions, and has no effect on application-controlled `workspace.run()`.
 
-Session Deno Modules are snapshotted for the Thread. Ending and resuming the same known Thread retains that snapshot; create a new Session when the Agent should consume a rebuilt implementation. For direct application use and its separate module scope, see [Workspace Deno Execution](./workspace-execution/).
+Session Runtime Modules are snapshotted for the Thread. Ending and resuming the same known Thread retains that snapshot; create a new Session when the Agent should consume a rebuilt implementation. For direct application use and its separate module scope, see [Workspace Runtime Execution](./workspace-execution/).

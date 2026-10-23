@@ -70,7 +70,7 @@ fn resolve_test_deno_executable() -> Option<PathBuf> {
     None
 }
 
-fn test_deno_executable() -> Option<PathBuf> {
+pub(super) fn test_deno_executable() -> Option<PathBuf> {
     match resolve_test_deno_executable() {
         Some(path) => Some(path),
         None => {
@@ -176,6 +176,7 @@ fn ready_module_thread_for_target(
     let thread_id = runtime
         .create_sdk_thread(
             CreateThreadInput {
+                runtime_full_access: false,
                 provider: ProviderCode::Codex,
                 effort_level: Some(EffortLevel::Default),
                 model: None,

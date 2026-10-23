@@ -39,32 +39,32 @@ const updateCounter = defineTool<
 
 `defineTool()` itself does not perform validation. `createSession()` and `pedelec.webmcp()` normalize and validate the tool list.
 
-## `defineDenoModule()`
+## `defineRuntimeModule()`
 
-For usage and the mental model, see [Deno Modules](../deno/modules/). This page retains the exact declaration and preparation contract.
+For usage and the mental model, see [Runtime Modules](../deno/modules/). This page retains the exact declaration and preparation contract.
 
-Vite applications can describe a local or package-backed Deno module with one authoring shape. A minimal declaration can be used by `workspace.run()`:
+Vite applications can describe a local or package-backed Runtime module with one authoring shape. A minimal declaration can be used by `workspace.run()`:
 
 ```ts
-import { defineDenoModule } from "@kaoruisaac/pedelec";
+import { defineRuntimeModule } from "@kaoruisaac/pedelec";
 
-const sceneTools = defineDenoModule({
+const sceneTools = defineRuntimeModule({
   name: "scene-tools",
   entry: "./deno/scene-tools.ts",
 });
 
 const result = await workspace.run(
   `import { buildScene } from "scene-tools";\nawait buildScene();`,
-  { denoModules: [sceneTools] },
+  { runtimeModules: [sceneTools] },
 );
 ```
 
-The same declaration can include Agent metadata when it is also used by `skills.denoModules`:
+The same declaration can include Agent metadata when it is also used by `skills.runtimeModules`:
 
 ```ts
-import { defineDenoModule } from "@kaoruisaac/pedelec";
+import { defineRuntimeModule } from "@kaoruisaac/pedelec";
 
-const spriteTools = defineDenoModule({
+const spriteTools = defineRuntimeModule({
   name: "sprite-tools",
   description: "Sprite authoring and preview utilities.",
   entry: "./agent/sprite-tools.ts",
@@ -75,11 +75,11 @@ const spriteTools = defineDenoModule({
 const skills = {
   guidance: "Use the module when sprite preview is needed.",
   tools: [],
-  denoModules: [spriteTools],
+  runtimeModules: [spriteTools],
 };
 ```
 
-`defineDenoModule()` preserves the concrete declaration shape, including whether optional metadata was supplied. `pedelecVitePlugin()` resolves the `entry`, bundles a self-contained ESM runtime, and rolls up a standalone public declaration artifact during `vite build` and `vite dev`. `createSession()` transfers each prepared artifact and Core materializes an immutable, thread-scoped package plus import map before the session is returned. `workspace.run()` uses the same prepared artifact format but caches packages per Workspace and authorized SDK origin, then creates an exact per-run import map for only the requested names.
+`defineRuntimeModule()` preserves the concrete declaration shape, including whether optional metadata was supplied. `pedelecVitePlugin()` resolves the `entry`, bundles a self-contained ESM runtime, and rolls up a standalone public declaration artifact during `vite build` and `vite dev`. `createSession()` transfers each prepared artifact and Core materializes an immutable, thread-scoped package plus import map before the session is returned. `workspace.run()` uses the same prepared artifact format but caches packages per Workspace and authorized SDK origin, then creates an exact per-run import map for only the requested names.
 
 Root SDK consumers that never import `@kaoruisaac/pedelec/vite` do not need Vite. The Vite peer is optional. Applications that use the plugin must install a supported Vite 8 release:
 
@@ -103,13 +103,13 @@ The plugin attaches a private, non-enumerable runtime/types artifact on the tran
 
 Keep `usage` concise: it is the common-case agent hint, while the generated declaration bundle is the authoritative surface when an enum or option shape needs inspection.
 
-The Agent imports the logical `name` from a JavaScript/TypeScript script run with `pedelec-deno`. It does not execute the module by its private filesystem path. Host Context lists the name, description, usage example, and a workspace-relative `index.d.ts` pointer for exact API discovery. The generated `index.mjs` is an implementation fallback, not the normal API reference.
+The Agent imports the logical `name` from a JavaScript/TypeScript script run with `pedelec-ts-runtime`. It does not execute the module by its private filesystem path. Host Context lists the name, description, usage example, and a workspace-relative `index.d.ts` pointer for exact API discovery. The generated `index.mjs` is an implementation fallback, not the normal API reference.
 
 `preferStdinExecution` is optional public authoring metadata for modules primarily used by short scripts. When `true`, Host Context exposes `preferredExecution: "stdin"`; the Agent should prefer the global `runStdinCommand`. The raw authoring flag is not exposed in Host Context, and provider-specific shell syntax is not part of the shared contract. This is a preference rather than a restriction: file-backed execution remains valid, and `false` or omission leaves `preferredExecution` absent. It does not affect bundling or artifact contents.
 
-`entry` supports local relative files, Vite aliases, and installed bare/package `exports` specifiers. It is build-time only; Desktop does not resolve it and runtime npm, JSR, and network fetching are unavailable. Imported modules run with the same restricted Pedelec Deno permissions as the Agent script.
+`entry` supports local relative files, Vite aliases, and installed bare/package `exports` specifiers. It is build-time only; Desktop does not resolve it and runtime npm, JSR, and network fetching are unavailable in Sandbox. Imported modules use the owning Thread mode: Sandbox by default, or explicitly authorized Full Access.
 
-Ending and resuming a session keeps the same module snapshot while Core still knows the thread. `pedelec.resumeSession(sessionId)` reattaches to that snapshot; create a new session to use a rebuilt artifact. `skills.tools` remains a separate App Tool capability: its calls use `pedelec-cli --thread-id ... tool-spec` and `tool-call`, while Deno Modules stay inside the `pedelec-deno` script.
+Ending and resuming a session keeps the same module snapshot while Core still knows the thread. `pedelec.resumeSession(sessionId)` reattaches to that snapshot; create a new session to use a rebuilt artifact. `skills.tools` remains a separate App Tool capability: its calls use `pedelec-cli --thread-id ... tool-spec` and `tool-call`, while Runtime Modules stay inside the `pedelec-ts-runtime` script.
 
 ## `ToolDefinition`
 
@@ -153,8 +153,8 @@ Return values must be compatible with the bridge's JSON data model.
 ## `SkillsInput`
 
 ```ts
-type AgentDenoModuleDefinition<TName extends string = string> =
-  DenoModuleDefinition<TName> & {
+type AgentModuleDefinition<TName extends string = string> =
+  RuntimeModuleDefinition<TName> & {
     description: string;
     usage: string;
   };
@@ -164,7 +164,9 @@ type SkillsInput<
 > = {
   guidance: string;
   tools: TTools;
-  denoModules?: readonly AgentDenoModuleDefinition[];
+  runtimeModules?: readonly AgentModuleDefinition[];
+  /** @deprecated Use runtimeModules. Do not provide both fields. */
+  denoModules?: readonly AgentModuleDefinition[];
 };
 ```
 
@@ -177,7 +179,7 @@ const skills = {
 } satisfies SkillsInput<typeof tools>;
 ```
 
-`guidance` must be a string and `tools` must be an array. `denoModules` is optional; Session/Agent modules require `name`, `description`, `entry`, and `usage`, with non-empty Agent metadata. A Workspace-only `workspace.run()` declaration requires only `name` and `entry`, plus its prepared Vite artifact. `preferStdinExecution` is an optional boolean preference and has no effect on Workspace execution. Session artifacts are transported during `createSession()`; Workspace artifacts are prepared on demand and reused while the Core runtime cache remains valid.
+`guidance` must be a string and `tools` must be an array. `runtimeModules` is optional; Session/Agent modules require `name`, `description`, `entry`, and `usage`, with non-empty Agent metadata. A Workspace-only `workspace.run()` declaration requires only `name` and `entry`, plus its prepared Vite artifact. `preferStdinExecution` is an optional boolean preference and has no effect on Workspace execution. Session artifacts are transported during `createSession()`; Workspace artifacts are prepared on demand and reused while the Core runtime cache remains valid.
 
 ## `ToolNameOf`
 
@@ -281,7 +283,7 @@ type WebMcpBinding = {
 };
 ```
 
-`skills.tools` is the only skills field. `guidance` and `denoModules` are Session capabilities and are not part of this input. Every tool passed to `webmcp()` must include an inline `handler`. There is no `session.onTool()` step for this binding.
+`skills.tools` is the only skills field. `guidance` and `runtimeModules` are Session capabilities and are not part of this input. Every tool passed to `webmcp()` must include an inline `handler`. There is no `session.onTool()` step for this binding.
 
 ```ts
 const tools = [getCurrentPage] as const;
@@ -308,7 +310,7 @@ The same `tools` array can also be passed to `createSession()`.
 | normalized `argsSchema` | `inputSchema` |
 | inline `handler` | `execute` |
 
-`timeoutMs` remains a Pedelec Session wait limit. WebMCP registration has no per-tool timeout, and this binding does not add one. Registration does not include `title`, `annotations`, `exposedTo`, `handler`, `guidance`, or `denoModules`.
+`timeoutMs` remains a Pedelec Session wait limit. WebMCP registration has no per-tool timeout, and this binding does not add one. Registration does not include `title`, `annotations`, `exposedTo`, `handler`, `guidance`, or `runtimeModules`.
 
 Names keep the Pedelec rule: a letter, then letters, digits, `_`, `.`, or `-`. WebMCP also requires the name to be at most 128 characters. `inputSchema` is the same normalized `argsSchema` clone that `createSession()` would send. Pedelec does not add `additionalProperties` or rewrite `required`, `enum`, or `oneOf`.
 
@@ -358,3 +360,17 @@ type ToolArgsSchemaNode =
 ```
 
 See [Types](./types/) for every field and [Tool Args Schema](../tools/args-schema/) for usage guidance.
+
+## Legacy module compatibility
+
+`DenoModuleDefinition`, `defineDenoModule()` and `denoModules` remain usable and are marked `@deprecated` in TypeScript. Migrate to `RuntimeModuleDefinition`, `defineRuntimeModule()` and `runtimeModules`. Supply exactly one module field per skills/options object; supplying both rejects with `INVALID_INPUT`, even when either list is empty. The internal `SerializableSkillsManifest.denoModules` wire field remains unchanged.
+
+```ts
+// Existing integrations remain valid:
+import { defineDenoModule, defineRuntimeModule, type DenoModuleDefinition } from "@kaoruisaac/pedelec";
+const legacy: DenoModuleDefinition = defineDenoModule({ name: "project-tools", entry: "./agent/project-tools.ts" });
+await workspace.run('import "project-tools";', { denoModules: [legacy] });
+// New integrations:
+const modern = defineRuntimeModule({ name: "project-tools", entry: "./agent/project-tools.ts" });
+await workspace.run('import "project-tools";', { runtimeModules: [modern] });
+```

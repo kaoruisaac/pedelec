@@ -30,6 +30,7 @@ const TARGET_PLATFORMS = Object.freeze({
 
 export const PUBLIC_HELPER_BINARY_STEMS = Object.freeze([
   "pedelec-cli",
+  "pedelec-ts-runtime",
   "pedelec-deno",
   "pedelec-agent",
   "pedelec-native-host",

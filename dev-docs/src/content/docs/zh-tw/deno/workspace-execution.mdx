@@ -1,5 +1,5 @@
 ---
-title: Workspace Deno 執行
+title: Workspace Runtime 執行
 description: 由已核准的 Web App 直接執行確定性的 Workspace 程式碼。
 sidebar:
   order: 4
@@ -25,12 +25,12 @@ const value = JSON.parse(result.stdout);
 
 直接執行適合在使用者按下 Export 後產生檔案、開啟專案時讀取並正規化 metadata、將資料送給 Agent 前先處理、儲存前驗證、已知的本機遷移，或建立衍生 manifest。
 
-## 在單次執行重用 Deno Module
+## 在單次執行重用 Runtime Module
 
 ```ts
-import { defineDenoModule } from "@kaoruisaac/pedelec";
+import { defineRuntimeModule } from "@kaoruisaac/pedelec";
 
-const projectTools = defineDenoModule({
+const projectTools = defineRuntimeModule({
   name: "project-tools",
   entry: "./deno/project-tools.ts",
 });
@@ -40,17 +40,17 @@ const result = await workspace.run(
     import { buildManifest } from "project-tools";
     await buildManifest();
   `,
-  { denoModules: [projectTools] },
+  { runtimeModules: [projectTools] },
 );
 ```
 
 僅供 Workspace 使用的宣告不需要 Agent-facing `description` 或 `usage`。每次執行都要明確提供 modules，且只會掛載該次要求的 modules。runtime cache 有效時，Pedelec 可私下重用已準備的 package。這不是公開的 Workspace module registry。
 
 ```text
-Session / Thread → skills.denoModules → 僅供 Agent-side pedelec-deno
-Workspace run   → workspace.run({ denoModules }) → 僅供 App 執行
+Session / Thread → skills.runtimeModules → 僅供 Agent-side pedelec-ts-runtime
+Workspace run   → workspace.run({ runtimeModules }) → 僅供 App 執行
 ```
 
-`workspace.run()` 不會繼承 Session Deno Modules。建立 Session 也不會繼承之前 Workspace run 用過的 modules；Workspace-run modules 不會出現在 Agent Host Context。
+`workspace.run()` 不會繼承 Session Runtime Modules。建立 Session 也不會繼承之前 Workspace run 用過的 modules；Workspace-run modules 不會出現在 Agent Host Context。
 
-同一個 Workspace 裡，Workspace Deno 執行可以與 Agent/provider 工作以及其他 `workspace.run()` 同時進行。Pedelec 不會替這些 actors 協調 filesystem conflicts。詳見 [PedelecWorkspace](../reference/pedelec-workspace/)。
+同一個 Workspace 裡，Workspace Runtime 執行可以與 Agent/provider 工作以及其他 `workspace.run()` 同時進行。Pedelec 不會替這些 actors 協調 filesystem conflicts。詳見 [PedelecWorkspace](../reference/pedelec-workspace/)。
