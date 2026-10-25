@@ -388,6 +388,29 @@ jobs:
           printf '%s' "$APPLE_API_KEY_PRIVATE" > "$api_key_path"
           chmod 600 "$api_key_path"
 
+      - name: Install macOS Stapler retry shim
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "$GITHUB_WORKSPACE/.github/scripts/xcrun"
+          echo "$GITHUB_WORKSPACE/.github/scripts" >> "$GITHUB_PATH"
+          echo "PEDELEC_STAPLER_LOG_PATH=$RUNNER_TEMP/pedelec-stapler.log" >> "$GITHUB_ENV"
+
+      - name: Verify macOS Stapler retry shim
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$GITHUB_WORKSPACE/.github/scripts/xcrun"
+          actual="$(command -v xcrun)"
+          [ "$actual" = "$expected" ] || {
+            echo "Expected Stapler shim $expected, got $actual" >&2
+            exit 1
+          }
+          xcrun --find codesign >/dev/null
+          echo "Stapler retry shim enabled and passthrough verified: $actual"
+
       - name: Build and upload Windows Tauri bundles
         if: runner.os == 'Windows'
         uses: tauri-apps/tauri-action@v0.6.2
@@ -626,8 +649,10 @@ jobs:
           app_info=$(codesign -dv --verbose=4 "$app_path" 2>&1)
           grep -Fq 'Authority=Developer ID Application:' <<<"$app_info"
           grep -Eq 'flags=.*\bruntime\b' <<<"$app_info"
-          spctl --assess --type execute --verbose=4 "$app_path"
+          # Confirm the embedded ticket first; spctl may otherwise report an
+          # unnotarized identity without explaining that Stapling failed.
           xcrun stapler validate "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
 
           echo "Verifying helper binary signatures."
           if find "$app_path" -type f \( -name deno -o -name deno.exe \) -print -quit | grep -q .; then
@@ -677,6 +702,18 @@ jobs:
             "$asset_path" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+      - name: Report macOS Stapler diagnostics
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -f "${PEDELEC_STAPLER_LOG_PATH:-}" ]; then
+            echo "::group::Stapler retries and ticket validation"
+            cat "$PEDELEC_STAPLER_LOG_PATH"
+            echo "::endgroup::"
+          else
+            echo "No Stapler diagnostics were recorded."
+          fi
 
       - name: Clean up Apple signing credentials
         if: always() && runner.os == 'macOS'

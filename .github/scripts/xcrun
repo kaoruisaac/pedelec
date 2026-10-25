@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node "$GITHUB_WORKSPACE/desktop/scripts/macos-stapler.mjs" "$@"
