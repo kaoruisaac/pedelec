@@ -50,6 +50,14 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Test release metadata scripts
+        run: node --test .github/scripts/release-metadata.test.mjs
+
+      - name: Verify release changelog
+        env:
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+        run: node .github/scripts/release-changelog.mjs
+
       - name: Verify package versions match tag
         shell: bash
         run: |
@@ -83,6 +91,30 @@ jobs:
           test "$EXT_VERSION" = "$VERSION"
           test "$TAURI_VERSION" = "$VERSION"
           test "$CARGO_VERSION" = "$VERSION"
+
+  changelog:
+    name: Upload release changelog
+    needs: [create-release, verify-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Stage validated changelog from release tag
+        env:
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+        run: node .github/scripts/release-changelog.mjs --stage
+
+      - name: Upload changelog asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
+        run: gh release upload "$TAG_NAME" dist/changelog.md --repo "$GITHUB_REPOSITORY" --clobber
 
   chrome-extension:
     name: Package Chrome Extension

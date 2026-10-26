@@ -47,6 +47,19 @@ Pedelec SDK / Workspace API
 
 此圖僅表示責任分離，不代表已核准新增任何特定公開 API 或抽象層實作。
 
+### 2026-10-24 補充候選：Microsoft eXecution Container（MXC）
+
+- **預選狀態**：將 **Bun + Microsoft MXC** 納入與 **Bun + Anthropic SRT** 並列的候選組合；**不是採用決議，也不啟動實作或 PoC**。維持原訂 2027 年 2 月重新評估。
+- **定位**：MXC 是供應用程式嵌入的開源 Sandbox SDK，以統一的權限政策及執行 API 封裝各平台的隔離後端；Pedelec 只考慮使用其 **本機 Process Sandbox** 能力，不以 VM／雲端多租戶執行環境為目標。
+- **平台後端（官方預設）**：Windows 11 使用 ProcessContainer、macOS 使用 Seatbelt、Linux 使用 Bubblewrap。這代表跨平台有統一 SDK，但底層安全邊界、OS 版本門檻與行為仍須分別驗證。
+- **權限與程序能力**：官方提供檔案系統讀寫／拒絕政策、網路政策、程序啟動、stdin/stdout/stderr 串流、PTY（依後端能力）、Lifecycle 與診斷介面；尚未驗證是否完全符合 Pedelec 的 ACP、多 Agent、子程序樹與 Cancel／Shutdown 需求。
+- **隨產品分發**：官方 Node／.NET SDK 套件包含原生 Runtime Assets；Rust crate 可把 SDK、Engine 與選定後端編入應用程式；亦有平台專用 Executor。原則上可隨 Pedelec 安裝／發布，但需查證平台前置條件、簽章、公證、原生二進位發行與更新成本，**不能假設所有 OS 都能零前置依賴安裝**。
+- **與 Bun 整合的預選方向**：官方 Node SDK 要求 Node.js 24+，**未承諾 Bun 相容**。可比較（A）Bun 直接呼叫 SDK（須實測相容性）、（B）Rust SDK 製作隨產品附帶的輕量 Launcher、（C）平台 Executor。**Rust Launcher 只作為 MXC Adapter／程序啟動器，不代表 Pedelec 自行實作或維護 OS-level Sandbox。**
+- **必要驗證**：Windows 版本與 ProcessContainer 可用性；macOS Seatbelt 發布限制；Linux Bubblewrap／User Namespace 前置需求；檔案與網路 Policy 的拒絕測試；Agent 子程序是否繼承隔離；stdio/PTY/長時間 ACP 通訊；多 Workspace 並行、清理、啟動延遲與版本升級；MXC 無法啟動時必須 Fail Closed，不得默默降為 Full Access。
+- **2027 年 2 月評估標準**：除了 SRT，也將 MXC 的成熟度、安全維護責任、跨平台部署、Bun 相容性及長期維護負擔列入比較；若仍不符合必要條件，維持延後遷移的選項。
+
+官方參考：[MXC Repository](https://github.com/microsoft/mxc)、[Node SDK](https://github.com/microsoft/mxc/tree/main/sdk/node)、[Releases](https://github.com/microsoft/mxc/releases)。
+
 ## 4. 主要風險
 
 | 面向 | 風險與待驗證事項 |
