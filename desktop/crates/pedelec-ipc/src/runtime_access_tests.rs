@@ -306,3 +306,58 @@ fn trusted_session_capability_is_required_and_revocation_cancels_only_its_origin
     assert_eq!(cancelled, ids);
     assert!(!dispatch(request(Some(ORIGIN), true), runtime, platform, deno).ok);
 }
+
+#[test]
+fn workspace_full_access_route_requires_trusted_native_capability() {
+    struct WorkspaceDispatcher;
+    impl DenoRuntimeDispatcher for WorkspaceDispatcher {
+        fn dispatch(&self, intent: DenoExecutionIntent) -> Result<DenoRunOutput, PedelecError> {
+            assert!(intent.runtime_full_access);
+            assert!(intent.runtime_authorization.as_ref().unwrap().is_active());
+            assert!(matches!(
+                intent.owner,
+                pedelec_core::DenoExecutionOwner::Workspace { .. }
+            ));
+            Ok(DenoRunOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            })
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(Mutex::new(CoreRuntime {
+        workspace_manager: WorkspaceManager::with_workspace_root(temp.path().join("workspace")),
+        ..CoreRuntime::default()
+    }));
+    let auth = runtime
+        .lock()
+        .unwrap()
+        .grant_extension_runtime_full_access(ORIGIN)
+        .unwrap();
+    let created = runtime.lock().unwrap().create_trusted_extension_thread(serde_json::from_value(serde_json::json!({"provider":"codex", "model":"test-model", "runtimeFullAccess":true})).unwrap(), &auth).unwrap();
+    let run = CoreIpcRequest {
+        request_id: "workspace-run".into(),
+        r#type: "workspace_run".into(),
+        caller_origin: Some(ORIGIN.into()),
+        caller_sdk_version: None,
+        payload: Some(
+            serde_json::json!({"workspaceId":created.workspace_id, "script":"0", "runtimeFullAccess":true}),
+        ),
+    };
+    assert!(!handle_core_ipc_request(run.clone(), runtime.clone()).ok);
+    let response = handle_core_ipc_request_with_services(
+        run,
+        runtime,
+        Arc::new(SessionPlatform {
+            authorization: auth,
+            instance_requested: true,
+        }),
+        Arc::new(RejectPersistentRuntimeDispatcher),
+        Arc::new(WorkspaceDispatcher),
+    );
+    assert!(response.ok, "{:?}", response.error);
+    assert_eq!(response.result.unwrap()["runtimeFullAccessApplied"], true);
+}

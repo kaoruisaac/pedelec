@@ -108,6 +108,17 @@ fn run_chrome_native_host(runtime_file_path: Option<PathBuf>) -> io::Result<()> 
                     )?;
                 }
             }
+        } else if request.r#type == "workspace_run" {
+            // Keep the Native pipe free to deliver revocations during execution.
+            let stdout = Arc::clone(&stdout);
+            let runtime_file_path = runtime_file_path.clone();
+            std::thread::spawn(move || {
+                let response = send_core_request(&request, runtime_file_path.as_deref());
+                let native_response = core_response_to_native_response(response);
+                let mut stdout = stdout.lock().unwrap();
+                let _ =
+                    write_bounded_native_response(&mut *stdout, &native_response, &request.r#type);
+            });
         } else {
             let response = send_core_request(&request, runtime_file_path.as_deref());
             let native_response = core_response_to_native_response(response);
@@ -128,8 +139,23 @@ fn admit_native_message(
 ) -> Result<CoreIpcRequest, NativeProtocolResponse> {
     let grant = message.get("nativeRuntimeGrant").cloned();
     let mut request = native_message_to_core_request(message)?;
+    if request.r#type == "workspace_run"
+        && request
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("runtimeFullAccess"))
+            .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(native_error_response(
+            &request.request_id,
+            PedelecError::new(
+                error_codes::INVALID_INPUT,
+                "runtimeFullAccess must be a boolean",
+            ),
+        ));
+    }
     if request.r#type == "revoke_runtime_full_access"
-        || (request.r#type == "create_thread"
+        || (matches!(request.r#type.as_str(), "create_thread" | "workspace_run")
             && request
                 .payload
                 .as_ref()
@@ -319,7 +345,13 @@ fn native_message_to_core_request(
         ))),
         "workspace_run" => Some(Value::Object(select_fields(
             &object,
-            &["workspaceId", "script", "timeoutMs", "denoModules"],
+            &[
+                "workspaceId",
+                "script",
+                "timeoutMs",
+                "denoModules",
+                "runtimeFullAccess",
+            ],
         ))),
         // The connectivity probe deliberately has no caller-controlled payload.
         "ping" => Some(serde_json::json!({})),

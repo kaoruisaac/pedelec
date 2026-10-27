@@ -607,9 +607,7 @@ impl PreparedDenoExecution {
     /// path against it.  Caller-provided script arguments are carried through
     /// unchanged; they only ever become script arguments.
     pub fn prepare(intent: &DenoExecutionIntent) -> Result<Self, PedelecError> {
-        // Workspace runs never inherit Full Access, even for a malformed intent.
-        let runtime_full_access = intent.runtime_full_access
-            && matches!(&intent.owner, DenoExecutionOwner::Thread { .. });
+        let runtime_full_access = intent.runtime_full_access;
         if runtime_full_access && !runtime_authorization_active(intent) {
             return Err(PedelecError::new(
                 error_codes::INVALID_INPUT,

@@ -1558,6 +1558,8 @@ pub struct WorkspaceListOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRunInput {
+    #[serde(default)]
+    pub runtime_full_access: bool,
     pub workspace_id: String,
     pub script: String,
     #[serde(default)]
@@ -2465,14 +2467,27 @@ impl CoreRuntime {
         &mut self,
         input: WorkspaceRunInput,
     ) -> Result<WorkspaceRunStart, PedelecError> {
-        self.begin_workspace_run_internal(input, None)
+        self.begin_workspace_run_internal(input, None, None)
     }
 
     fn begin_workspace_run_internal(
         &mut self,
         input: WorkspaceRunInput,
         caller_origin: Option<&str>,
+        authorization: Option<&ExtensionRuntimeAuthorization>,
     ) -> Result<WorkspaceRunStart, PedelecError> {
+        let runtime_authorization = if input.runtime_full_access {
+            let auth = authorization.ok_or_else(runtime_access_denied)?;
+            if caller_origin != Some(auth.origin.as_str())
+                || !auth.grant.is_active()
+                || self.runtime_full_access_grants.get(&auth.origin) != Some(&auth.grant)
+            {
+                return Err(runtime_access_denied());
+            }
+            Some(auth.grant.clone())
+        } else {
+            None
+        };
         let timeout_ms = input.timeout_ms.unwrap_or(DEFAULT_WORKSPACE_RUN_TIMEOUT_MS);
         if timeout_ms == 0 {
             return Err(PedelecError::new(
@@ -2524,8 +2539,8 @@ impl CoreRuntime {
             workspace_id: input.workspace_id.clone(),
             run_id: run_id.clone(),
             intent: DenoExecutionIntent {
-                runtime_full_access: false,
-                runtime_authorization: None,
+                runtime_full_access: input.runtime_full_access,
+                runtime_authorization,
                 thread_id: String::new(),
                 owner: DenoExecutionOwner::Workspace {
                     workspace_id: input.workspace_id,
@@ -2964,7 +2979,17 @@ impl CoreRuntime {
         input: WorkspaceRunInput,
         caller_origin: &str,
     ) -> Result<WorkspaceRunStart, PedelecError> {
-        self.begin_workspace_run_internal(input, Some(caller_origin))
+        self.begin_workspace_run_internal(input, Some(caller_origin), None)
+    }
+
+    pub fn begin_trusted_workspace_run_for_origin(
+        &mut self,
+        input: WorkspaceRunInput,
+        caller_origin: &str,
+        authorization: &ExtensionRuntimeAuthorization,
+    ) -> Result<WorkspaceRunStart, PedelecError> {
+        self.authorize_workspace_access(&input.workspace_id, caller_origin)?;
+        self.begin_workspace_run_internal(input, Some(caller_origin), Some(authorization))
     }
 
     pub fn create_deno_module_upload(
@@ -14659,9 +14684,8 @@ mod deno_tests {
         assert!(context.contains(
             "runFileCommand: pedelec-ts-runtime --thread-id thread-deno-context run <workspace-relative-script-path>"
         ));
-        assert!(
-            context.contains("runStdinCommand: pedelec-ts-runtime --thread-id thread-deno-context run -")
-        );
+        assert!(context
+            .contains("runStdinCommand: pedelec-ts-runtime --thread-id thread-deno-context run -"));
         assert!(context.contains("index.d.ts"));
         assert!(context.contains("\"preferredExecution\": \"stdin\""));
         assert!(!context.contains("runCommandTemplate"));
@@ -14707,7 +14731,8 @@ mod deno_tests {
         assert!(empty.contains(
             "runFileCommand: pedelec-ts-runtime --thread-id thread-deno-order run <workspace-relative-script-path>"
         ));
-        assert!(empty.contains("runStdinCommand: pedelec-ts-runtime --thread-id thread-deno-order run -"));
+        assert!(empty
+            .contains("runStdinCommand: pedelec-ts-runtime --thread-id thread-deno-order run -"));
 
         let modules = vec![
             DenoModuleState {
@@ -14818,7 +14843,8 @@ mod deno_tests {
     #[test]
     fn bootstrap_keeps_the_compact_invariant_contract() {
         let instruction = build_pedelec_bootstrap_instruction();
-        assert!(instruction.contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
+        assert!(instruction
+            .contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
         assert!(instruction.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
         assert!(instruction.contains("Deno Modules are imported from `pedelec-ts-runtime` scripts"));
         assert!(instruction.contains("readSpecCommand` / `callCommand"));

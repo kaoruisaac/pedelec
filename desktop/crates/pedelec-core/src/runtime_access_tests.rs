@@ -99,6 +99,7 @@ fn mixed_threads_and_workspace_runs_keep_their_own_modes_on_resume() {
     }
     let run = runtime
         .begin_workspace_run(WorkspaceRunInput {
+            runtime_full_access: false,
             workspace_id: full.workspace_id,
             script: "console.log('workspace')".into(),
             timeout_ms: None,
@@ -190,5 +191,44 @@ fn revocation_invalidates_prepared_intents_all_origin_threads_and_old_sessions()
         .resume_thread(ResumeThreadInput {
             thread_id: other.thread_id
         })
+        .is_err());
+}
+
+#[test]
+fn workspace_full_access_requires_trusted_origin_and_is_per_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut core = runtime(&temp);
+    let auth = core.grant_extension_runtime_full_access(ORIGIN).unwrap();
+    let thread = core
+        .create_trusted_extension_thread(input(true), &auth)
+        .unwrap();
+    let run = WorkspaceRunInput {
+        workspace_id: thread.workspace_id,
+        script: "0".into(),
+        timeout_ms: None,
+        deno_modules: vec![],
+        runtime_full_access: true,
+    };
+    assert!(core
+        .begin_workspace_run_for_origin(run.clone(), ORIGIN)
+        .is_err());
+    let full = core
+        .begin_trusted_workspace_run_for_origin(run.clone(), ORIGIN, &auth)
+        .unwrap();
+    assert!(full.intent.runtime_full_access);
+    let sandbox = core
+        .begin_workspace_run_for_origin(
+            WorkspaceRunInput {
+                runtime_full_access: false,
+                ..run.clone()
+            },
+            ORIGIN,
+        )
+        .unwrap();
+    assert!(!sandbox.intent.runtime_full_access);
+    core.revoke_runtime_full_access(ORIGIN).unwrap();
+    assert!(!full.intent.runtime_authorization.unwrap().is_active());
+    assert!(core
+        .begin_trusted_workspace_run_for_origin(run, ORIGIN, &auth)
         .is_err());
 }

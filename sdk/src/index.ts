@@ -373,6 +373,7 @@ export type SerializableSkillsManifest = {
 
 export type WorkspaceRunOptions = {
   timeoutMs?: number;
+  runtimeFullAccess?: boolean;
   runtimeModules?: readonly RuntimeModuleDefinition[];
   /** @deprecated Use runtimeModules. */
   denoModules?: readonly DenoModuleDefinition[];
@@ -1180,7 +1181,12 @@ export class PedelecWorkspace {
     }
 
     let modules: PreparedWorkspaceRuntimeModule[];
+    let runtimeFullAccess: boolean;
     try {
+      runtimeFullAccess = normalizeRuntimeFullAccess(options.runtimeFullAccess);
+      if (runtimeFullAccess && !this.client.runtimeFullAccessInternal) {
+        throw makeError("INVALID_INPUT", "Workspace runtimeFullAccess requires an Instance with runtimeFullAccess enabled");
+      }
       modules = normalizeWorkspaceDenoModules(resolveRuntimeModules(options));
     } catch (error) {
       return Promise.reject(error);
@@ -1211,11 +1217,12 @@ export class PedelecWorkspace {
         {
           workspaceId: this.workspaceId,
           script,
+          ...(options.runtimeFullAccess === undefined ? {} : { runtimeFullAccess }),
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           ...(modules.length === 0 ? {} : { denoModules: modules.map(({ name }) => name) }),
         },
         { timeoutMs: null },
-      ).then(normalizeWorkspaceRunResponse);
+      ).then((value) => normalizeWorkspaceRunResponse(value, runtimeFullAccess));
     };
 
     return run();
@@ -1251,6 +1258,9 @@ export class Pedelec {
   private readonly channelId: string;
   private readonly bridgeTimeoutMs: number;
   private readonly runtimeFullAccess: boolean;
+
+  /** @internal */
+  get runtimeFullAccessInternal(): boolean { return this.runtimeFullAccess; }
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly sessions = new Map<string, PedelecSession<string>>();
   private readonly lastSeqBySession = new Map<string, number>();
@@ -3156,11 +3166,16 @@ function normalizeWorkspaceDenoModulePrepareResponse(
   return value.missingModuleNames;
 }
 
-function normalizeWorkspaceRunResponse(value: unknown): WorkspaceRunResult {
+function normalizeWorkspaceRunResponse(value: unknown, runtimeFullAccess: boolean): WorkspaceRunResult {
   if (!isPlainObject(value) || !Number.isInteger(value.exitCode) || typeof value.stdout !== "string" ||
       typeof value.stderr !== "string" || typeof value.stdoutTruncated !== "boolean" ||
       typeof value.stderrTruncated !== "boolean") {
     throw makeError("SDK_PROTOCOL_ERROR", "workspace_run response had an invalid shape");
+  }
+  if ((runtimeFullAccess && value.runtimeFullAccessApplied !== true) ||
+      (!runtimeFullAccess && value.runtimeFullAccessApplied === true) ||
+      (value.runtimeFullAccessApplied !== undefined && typeof value.runtimeFullAccessApplied !== "boolean")) {
+    throw makeError("SDK_PROTOCOL_ERROR", "The connected Pedelec Extension/Desktop did not confirm the requested Runtime mode");
   }
   return {
     exitCode: value.exitCode as number,

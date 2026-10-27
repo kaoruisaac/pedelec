@@ -15,7 +15,7 @@ The runtime also denies network, host environment, subprocess, FFI, and `sys` ac
 
 Script arguments cannot increase permissions. For example, passing `--allow-net` after the script argument separator only puts that string in `Deno.args`; it does not grant network access.
 
-`workspace.run()` is a direct capability of an [approved Web application](../getting-started/approval-and-connection/) to run deterministic code against the opened Workspace. It remains inside Pedelec's restricted Deno sandbox and does not provide unrestricted host execution. See the [PedelecWorkspace reference](../reference/pedelec-workspace/) for exact security and admission behavior.
+`workspace.run()` is a direct capability of an [approved Web application](../getting-started/approval-and-connection/) to run deterministic code against the opened Workspace. It defaults to the restricted Deno sandbox; an authorized application may opt in to Full Access per run. See the [PedelecWorkspace reference](../reference/pedelec-workspace/) for exact security and admission behavior.
 
 ## Full Access Thread boundary
 

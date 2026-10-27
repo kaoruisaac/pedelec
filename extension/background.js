@@ -2044,10 +2044,12 @@ function createBackground(runtimeChrome, options = {}) {
       return Promise.reject({ code: "SDK_ORIGIN_UNAVAILABLE", message: "The SDK caller origin is unavailable." });
     }
     // Deliver persisted revocations before any SDK action can run on a reconnected host.
+    const grantEpoch = grantEpochByOrigin.get(context.origin) || 0;
     await flushRuntimeRevocations(context.origin);
-    const grants = type === "create_thread" && payload.runtimeFullAccess === true
+    const grants = (type === "create_thread" || type === "workspace_run") && payload.runtimeFullAccess === true
       ? await originGrants(context.origin, context.runtimeFullAccess) : null;
-    if (grants && (!context.runtimeFullAccess || !grants.approved || !context.approvalId)) {
+    if (grants && (!context.runtimeFullAccess || !grants.approved || !context.approvalId ||
+        grantEpoch !== (grantEpochByOrigin.get(context.origin) || 0))) {
       throw { code: "CREATE_SESSION_NOT_APPROVED", message: "Full Runtime Access approval is required." };
     }
     return sendNativeRequest(type, payload, { ...metadata, callerOrigin: context.origin,
@@ -2376,6 +2378,12 @@ function createBackground(runtimeChrome, options = {}) {
       }
 
       if (message.type === "workspace_run") {
+        if (message.runtimeFullAccess !== undefined && typeof message.runtimeFullAccess !== "boolean") {
+          throw { code: "INVALID_INPUT", message: "runtimeFullAccess must be a boolean." };
+        }
+        if (message.runtimeFullAccess === true && !context.runtimeFullAccess) {
+          throw { code: "CREATE_SESSION_NOT_APPROVED", message: "This Instance did not request Full Runtime Access." };
+        }
         if (context.approvalRequired && !options.skipApproval) {
           const approved = await ensureApprovedOrQueue(port, message, context);
           if (!approved) return;
@@ -2384,9 +2392,14 @@ function createBackground(runtimeChrome, options = {}) {
         const result = await sendSdkNativeRequest(context, "workspace_run", {
           workspaceId: message.workspaceId,
           script: message.script,
+          ...(message.runtimeFullAccess === undefined ? {} : { runtimeFullAccess: message.runtimeFullAccess }),
           ...(message.timeoutMs === undefined ? {} : { timeoutMs: message.timeoutMs }),
           ...(message.denoModules === undefined ? {} : { denoModules: message.denoModules }),
         });
+        if ((message.runtimeFullAccess === true && result?.runtimeFullAccessApplied !== true) ||
+            (message.runtimeFullAccess !== true && result?.runtimeFullAccessApplied === true)) {
+          throw { code: "SDK_PROTOCOL_ERROR", message: "Native did not confirm the requested Runtime mode." };
+        }
         postSdkResponse(port, channelId, requestId, true, result);
         return;
       }

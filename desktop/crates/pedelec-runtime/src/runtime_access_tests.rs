@@ -97,6 +97,39 @@ fn real_full_access_process_tree_lifecycle() {
 }
 
 #[test]
+fn real_workspace_full_access_revocation_terminates_process_tree() {
+    let Some(executable) = super::deno_execution_fixture::test_deno_executable() else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("workspace-pids.json");
+    let (mut core, mut intent) = full_intent(&temp, &tree_fixture::source(&marker, false));
+    intent.owner = DenoExecutionOwner::Workspace {
+        workspace_id: "workspace".into(),
+        run_id: "run".into(),
+    };
+    let owner = configured(&executable, &temp, 4096);
+    let dispatch_owner = owner.clone();
+    let (tx, rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let _ = tx.send(dispatch_owner.dispatch(intent));
+    });
+    let pids = tree_fixture::wait_pids(&marker);
+    let _cleanup = tree_fixture::Cleanup(pids.clone());
+    core.revoke_runtime_full_access(ORIGIN).unwrap();
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(8))
+            .unwrap()
+            .unwrap_err()
+            .code,
+        error_codes::DENO_EXECUTION_CANCELLED
+    );
+    worker.join().unwrap();
+    tree_fixture::assert_stopped(&pids);
+    assert_eq!(owner.active_run_count(), 0);
+}
+
+#[test]
 fn real_process_tree_cancel_does_not_affect_another_thread_or_workspace() {
     let Some(executable) = super::deno_execution_fixture::test_deno_executable() else {
         return;
@@ -257,9 +290,11 @@ fn full_access_argv_has_no_sandbox_restrictions_and_arguments_stay_after_entrypo
         workspace_id: "workspace".into(),
         run_id: "run".into(),
     };
-    let sandbox = PreparedDenoExecution::prepare(&workspace).unwrap();
-    assert!(!sandbox.runtime_full_access);
-    assert!(build_deno_command_args(&sandbox).contains(&OsString::from("--deny-net")));
+    let prepared_workspace = PreparedDenoExecution::prepare(&workspace).unwrap();
+    assert!(prepared_workspace.runtime_full_access);
+    assert!(build_deno_command_args(&prepared_workspace).contains(&OsString::from("--allow-all")));
+    workspace.runtime_authorization = None;
+    assert!(PreparedDenoExecution::prepare(&workspace).is_err());
     // A serialized capability cannot bypass the in-process admission boundary.
     let restored: DenoExecutionIntent =
         serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();

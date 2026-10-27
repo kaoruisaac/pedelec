@@ -3651,6 +3651,30 @@ describe("Pedelec SDK", () => {
     });
     await expect(run).resolves.toMatchObject({ exitCode: 3, stdout: "3" });
     await expect(workspace.run("x", { timeoutMs: 0 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(workspace.run("x", { runtimeFullAccess: true })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("requires per-run Full Access and authoritative acknowledgment", async () => {
+    const pedelec = new Pedelec({ runtimeFullAccess: true });
+    const open = pedelec.openWorkspace("C:\\workspace\\project");
+    respondOk(pageWindow, pageWindow.lastSent(), { workspace: { workspaceId: "workspace_modes", path: "C:\\workspace\\project" } });
+    const workspace = await open;
+    await expect(workspace.run("0", { runtimeFullAccess: "yes" as unknown as boolean })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    const output = { exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false };
+    for (const ack of [undefined, false, true]) {
+      const run = workspace.run("0", { runtimeFullAccess: true });
+      const request = pageWindow.lastSent();
+      expect(request).toMatchObject({ type: "workspace_run", runtimeFullAccess: true });
+      respondOk(pageWindow, request, { ...output, ...(ack === undefined ? {} : { runtimeFullAccessApplied: ack }) });
+      if (ack) await expect(run).resolves.toEqual(output);
+      else await expect(run).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR" });
+    }
+    const sandbox = workspace.run("0");
+    respondOk(pageWindow, pageWindow.lastSent(), { ...output, runtimeFullAccessApplied: true });
+    await expect(sandbox).rejects.toMatchObject({ code: "SDK_PROTOCOL_ERROR" });
+    const legacy = workspace.run("0", { runtimeFullAccess: false });
+    respondOk(pageWindow, pageWindow.lastSent(), output);
+    await expect(legacy).resolves.toEqual(output);
   });
 
   it.each(["runtimeModules", "denoModules"] as const)("prepares and uploads Workspace modules via %s", async (moduleKey) => {

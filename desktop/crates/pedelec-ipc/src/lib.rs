@@ -2591,7 +2591,9 @@ fn handle_core_ipc_request_with_services(
         "deno_run" => handle_deno_run_request(&request, runtime, deno_dispatcher),
         "workspace_list_files" => handle_workspace_list_request(&request, runtime, false),
         "workspace_list_folders" => handle_workspace_list_request(&request, runtime, true),
-        "workspace_run" => handle_workspace_run_request(&request, runtime, deno_dispatcher),
+        "workspace_run" => {
+            handle_workspace_run_request(&request, runtime, platform_services, deno_dispatcher)
+        }
         "prepare_workspace_deno_modules" => {
             match decode_payload::<PrepareWorkspaceDenoModulesInput>(&request) {
                 Ok(input) => {
@@ -2957,6 +2959,7 @@ fn handle_workspace_list_request(
 fn handle_workspace_run_request(
     request: &CoreIpcRequest,
     runtime: SharedCoreRuntime,
+    platform_services: Arc<dyn CoreIpcPlatformServices>,
     deno_dispatcher: Arc<dyn DenoRuntimeDispatcher>,
 ) -> CoreIpcResponse {
     let input = match decode_payload::<WorkspaceRunInput>(request) {
@@ -2979,16 +2982,29 @@ fn handle_workspace_run_request(
             )
         }
     };
-    let start = match runtime
-        .lock()
-        .unwrap()
-        .begin_workspace_run_for_origin(input, caller_origin)
-    {
+    let start_result = if input.runtime_full_access {
+        platform_services
+            .authorize_extension_runtime_request(request)
+            .and_then(|authorization| {
+                ensure_runtime_authorization_origin(request, &authorization)?;
+                runtime
+                    .lock()
+                    .unwrap()
+                    .begin_trusted_workspace_run_for_origin(input, caller_origin, &authorization)
+            })
+    } else {
+        runtime
+            .lock()
+            .unwrap()
+            .begin_workspace_run_for_origin(input, caller_origin)
+    };
+    let start = match start_result {
         Ok(start) => start,
         Err(error) => return error_response(&request.request_id, error),
     };
     let workspace_id = start.workspace_id.clone();
     let run_id = start.run_id.clone();
+    let runtime_full_access_applied = start.intent.runtime_full_access;
     let dispatch_result = deno_dispatcher.dispatch(start.intent);
     runtime
         .lock()
@@ -2996,7 +3012,11 @@ fn handle_workspace_run_request(
         .finish_workspace_run(&workspace_id, &run_id);
 
     match dispatch_result {
-        Ok(output) => ok_response(&request.request_id, serde_json::json!(output)),
+        Ok(output) => {
+            let mut result = serde_json::to_value(output).unwrap();
+            result["runtimeFullAccessApplied"] = serde_json::json!(runtime_full_access_applied);
+            ok_response(&request.request_id, result)
+        }
         Err(error) => error_response(&request.request_id, error),
     }
 }

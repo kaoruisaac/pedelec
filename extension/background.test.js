@@ -244,6 +244,24 @@ async function requestRuntimeApproval(fixture, runtimeFullAccess = false) {
   return approvalState(popup);
 }
 
+test("Workspace Full Access uses the trusted per-run Native envelope", async () => {
+  const fixture = await runtimeFixture({ fullGrant: true });
+  const native = new MockPort();
+  fixture.chrome.nativePortQueue.push(native);
+  fixture.sdk.emit({ type: "workspace_run", requestId: "workspace-full", channelId: "runtime-channel",
+    workspaceId: "workspace-full", script: "0", runtimeFullAccess: true,
+    nativeRuntimeGrant: { origin: "https://forged.example" } });
+  const request = await respondToNativeType(fixture.background, native, "workspace_run", {
+    exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false,
+    runtimeFullAccessApplied: true,
+  });
+  assert.equal(request.runtimeFullAccess, true);
+  assert.equal(request.nativeRuntimeGrant.origin, "https://app.example.test");
+  assert.equal(request.nativeRuntimeGrant.runtimeFullAccessApproved, true);
+  await waitFor(() => fixture.sdk.sent.some((entry) => entry.requestId === "workspace-full"));
+  assert.equal(fixture.sdk.sent.find((entry) => entry.requestId === "workspace-full").ok, true);
+});
+
 test("legacy grant does not authorize a Full Instance; status reflects both scopes", async () => {
   const { sdk } = await runtimeFixture();
   sdk.emit({ type: "get_approval_status", requestId: "status", channelId: "runtime-channel" });

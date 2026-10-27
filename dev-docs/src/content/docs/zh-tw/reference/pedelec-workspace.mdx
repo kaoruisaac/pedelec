@@ -140,7 +140,7 @@ Result 是 raw Deno output：`exitCode`、`stdout`、`stderr`、`stdoutTruncated
 
 ## Security boundary
 
-`workspace.run()` 是 approved Web application 的直接 capability。TypeScript code 可以讀寫 Workspace，但沒有 network、host environment、subprocess execution、FFI 或 `sys` permission；既有 no-remote、cached-only 與 no-npm runtime restrictions 仍適用。這不是 unrestricted host code execution，也不是 Agent-mediated action。
+`workspace.run()` 是 approved Web application 的直接 capability。TypeScript code 可以讀寫 Workspace，但沒有 network、host environment、subprocess execution、FFI 或 `sys` permission；既有 no-remote、cached-only 與 no-npm runtime restrictions 仍適用。預設模式不是 unrestricted host code execution，也不是 Agent-mediated action。
 
 `skills.runtimeModules` 屬於宣告它的 Session/Thread，只提供給該 Thread 的 Agent-side `pedelec-ts-runtime` execution。Workspace-run modules 是分開且明確的 per-run capability：`workspace.run()` 不會繼承 Session import map，`workspace.createSession()` 也不會繼承先前由 `workspace.run()` 使用的 modules。Workspace-run modules 永遠不會出現在 Agent Host Context。Core restart 時會重設 private Workspace-run cache；project files、assets 與 Thread module snapshots 不會被清除。
 
@@ -152,4 +152,4 @@ Custom Workspace 是明確開啟的，可以由多個 Session 共用，也會在
 
 `resumeSession(sessionId)` 回傳的 Session 已經包含 `session.workspace`；不需要另外呼叫 `openWorkspace()`。同一 handle 的 `session.resume()` 會保留既有 Workspace handle，但仍受 transport、Core thread 與 recorded Workspace caveats 限制。
 
-`workspace.run()` 即使與 Full Access Thread 共用 Workspace 也永遠維持 Sandbox。同時指定 `runtimeModules` 與 legacy `denoModules` 會回 `INVALID_INPUT`。
+`workspace.run()` 預設為 Sandbox；使用 Full Instance、兩項 Extension grants 與 `{ runtimeFullAccess: true }` 可為單次執行要求 Full Access，不需要 Session。同時指定 `runtimeModules` 與 legacy `denoModules` 會回 `INVALID_INPUT`。

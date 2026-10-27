@@ -56,7 +56,7 @@ fn validate_grant(request: &CoreIpcRequest, grant: &Value) -> Result<(), Pedelec
     }
     match request.r#type.as_str() {
         "revoke_runtime_full_access" if grant["revoke"] == true => Ok(()),
-        "create_thread"
+        "create_thread" | "workspace_run"
             if grant["instanceRequested"] == true
                 && grant["agentSessionsApproved"] == true
                 && grant["runtimeFullAccessApproved"] == true
@@ -109,6 +109,7 @@ pub struct NativeRuntimePlatformServices {
     runtime: SharedCoreRuntime,
     key: Vec<u8>,
     used: Mutex<HashMap<String, u64>>,
+    revoked_at: Mutex<HashMap<String, u64>>,
 }
 
 impl NativeRuntimePlatformServices {
@@ -149,6 +150,7 @@ impl NativeRuntimePlatformServices {
             runtime,
             key,
             used: Mutex::new(HashMap::new()),
+            revoked_at: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -184,6 +186,16 @@ impl CoreIpcPlatformServices for NativeRuntimePlatformServices {
         if used.contains_key(&proof.nonce) || used.len() >= 10_000 {
             return Err(denied());
         }
+        let origin = request.caller_origin.as_deref().ok_or_else(denied)?;
+        let mut revoked_at = self.revoked_at.lock().unwrap();
+        if request.r#type == "revoke_runtime_full_access" {
+            revoked_at.insert(origin.to_owned(), proof.issued_at);
+        } else if revoked_at
+            .get(origin)
+            .is_some_and(|time| proof.issued_at <= *time)
+        {
+            return Err(denied());
+        }
         used.insert(proof.nonce, proof.issued_at);
         self.runtime
             .lock()
@@ -197,6 +209,73 @@ impl CoreIpcPlatformServices for NativeRuntimePlatformServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_proof_is_scoped_signed_and_single_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.json");
+        let core = Arc::new(Mutex::new(pedelec_core::CoreRuntime::default()));
+        let platform = NativeRuntimePlatformServices::install(
+            Arc::new(NoopCoreIpcPlatformServices),
+            core,
+            &path,
+        )
+        .unwrap();
+        let mut request = CoreIpcRequest {
+            request_id: "workspace".into(),
+            r#type: "workspace_run".into(),
+            caller_origin: Some("https://app.example.test".into()),
+            caller_sdk_version: None,
+            payload: Some(
+                serde_json::json!({"workspaceId":"ws", "script":"0", "runtimeFullAccess":true}),
+            ),
+        };
+        let grant = serde_json::json!({"version":1,"origin":"https://app.example.test","instanceId":"port",
+            "instanceRequested":true,"agentSessionsApproved":true,"runtimeFullAccessApproved":true});
+        assert!(platform
+            .authorize_extension_runtime_request(&request)
+            .is_err());
+        attest_native_runtime_request(&mut request, grant.clone(), &path).unwrap();
+        let mut stale = request.clone();
+        stale
+            .payload
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(PROOF);
+        attest_native_runtime_request(&mut stale, grant, &path).unwrap();
+        let mut changed = request.clone();
+        changed.payload.as_mut().unwrap()["script"] = serde_json::json!("1");
+        assert!(platform
+            .authorize_extension_runtime_request(&changed)
+            .is_err());
+        assert!(platform
+            .authorize_extension_runtime_request(&request)
+            .is_ok());
+        assert!(platform
+            .authorize_extension_runtime_request(&request)
+            .is_err());
+        let mut revoke = CoreIpcRequest {
+            request_id: "revoke".into(),
+            r#type: "revoke_runtime_full_access".into(),
+            caller_origin: request.caller_origin.clone(),
+            caller_sdk_version: None,
+            payload: Some(serde_json::json!({})),
+        };
+        attest_native_runtime_request(
+            &mut revoke,
+            serde_json::json!({"version":1,"origin":"https://app.example.test","revoke":true}),
+            &path,
+        )
+        .unwrap();
+        assert!(platform
+            .authorize_extension_runtime_request(&revoke)
+            .is_ok());
+        assert!(platform
+            .authorize_extension_runtime_request(&stale)
+            .is_err());
+    }
 
     #[test]
     fn production_adapter_rejects_expiration_replay_restart_and_changed_payload() {

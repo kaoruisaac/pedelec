@@ -15,7 +15,8 @@ mod tests {
         let instruction = build_pedelec_bootstrap_instruction();
         assert!(instruction.contains("Pedelec Host Context is generated integration context"));
         assert!(instruction.contains("Use Pedelec App Tools through their listed"));
-        assert!(instruction.contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
+        assert!(instruction
+            .contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
         assert!(instruction.contains("do not fall back to Node.js, Bun, raw Deno, npx"));
         assert!(instruction.contains("Deno Modules are imported from `pedelec-ts-runtime` scripts"));
         assert!(instruction.contains("readSpecCommand` / `callCommand"));
@@ -3436,7 +3437,9 @@ mod tests {
             "pedelec-ts-runtime --thread-id thread_with_tools_md run <workspace-relative-script-path>"
         ));
         assert!(persistent.contains("pedelec-ts-runtime --thread-id thread_with_tools_md run -"));
-        assert!(persistent.contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`"));
+        assert!(
+            persistent.contains("For JavaScript or TypeScript execution, use `pedelec-ts-runtime`")
+        );
         assert!(persistent.contains("pedelec-cli --thread-id thread_with_tools_md tool-call"));
         let cursor_first_prompt =
             build_persistent_user_prompt_with_bootstrap(&persistent, "first task");
@@ -8263,6 +8266,7 @@ mod tests {
 
         let run_a = runtime
             .begin_workspace_run(WorkspaceRunInput {
+                runtime_full_access: false,
                 workspace_id: workspace_id.clone(),
                 script: "console.log('a')".into(),
                 timeout_ms: Some(1_000),
@@ -8271,6 +8275,7 @@ mod tests {
             .unwrap();
         let run_b = runtime
             .begin_workspace_run(WorkspaceRunInput {
+                runtime_full_access: false,
                 workspace_id: workspace_id.clone(),
                 script: "console.log('b')".into(),
                 timeout_ms: None,
@@ -8309,6 +8314,7 @@ mod tests {
 
         let run_a = runtime
             .begin_workspace_run(WorkspaceRunInput {
+                runtime_full_access: false,
                 workspace_id: workspace_id.clone(),
                 script: "console.log('one')".into(),
                 timeout_ms: None,
@@ -8317,6 +8323,7 @@ mod tests {
             .unwrap();
         let run_b = runtime
             .begin_workspace_run(WorkspaceRunInput {
+                runtime_full_access: false,
                 workspace_id: workspace_id.clone(),
                 script: "console.log('two')".into(),
                 timeout_ms: None,
@@ -8392,6 +8399,7 @@ mod tests {
 
         let run = runtime
             .begin_workspace_run(WorkspaceRunInput {
+                runtime_full_access: false,
                 workspace_id: workspace_id.into(),
                 script: "console.log('one')".into(),
                 timeout_ms: Some(1_000),
@@ -8501,6 +8509,7 @@ mod tests {
         let only_scene = runtime
             .begin_workspace_run_for_origin(
                 WorkspaceRunInput {
+                    runtime_full_access: false,
                     workspace_id: workspace_id.clone(),
                     script: "import 'scene-tools';".into(),
                     timeout_ms: None,
@@ -8778,6 +8787,7 @@ mod tests {
         let error = runtime
             .begin_workspace_run_for_origin(
                 WorkspaceRunInput {
+                    runtime_full_access: false,
                     workspace_id: workspace_id.clone(),
                     script: "import 'sprite-tools';".into(),
                     timeout_ms: None,
@@ -8825,6 +8835,7 @@ mod tests {
         let error = runtime
             .begin_workspace_run_for_origin(
                 WorkspaceRunInput {
+                    runtime_full_access: false,
                     workspace_id: workspace_id.clone(),
                     script: "import 'sprite-tools';".into(),
                     timeout_ms: None,
@@ -8904,6 +8915,7 @@ mod tests {
         );
         let run = runtime
             .begin_workspace_run(WorkspaceRunInput {
+                runtime_full_access: false,
                 workspace_id: workspace_id.clone(),
                 script: "console.log('unrelated');".into(),
                 timeout_ms: None,

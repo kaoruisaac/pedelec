@@ -10,7 +10,7 @@ Port, channel and scope. Popup `approvalId` identifies the displayed request or
 Instance; stale Full Access selections cannot approve a replacement request.
 
 After checking both grants and the Port's immutable Instance flag, background sends
-`create_thread` with `runtimeFullAccess` and a `nativeRuntimeGrant` envelope:
+`create_thread` or per-invocation `workspace_run` with `runtimeFullAccess: true` and a `nativeRuntimeGrant` envelope:
 
 ```json
 { "version": 1, "origin": "https://example.com", "instanceId": "instance:1",
@@ -23,8 +23,7 @@ trusted ingress. Native Host validates the envelope and attests the entire Core
 request with HMAC-SHA256, a random nonce and a 30-second expiry. The production
 `NativeRuntimePlatformServices` adapter is composed by the common Desktop IPC
 initializer used by Tauri. It verifies the attestation, consumes the nonce and
-calls `CoreRuntime.grant_extension_runtime_full_access()` before trusted Thread
-admission. Toolkit directory selection is delegated to the existing Tauri service.
+calls `CoreRuntime.grant_extension_runtime_full_access()` before trusted Thread or Workspace run admission. Workspace authorization is checked first; no Session is required. Toolkit directory selection is delegated to the existing Tauri service.
 The adapter never falls back to payload booleans or the platform's default denial.
 
 The signing key is generated on each Desktop start beside runtime.json, never
@@ -49,7 +48,7 @@ Revoking either grant persists a pending Origin revocation and sends:
 ```
 
 Native must invalidate existing Full Access threads for this Origin, refuse their
-subsequent high privilege execution/resume, cancel active Runtime processes and
+subsequent high privilege execution/resume, cancel active Full Access Thread and Workspace Runtime processes and
 reply with `{ "revoked": true }`. This operation must be
 idempotent. A later explicit grant may authorize a new thread, but cannot revive
 revoked threads. Agent Sessions and Sandbox threads stay usable after successful
@@ -84,3 +83,5 @@ mode acknowledgment and performs outside-Workspace I/O, host environment access,
 subprocess execution, active cancellation and resume denial with managed Deno.
 If Deno is unavailable, the test explicitly reports the execution portion skipped.
 The installed Chrome/Tauri GUI workflow still requires manual acceptance.
+
+Workspace runs default to Sandbox independently of Session mode. Full Access requires the Full Instance, both grants, and an explicit per-run request. Legacy Sandbox responses may omit the mode acknowledgment; a Full Access response must confirm it. Revocation invalidates in-flight and running Full Access work for the affected Origin.

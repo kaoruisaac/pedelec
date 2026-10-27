@@ -140,7 +140,7 @@ The result is raw Deno output: `exitCode`, `stdout`, `stderr`, `stdoutTruncated`
 
 ## Security boundary
 
-`workspace.run()` is a direct capability for the approved Web application. Its TypeScript code has read and write access to the Workspace, but has no network, host environment, subprocess execution, FFI, or `sys` permission. No-remote, cached-only, and no-npm runtime restrictions continue to apply. This is not unrestricted host code execution and is not an Agent-mediated action.
+`workspace.run()` is a direct capability for the approved Web application. By default its TypeScript code has read and write access to the Workspace, but has no network, host environment, subprocess execution, FFI, or `sys` permission. In Sandbox, no-remote, cached-only, and no-npm runtime restrictions continue to apply. This default mode is not unrestricted host execution and is not an Agent-mediated action.
 
 Session `skills.runtimeModules` remain owned by the Session/Thread that declared them and are available to Agent-side `pedelec-ts-runtime` execution for that Thread. Workspace-run modules are a separate, explicit per-run capability: `workspace.run()` does not inherit a Session import map, and `workspace.createSession()` does not inherit modules previously used by `workspace.run()`. Workspace-run modules never appear in Agent Host Context. Core resets the private Workspace-run cache when its runtime restarts; project files, assets, and Thread module snapshots are not cleared.
 
@@ -152,4 +152,4 @@ Custom Workspaces are opened explicitly, can outlive and be shared by multiple S
 
 `resumeSession(sessionId)` returns a Session that already includes `session.workspace`; do not separately call `openWorkspace()` for a resumed Session. Same-handle `session.resume()` preserves its existing Workspace handle, subject to the documented transport, Core thread, and recorded Workspace caveats.
 
-`workspace.run()` always runs in Sandbox, even beside a Full Access Thread in this Workspace. Supplying both `runtimeModules` and legacy `denoModules` rejects with `INVALID_INPUT`.
+`workspace.run()` defaults to Sandbox. A Full Instance with both Extension grants can opt in per invocation using `{ runtimeFullAccess: true }`; no Session is required. Supplying both `runtimeModules` and legacy `denoModules` rejects with `INVALID_INPUT`.
