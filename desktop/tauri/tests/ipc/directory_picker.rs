@@ -52,7 +52,10 @@ fn picker_open_workspace_initializes_and_returns_a_workspace_capability() {
 
     assert!(response.ok, "open_workspace failed: {:?}", response.error);
     let workspace = response.result.as_ref().unwrap()["workspace"].clone();
-    assert_eq!(workspace["path"], selected.to_string_lossy().to_string());
+    assert_eq!(
+        std::fs::canonicalize(workspace["path"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&selected).unwrap()
+    );
     assert!(workspace["workspaceId"]
         .as_str()
         .unwrap()
@@ -96,8 +99,13 @@ fn open_workspace_explicit_path_bypasses_the_picker_and_cancellation_is_clean() 
         explicit.error
     );
     assert_eq!(
-        explicit.result.as_ref().unwrap()["workspace"]["path"],
-        selected.to_string_lossy().to_string()
+        std::fs::canonicalize(
+            explicit.result.as_ref().unwrap()["workspace"]["path"]
+                .as_str()
+                .unwrap()
+        )
+        .unwrap(),
+        std::fs::canonicalize(&selected).unwrap()
     );
 
     let cancel_runtime: SharedCoreRuntime = Arc::new(Mutex::new(CoreRuntime::default()));

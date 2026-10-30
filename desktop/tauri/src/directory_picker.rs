@@ -2,7 +2,10 @@ use pedelec_core::{error_codes, PedelecError};
 use pedelec_ipc::CoreIpcPlatformServices;
 use std::path::PathBuf;
 use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, FilePath};
+#[cfg(not(target_os = "macos"))]
+use tauri_plugin_dialog::DialogExt;
+#[cfg(any(not(target_os = "macos"), test))]
+use tauri_plugin_dialog::FilePath;
 
 #[cfg(target_os = "macos")]
 use tauri::Manager;
@@ -133,6 +136,17 @@ fn windows_picker_parent_strategy(
 
 #[cfg(target_os = "macos")]
 fn pick_directory_macos(app: &AppHandle) -> Result<Option<PathBuf>, PedelecError> {
+    use objc2::MainThreadMarker;
+    use std::sync::mpsc::sync_channel;
+
+    // Core IPC invokes this synchronous service on a worker thread. Never
+    // block the AppKit main thread waiting for work scheduled onto itself.
+    if MainThreadMarker::new().is_some() {
+        return Err(picker_failed(
+            "folder picker cannot block the AppKit main thread",
+        ));
+    }
+
     let restore_accessory = matches!(
         mac_picker_policy(main_window_visibility(app)),
         MacPickerPolicy::RestoreAccessory
@@ -144,14 +158,89 @@ fn pick_directory_macos(app: &AppHandle) -> Result<Option<PathBuf>, PedelecError
             .map_err(|err| picker_failed(format!("could not enable app activation: {err}")))?;
     }
 
-    // This handoff is intentionally separate from the blocking picker call. The
-    // picker can remain open for as long as the user needs without a timeout.
-    activate_macos(app)?;
+    let (sender, receiver) = sync_channel(1);
+    app.run_on_main_thread(move || {
+        let result = match MainThreadMarker::new() {
+            Some(marker) => pick_directory_appkit(marker),
+            None => Err(picker_failed(
+                "folder picker did not run on the AppKit main thread",
+            )),
+        };
+        // The channel carries only owned path/error data, never AppKit objects.
+        let _ = sender.send(result);
+    })
+    .map_err(|err| picker_failed(format!("could not schedule folder picker: {err}")))?;
 
-    dialog_result_to_path(app.dialog().file().blocking_pick_folder())
+    // runModal runs AppKit's own modal event loop; the user may take as long as
+    // necessary to choose a folder. The IPC worker has no picker timeout.
+    receiver
+        .recv()
+        .map_err(|err| picker_failed(format!("folder picker result was interrupted: {err}")))?
 }
 
 #[cfg(target_os = "macos")]
+fn pick_directory_appkit(marker: objc2::MainThreadMarker) -> Result<Option<PathBuf>, PedelecError> {
+    use objc2_app_kit::{NSApplication, NSModalResponseOK, NSOpenPanel};
+    use std::ffi::{CStr, OsString};
+    use std::os::unix::ffi::OsStringExt;
+
+    let application = NSApplication::sharedApplication(marker);
+    request_macos_activation(&application);
+
+    // Unlike the Tauri/rfd picker, runModal presents an independent
+    // application-modal NSOpenPanel, not a sheet attached to the main window.
+    let panel = NSOpenPanel::openPanel(marker);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+
+    let response = panel.runModal();
+    if response != NSModalResponseOK {
+        return mac_modal_result(response, None);
+    }
+
+    let url = panel
+        .URL()
+        .ok_or_else(|| picker_failed("native folder picker returned no directory URL"))?;
+    if !url.isFileURL() {
+        return Err(picker_failed(
+            "native folder picker returned a non-file URL",
+        ));
+    }
+
+    // NSURL's filesystem representation preserves the selected path without
+    // converting through a lossy UTF-8 String.
+    let bytes = unsafe { CStr::from_ptr(url.fileSystemRepresentation().as_ptr()) }.to_bytes();
+    if bytes.is_empty() {
+        return Err(picker_failed(
+            "native folder picker returned an empty directory path",
+        ));
+    }
+    mac_modal_result(
+        response,
+        Some(PathBuf::from(OsString::from_vec(bytes.to_vec()))),
+    )
+}
+
+// NSModalResponseOK = 1 and NSModalResponseCancel = 0. An abort or
+// unexpected response is a picker failure, never a user cancellation.
+#[cfg(any(target_os = "macos", test))]
+fn mac_modal_result(
+    response: isize,
+    selected_path: Option<PathBuf>,
+) -> Result<Option<PathBuf>, PedelecError> {
+    match response {
+        0 => Ok(None),
+        1 => selected_path
+            .map(Some)
+            .ok_or_else(|| picker_failed("native folder picker returned no selected path")),
+        other => Err(picker_failed(format!(
+            "native folder picker failed with modal response {other}"
+        ))),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn picker_failed(message: impl Into<String>) -> PedelecError {
     PedelecError::new(error_codes::DIRECTORY_PICKER_FAILED, message)
 }
@@ -172,54 +261,6 @@ fn main_window_visibility(app: &AppHandle) -> Option<bool> {
                 "directory picker could not read main window visibility: {err}; keeping the current activation policy"
             );
             None
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn activate_macos(app: &AppHandle) -> Result<(), PedelecError> {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc::{sync_channel, RecvTimeoutError};
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancelled_on_main_thread = Arc::clone(&cancelled);
-    let (sender, receiver) = sync_channel(1);
-
-    let schedule_result = app.run_on_main_thread(move || {
-        let result = if cancelled_on_main_thread.load(Ordering::Acquire) {
-            Err("activation handoff was cancelled".to_string())
-        } else if let Some(marker) = MainThreadMarker::new() {
-            let application = NSApplication::sharedApplication(marker);
-            request_macos_activation(&application);
-            Ok(())
-        } else {
-            Err("activation handoff did not run on the AppKit main thread".to_string())
-        };
-
-        let _ = sender.send(result);
-    });
-
-    if let Err(err) = schedule_result {
-        cancelled.store(true, Ordering::Release);
-        return Err(picker_failed(format!(
-            "could not schedule app activation: {err}"
-        )));
-    }
-
-    match receiver.recv_timeout(Duration::from_secs(1)) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(message)) => Err(picker_failed(message)),
-        Err(RecvTimeoutError::Timeout) => {
-            cancelled.store(true, Ordering::Release);
-            Err(picker_failed("timed out waiting for app activation"))
-        }
-        Err(RecvTimeoutError::Disconnected) => {
-            cancelled.store(true, Ordering::Release);
-            Err(picker_failed("app activation handoff was interrupted"))
         }
     }
 }
@@ -307,6 +348,7 @@ fn mac_picker_policy(main_window_visible: Option<bool>) -> MacPickerPolicy {
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn dialog_result_to_path(file_path: Option<FilePath>) -> Result<Option<PathBuf>, PedelecError> {
     let Some(file_path) = file_path else {
         return Ok(None);
@@ -314,6 +356,7 @@ fn dialog_result_to_path(file_path: Option<FilePath>) -> Result<Option<PathBuf>,
     file_path_to_path(file_path)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn file_path_to_path(file_path: FilePath) -> Result<Option<PathBuf>, PedelecError> {
     file_path.into_path().map(Some).map_err(|err| {
         PedelecError::new(
@@ -357,6 +400,29 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, error_codes::DIRECTORY_PICKER_FAILED);
         assert!(!error.message.contains("example.com"));
+    }
+
+    #[test]
+    fn macos_modal_result_returns_selected_directory() {
+        let path = PathBuf::from("/Users/example/workspace");
+        assert_eq!(mac_modal_result(1, Some(path.clone())).unwrap(), Some(path));
+    }
+
+    #[test]
+    fn macos_modal_result_treats_cancel_as_none() {
+        assert_eq!(mac_modal_result(0, None).unwrap(), None);
+    }
+
+    #[test]
+    fn macos_modal_result_rejects_missing_selected_path() {
+        let error = mac_modal_result(1, None).unwrap_err();
+        assert_eq!(error.code, error_codes::DIRECTORY_PICKER_FAILED);
+    }
+
+    #[test]
+    fn macos_modal_result_reports_abort_as_error() {
+        let error = mac_modal_result(-1001, None).unwrap_err();
+        assert_eq!(error.code, error_codes::DIRECTORY_PICKER_FAILED);
     }
 
     #[test]
