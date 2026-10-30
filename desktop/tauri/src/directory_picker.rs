@@ -185,7 +185,6 @@ fn pick_directory_appkit(marker: objc2::MainThreadMarker) -> Result<Option<PathB
     use std::os::unix::ffi::OsStringExt;
 
     let application = NSApplication::sharedApplication(marker);
-    request_macos_activation(&application);
 
     // Unlike the Tauri/rfd picker, runModal presents an independent
     // application-modal NSOpenPanel, not a sheet attached to the main window.
@@ -193,6 +192,14 @@ fn pick_directory_appkit(marker: objc2::MainThreadMarker) -> Result<Option<PathB
     panel.setCanChooseDirectories(true);
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
+
+    // The request originates in a browser, which may remain the active app
+    // even after NSApplication.activate(). Make this panel the key window and
+    // explicitly order it ahead of windows from other apps. Keep the hidden
+    // Pedelec main window untouched; do not change the panel's window level.
+    panel.makeKeyAndOrderFront(None);
+    panel.orderFrontRegardless();
+    request_macos_activation(&application);
 
     let response = panel.runModal();
     if response != NSModalResponseOK {
