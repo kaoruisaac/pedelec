@@ -488,3 +488,37 @@ fn real_full_access_loads_npm_through_the_managed_cache() {
     assert!(!temp.path().join("workspace/node_modules").exists());
     assert!(temp.path().join("cache/npm").is_dir());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn real_macos_workspace_short_lived_outputs_survive_group_cleanup() {
+    let Some(executable) = super::deno_execution_fixture::test_deno_executable() else {
+        return;
+    };
+    for full_access in [false, true] {
+        for (script, expected_code, expected_stdout, expected_stderr) in [
+            ("console.log('hello')", 0, "hello", ""),
+            ("console.error('nonzero'); Deno.exit(7)", 7, "", "nonzero"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (_core, mut intent) = full_intent(&temp, script);
+            intent.owner = DenoExecutionOwner::Workspace {
+                workspace_id: "workspace".into(),
+                run_id: format!("short-{}", full_access),
+            };
+            intent.runtime_full_access = full_access;
+            if !full_access {
+                intent.runtime_authorization = None;
+            }
+
+            let owner = configured(&executable, &temp, 4096);
+            let output = owner.dispatch(intent).unwrap();
+            assert_eq!(output.exit_code, expected_code);
+            assert_eq!(output.stdout.trim(), expected_stdout);
+            assert_eq!(output.stderr.trim(), expected_stderr);
+            assert!(!output.stdout_truncated);
+            assert!(!output.stderr_truncated);
+            assert_eq!(owner.active_run_count(), 0);
+        }
+    }
+}
