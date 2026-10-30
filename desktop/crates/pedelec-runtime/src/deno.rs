@@ -654,17 +654,17 @@ impl PreparedDenoExecution {
             }
         };
 
-        let import_map_path = if matches!(&intent.owner, DenoExecutionOwner::Workspace { .. }) {
-            // Workspace-owned execution is deliberately independent from all
-            // Thread/Session Deno Module snapshots, even if a malformed
-            // directly-constructed intent tries to attach one.
-            None
-        } else {
-            intent
+        let import_map_path = match &intent.owner {
+            DenoExecutionOwner::Workspace { run_id, .. } => intent
+                .import_map_path
+                .as_deref()
+                .map(|path| prepare_workspace_import_map_path(path, &workspace, run_id))
+                .transpose()?,
+            DenoExecutionOwner::Thread { .. } => intent
                 .import_map_path
                 .as_deref()
                 .map(|path| prepare_import_map_path(path, &workspace, &intent.thread_id))
-                .transpose()?
+                .transpose()?,
         };
         Ok(Self {
             runtime_full_access,
@@ -755,6 +755,64 @@ fn runtime_authorization_active(intent: &DenoExecutionIntent) -> bool {
         .runtime_authorization
         .as_ref()
         .is_some_and(|authorization| authorization.is_active())
+}
+
+/// Workspace runs may only use the map created for their own Core run,
+/// inside the private per-origin scope. Never fall back to a Thread map.
+fn prepare_workspace_import_map_path(
+    path: &Path,
+    workspace: &Path,
+    run_id: &str,
+) -> Result<PathBuf, PedelecError> {
+    let invalid = || {
+        PedelecError::with_details(
+            error_codes::DENO_IMPORT_MAP_INVALID,
+            "Deno Workspace import map does not belong to this run",
+            serde_json::json!({ "runId": run_id }),
+        )
+    };
+    // Core may supply a Windows canonical verbatim (\\\\?\\) path while
+    // workspace was normalized for Deno. Normalize only the prefix, not the
+    // path components: traversal and alternate owners still fail closed.
+    let normalized_path = PathBuf::from(path_for_external_use(path));
+    if !valid_workspace_import_map_layout(&normalized_path, workspace, run_id) {
+        return Err(invalid());
+    }
+    let canonical = prepare_import_map_path(&normalized_path, workspace, "")?;
+    if !valid_workspace_import_map_layout(&canonical, workspace, run_id) {
+        return Err(invalid());
+    }
+    Ok(canonical)
+}
+
+fn valid_workspace_import_map_layout(path: &Path, workspace: &Path, run_id: &str) -> bool {
+    let Some(run_suffix) = run_id.strip_prefix("wr_") else {
+        return false;
+    };
+    if run_suffix.len() != 32 || !run_suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let Ok(relative) = path.strip_prefix(workspace) else {
+        return false;
+    };
+    let Some(parts) = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    match parts.as_slice() {
+        [".pedelec-runtime", "deno", "workspace", scope, "runs", run, "import-map.json"] => {
+            scope.strip_prefix("scope_").is_some_and(|suffix| {
+                suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) && *run == run_id
+        }
+        _ => false,
+    }
 }
 
 fn prepare_import_map_path(
@@ -2073,38 +2131,186 @@ mod tests {
         assert_no_deno_owned_workspace_cache(&workspace_b);
     }
 
-    #[test]
-    fn workspace_execution_ignores_thread_import_maps() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        let import_map = workspace.join(".pedelec-runtime/deno/threads/thread-1/import-map.json");
-        fs::create_dir_all(import_map.parent().unwrap()).unwrap();
-        fs::write(&import_map, "{\"imports\":{}}").unwrap();
-        let prepared = PreparedDenoExecution::prepare(&DenoExecutionIntent {
+    const WORKSPACE_RUN_ID: &str = "wr_11111111111111111111111111111111";
+    const WORKSPACE_SCOPE_ID: &str = "scope_22222222222222222222222222222222";
+
+    fn workspace_import_map_path(workspace: &Path) -> PathBuf {
+        workspace
+            .join(".pedelec-runtime/deno/workspace")
+            .join(WORKSPACE_SCOPE_ID)
+            .join("runs")
+            .join(WORKSPACE_RUN_ID)
+            .join("import-map.json")
+    }
+
+    fn workspace_import_map_intent(workspace: &Path, map: Option<PathBuf>) -> DenoExecutionIntent {
+        DenoExecutionIntent {
             runtime_full_access: false,
             runtime_authorization: None,
             thread_id: String::new(),
             owner: DenoExecutionOwner::Workspace {
                 workspace_id: "workspace-runtime".into(),
-                run_id: "run-1".into(),
+                run_id: WORKSPACE_RUN_ID.into(),
             },
-            workspace_path: workspace.clone(),
+            workspace_path: workspace.to_path_buf(),
             target: DenoExecutionTarget::StdinSource {
                 source: "console.log(1)".into(),
             },
             args: Vec::new(),
             timeout_ms: 0,
-            import_map_path: Some(import_map.clone()),
-        })
+            import_map_path: map,
+        }
+    }
+
+    #[test]
+    fn workspace_execution_uses_only_its_validated_run_import_map() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let map = workspace_import_map_path(&workspace);
+        fs::create_dir_all(map.parent().unwrap()).unwrap();
+        fs::write(&map, "{\"imports\":{}}").unwrap();
+        let prepared = PreparedDenoExecution::prepare(&workspace_import_map_intent(
+            &workspace,
+            Some(map.clone()),
+        ))
         .unwrap();
-        assert!(prepared.import_map_path().is_none());
+        assert_eq!(prepared.import_map_path(), Some(canonical(&map).as_path()));
         assert!(prepared.stdin_source().is_some());
-        assert!(import_map.is_file());
+        let args = build_deno_command_args(&prepared);
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.to_string_lossy().starts_with("--import-map="))
+                .count(),
+            1
+        );
+        assert!(args.iter().any(|arg| arg.to_string_lossy()
+            == format!("--import-map={}", path_for_external_use(&canonical(&map)))));
+        for flag in ["--no-remote", "--cached-only", "--no-npm", "--deny-net"] {
+            assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
+        }
         assert_no_deno_owned_workspace_cache(&workspace);
+    }
+
+    #[test]
+    fn workspace_execution_without_modules_has_no_import_map() {
+        let temp = tempfile::tempdir().unwrap();
+        let prepared =
+            PreparedDenoExecution::prepare(&workspace_import_map_intent(temp.path(), None))
+                .unwrap();
+        assert!(prepared.import_map_path().is_none());
         assert!(build_deno_command_args(&prepared)
             .iter()
             .all(|arg| !arg.to_string_lossy().starts_with("--import-map=")));
+    }
+
+    #[test]
+    fn workspace_execution_rejects_foreign_import_maps() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let valid = workspace_import_map_path(&workspace);
+        let other_run = valid
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("wr_33333333333333333333333333333333/import-map.json");
+        let other_scope = workspace
+            .join(".pedelec-runtime/deno/workspace/scope_44444444444444444444444444444444/runs")
+            .join(WORKSPACE_RUN_ID)
+            .join("nested/import-map.json");
+        let paths = [
+            workspace.join(".pedelec-runtime/deno/threads/thread-1/import-map.json"),
+            other_run,
+            other_scope,
+            workspace.join("custom/import-map.json"),
+            temp.path().join("outside-import-map.json"),
+            workspace
+                .join(".pedelec-runtime/deno/workspace/scope-not-valid/runs")
+                .join(WORKSPACE_RUN_ID)
+                .join("import-map.json"),
+        ];
+        for path in paths {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "{\"imports\":{}}").unwrap();
+            let error = PreparedDenoExecution::prepare(&workspace_import_map_intent(
+                &workspace,
+                Some(path.clone()),
+            ))
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                error_codes::DENO_IMPORT_MAP_INVALID,
+                "{}",
+                path.display()
+            );
+        }
+        fs::create_dir_all(valid.parent().unwrap()).unwrap();
+        fs::write(&valid, "{\"imports\":{}}").unwrap();
+        let traversal = valid.parent().unwrap().join("nested/../import-map.json");
+        let error = PreparedDenoExecution::prepare(&workspace_import_map_intent(
+            &workspace,
+            Some(traversal),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_IMPORT_MAP_INVALID);
+    }
+
+    #[test]
+    fn workspace_execution_rejects_missing_or_non_file_import_maps() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let map = workspace_import_map_path(&workspace);
+        fs::create_dir_all(map.parent().unwrap()).unwrap();
+        let error = PreparedDenoExecution::prepare(&workspace_import_map_intent(
+            &workspace,
+            Some(map.clone()),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_IMPORT_MAP_INVALID);
+        fs::create_dir(&map).unwrap();
+        let error =
+            PreparedDenoExecution::prepare(&workspace_import_map_intent(&workspace, Some(map)))
+                .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_IMPORT_MAP_INVALID);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_execution_rejects_symlinked_map_and_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let map = workspace_import_map_path(&workspace);
+        fs::create_dir_all(map.parent().unwrap()).unwrap();
+        let outside = temp.path().join("actual-map.json");
+        fs::write(&outside, "{\"imports\":{}}").unwrap();
+        symlink(&outside, &map).unwrap();
+        let error = PreparedDenoExecution::prepare(&workspace_import_map_intent(
+            &workspace,
+            Some(map.clone()),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_IMPORT_MAP_INVALID);
+
+        fs::remove_file(&map).unwrap();
+        fs::write(&map, "{\"imports\":{}}").unwrap();
+        let actual_scope = map.parent().unwrap().parent().unwrap().parent().unwrap();
+        let alias_scope = actual_scope
+            .parent()
+            .unwrap()
+            .join("scope_55555555555555555555555555555555");
+        symlink(actual_scope, &alias_scope).unwrap();
+        let alias_map = alias_scope
+            .join("runs")
+            .join(WORKSPACE_RUN_ID)
+            .join("import-map.json");
+        let error = PreparedDenoExecution::prepare(&workspace_import_map_intent(
+            &workspace,
+            Some(alias_map),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, error_codes::DENO_IMPORT_MAP_INVALID);
     }
 
     #[cfg(unix)]

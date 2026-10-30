@@ -9,10 +9,12 @@ use super::{
     PreparedDenoExecution,
 };
 use pedelec_core::{
-    workspace_deno_import_map_path, workspace_deno_modules_root, workspace_tmp_root, CoreRuntime,
+    workspace_deno_import_map_path, workspace_deno_modules_root,
+    workspace_deno_workspace_modules_root, workspace_tmp_root, CoreRuntime,
     CreateDenoModuleUploadInput, CreateThreadDenoModuleInput, CreateThreadInput,
-    CreateThreadSkillsInput, DenoModuleUploadState, DenoRunInput, DenoRunTarget, EffortLevel,
-    OpenWorkspaceInput, ProviderCode, ThreadStatus, WorkspaceManager,
+    CreateThreadSkillsInput, CreateWorkspaceDenoModuleUploadInput, DenoModuleUploadState,
+    DenoRunInput, DenoRunTarget, EffortLevel, OpenWorkspaceInput, PrepareWorkspaceDenoModulesInput,
+    ProviderCode, ThreadStatus, WorkspaceManager, WorkspaceRunInput,
 };
 use pedelec_shared::deno_release::managed_runtime_executable_for_current;
 use pedelec_shared::paths::pedelec_home_dir;
@@ -157,6 +159,55 @@ fn materialize_sprite_tools(runtime: &mut CoreRuntime, workspace: &Path, thread_
         .unwrap();
 }
 
+fn materialize_workspace_scene_tools(
+    runtime: &mut CoreRuntime,
+    workspace: &Path,
+    workspace_id: &str,
+    origin: &str,
+    value: &str,
+) {
+    let missing = runtime
+        .prepare_workspace_deno_modules(
+            PrepareWorkspaceDenoModulesInput {
+                workspace_id: workspace_id.into(),
+                module_names: vec!["scene-tools".into()],
+            },
+            origin,
+        )
+        .unwrap();
+    assert_eq!(missing.missing_module_names, vec!["scene-tools"]);
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "format": "esm",
+        "runtimeSource": format!("export const value = {};", serde_json::to_string(value).unwrap()),
+        "typesSource": "export declare const value: string;",
+    }))
+    .unwrap();
+    let ticket = runtime
+        .create_workspace_deno_module_upload(
+            CreateWorkspaceDenoModuleUploadInput {
+                workspace_id: workspace_id.into(),
+                module_name: "scene-tools".into(),
+                expected_size_bytes: bytes.len() as u64,
+            },
+            origin,
+        )
+        .unwrap();
+    runtime
+        .deno_module_upload_tickets
+        .get_mut(&ticket.upload_id)
+        .unwrap()
+        .state = DenoModuleUploadState::Uploading;
+    let temporary_path =
+        workspace_tmp_root(workspace).join(format!("{}-{}.json", ticket.upload_id, value));
+    fs::create_dir_all(temporary_path.parent().unwrap()).unwrap();
+    fs::write(&temporary_path, bytes).unwrap();
+    let complete = runtime
+        .complete_deno_module_upload(&ticket.upload_id, &temporary_path)
+        .unwrap();
+    assert!(complete.ready);
+}
+
 fn ready_module_thread_for_target(
     runtime: &mut CoreRuntime,
     workspace: &Path,
@@ -237,6 +288,167 @@ fn write_agent_script(workspace: &Path, body: &str) {
     let script = workspace.join("scripts").join("work.ts");
     fs::create_dir_all(script.parent().unwrap()).unwrap();
     fs::write(script, body).unwrap();
+}
+
+#[test]
+fn real_deno_workspace_run_imports_core_uploaded_modules_and_cleans_per_run_maps() {
+    let Some(executable) = test_deno_executable() else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let mut core = runtime_for(&temp);
+    let origin_a = "https://first.example.test";
+    let origin_b = "https://second.example.test";
+    let workspace_id = core
+        .open_workspace(
+            OpenWorkspaceInput {
+                path: workspace.clone(),
+            },
+            origin_a,
+            Some("0.4.17"),
+        )
+        .unwrap()
+        .workspace_id;
+    let second_id = core
+        .open_workspace(
+            OpenWorkspaceInput {
+                path: workspace.clone(),
+            },
+            origin_b,
+            Some("0.4.17"),
+        )
+        .unwrap()
+        .workspace_id;
+    assert_eq!(workspace_id, second_id);
+    materialize_workspace_scene_tools(
+        &mut core,
+        &workspace,
+        &workspace_id,
+        origin_a,
+        "origin-a-ok",
+    );
+    materialize_workspace_scene_tools(
+        &mut core,
+        &workspace,
+        &workspace_id,
+        origin_b,
+        "origin-b-ok",
+    );
+    let deno = owner(&executable, &temp.path().join("managed-deno-cache"));
+
+    let mut scope_roots = Vec::new();
+    for (origin, expected) in [(origin_a, "origin-a-ok"), (origin_b, "origin-b-ok")] {
+        let start = core
+            .begin_workspace_run_for_origin(
+                WorkspaceRunInput {
+                    runtime_full_access: false,
+                    workspace_id: workspace_id.clone(),
+                    script: "import { value } from \"scene-tools\"; console.log(value);".into(),
+                    timeout_ms: None,
+                    deno_modules: vec!["scene-tools".into()],
+                },
+                origin,
+            )
+            .unwrap();
+        let map = start
+            .intent
+            .import_map_path
+            .clone()
+            .expect("Core per-run import map");
+        assert!(map.is_file());
+        let scope_id = map
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let module_file = workspace_deno_workspace_modules_root(&workspace, scope_id)
+            .join("scene-tools/index.mjs");
+        assert!(module_file.is_file());
+        scope_roots.push(module_file.clone());
+        let import_map = fs::read_to_string(&map).unwrap();
+        assert!(import_map.contains("../../modules/scene-tools/index.mjs"));
+        let prepared = PreparedDenoExecution::prepare(&start.intent).unwrap();
+        let args = build_deno_command_args(&prepared);
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.to_string_lossy().starts_with("--import-map="))
+                .count(),
+            1
+        );
+        for flag in ["--no-remote", "--cached-only", "--no-npm", "--deny-net"] {
+            assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
+        }
+        let output = deno.dispatch(start.intent).unwrap();
+        core.finish_workspace_run(&workspace_id, &start.run_id);
+        assert_eq!(
+            output.exit_code, 0,
+            "stdout={} stderr={}",
+            output.stdout, output.stderr
+        );
+        assert!(output.stdout.contains(expected), "{}", output.stdout);
+        assert!(!map.exists(), "per-run import map must be removed");
+        assert!(
+            module_file.is_file(),
+            "ready scope module must remain cached"
+        );
+    }
+    assert_ne!(
+        scope_roots[0], scope_roots[1],
+        "origins must have separate module caches"
+    );
+
+    let no_module = core
+        .begin_workspace_run_for_origin(
+            WorkspaceRunInput {
+                runtime_full_access: false,
+                workspace_id: workspace_id.clone(),
+                script: "console.log('workspace-no-modules-ok');".into(),
+                timeout_ms: None,
+                deno_modules: vec![],
+            },
+            origin_a,
+        )
+        .unwrap();
+    assert!(no_module.intent.import_map_path.is_none());
+    let prepared = PreparedDenoExecution::prepare(&no_module.intent).unwrap();
+    assert!(build_deno_command_args(&prepared)
+        .iter()
+        .all(|arg| !arg.to_string_lossy().starts_with("--import-map=")));
+    let output = deno.dispatch(no_module.intent).unwrap();
+    core.finish_workspace_run(&workspace_id, &no_module.run_id);
+    assert_eq!(output.exit_code, 0, "{}", output.stderr);
+    assert!(output.stdout.contains("workspace-no-modules-ok"));
+
+    let failed = core
+        .begin_workspace_run_for_origin(
+            WorkspaceRunInput {
+                runtime_full_access: false,
+                workspace_id: workspace_id.clone(),
+                script: "import { value } from \"scene-tools\"; throw new Error(value);".into(),
+                timeout_ms: None,
+                deno_modules: vec!["scene-tools".into()],
+            },
+            origin_a,
+        )
+        .unwrap();
+    let failed_map = failed.intent.import_map_path.clone().unwrap();
+    let failed_output = deno.dispatch(failed.intent).unwrap();
+    core.finish_workspace_run(&workspace_id, &failed.run_id);
+    assert_ne!(failed_output.exit_code, 0);
+    assert!(
+        !failed_map.exists(),
+        "failing run must also clean its temporary map"
+    );
+    assert!(scope_roots.iter().all(|path| path.is_file()));
+    assert_no_deno_owned_workspace_cache(&workspace);
 }
 
 #[test]

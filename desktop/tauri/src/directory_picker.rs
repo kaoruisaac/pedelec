@@ -180,7 +180,7 @@ fn pick_directory_macos(app: &AppHandle) -> Result<Option<PathBuf>, PedelecError
 
 #[cfg(target_os = "macos")]
 fn pick_directory_appkit(marker: objc2::MainThreadMarker) -> Result<Option<PathBuf>, PedelecError> {
-    use objc2_app_kit::{NSApplication, NSModalResponseOK, NSOpenPanel};
+    use objc2_app_kit::{NSApplication, NSModalPanelWindowLevel, NSModalResponseOK, NSOpenPanel};
     use std::ffi::{CStr, OsString};
     use std::os::unix::ffi::OsStringExt;
 
@@ -193,10 +193,13 @@ fn pick_directory_appkit(marker: objc2::MainThreadMarker) -> Result<Option<PathB
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
 
-    // The request originates in a browser, which may remain the active app
-    // even after NSApplication.activate(). Make this panel the key window and
-    // explicitly order it ahead of windows from other apps. Keep the hidden
-    // Pedelec main window untouched; do not change the panel's window level.
+    // An inactive application's normal-level panel can stay behind the browser.
+    // Use AppKit's standard modal-panel level for this short-lived picker only;
+    // leave the hidden Pedelec main window and its level untouched.
+    panel.setLevel(NSModalPanelWindowLevel);
+
+    // The browser may remain active after NSApplication.activate(). Make the
+    // picker the key window when possible and order it ahead of normal windows.
     panel.makeKeyAndOrderFront(None);
     panel.orderFrontRegardless();
     request_macos_activation(&application);
