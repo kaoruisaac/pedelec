@@ -473,6 +473,7 @@ type ToolArgsObjectSchema = ToolArgsSchemaMeta<
   type: "object";
   properties?: Record<string, ToolArgsSchemaNode>;
   required?: string[];
+  additionalProperties?: boolean;
 };
 ```
 
@@ -499,7 +500,7 @@ type ToolArgsSchemaNode =
 type ToolArgsSchema = ToolArgsObjectSchema;
 ```
 
-The root alias enforces an object schema at compile time.
+The root alias enforces an object schema at compile time. Object schemas (root and nested) accept extra fields by default; use `additionalProperties: false` to reject them. This applies to the original tool arguments, including a field named `timeoutMs` if passed by the agent.
 
 ## Event contexts
 

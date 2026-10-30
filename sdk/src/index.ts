@@ -283,6 +283,7 @@ export type ToolArgsObjectSchema = ToolArgsSchemaMeta<Record<string, JsonValue>>
   type: "object";
   properties?: Record<string, ToolArgsSchemaNode>;
   required?: string[];
+  additionalProperties?: boolean;
 };
 
 export type ToolArgsOneOfSchema = ToolArgsSchemaMeta & {

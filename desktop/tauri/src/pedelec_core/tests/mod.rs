@@ -4439,7 +4439,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_timeout_override_strips_control_arg_when_schema_omits_it() {
+    fn tool_call_rejects_unlisted_timeout_ms_for_strict_schema() {
         let registry = ToolRegistry::from_tools_json_str(
             r#"{
                 "tools": [{
@@ -4456,16 +4456,15 @@ mod tests {
         )
         .unwrap();
 
-        let normalized = registry
+        let error = registry
             .normalize_tool_call("get_app_state", &json!({ "timeoutMs": 25 }))
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(normalized.timeout_ms, 25);
-        assert_eq!(normalized.args, json!({}));
+        assert_eq!(error.code, error_codes::TOOL_ARGS_INVALID);
     }
 
     #[test]
-    fn tool_call_timeout_override_preserves_arg_when_schema_defines_it() {
+    fn tool_call_treats_declared_timeout_ms_as_business_data() {
         let registry = ToolRegistry::from_tools_json_str(
             r#"{
                 "tools": [{
@@ -4489,12 +4488,12 @@ mod tests {
             .normalize_tool_call("wait_for_counter", &json!({ "timeoutMs": 25 }))
             .unwrap();
 
-        assert_eq!(normalized.timeout_ms, 25);
+        assert_eq!(normalized.timeout_ms, 5000);
         assert_eq!(normalized.args, json!({ "timeoutMs": 25 }));
     }
 
     #[test]
-    fn tool_call_timeout_override_must_be_positive_integer() {
+    fn tool_call_allows_arbitrary_timeout_ms_business_data_when_schema_is_open() {
         let registry = ToolRegistry::from_tools_json_str(
             r#"{
                 "tools": [{
@@ -4502,24 +4501,25 @@ mod tests {
                     "description": "Read state.",
                     "argsSchema": {
                         "type": "object",
-                        "properties": {},
-                        "additionalProperties": false
+                        "properties": {}
                     }
                 }]
             }"#,
         )
         .unwrap();
 
-        for invalid_timeout in [json!(0), json!(-1), json!(1.5), json!("100")] {
-            let err = registry
-                .normalize_tool_call("get_app_state", &json!({ "timeoutMs": invalid_timeout }))
-                .unwrap_err();
-            assert_eq!(err.code, error_codes::TOOL_ARGS_INVALID);
+        for data in [json!(0), json!(-1), json!(1.5), json!("100")] {
+            let args = json!({ "timeoutMs": data });
+            let normalized = registry
+                .normalize_tool_call("get_app_state", &args)
+                .unwrap();
+            assert_eq!(normalized.timeout_ms, DEFAULT_TOOL_TIMEOUT_MS);
+            assert_eq!(normalized.args, args);
         }
     }
 
     #[test]
-    fn begin_tool_call_uses_normalized_args_for_pending_request_and_event() {
+    fn begin_tool_call_passes_original_args_and_manifest_timeout_to_broker_and_event() {
         let mut runtime = runtime_with_tool_thread(
             "thread_normalized",
             ThreadStatus::Running,
@@ -4530,7 +4530,7 @@ mod tests {
                     "argsSchema": {
                         "type": "object",
                         "properties": {},
-                        "additionalProperties": false
+                        "additionalProperties": true
                     },
                     "timeoutMs": 5000
                 }]
@@ -4552,7 +4552,7 @@ mod tests {
         };
         let request_id = wait.request_id;
 
-        assert_eq!(wait.timeout_ms, 25);
+        assert_eq!(wait.timeout_ms, 5000);
         assert_eq!(
             runtime
                 .tool_request_broker
@@ -4560,7 +4560,7 @@ mod tests {
                 .unwrap()
                 .request
                 .args,
-            json!({})
+            json!({ "timeoutMs": 25 })
         );
         let status_event = event_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(
@@ -4573,8 +4573,135 @@ mod tests {
         let tool_event = event_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(
             tool_event,
-            ThreadEvent::ToolCall { args, .. } if args == json!({})
+            ThreadEvent::ToolCall { args, .. } if args == json!({ "timeoutMs": 25 })
         ));
+    }
+
+    #[test]
+    fn rejected_tool_args_and_unknown_name_emit_safe_core_errors_without_pending_requests() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_tool_rejected",
+            ThreadStatus::Running,
+            r#"{"tools":[{"name":"strict_tool","description":"Test.","argsSchema":{
+                "type":"object",
+                "properties":{"value":{"type":"integer"}},
+                "required":["value"],
+                "additionalProperties":false
+            },"timeoutMs":7000}]}"#,
+        );
+        let events = runtime.event_bus.subscribe("thread_tool_rejected");
+        let invalid_calls = [
+            ("strict_tool", json!({}), error_codes::TOOL_ARGS_INVALID),
+            (
+                "strict_tool",
+                json!({"value":"SENSITIVE_INPUT"}),
+                error_codes::TOOL_ARGS_INVALID,
+            ),
+            (
+                "strict_tool",
+                json!({"value":1,"timeoutMs":120000}),
+                error_codes::TOOL_ARGS_INVALID,
+            ),
+            ("strict_tool", json!(null), error_codes::TOOL_ARGS_INVALID),
+            ("missing_tool", json!({}), error_codes::TOOL_NOT_FOUND),
+        ];
+        for (tool_name, args, expected_code) in invalid_calls {
+            let error = runtime
+                .begin_tool_call(ToolCallInput {
+                    thread_id: "thread_tool_rejected".into(),
+                    tool_name: tool_name.into(),
+                    args,
+                })
+                .unwrap_err();
+            assert_eq!(error.code, expected_code);
+            assert_eq!(runtime.tool_request_broker.pending_count(), 0);
+            assert_eq!(
+                runtime
+                    .thread_manager
+                    .thread("thread_tool_rejected")
+                    .unwrap()
+                    .status,
+                ThreadStatus::Running
+            );
+            let event = events
+                .try_recv()
+                .expect("rejected tool must emit one error");
+            match &event {
+                ThreadEvent::Error {
+                    thread_id,
+                    operation_id,
+                    source,
+                    error,
+                    ..
+                } => {
+                    assert_eq!(thread_id, "thread_tool_rejected");
+                    assert_eq!(
+                        operation_id.as_deref(),
+                        Some("test-operation-thread_tool_rejected")
+                    );
+                    assert!(matches!(source, ThreadErrorSource::Core));
+                    assert_eq!(error.code, expected_code);
+                    assert_eq!(error.details, None);
+                }
+                other => panic!("unexpected rejected-tool event: {other:?}"),
+            }
+            assert!(!serde_json::to_string(&event)
+                .unwrap()
+                .contains("SENSITIVE_INPUT"));
+            assert!(
+                events.try_recv().is_err(),
+                "exactly one event per rejection"
+            );
+        }
+
+        let call = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_tool_rejected".into(),
+                tool_name: "strict_tool".into(),
+                args: json!({"value":2}),
+            })
+            .unwrap();
+        assert!(matches!(call, ToolInvocationRegistration::Created(_)));
+        assert_eq!(runtime.tool_request_broker.pending_count(), 1);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            ThreadEvent::StatusChanged { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            ThreadEvent::ToolCall { .. }
+        ));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn untrusted_or_inactive_thread_tool_calls_do_not_emit_error_events() {
+        let mut runtime = runtime_with_tool_thread(
+            "thread_tool_inactive",
+            ThreadStatus::Running,
+            r#"{"tools":[]}"#,
+        );
+        let events = runtime.event_bus.subscribe("thread_tool_inactive");
+        runtime
+            .pending_provider_operations
+            .remove("thread_tool_inactive");
+        let inactive = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_tool_inactive".into(),
+                tool_name: "unknown".into(),
+                args: json!({}),
+            })
+            .unwrap_err();
+        assert_ne!(inactive.code, error_codes::TOOL_NOT_FOUND);
+        let unknown = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "untrusted-thread".into(),
+                tool_name: "unknown".into(),
+                args: json!({}),
+            })
+            .unwrap_err();
+        assert_eq!(unknown.code, error_codes::THREAD_NOT_FOUND);
+        assert!(events.try_recv().is_err());
     }
 
     #[test]
@@ -4740,7 +4867,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_args_define_identity_and_preserve_original_timeout() {
+    fn original_args_define_pending_identity_and_manifest_timeout() {
         let mut runtime = runtime_with_tool_thread(
             "thread_normalized_join",
             ThreadStatus::Running,
@@ -4755,7 +4882,7 @@ mod tests {
                             "b": { "type": "integer" }
                         },
                         "required": ["a", "b"],
-                        "additionalProperties": false
+                        "additionalProperties": true
                     },
                     "timeoutMs": 1000
                 }]
@@ -4781,7 +4908,7 @@ mod tests {
             .begin_tool_call(ToolCallInput {
                 thread_id: "thread_normalized_join".into(),
                 tool_name: "tool_x".into(),
-                args: json!({ "timeoutMs": 2000, "b": 2, "a": 1 }),
+                args: json!({ "timeoutMs": 1000, "b": 2, "a": 1 }),
             })
             .unwrap();
         let second_wait = match second {
@@ -4802,8 +4929,16 @@ mod tests {
                 .unwrap()
                 .request
                 .args,
-            json!({ "a": 1, "b": 2 })
+            json!({ "a": 1, "b": 2, "timeoutMs": 1000 })
         );
+        let mismatch = runtime
+            .begin_tool_call(ToolCallInput {
+                thread_id: "thread_normalized_join".into(),
+                tool_name: "tool_x".into(),
+                args: json!({ "a": 1, "b": 2, "timeoutMs": 2000 }),
+            })
+            .unwrap_err();
+        assert_eq!(mismatch.code, error_codes::PENDING_TOOL_REQUEST_EXISTS);
     }
 
     #[test]
@@ -5102,7 +5237,8 @@ mod tests {
                         "type": "object",
                         "properties": {},
                         "additionalProperties": false
-                    }
+                    },
+                    "timeoutMs": 300
                 }]
             }"#,
         );
@@ -5110,7 +5246,7 @@ mod tests {
             .begin_tool_call(ToolCallInput {
                 thread_id: "thread_deadline".into(),
                 tool_name: "tool_x".into(),
-                args: json!({ "timeoutMs": 300 }),
+                args: json!({}),
             })
             .unwrap();
         let first_wait = match first {
@@ -5125,7 +5261,7 @@ mod tests {
             .begin_tool_call(ToolCallInput {
                 thread_id: "thread_deadline".into(),
                 tool_name: "tool_x".into(),
-                args: json!({ "timeoutMs": 9999 }),
+                args: json!({}),
             })
             .unwrap()
         {
@@ -5407,7 +5543,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_replay_uses_normalized_args_and_original_timeout() {
+    fn completed_replay_requires_original_args_and_uses_manifest_timeout() {
         let mut runtime = runtime_with_tool_thread(
             "thread_replay_normalized",
             ThreadStatus::Running,
@@ -5422,7 +5558,7 @@ mod tests {
                             "b": { "type": "integer" }
                         },
                         "required": ["a", "b"],
-                        "additionalProperties": false
+                        "additionalProperties": true
                     },
                     "timeoutMs": 1000
                 }]
@@ -5457,7 +5593,7 @@ mod tests {
             .begin_tool_call(ToolCallInput {
                 thread_id: "thread_replay_normalized".into(),
                 tool_name: "tool_x".into(),
-                args: json!({ "timeoutMs": 5000, "b": 2, "a": 1 }),
+                args: json!({ "timeoutMs": 1000, "b": 2, "a": 1 }),
             })
             .unwrap()
         {

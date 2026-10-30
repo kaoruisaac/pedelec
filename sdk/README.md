@@ -203,6 +203,8 @@ session.onError((error) => {
 await session.sendText("Please help me analyze the current page state");
 ```
 
+Tool `argsSchema` uses JSON Schema object rules: extra fields are allowed by default; set `additionalProperties: false` on the root or any nested object to reject them. The tool's `timeoutMs` config controls its deadline (default 60 seconds). An agent-supplied `timeoutMs` argument is only business data and cannot override that deadline. Core-rejected tool arguments or unknown tool names can also appear in `session.onError((error, ctx) => ...)` with `ctx.source === "core"` and the active `ctx.turnId`; they do not automatically fail the turn.
+
 `sendText()` resolves after Core reports the matching semantic operation as completed. An `idle` status or bridge request response alone does not complete it. If the session is already handling a previous prompt, the new `sendText()` call is rejected to prevent multiple concurrent requests from running in the same session.
 
 ## Share App Tools with WebMCP

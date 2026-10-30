@@ -473,6 +473,7 @@ type ToolArgsObjectSchema = ToolArgsSchemaMeta<
   type: "object";
   properties?: Record<string, ToolArgsSchemaNode>;
   required?: string[];
+  additionalProperties?: boolean;
 };
 ```
 
@@ -499,7 +500,7 @@ type ToolArgsSchemaNode =
 type ToolArgsSchema = ToolArgsObjectSchema;
 ```
 
-Root alias 在 compile time 強制 object schema。
+Root alias 在 compile time 強制 object schema。Root 與巢狀 object 的 `additionalProperties` 預設允許額外欄位；設定 `false` 會拒絕。Agent 傳入的 `timeoutMs` 也只是一般業務欄位，依原始 Args Schema 驗證。
 
 ## Event contexts
 

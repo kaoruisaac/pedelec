@@ -1036,6 +1036,67 @@ mod tests {
     }
 
     #[test]
+    fn rejected_tool_call_returns_cli_error_and_emits_one_safe_core_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(CoreRuntime::default()));
+        insert_thread_with_registry(
+            &runtime,
+            temp.path(),
+            "thread_rejected_ipc",
+            ThreadStatus::Running,
+            5000,
+        );
+        let events = runtime
+            .lock()
+            .unwrap()
+            .event_bus
+            .subscribe("thread_rejected_ipc");
+        let handled = handle_tool_call_request_with_metadata(
+            &CoreIpcRequest {
+                request_id: "rejected_tool_1".into(),
+                r#type: "tool_call".into(),
+                caller_origin: None,
+                caller_sdk_version: None,
+                payload: Some(json!({
+                    "threadId": "thread_rejected_ipc",
+                    "toolName": "get_app_state",
+                    "args": {"timeoutMs": 123456, "secret": "PRIVATE"}
+                })),
+            },
+            Arc::clone(&runtime),
+        );
+        assert!(!handled.response.ok);
+        assert_eq!(
+            handled.response.error.unwrap().code,
+            error_codes::TOOL_ARGS_INVALID
+        );
+        assert!(handled.tool_delivery_request_id.is_none());
+        assert_eq!(
+            runtime.lock().unwrap().tool_request_broker.pending_count(),
+            0
+        );
+        let event = events.try_recv().expect("core must emit rejection event");
+        match &event {
+            ThreadEvent::Error {
+                thread_id,
+                operation_id,
+                source,
+                error,
+                ..
+            } => {
+                assert_eq!(thread_id, "thread_rejected_ipc");
+                assert!(operation_id.is_some());
+                assert!(matches!(source, pedelec_core::ThreadErrorSource::Core));
+                assert_eq!(error.code, error_codes::TOOL_ARGS_INVALID);
+                assert!(error.details.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(!serde_json::to_string(&event).unwrap().contains("PRIVATE"));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
     fn phase09_demo_tools_fixture_matches_registry_contract() {
         let skills: CreateThreadSkillsInput =
             serde_json::from_value(phase09_skills_manifest()).unwrap();

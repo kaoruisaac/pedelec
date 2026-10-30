@@ -335,8 +335,9 @@ async function sharedAppToolsBindToWebMcpAndSession() {
     description: "Get selected text.",
     argsSchema: {
       type: "object",
-      properties: {},
+      properties: { nested: { type: "object", additionalProperties: true } },
       required: [],
+      additionalProperties: false,
     },
     handler: async () => ({ text: "..." }),
   });

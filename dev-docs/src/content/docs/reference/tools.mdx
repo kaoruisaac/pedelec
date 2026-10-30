@@ -132,7 +132,7 @@ type ToolDefinition<
 | `name` | Yes | Agent-facing name. Must start with a letter and contain only letters, digits, `_`, `.`, `-`. |
 | `description` | Yes | Non-empty explanation of behavior, side effects, and selection criteria. |
 | `argsSchema` | Yes | Pedelec Tool Args Schema. Root must be an object. |
-| `timeoutMs` | No | Positive integer runtime wait limit. Core default is currently 60 seconds. |
+| `timeoutMs` | No | Positive integer runtime wait limit defined by the tool, not overridable through agent tool arguments. Core default is currently 60 seconds. |
 | `handler` | No | Inline browser handler retained by the SDK and not sent to Core. Required for `pedelec.webmcp()`. |
 
 Names must be unique within a skills manifest.

@@ -2723,11 +2723,13 @@ describe("Pedelec SDK", () => {
     const argsSchema = {
       type: "object",
       required: ["delta"],
+      additionalProperties: false,
       properties: {
         delta: {
           type: "number",
           description: "Original delta.",
         },
+        context: { type: "object", additionalProperties: true },
       },
     } as const;
     const create = pedelec.createSession({
@@ -2749,6 +2751,8 @@ describe("Pedelec SDK", () => {
     expect(createRequest.input.skills.tools[0].argsSchema.properties.delta.description).toBe(
       "Original delta."
     );
+    expect(createRequest.input.skills.tools[0].argsSchema.additionalProperties).toBe(false);
+    expect(createRequest.input.skills.tools[0].argsSchema.properties.context.additionalProperties).toBe(true);
     respondOk(pageWindow, createRequest, { sessionId: "thread_clone" });
     await create;
   });
@@ -3105,6 +3109,56 @@ describe("Pedelec SDK", () => {
     expect(pageWindow.lastSent().type).toBe("reactivate_session");
     respondError(pageWindow, pageWindow.lastSent(), "WORKSPACE_OPEN_FAILED");
     await expect(retry).rejects.toMatchObject({ code: "WORKSPACE_OPEN_FAILED" });
+  });
+
+  it("delivers a core tool-validation error to onError without ending the active turn", async () => {
+    const pedelec = new Pedelec();
+    const { session } = await createProviderSession(pedelec, pageWindow);
+    const errors: Array<{ error: any; context: any }> = [];
+    session.onError((error, context) => errors.push({ error, context }));
+    session.onTool("valid_tool", () => ({ ok: true }));
+
+    const turn = await startTurn(session, pageWindow);
+    emitEvent(pageWindow, turn.request, {
+      type: "error",
+      sessionId: "thread_1",
+      seq: 1,
+      operationId: turn.request.operationId,
+      error: { code: "TOOL_ARGS_INVALID", message: "tool args do not match schema" },
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      error: { code: "TOOL_ARGS_INVALID" },
+      context: { sessionId: "thread_1", source: "core", turnId: turn.request.operationId, type: "error" },
+    });
+    expect(session.getStatus()).toBe("running");
+
+    emitEvent(pageWindow, turn.request, {
+      type: "tool_call",
+      sessionId: "thread_1",
+      seq: 2,
+      operationId: turn.request.operationId,
+      toolRequestId: "valid_after_invalid",
+      tool: "valid_tool",
+      args: {},
+    });
+    await nextTick();
+    expect(pageWindow.lastSent()).toMatchObject({
+      type: "submit_tool_result",
+      result: { ok: true },
+    });
+    respondOk(pageWindow, pageWindow.lastSent());
+
+    emitEvent(pageWindow, turn.request, {
+      type: "operation_completed",
+      sessionId: "thread_1",
+      seq: 3,
+      operationId: turn.request.operationId,
+      operationKind: "user",
+      success: true,
+    });
+    await expect(turn.send).resolves.toBeUndefined();
   });
 
   it("passes context metadata to error and ended callbacks", async () => {

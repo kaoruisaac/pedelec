@@ -50,7 +50,6 @@ const PEDELEC_ANTIGRAVITY_HOOKS_FILE: &str = ".agents/hooks.json";
 const PEDELEC_ANTIGRAVITY_HOOK_KEY: &str = "pedelec-provider-artifacts";
 pub const PEDELEC_RUNTIME_DATA_DIR: &str = ".pedelec-runtime";
 pub const PEDELEC_WORKSPACE_FILE: &str = ".pedelec-workspace.json";
-const TOOL_TIMEOUT_OVERRIDE_FIELD: &str = "timeoutMs";
 pub const TOOL_RESULT_REPLAY_WINDOW: Duration = Duration::from_secs(10);
 pub const TOOL_RESULT_REPLAY_MAX_ENTRIES: usize = 256;
 const THREAD_ID_BASE36_MIN_WIDTH: usize = 6;
@@ -6256,7 +6255,26 @@ impl CoreRuntime {
                 ));
             }
         };
-        let normalized = registry.normalize_tool_call(&input.tool_name, &input.args)?;
+        let normalized = match registry.normalize_tool_call(&input.tool_name, &input.args) {
+            Ok(normalized) => normalized,
+            Err(error) => {
+                if matches!(
+                    error.code.as_str(),
+                    error_codes::TOOL_ARGS_INVALID | error_codes::TOOL_NOT_FOUND
+                ) {
+                    // The CLI keeps the original diagnostic, while browser events
+                    // contain no raw arguments or schema validation error text.
+                    let event_error = PedelecError::new(&error.code, &error.message);
+                    self.event_bus.emit_error_for_operation(
+                        &input.thread_id,
+                        ThreadErrorSource::Core,
+                        event_error,
+                        Some(&operation_id),
+                    );
+                }
+                return Err(error);
+            }
+        };
         let has_pending = self
             .tool_request_broker
             .has_pending_for_thread(&input.thread_id);
@@ -9398,19 +9416,6 @@ impl ToolRegistry {
             ));
         }
 
-        let schema_defines_timeout_ms =
-            tool_schema_defines_top_level_property(&tool.args_schema, TOOL_TIMEOUT_OVERRIDE_FIELD);
-        let mut normalized_args = args.clone();
-        let mut timeout_override_ms = None;
-        if let Value::Object(args_object) = &mut normalized_args {
-            if let Some(timeout_value) = args_object.get(TOOL_TIMEOUT_OVERRIDE_FIELD).cloned() {
-                timeout_override_ms = Some(parse_tool_timeout_override(tool_name, &timeout_value)?);
-                if !schema_defines_timeout_ms {
-                    args_object.remove(TOOL_TIMEOUT_OVERRIDE_FIELD);
-                }
-            }
-        }
-
         let validator = jsonschema::validator_for(&tool.args_schema).map_err(|err| {
             PedelecError::with_details(
                 error_codes::TOOLS_JSON_INVALID,
@@ -9419,7 +9424,7 @@ impl ToolRegistry {
             )
         })?;
 
-        validator.validate(&normalized_args).map_err(|err| {
+        validator.validate(args).map_err(|err| {
             PedelecError::with_details(
                 error_codes::TOOL_ARGS_INVALID,
                 "tool args do not match schema",
@@ -9428,8 +9433,8 @@ impl ToolRegistry {
         })?;
 
         Ok(NormalizedToolCall {
-            args: normalized_args,
-            timeout_ms: timeout_override_ms.unwrap_or(tool.timeout_ms),
+            args: args.clone(),
+            timeout_ms: tool.timeout_ms,
         })
     }
 
@@ -9547,32 +9552,6 @@ fn validate_tool_args_schema_with_code(
         )
     })?;
     Ok(())
-}
-
-fn parse_tool_timeout_override(
-    tool_name: &str,
-    timeout_value: &Value,
-) -> Result<u64, PedelecError> {
-    timeout_value
-        .as_u64()
-        .filter(|timeout_ms| *timeout_ms > 0)
-        .ok_or_else(|| {
-            PedelecError::with_details(
-                error_codes::TOOL_ARGS_INVALID,
-                "tool timeoutMs must be a positive integer",
-                serde_json::json!({
-                    "toolName": tool_name,
-                    "field": TOOL_TIMEOUT_OVERRIDE_FIELD
-                }),
-            )
-        })
-}
-
-fn tool_schema_defines_top_level_property(args_schema: &Value, property_name: &str) -> bool {
-    args_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .is_some_and(|properties| properties.contains_key(property_name))
 }
 
 #[derive(Debug)]
